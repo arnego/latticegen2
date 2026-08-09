@@ -28,7 +28,7 @@ Before implementing features, establish:
 
 ### Review code
 
-Run /code-review before pushing and fix any issues that come up. 
+User will run /code-review manually or ask for it explicitly when needed. 
 
 ### Testing Procedures
 

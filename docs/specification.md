@@ -193,28 +193,6 @@ TBD
 *Anything you're unsure about — list it here explicitly so it doesn't get silently
 assumed by default. Delete each line once resolved.*
 
-- **`dense-lattice` golden sample still needs to be generated and reviewed.**
-  [TODO: needs decision] The earlier appearance of a crash (§6.1) was root-caused and
-  fixed — see docs/algorithm.md §11.2 — but no one has yet reviewed a full run's output
-  and committed it as the golden sample
-  test/test-cylinder-cc10t1.5-golden-sample.step (params changed
-  2026-08-09 from the original -cc 5 -t 1 to a less dense -cc 10 -t 1.5, §6.1).
-  Committing a golden sample is a judgement call about what "correct output" is, so it
-  stays a decision for whoever owns the test fixture rather than something to pick a
-  default for.
-
-  **Resolved (2026-08-09), previously listed here as a blocker:** a prior revision of
-  this item recorded that `test/test-cylinder.STEP` had a real CAD defect gmsh could not
-  tessellate, blocking this scenario outright. That was **wrong** — the mesh was correct
-  and the file needs no repair. The pipeline's own mesh-coverage gate was testing mesh
-  completeness against OCC's deliberately over-estimating bounding box and falsely
-  rejecting the file; the gate now compares against exact trimmed face area instead.
-  See docs/algorithm.md §11.3 for the corrected investigation. The scenario has since
-  been run end-to-end at these params (exit 0, 25m 55s, inside the 60-minute budget;
-  output verified manifold, free of self-intersections, and reaching the part's true
-  extent), so no decision about replacing or repairing the test fixture is needed —
-  only the golden-sample review above remains.
-
 ---
 
 ## 10. Roadmap features or bugs to fix in later sessions

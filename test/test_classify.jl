@@ -232,7 +232,7 @@ end
             end
         end
 
-        @testset "raises InputGeometryError when a face's mesh doesn't cover its own CAD extent" begin
+        @testset "raises InputGeometryError when a face has no mesh at all" begin
             lp = LatticeParams(10.0, 2.0)
             with_gmsh() do
                 new_model("coverage-bad")
@@ -241,31 +241,136 @@ end
                 gmsh.option.setNumber("Mesh.MeshSizeMax", 2.0)
                 gmsh.option.setNumber("Mesh.MeshSizeMin", 0.2)
                 gmsh.model.mesh.generate(2)
-                # Simulate the real failure mode directly (no known gmsh
-                # option reproduces it on demand, docs/algorithm.md §11.3):
-                # delete every mesh element belonging to one face, so that
-                # face's meshed extent trivially falls short of its true CAD
-                # extent -- exactly what check_surface_mesh_coverage exists
-                # to catch (the true bug leaves a partially-, not
-                # zero-element, face, but the "zero elements" branch is the
-                # same code path and just as real a failure to guard against).
+                # Delete every mesh element belonging to one face: that face's
+                # meshed area is then trivially zero against a nonzero exact
+                # area -- the "zero elements" branch of the gate.
                 gmsh.model.mesh.clear([(2, 1)])
                 @test_throws InputGeometryError check_surface_mesh_coverage(lp)
             end
         end
 
-        @testset "regression: test-cylinder.STEP at cc=10/t=1.5 is caught, not silently misclassified" begin
-            # docs/algorithm.md §11.3: this exact input/parameter combination
-            # was the one that produced a run whose output was missing an
-            # entire ~18.7mm slab of lattice with no error at all -- gmsh's
-            # mesher silently recovers a truncated parametric domain for one
-            # face of this part. Regression-guards that this now fails loudly
-            # (exit 3) instead of silently proceeding with an incomplete mesh.
+        @testset "raises InputGeometryError when a face's meshed area falls short of its exact area" begin
+            # The coverage branch, exercised against real geometry rather than
+            # a doctored mesh: a coarsely-meshed sphere's secant triangles
+            # genuinely under-cover its exact (curved) area, so a tolerance
+            # tightened below that deficit must reject it. This is the same
+            # comparison a truly truncated parametric domain would trip, just
+            # produced by a mechanism that can be created on demand.
+            lp = LatticeParams(10.0, 2.0)
+            with_gmsh() do
+                new_model("coverage-area-deficit")
+                gmsh.model.occ.addSphere(0, 0, 0, 10)
+                gmsh.model.occ.synchronize()
+                gmsh.option.setNumber("Mesh.MeshSizeMax", 8.0)
+                gmsh.option.setNumber("Mesh.MeshSizeMin", 8.0)
+                gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+                gmsh.model.mesh.generate(2)
+                exact = gmsh.model.occ.getMass(2, 1)
+                meshed = meshed_face_areas()[1]
+                deficit = 1 - meshed / exact
+                # Sanity-check the fixture actually under-covers, so the
+                # assertion below is testing the gate and not a no-op.
+                @test deficit > 0.05
+                @test_throws InputGeometryError check_surface_mesh_coverage(lp; area_rel_tol=0.01)
+                # ...and passes once the tolerance covers the real deficit.
+                @test check_surface_mesh_coverage(lp; area_rel_tol=0.5) === nothing
+                # The absolute bar alone must also be able to spare it: the
+                # same under-covering mesh passes when its shortfall is
+                # declared smaller than one mesh element's worth of area.
+                @test check_surface_mesh_coverage(lp; area_rel_tol=0.01,
+                                                  min_deficit_factor=1e6) === nothing
+            end
+        end
+
+        @testset "a sliver face's meshing noise is not mistaken for a lost region" begin
+            # Regression for a false positive found by re-tessellating generated
+            # lattice output (which tools/e2e.jl does for its manifold and
+            # self-intersection checks). A lattice has thousands of tiny trimmed
+            # sliver faces at strut junctions; on one real 0.0403 mm^2 face the
+            # meshed area was 0.0302 mm^2 = 75.0%, which trips a pure
+            # relative-tolerance test even though the 0.01 mm^2 shortfall is
+            # physically irrelevant. The absolute `min_deficit` bar is what
+            # keeps the gate meaningful on such faces (docs/algorithm.md §11.3).
+            lp = LatticeParams(10.0, 1.5)
+            with_gmsh() do
+                new_model("coverage-sliver")
+                # A long, extremely thin sliver: area is tiny, so even a
+                # proportionally large meshing shortfall is negligible.
+                gmsh.model.occ.addRectangle(0, 0, 0, 20.0, 0.002)
+                gmsh.model.occ.synchronize()
+                gmsh.option.setNumber("Mesh.MeshSizeMax", 1.5)
+                gmsh.option.setNumber("Mesh.MeshSizeMin", 0.15)
+                gmsh.model.mesh.generate(2)
+                exact = gmsh.model.occ.getMass(2, 1)
+                # Whatever the ratio comes out at, the absolute shortfall is far
+                # below one coarsest element (min(t,a)^2 = 2.25 mm^2) and must
+                # not be reported as an incomplete tessellation.
+                @test exact < 1.0
+                @test check_surface_mesh_coverage(lp) === nothing
+            end
+        end
+
+        @testset "raises InputGeometryError when a mesh node lands outside its face's CAD box" begin
+            lp = LatticeParams(10.0, 2.0)
+            with_gmsh() do
+                new_model("coverage-containment")
+                gmsh.model.occ.addBox(0, 0, 0, 20, 20, 20)
+                gmsh.model.occ.synchronize()
+                gmsh.option.setNumber("Mesh.MeshSizeMax", 4.0)
+                gmsh.option.setNumber("Mesh.MeshSizeMin", 4.0)
+                gmsh.model.mesh.generate(2)
+                # Displace one of face 1's nodes far outside the face's own CAD
+                # bounding box: the containment half of the gate must catch a
+                # mesh that sits in the wrong place even when its area is right.
+                tags, _, _ = gmsh.model.mesh.getNodes(2, 1, true)
+                gmsh.model.mesh.setNode(tags[1], [500.0, 500.0, 500.0], Float64[])
+                @test_throws InputGeometryError check_surface_mesh_coverage(lp)
+            end
+        end
+
+        @testset "regression: test-cylinder.STEP at cc=10/t=1.5 tessellates faithfully" begin
+            # docs/algorithm.md §11.3. This exact input/parameter combination
+            # was previously rejected outright (InputGeometryError, exit 3) by
+            # a bounding-box-based version of this gate, blocking the
+            # dense-lattice scenario (specification.md §6.1) entirely. The
+            # mesh was correct all along: OCC's getBoundingBox is a deliberate
+            # over-estimate (B-spline control-point hull for edges, untrimmed
+            # UV rectangle for planar faces), so requiring the mesh to *reach*
+            # it was never a sound test. Guards against reintroducing that
+            # false positive, and pins the exact-area evidence that the mesh is
+            # in fact complete.
             lp = LatticeParams(10.0, 1.5)
             with_gmsh() do
                 new_model("coverage-test-cylinder")
                 import_shapes(joinpath(@__DIR__, "test-cylinder.STEP"))
-                @test_throws InputGeometryError tessellate_surface(lp)
+                mesh = tessellate_surface(lp)
+                @test length(mesh.tris) > 0
+
+                meshed = meshed_face_areas()
+                for (_, tag) in gmsh.model.getEntities(2)
+                    exact = gmsh.model.occ.getMass(2, tag)
+                    @test isapprox(meshed[Int(tag)], exact; rtol=0.01)
+                end
+            end
+        end
+
+        @testset "OCC face bounding boxes over-estimate, so coverage cannot be tested against them" begin
+            # Pins the root cause of the false positive above (docs/algorithm.md
+            # §11.3): face 9 of test-cylinder.STEP is a Plane bounded by B-spline
+            # curves. Its reported CAD box reaches x ~= 190.25, but sampling its
+            # boundary B-spline (edge 9) directly shows the real surface stops at
+            # x ~= 171.58. Any future "the mesh must reach the CAD box" check
+            # would fail on this part again.
+            with_gmsh() do
+                new_model("bbox-overestimate")
+                import_shapes(joinpath(@__DIR__, "test-cylinder.STEP"))
+                sync_model()
+                _, _, _, xmax, _, _ = gmsh.model.getBoundingBox(2, 9)
+                lo, hi = gmsh.model.getParametrizationBounds(1, 9)
+                sampled_xmax = maximum(gmsh.model.getValue(1, 9, [lo[1] + (hi[1] - lo[1]) * i / 500])[1]
+                                       for i in 0:500)
+                @test xmax > sampled_xmax + 10.0
+                @test isapprox(sampled_xmax, 171.58; atol=0.1)
             end
         end
     end

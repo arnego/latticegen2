@@ -184,14 +184,16 @@ coordinate system — no re-centering or scaling). Both files under
 [test/](test/) are real example inputs (an 80 mm test sphere and a larger real
 heat-exchanger cavity volume).
 
-**Known limitation:** on rare inputs, gmsh's surface mesher can silently produce an
-incomplete triangulation of one face (usually a large, curved-boundary planar face) —
-one specific STEP file in `test/` triggers this. Since every classification decision
-depends on this mesh, the tool actively checks for it after tessellation and fails with
-a clear `InputGeometryError` (exit 3) naming the offending face rather than silently
-generating a lattice with a region missing (docs/algorithm.md §11.3). If you hit this,
-the input face likely needs repair in the originating CAD tool — no workaround inside
-this tool is currently known.
+**Input mesh check:** every classification decision depends on the surface mesh gmsh
+builds from your STEP file, so after tessellation the tool verifies that each face's
+mesh covers that face's exact trimmed area (OCCT Gauss quadrature) and stays inside the
+face's CAD bounding box. A face that fails either test raises a clear
+`InputGeometryError` (exit 3) naming the face and the measured shortfall, rather than
+silently generating a lattice with a region missing. If you hit this, the input face
+likely needs repair in the originating CAD tool. (Note: an earlier release reported one
+of the STEP files in `test/` as defective under this check. That was a false positive —
+the check compared coverage against OCC's deliberately over-estimating bounding box; it
+now compares exact areas. See docs/algorithm.md §11.3.)
 
 ## Output format
 

@@ -52,7 +52,7 @@ Run unit tests for parameter validation and intermediate calculations
    which compares its output against the committed golden sample
    `test/80mm-test-ball-cc20t4-golden-sample.step` via `golden_sample_volume_diff`.
    `dense-lattice` is implemented the same way but self-skips: its golden sample
-   (`test/test-cylinder-cc10t1.5.step`) does not exist yet. Originally specified at
+   (`test/test-cylinder-cc10t1.5-golden-sample.step`) does not exist yet. Originally specified at
    -cc 5 -t 1, the one attempt to generate that denser golden sample ran for hours
    before being manually terminated — root-caused and fixed (not a crash: an
    auto-tuned tile size past the fuse-time performance knee, plus an unconditional
@@ -61,11 +61,11 @@ Run unit tests for parameter validation and intermediate calculations
    changed 2026-08-09 to -cc 10 -t 1.5 (a less dense lattice capable of finishing
    within a reasonable time) with a 60-minute runtime budget. Regenerating the
    golden sample and committing it is a follow-up step, tracked as an open item in
-   specification.md §9, not automated here — **and, as of a separate 2026-08-09
-   finding, currently blocked outright**: `test/test-cylinder.STEP` has a CAD defect
-   in one face that gmsh cannot fully tessellate (docs/algorithm.md §11.3), so this
-   scenario now correctly fails fast (exit 3, `InputGeometryError`) instead of running
-   to completion at all, pending the decision recorded in specification.md §9. Until
+   specification.md §9, not automated here. (A prior revision of this note said the
+   scenario was blocked outright by a CAD defect in `test/test-cylinder.STEP` that
+   gmsh could not tessellate. That was a false positive in the pipeline's own
+   mesh-coverage gate, not a defect in the file — corrected, with the gate fixed, in
+   docs/algorithm.md §11.3. The scenario runs to completion again.) Until
    that sample exists, `tools/e2e.jl`
    provides the `smoke-fast`/`smoke-verified` output `.step` files (and console/log
    summaries) for manual user verification, and automatically ensures the generated

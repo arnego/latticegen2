@@ -11,8 +11,12 @@
 #   - smoke-verified:  always run; compares against the committed golden sample
 #                      test/80mm-test-ball-cc20t4-golden-sample.step via
 #                      golden_sample_volume_diff.
-#   - dense-lattice:   only runs if test/test-cylinder-cc10t1.5.step (the
-#                      golden sample) is present on disk. Originally specified
+#   - dense-lattice:   only runs if test/test-cylinder-cc10t1.5-golden-sample.step
+#                      is present on disk. The `-golden-sample` suffix (matching
+#                      80mm-test-ball-cc20t4-golden-sample.step) keeps a
+#                      reviewed baseline clearly distinct from the ordinary
+#                      run output a generation at these params produces.
+#                      Originally specified
 #                      at -cc 5 -t 1, an attempt to produce that golden sample
 #                      ran for hours and was manually terminated mid-run (not a
 #                      crash — see docs/algorithm.md §11.2's investigation): an
@@ -305,22 +309,23 @@ println()
 println("=== latticegen2 e2e: dense-lattice ===")
 
 # specification.md §6.1 `dense-lattice` scenario. Gated on the golden sample
-# already existing on disk — see the header comment above for why this isn't
-# auto-run: the one attempt made to produce it ran ~3 hours and then stopped
-# silently, which looks like a native OCCT/gmsh crash rather than a normal
-# failure path, and that has not yet been root-caused.
+# already existing on disk — not because the scenario is broken (it runs to
+# completion; the earlier long-run and mesh-coverage problems are both
+# root-caused and fixed, docs/algorithm.md §11.2 and §11.3) but because
+# committing a golden sample is a review decision for whoever owns the test
+# fixture, not something this harness should make for them.
 const DENSE_INPUT = joinpath(ROOT, "test", "test-cylinder.STEP")
-const DENSE_GOLDEN = joinpath(ROOT, "test", "test-cylinder-cc10t1.5.step")
+const DENSE_GOLDEN = joinpath(ROOT, "test", "test-cylinder-cc10t1.5-golden-sample.step")
 const DENSE_CC = 10.0
 const DENSE_T = 1.5
 const DENSE_BUDGET_SECONDS = 60 * 60.0   # less dense than the original -cc 5 -t 1 scenario; 60-minute budget for now
 
 if !isfile(DENSE_GOLDEN)
     println("SKIPPED: golden sample not found at $DENSE_GOLDEN.")
-    println("         A prior attempt to generate it (see test/test-cylinder-cc5t1.log if present)")
-    println("         ran for hours before being manually terminated — root-caused and fixed, not a")
-    println("         crash (docs/algorithm.md §11.2). Regenerating and committing the golden sample")
-    println("         is a follow-up step, not automated here. See specification.md §6.1/§9.")
+    println("         The scenario itself runs to completion — the earlier multi-hour run and the")
+    println("         later mesh-coverage rejection are both root-caused and fixed (docs/algorithm.md")
+    println("         §11.2, §11.3). Generating this file and committing it as the golden sample is a")
+    println("         review decision, not automated here. See specification.md §6.1/§9.")
 else
     const DENSE_OUTDIR = mktempdir()
     const DENSE_OUTPUT = joinpath(DENSE_OUTDIR, "dense-lattice.step")

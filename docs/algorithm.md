@@ -215,14 +215,24 @@ boolean workload into an O(boundary struts) ≈ O(surface area / cell area) work
   necessary on large, gently-curved surfaces, at a severe performance cost (~1.2M
   triangles / 47s vs. ~12K triangles / 0.4s on the 80mm test ball with curvature-
   adaptive sizing instead) — see §11.
-- Immediately after meshing, `check_surface_mesh_coverage` verifies every face's mesh
-  actually covers that face's own true (OCCT-reported) extent, and raises
-  `InputGeometryError` (exit 3) if not — a defensive gate against a real, observed gmsh
-  meshing-robustness failure where the mesher silently recovers a truncated parametric
-  domain for a face, producing a mesh that is still a well-formed closed 2-manifold but
-  geometrically incomplete (§11.3). Every classification decision below depends entirely
-  on this mesh being faithful to the input solid, so this check exists to convert that
-  failure mode from "silently misclassify" into "fail loudly."
+- Immediately after meshing, `check_surface_mesh_coverage` verifies the mesh is faithful
+  to the input solid, raising `InputGeometryError` (exit 3) if not. Every classification
+  decision below depends entirely on that faithfulness, so this gate converts a
+  silently-incomplete tessellation from "silently misclassify" into "fail loudly." Two
+  per-face tests, each using a quantity that is sound in the direction it is used:
+  - **Coverage**, against the face's **exact trimmed area**
+    (`gmsh.model.occ.getMass(2, tag)`, OCCT Gauss quadrature) versus the summed triangle
+    area of that face's mesh. Rejected only when the shortfall clears **both** a
+    relative bar (`area_rel_tol`, default 0.25) **and** an absolute one
+    (`min_deficit = min_deficit_factor * min(t, a)²`, one coarsest mesh element's worth
+    of area). Both are needed and both fire on real data — see §11.3.
+  - **Containment**, against the face's CAD bounding box as an **upper bound only** —
+    every mesh node must lie inside it, inflated by 1 mm.
+  A face with zero elements is always an error. The bounding box is deliberately never
+  used to test coverage: OCC's `getBoundingBox` returns the control-point hull for
+  B-spline edges and the untrimmed UV rectangle for planar faces, so it over-estimates
+  the true extent — a version of this gate that required the mesh to *reach* it
+  produced a false positive that blocked a valid input file outright (§11.3).
 - Build a uniform spatial hash grid over the resulting triangles, with cell size ≈ 2×
   the median triangle edge length. Each grid cell stores indices of triangles whose
   AABB overlaps it.
@@ -842,8 +852,12 @@ Because priority #1 is precision, every optimization above is designed so that i
   [testing.md](testing.md) (manifold check, self-intersection check) catch any
   regression before a run is reported as successful.
 - `check_surface_mesh_coverage` (§5.1) fails loudly (exit 3) rather than silently
-  classifying against an incomplete input-surface mesh — one real failure mode
-  (§11.3) that this principle had been quietly violating until found and fixed.
+  classifying against an incomplete input-surface mesh. Note that the guarantee cuts
+  both ways: a gate is only as trustworthy as the tightness of the quantity it
+  compares. This one originally tested mesh coverage against OCC's deliberately
+  over-estimating bounding box and rejected a perfectly good input file as a result
+  (§11.3), which is its own violation of the principle — "do more work" is the
+  acceptable failure mode, "refuse valid input" is not.
 
 ---
 
@@ -900,7 +914,7 @@ The optimization levers, restated as a single reference table (also referenced f
 | Threaded classification loop (`Threads.@threads`) | Parallel, allocation-free per-strut classification within each process, layered under the existing process-level parallelism — requires launching Julia with `-t auto`/`JULIA_NUM_THREADS` set (the provided wrapper scripts do); a plain `julia src/main.jl` with no thread flag runs it single-threaded |
 | Wall-clock circuit breaker on every fuse call, per-tile and per-merge-round (correctness safety net, not a speed lever) | Prevents a truly runaway fuse from hanging, deliberately set generously since cutting fusing off early risks leaving self-intersecting geometry un-fused; the tile stage's per-call budget (§7.1) is itself derived from the tile-sizing target so a stuck tile is bounded and *logged*, not silently absorbing three unbudgeted 600 s stalls |
 | Bounded memory-watchdog backpressure pause (correctness/stability safety net) | `rl.max_rss` is a high-water mark that can never fall on its own — an unbounded wait would be a guaranteed hang the first time it trips, not a slow pause (§7.2) |
-| `check_surface_mesh_coverage` post-tessellation completeness gate (correctness safety net, not a speed lever) | Catches a real, observed gmsh meshing-robustness failure — a silently truncated/mis-parametrized face mesh that is still a valid closed 2-manifold, so ordinary manifold checks miss it — before it can silently misclassify struts as OUTSIDE; fails loudly (exit 3) instead (§5.1, §11.3) |
+| `check_surface_mesh_coverage` post-tessellation completeness gate (correctness safety net, not a speed lever) | Catches a mesh that under-covers its face's **exact trimmed area**, or whose nodes fall outside that face's CAD box, before it can misclassify struts as OUTSIDE; fails loudly (exit 3) instead. Coverage is deliberately *not* tested against the CAD bounding box — OCC over-estimates it (control-point hull / untrimmed UV rectangle), and doing so falsely rejected a valid input file (§5.1, §11.3) |
 | `sync_model()` before `filter_floating!`'s removal/export step (correctness safety net, not a speed lever) | `gmsh.model.occ.fuse` doesn't synchronize gmsh's model-level entity list itself; without this call, export could silently write stale pre-fuse fragments instead of the resolved geometry the run believes it wrote (§8, §11.4) |
 | Calibration probe + tile sizing + RSS watchdog | Memory stability on 32 GB target |
 | .brep disk staging in temp/<ts> for tile/merge-round IPC (never for the final assembly result) | Small IPC, restartable analysis on failure; the final hand-off from assembly to export instead shares one gmsh session (see §6.5) so the completed lattice is never serialized to disk only to be immediately reparsed |
@@ -1132,82 +1146,169 @@ run in its own right.
 
 ---
 
-## 11.3 Investigation history: silent gmsh mesh truncation on `test-cylinder-cc10t1.5`
+## 11.3 Investigation history: the mesh-coverage gate's bounding-box false positive
 
-A user-reported run (`-i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 16`)
-completed with exit 0 and a plausible-looking log, but visual inspection of the output
-against the input showed a large, contiguous region of the input volume with no lattice
-at all — not scattered gaps, a hard-edged missing slab at one end of the part.
+**Superseded conclusion.** An earlier revision of this section recorded that gmsh's
+mesher "silently produced an incomplete triangulation" of one face of
+`test/test-cylinder.STEP`, that no gmsh-level mitigation existed, and that the input
+file needed CAD repair. **That diagnosis was wrong.** The mesh was faithful all along;
+the measurement used to condemn it was not. The corrected account follows, and the
+sections it touches (§5.1, §10, §11) have been updated to match.
 
-**Root cause: `tessellate_surface`'s `gmsh.model.mesh.generate(2)` call (§5.1) silently
-produced an incomplete triangulation of one face of the input solid.** Direct
-measurement: the run's own logged input bounding box reached `x=190.25`, but the actual
-tessellated mesh's own bounding box (`mesh_bounds`) stopped at `x=171.58` — an ~18.7 mm
-gap. Since every classification decision (`classify_strut`, §5.2) — both the
-distance-to-surface test and the ray-cast point-in-solid test — depends entirely on this
-mesh, every candidate strut beyond the un-meshed region was silently misclassified
-`OUTSIDE`, exactly matching the observed missing slab. This was reproduced with a
-~15-line standalone `Gmsh.jl` script containing **no** latticegen2 code at all (no
-`with_gmsh`, no `import_shapes`, no project-specific mesh-size logic), ruling out
-anything project-side: gmsh's Frontal-Delaunay mesher recovers a truncated parametric
-domain for one large, curved-boundary planar face of this specific part (a `Plane`
-entity whose OCCT-reported parameter bounds, printed at `General.Verbosity=99`, are far
-smaller than the face's true physical extent). Critically, the resulting mesh is still a
-perfectly well-formed **closed 2-manifold** — every edge shared by exactly 2 triangles —
-so a `manifold_check`-style edge-count test (the one thing this pipeline already had to
-validate a mesh, per `tools/verify_geometry.jl`) does not catch this at all. A
-total-surface-area comparison doesn't catch it either: the truncated mesh for that face
-covers 99.99% of the *total* model's true surface area, because the mesher's recovered
-(wrong) parametric patch happens to be nearly the same *size*, just the wrong *shape and
-location* — only a per-face bounding-box comparison against that face's own true,
-OCCT-reported extent reveals the defect.
+**The original report.** A user run (`-i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6
+--ram 16`) completed with exit 0 but produced output visibly missing a large contiguous
+region of lattice. Investigating it, the run's logged input bounding box reached
+`x=190.25` while the tessellated mesh's own bounding box stopped at `x=171.58` — an
+~18.7 mm gap. That was read as proof the mesher had truncated the surface, and a
+per-face bounding-box completeness gate (`check_surface_mesh_coverage`) was added to
+reject it. The gate did reject it — along with the entire `dense-lattice` scenario
+(specification.md §6.1), which could no longer be run at all.
 
-**Mitigation attempts that did *not* fix it** (each independently verified against the
-same reproduction script): a uniform, curvature-independent mesh size (ruling out
-`Mesh.MeshSizeFromCurvature` interacting badly with a large flat face); three different
-`Mesh.Algorithm` choices (`MeshAdapt`, `Delaunay`, and the default `Frontal-Delaunay`,
-ruling out the 2D triangulation algorithm itself — the truncation happens upstream, in
-boundary-curve/parametric-domain recovery, common to all of them); OCCT's import-time
-healing options (`Geometry.OCCFixDegenerated`, `OCCFixSmallEdges`, `OCCFixSmallFaces`,
-`OCCSewFaces`, `OCCMakeSolids`); and `gmsh.model.occ.healShapes()` (OCCT's own
-`ShapeFix`/`ShapeUpgrade` healing pipeline, run explicitly on the imported shape). All
-five reproduced the identical truncation, to within meshing-order floating-point noise.
-No gmsh/OCCT-level workaround is currently known; this appears to be a genuine OCCT
-B-rep parametrization defect for this specific face, not a Julia-side or an
-option-tuning problem. Resolving it further would likely require either repairing the
-source face in the originating CAD tool, or a deeper investigation into OCCT's own
-curve-to-parameter-space projection for this surface type — out of scope for a
-gmsh-option-level fix.
+**Actual root cause of the gate's rejection: `gmsh.model.getBoundingBox` is a
+deliberate over-estimate, and coverage was being tested against it.** OCC's
+`BRepBndLib` does not return a tight box. For a B-spline edge it returns the hull of
+the curve's **control points**; for a planar face it returns the rectangle of the
+**untrimmed UV parameter domain**. Neither is the surface's real extent. Measured
+directly on the offending face (face 9, a `Plane` bounded by B-spline curves):
 
-**Fix implemented: fail loudly instead of silently (`check_surface_mesh_coverage`,
-`src/classify.jl`).** Since priority #1 (precision, specification.md) rules out
-silently proceeding with an unfaithful mesh, `tessellate_surface` now calls
-`check_surface_mesh_coverage` immediately after `generate(2)`: for every face in the
-model, it compares that face's OCCT-reported bounding box (`getBoundingBox(2, tag)`,
-from the exact B-rep, not the mesh) against the bounding box of the mesh nodes gmsh
-actually generated for *that specific face*, with tolerance
-`clamp(4 * mesh_chordal_target(lp), 0.05, 3.0)` mm — a few of the *finest* elements'
-worth of slack (the curvature-refinement floor `d`, not the coarser `min(t, a)` cap),
-**clamped to an absolute range independent of `t`/`cc`**. That clamp is itself a fix
-for a real gap found during code review of this change: an earlier version of this
-tolerance scaled directly off `min(t, a)` with no ceiling, so at `cc=10, t=5` it
-computed a 20 mm tolerance against the very ~18.7 mm defect this check exists to catch
-— silently defeating the guard at exactly the larger parameter range a bigger lattice
-would use, since the tolerance was tracking the CLI parameters rather than the mesh's
-actual fidelity or the defect's actual size. Verified directly across the documented
-parameter range (`cc=10,t=1.5`; `cc=10,t=5`; `cc=20,t=4`; `cc=50,t=20`, the upper
-bound of both ranges): the same defect on `test/test-cylinder.STEP` is caught at every
-one of them with the corrected, ceiling-clamped tolerance. A face whose mesh falls
-short raises `InputGeometryError` (exit 3) naming the offending face and the observed
-vs. expected extents, rather than letting a silently-incomplete mesh feed
-classification. This converts the failure mode from "silently produce a wrong lattice"
-to "fail loudly with a diagnosable message" — consistent with the "worst case is more
-work, never a wrong result" guarantee §10 states for every other optimization in this
-pipeline, which this failure mode had been quietly violating. Regression-tested
-directly against `test/test-cylinder.STEP` at `cc=10, t=1.5` (`test/test_classify.jl`):
-this exact
-input/parameter combination now raises `InputGeometryError` instead of completing with
-missing geometry.
+| Quantity | Value |
+|---|---|
+| Face 9 reported CAD bbox | `lo=(114.85, 53.71, 59.14)` `hi=(190.25, 140.0, 139.15)` |
+| Edge 9 (its B-spline boundary) reported bbox | `xmax = 190.2510582855133` |
+| Edge 9 sampled at 2001 points along its own parametrization | `xmax = 171.5823722631882` |
+| Meshed extent of face 9 | `xmax = 171.575` |
+
+The mesh agreed with the *sampled true curve* to within one chordal deviation; the
+reported bbox over-reached it by 18.7 mm. The whole solid's bbox `xmax=190.25` came
+from this one face — every other face stops at `x≈171.58`. So the "missing ~18.7 mm
+slab" was empty space that is not part of the solid at all.
+
+**Confirmation via exact trimmed area.** `gmsh.model.occ.getMass(2, tag)` gives OCCT's
+exact Gauss-quadrature area of a *trimmed* face — a tight quantity, unlike the bbox.
+Comparing it per face against the summed triangle area of the mesh gmsh generated for
+that same face, at `cc=10, t=1.5`:
+
+| Face | Exact (mm²) | Meshed (mm²) | Ratio |
+|---|---|---|---|
+| 9 (the "truncated" one) | 5930.084 | 5929.836 | **0.999958** |
+| worst of all 13 faces (1, a cylinder) | 1726.303 | 1724.265 | 0.998819 |
+| total | 48824.511 | 48818.382 | 0.999874 |
+
+Every face, face 9 included, is meshed to within 0.12% of its exact area. There is no
+truncation. (The earlier note that "a total-surface-area comparison doesn't catch it
+either" was measuring *total* area, which is insensitive by construction; *per-face*
+exact area is both sensitive and correct, and it exonerates the mesh.)
+
+Note also that the failed diagnosis's own supporting evidence is consistent with this:
+the mitigation attempts that "did not fix it" (uniform mesh sizing, three
+`Mesh.Algorithm` choices, the `OCCFix*`/`OCCSewFaces` import options, and
+`gmsh.model.occ.healShapes()`) all "reproduced the identical truncation" precisely
+because there was nothing to fix — every one of them produced the same correct mesh,
+measured against the same over-estimating box.
+
+**What actually caused the original missing lattice: §11.4's export-sync bug.** The run
+that prompted the report is `test/test-cylinder-cc10t1.5-finished-incomplete-lattice.log`.
+Its own summary line reads `Solids written: 2`, while the `.step` file it produced
+contains **113** solids — the stale, pre-fuse model-level entity list described in
+§11.4, exported instead of the resolved geometry. That is a defect in what gets
+written, entirely downstream of classification, and it is fixed (§11.4's `sync_model()`
+call). The classification mesh was never implicated.
+
+**Fix implemented (`check_surface_mesh_coverage`, `src/classify.jl`).** The gate is
+kept — a silently unfaithful mesh really would misclassify struts as `OUTSIDE`, and §10
+requires that failure mode be loud — but each quantity is now used only in the
+direction it is sound in:
+
+1. **Coverage is tested with exact trimmed area.** A face is rejected when its meshed
+   area falls short of `gmsh.model.occ.getMass(2, tag)` by both more than
+   `area_rel_tol` of its own area *and* more than `min_deficit` mm² absolute. Both
+   sides of this comparison are tight, so the test means what it says. A genuine
+   truncated parametric domain loses a large contiguous chunk and clears both bars by
+   orders of magnitude.
+2. **The CAD bounding box is used only as an upper bound.** Every mesh node must lie
+   *within* its face's box (inflated by `bbox_slack`, 1 mm). A conservative
+   over-estimate is perfectly sound to test containment against; it is meaningless to
+   test coverage against. This half catches a mesh that has the right *amount* of area
+   in the wrong *place* — the one scenario area alone cannot see.
+3. A face with **zero** elements remains an unconditional error.
+
+**Calibrating the two bars — and why one bar is not enough.** `area_rel_tol` defaults
+to **25%**, calibrated by measuring the worst legitimate per-face deficit across
+`test-cylinder.STEP`, `80mm-test-ball.step` and `TD_HX_Indre_Volum.step` at `(cc,t)` =
+(10,1.5), (10,5), (20,4), (50,20), (5,1) — spanning the documented CLI range
+(specification.md §3). The worst was **4.45%**, on a 4 mm² face of the heat-exchanger
+part at the coarsest setting; every other input-CAD combination stayed under 2%. That
+deficit is ordinary chordal-deviation noise (a curved face's triangles are secants, so
+meshed area sits slightly below true area, more so the coarser the mesh).
+
+A relative bar alone is still not enough, because `tessellate_surface` is run on
+generated lattice **output** as well as on input CAD — `tools/e2e.jl` re-tessellates
+the finished `.step` for its manifold and self-intersection checks. A lattice has
+thousands of tiny trimmed sliver faces at strut junctions, where a ratio is
+meaningless: re-tessellating this very run's 15,969-face output turned up a
+**0.0403 mm²** face meshed to 0.0302 mm² — 75.0%, enough to trip a pure 25% test over
+a shortfall of 0.01 mm². Hence the absolute floor
+`min_deficit = min_deficit_factor * min(t, a)²` — one coarsest mesh element's worth of
+area, `min(t, a)` being the element-size cap §5.1 sets. A shortfall below a single
+element is meshing noise by construction.
+
+Re-running the calibration with both bars over all 17 combinations (the three input
+parts across the parameter range, plus this run's lattice output and the committed
+`80mm-test-ball-cc20t4-golden-sample.step`) passes everywhere, and confirms each bar
+is load-bearing — neither alone would do:
+
+| Case | Relative bar | Absolute bar |
+|---|---|---|
+| lattice output, `cc=10 t=1.5` (15,969 faces) | **exceeded** — worst ratio 0.750 | spares it: worst shortfall 0.107 mm² vs. 2.25 mm² floor |
+| `TD_HX_Indre_Volum.step`, `cc=5 t=1` (388 faces) | spares it: worst ratio 0.990 | **exceeded** — worst shortfall 18.5 mm² vs. 1.0 mm² floor |
+
+A real truncation clears both by orders of magnitude: the ~18.7 mm-scale defect this
+gate was originally built to catch would be ~1500 mm² against a 2.25 mm² floor at
+`cc=10, t=1.5`.
+
+**Lesson worth keeping:** the original gate was added in good faith to enforce priority
+#1, but it enforced it against a quantity that could not support the claim, and the
+resulting hard failure was indistinguishable from a real defect — it blocked valid
+input and sent the investigation toward "repair the CAD file." A correctness gate is
+only as trustworthy as the tightness of the quantity it compares; when a gate rejects
+input, the gate's own measurement deserves the same scrutiny as the input.
+
+**Regression-tested** (`test/test_classify.jl`): `test-cylinder.STEP` at `cc=10, t=1.5`
+now tessellates successfully with every face within 1% of its exact area; a separate
+test pins the bbox over-estimate itself (reported `xmax` vs. sampled `xmax` on face 9 /
+edge 9) so any future attempt to test coverage against the bounding box fails
+immediately rather than reaching a user. The coverage, sliver-face and containment
+branches each have their own test (a coarsely-meshed sphere that genuinely
+under-covers, a thin sliver whose proportional shortfall is physically irrelevant, and
+a node displaced outside its face's box).
+
+**End-to-end verification.** The originally-failing invocation
+(`-i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 16 -v`) was re-run in full
+and completed with **exit 0 in 25m 55s** — inside the scenario's 60-minute budget
+(specification.md §6.1) — where it had previously exited 3 after 8 seconds. Stage
+timings: import 0.05 s, tessellate 1.86 s, classify 0.50 s, tile_stage 1m 39s,
+assembly 18m 6s, export 5m 22s, verify 13.4 s; peak RSS 1.23 GB. Classification output
+is **bit-identical** to the pre-gate run that produced
+`test-cylinder-cc10t1.5-finished-incomplete-lattice.log` (52,368 triangles; 69,192
+candidates → interior 1,976 / boundary 2,655 / outside 64,561), which is direct
+confirmation that the mesh and every decision derived from it were never affected by
+this gate — it only ever added a false rejection on top of correct work.
+
+Independent checks on the output STEP:
+
+| Check | Result |
+|---|---|
+| Solids in file vs. run summary | 2 vs. 2 — the §11.4 stale-export discrepancy is gone |
+| Total lattice volume | 43,574.1 mm³ (40,576.9 + 2,997.2) |
+| Bounding box within input ± (cc+t) | contained |
+| Lattice x-extent vs. the part's real extent | 91.60 … 171.59 against a true surface maximum of 171.58 — no missing slab |
+| `manifold_check` | manifold, 0 bad edges |
+| `self_intersection_check` | 0 intersecting pairs (227,898 triangles) |
+
+The zero self-intersection count is worth noting against §11.1, which recorded ~4,343
+residual pairs on `smoke-fast` and attributed them to thin-fold tessellation aliasing
+at strut junctions; that open question is unchanged by this fix, but this particular
+output does not exhibit it.
 
 ## 11.4 Investigation history: `filter_floating!`'s export silently reflected stale, pre-fuse geometry
 

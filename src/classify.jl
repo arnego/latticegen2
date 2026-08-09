@@ -28,96 +28,197 @@ end
 tolerance `d` (docs/algorithm.md §5.1): `d = min(t, a) / 10`."""
 mesh_chordal_target(lp::LatticeParams) = min(lp.t, lp.a) / 10
 
+"""Fetch every mesh node in the model once, returning `(coords, index)` where
+`coords` is gmsh's flat `[x1,y1,z1,x2,...]` array and `index` maps a node tag
+to its 1-based slot in it. Bulk-fetching once and indexing is deliberate: the
+previous bounding-box version of `check_surface_mesh_coverage` made one
+`gmsh.model.mesh.getNode` API call per node, which on a fine mesh of a large
+part is millions of individual round-trips."""
+function _mesh_node_index()
+    nodeTags, coords, _ = gmsh.model.mesh.getNodes()
+    idx = Dict{UInt64,Int}()
+    sizehint!(idx, length(nodeTags))
+    for i in eachindex(nodeTags)
+        idx[nodeTags[i]] = i
+    end
+    return coords, idx
+end
+
 """
-    check_surface_mesh_coverage(lp::LatticeParams; tol_factor::Real=4.0,
-                                 min_tol::Real=0.05, max_tol::Real=3.0)
+    meshed_face_areas([coords, idx]) -> Dict{Int,Float64}
 
-Defensive completeness gate on the 2D surface mesh gmsh just produced,
-called from `tessellate_surface` immediately after `gmsh.model.mesh.generate(2)`
-(docs/algorithm.md §5.1, §11.3). For every face currently in the model,
-compares the OCCT/CAD-reported bounding box of that face
-(`gmsh.model.getBoundingBox(2, tag)`, computed from the exact B-rep, not the
-mesh) against the bounding box of the mesh nodes gmsh actually generated for
-it. A healthy, CAD-conforming mesh places its boundary nodes essentially
-exactly on the true face boundary, so any face whose meshed extent falls
-short of its true extent by more than `tol` indicates the mesher silently
-produced an incomplete or mis-parametrized triangulation for that face.
+Total triangle area of the 2D mesh gmsh currently holds for each face in the
+model, keyed by face tag. Pass an existing `(coords, idx)` pair from
+`_mesh_node_index()` to avoid re-fetching the model's whole node array.
+"""
+meshed_face_areas() = meshed_face_areas(_mesh_node_index()...)
 
-`tol = clamp(tol_factor * mesh_chordal_target(lp), min_tol, max_tol)` — a few
-of the *finest* elements' worth of slack (`mesh_chordal_target`, the
-curvature-refinement floor `d`, not the coarser `min(t, a)` cap most of a
-mesh is actually sized at), **clamped to an absolute `[min_tol, max_tol]`
-mm range independent of `t`/`cc`**. This clamp matters: an earlier version of
-this check scaled its tolerance directly off `min(t, a)` with no ceiling, so
-at larger `-cc`/`-t` the tolerance itself grew past the size of the very
-defect this check exists to catch — e.g. at `cc=10, t=5` the old formula gave
-a 20 mm tolerance against the ~18.7 mm real-world truncation this check was
-built to catch (§11.3), silently defeating the guard at exactly the
-parameter range a larger lattice would use. A completeness gate whose
-sensitivity depends on unrelated CLI parameters rather than on the actual
-mesh/geometry is not a real guarantee; the absolute ceiling keeps `tol`
-comfortably below that defect's scale (and any question about the CAD kernel
-producing something similarly-sized on other geometry) regardless of how
-large `t`/`cc` are chosen. The floor (`min_tol`) exists purely so an
-extremely fine lattice doesn't get an unrealistically-tight, floating-point-
-noise-level tolerance.
+function meshed_face_areas(coords::Vector{Float64}, idx::Dict{UInt64,Int})
+    areas = Dict{Int,Float64}()
+    for (_, tag) in gmsh.model.getEntities(2)
+        elemTypes, _, elemNodeTags = gmsh.model.mesh.getElements(2, tag)
+        total = 0.0
+        for ti in eachindex(elemTypes)
+            elemTypes[ti] == 2 || continue   # gmsh element type 2 == 3-node triangle
+            tags = elemNodeTags[ti]
+            for e in 1:(length(tags) ÷ 3)
+                # NOTE: `3e-2`/`3e-1` are NOT valid here — Julia parses those
+                # as float literals (0.03/0.3), not `3*e - 2`.
+                i1, i2, i3 = idx[tags[3*e-2]], idx[tags[3*e-1]], idx[tags[3*e]]
+                ux = coords[3i2-2] - coords[3i1-2]
+                uy = coords[3i2-1] - coords[3i1-1]
+                uz = coords[3i2]   - coords[3i1]
+                vx = coords[3i3-2] - coords[3i1-2]
+                vy = coords[3i3-1] - coords[3i1-1]
+                vz = coords[3i3]   - coords[3i1]
+                cx = uy * vz - uz * vy
+                cy = uz * vx - ux * vz
+                cz = ux * vy - uy * vx
+                total += 0.5 * sqrt(cx * cx + cy * cy + cz * cz)
+            end
+        end
+        areas[Int(tag)] = total
+    end
+    return areas
+end
 
-This is a real, observed gmsh/OCCT failure mode, not a hypothetical one:
-investigating a "large volumes of missing lattice" report against
-`test/test-cylinder.STEP` (docs/algorithm.md §11.3) found that gmsh's
-Frontal-Delaunay mesher recovered a truncated parametric domain for one
-large, curved-boundary planar face of that part, silently producing a
-mesh that covers only part of the face's true extent — and, worse, the
-resulting mesh is still a perfectly well-formed *closed 2-manifold* (a
-`manifold_check`-style edge-sharing test does not catch it at all; the
-mesh is geometrically wrong, not topologically broken). Every downstream
-classification decision (`classify_strut`, docs/algorithm.md §5.2) depends
-entirely on this mesh faithfully representing the input solid's boundary, so
-this failure mode silently misclassified every strut beyond the
-mis-tessellated region as `OUTSIDE`, with no error or warning anywhere —
+"""
+    check_surface_mesh_coverage(lp::LatticeParams; area_rel_tol::Real=0.25,
+                                 bbox_slack::Real=1.0)
+
+Defensive completeness gate on the 2D surface mesh gmsh just produced, called
+from `tessellate_surface` immediately after `gmsh.model.mesh.generate(2)`
+(docs/algorithm.md §5.1, §11.3). Every classification decision
+(`classify_strut`, docs/algorithm.md §5.2) depends entirely on this mesh
+faithfully representing the input solid's boundary, so a silently incomplete
+mesh would misclassify every strut beyond the missing region as `OUTSIDE` —
 exactly the opposite of the "worst case is more work, never a wrong result"
-guarantee docs/algorithm.md §10 promises for every other optimization in this
-pipeline. Multiple mitigation attempts (curvature-independent uniform sizing,
-three different `Mesh.Algorithm` choices, OCCT's import-time `OCCFix*`/
-`OCCSewFaces` healing options, and `gmsh.model.occ.healShapes`) all
-reproduced the identical truncation, so no gmsh-level workaround is known;
-this check exists to convert the failure from silent data loss into a loud,
-diagnosable one (`InputGeometryError`, exit 3) until/unless a real fix is
-found (docs/algorithm.md §11.3).
+guarantee docs/algorithm.md §10 makes for the rest of the pipeline. This
+check converts that failure mode into a loud, diagnosable one
+(`InputGeometryError`, exit 3).
+
+Two independent per-face tests, each using a quantity that is *sound in the
+direction it is used in*:
+
+1. **Coverage — exact trimmed area.** `gmsh.model.occ.getMass(2, tag)` is
+   OCCT's exact Gauss-quadrature area of the *trimmed* face; the meshed area
+   is the sum of that face's triangle areas. A face is rejected only when its
+   shortfall is **both** more than `area_rel_tol` of its own area **and** more
+   than `min_deficit` mm² in absolute terms. A mesher that recovered a
+   truncated parametric domain loses a large, contiguous chunk of the face,
+   which clears both bars easily.
+2. **Containment — CAD bounding box, upper bound only.** Every mesh node of a
+   face must lie *inside* that face's `gmsh.model.getBoundingBox(2, tag)`,
+   inflated by `bbox_slack` mm. This catches a mesh that covers roughly the
+   right *amount* of area but in the wrong *place*, which test 1 alone cannot
+   see.
+
+**Why the bounding box is only ever used as an upper bound.** This check
+previously worked the other way around — it required the *meshed* bbox to
+reach the CAD bbox — and that was a false-positive bug that blocked
+`test/test-cylinder.STEP` outright (docs/algorithm.md §11.3). OCC's
+`getBoundingBox` is deliberately **conservative**: for a B-spline edge it
+returns the hull of the control points, and for a planar face the rectangle
+of the untrimmed UV parameter domain — neither is the true trimmed extent.
+On `test-cylinder.STEP`, face 9 (a `Plane` with B-spline boundary curves) is
+reported as reaching `x=190.25`, while the surface actually stops at
+`x=171.58`; sampling its boundary B-spline directly confirms `x=171.58` is
+the real maximum. The mesh was correct all along — per-face exact-area
+comparison puts every face of that part, face 9 included, within 0.005% of
+its true area. A conservative over-estimate is safe to test *containment*
+against (nothing may lie outside it) but is meaningless to test *coverage*
+against (the mesh is not required to reach it), which is the distinction the
+two tests above respect.
+
+**Why both a relative and an absolute bar.** `area_rel_tol` defaults to 25%,
+calibrated against the largest legitimate deficit measured on *input* CAD —
+`test-cylinder.STEP`, `80mm-test-ball.step` and `TD_HX_Indre_Volum.step` at
+`(cc, t)` spanning the documented CLI range (specification.md §3) — which was
+**4.45%**, on a 4 mm² face of the heat-exchanger part at the coarsest setting
+(`cc=50, t=20`). That deficit is ordinary chordal-deviation noise: a curved
+face's triangles are secants, so meshed area sits slightly below true area,
+more so the coarser the mesh.
+
+A ratio alone is **not** sufficient, because this function is also run on
+generated lattice *output*, not just input CAD — `tools/e2e.jl` re-tessellates
+the finished `.step` to run its manifold and self-intersection checks. A
+lattice has thousands of tiny trimmed sliver faces at strut/boundary
+junctions, and on a sliver the ratio is meaningless: one observed face of
+**0.0403 mm²** meshed to 0.0302 mm², i.e. 75.0% — enough to trip a pure
+25%-ratio test, while the shortfall it represents (0.01 mm²) is physically
+irrelevant. Hence `min_deficit = min_deficit_factor * min(t, a)^2`, one
+coarsest mesh element's worth of area (`min(t, a)` is the element-size cap
+`tessellate_surface` sets): a shortfall smaller than a single element is
+meshing noise by construction, never a lost region. A real truncation loses a
+large contiguous chunk and clears both bars by orders of magnitude — the
+~18.7 mm-scale defect this gate was originally built for would be ~1500 mm²
+against a 2.25 mm² floor at `cc=10, t=1.5`.
+
+A face with **zero** elements is always an error regardless of either
+tolerance.
+
+Note that `min_deficit` scales with `t`/`cc` while `area_rel_tol` does not,
+and that asymmetry is deliberate. An earlier version of this gate scaled its
+*whole* sensitivity off `min(t, a)` with no ceiling, so at `cc=10, t=5` it
+computed a 20 mm tolerance against the ~18.7 mm defect it existed to catch.
+The difference is that `min_deficit` is a floor on what counts as a *region*
+(legitimately tied to the mesh's own element size, and bounded above by the
+relative test), not the sole gate — a large fractional loss on a large face
+still fails no matter how big `t` is.
 """
-function check_surface_mesh_coverage(lp::LatticeParams; tol_factor::Real=4.0,
-                                      min_tol::Real=0.05, max_tol::Real=3.0)
-    tol = clamp(tol_factor * mesh_chordal_target(lp), min_tol, max_tol)
-    for (d, tag) in gmsh.model.getEntities(2)
+function check_surface_mesh_coverage(lp::LatticeParams; area_rel_tol::Real=0.25,
+                                      min_deficit_factor::Real=1.0,
+                                      bbox_slack::Real=1.0)
+    min_deficit = min_deficit_factor * min(lp.t, lp.a)^2
+    coords, node_index = _mesh_node_index()
+    meshed = meshed_face_areas(coords, node_index)
+
+    for (_, tag) in gmsh.model.getEntities(2)
+        exact = gmsh.model.occ.getMass(2, tag)
+        ma = get(meshed, Int(tag), 0.0)
         xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(2, tag)
-        _, _, elemNodeTags = gmsh.model.mesh.getElements(2, tag)
-        nodetags = Int[]
-        for arr in elemNodeTags
-            append!(nodetags, arr)
-        end
-        isempty(nodetags) && throw(InputGeometryError(
-            "Surface tessellation produced zero elements for face $tag (CAD bounding box " *
-            "lo=($xmin,$ymin,$zmin) hi=($xmax,$ymax,$zmax)); the input geometry could not be " *
-            "faithfully meshed for boundary classification (docs/algorithm.md §11.3)."))
-        mlo = Vec3(Inf, Inf, Inf)
-        mhi = Vec3(-Inf, -Inf, -Inf)
-        for t in unique(nodetags)
-            coord, _, _, _ = gmsh.model.mesh.getNode(t)
-            mlo = Vec3(min(mlo.x, coord[1]), min(mlo.y, coord[2]), min(mlo.z, coord[3]))
-            mhi = Vec3(max(mhi.x, coord[1]), max(mhi.y, coord[2]), max(mhi.z, coord[3]))
-        end
-        if mlo.x > xmin + tol || mlo.y > ymin + tol || mlo.z > zmin + tol ||
-           mhi.x < xmax - tol || mhi.y < ymax - tol || mhi.z < zmax - tol
+
+        ma > 0 || throw(InputGeometryError(
+            "Surface tessellation produced zero elements for face $tag (exact CAD area " *
+            "$(round(exact, digits=4)) mm^2, CAD bounding box lo=($xmin,$ymin,$zmin) " *
+            "hi=($xmax,$ymax,$zmax)); the input geometry could not be faithfully meshed " *
+            "for boundary classification (docs/algorithm.md §11.3)."))
+
+        # Reject only when the shortfall is BOTH a large fraction of the face
+        # AND larger in absolute terms than one coarsest mesh element — see the
+        # docstring for why a ratio alone false-positives on sliver faces.
+        if exact > 0 && ma < (1 - area_rel_tol) * exact && (exact - ma) > min_deficit
             throw(InputGeometryError(
-                "Surface tessellation for face $tag does not cover its own geometry " *
-                "(docs/algorithm.md §11.3): CAD bounding box lo=($xmin,$ymin,$zmin) " *
-                "hi=($xmax,$ymax,$zmax) vs. meshed bounding box lo=($(mlo.x),$(mlo.y),$(mlo.z)) " *
-                "hi=($(mhi.x),$(mhi.y),$(mhi.z)) (tolerance $(round(tol, digits=4)) mm). This " *
-                "indicates gmsh's mesher silently produced an incomplete or mis-parametrized " *
-                "triangulation for this face — classification against this mesh would silently " *
-                "misclassify struts near the missing region as OUTSIDE rather than fail. No " *
-                "gmsh-level mitigation is currently known (docs/algorithm.md §11.3); the input " *
-                "face likely needs repair in the originating CAD tool."))
+                "Surface tessellation for face $tag covers only " *
+                "$(round(100 * ma / exact, digits=2))% of that face's exact area " *
+                "(meshed $(round(ma, digits=4)) mm^2 vs. exact $(round(exact, digits=4)) mm^2, " *
+                "shortfall $(round(exact - ma, digits=4)) mm^2; tolerances " *
+                "$(round(100 * area_rel_tol, digits=1))% and $(round(min_deficit, digits=4)) mm^2 " *
+                "— docs/algorithm.md §11.3). This indicates gmsh's mesher silently produced an " *
+                "incomplete or mis-parametrized triangulation for this face — classification " *
+                "against this mesh would misclassify struts near the missing region as OUTSIDE " *
+                "rather than fail. The input face likely needs repair in the originating CAD tool."))
+        end
+
+        # Containment: the CAD bbox is a conservative over-estimate, so it is
+        # only ever valid to require that the mesh stays *within* it.
+        # `includeBoundary=true` so the face's own boundary nodes (owned by its
+        # bounding edges/vertices, not by the face) are checked too.
+        face_nodes, _, _ = gmsh.model.mesh.getNodes(2, tag, true)
+        for nt in face_nodes
+            i = node_index[nt]
+            x, y, z = coords[3i-2], coords[3i-1], coords[3i]
+            if x < xmin - bbox_slack || x > xmax + bbox_slack ||
+               y < ymin - bbox_slack || y > ymax + bbox_slack ||
+               z < zmin - bbox_slack || z > zmax + bbox_slack
+                throw(InputGeometryError(
+                    "Surface tessellation for face $tag placed a mesh node at " *
+                    "($x, $y, $z), outside that face's own CAD bounding box " *
+                    "lo=($xmin,$ymin,$zmin) hi=($xmax,$ymax,$zmax) (slack " *
+                    "$(bbox_slack) mm — docs/algorithm.md §11.3). This indicates gmsh's " *
+                    "mesher produced a mis-parametrized triangulation for this face; " *
+                    "classification against this mesh would be unreliable."))
+            end
         end
     end
     return nothing
@@ -142,11 +243,11 @@ against ~12K triangles / 0.4s with curvature-adaptive sizing) — see
 docs/algorithm.md §11 for why this matters for the optimization strategy.
 
 After meshing, `check_surface_mesh_coverage` verifies every face's mesh
-actually covers that face's true CAD extent before this function returns —
-see its docstring for the real, observed gmsh meshing-robustness failure
-this guards against (docs/algorithm.md §11.3): a mesher-recovered
-parametric domain that silently omits part of a face without any error, and
-without even breaking the resulting mesh's own 2-manifold closure.
+actually covers that face's exact trimmed area, and stays within that face's
+CAD bounding box, before this function returns — see its docstring for what
+that guards against, and for why the coverage half of the test must use
+exact area rather than the deliberately-conservative CAD bounding box
+(docs/algorithm.md §11.3).
 """
 function tessellate_surface(lp::LatticeParams)
     gmsh.model.occ.synchronize()

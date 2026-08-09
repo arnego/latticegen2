@@ -152,7 +152,7 @@ case for invalid input).
 |----------|-----------|------------------|
 | smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | generation < 10 minutes, quick test not applicable for output geometry verification |
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step — implemented as `tools/e2e.jl`'s `smoke-verified e2e` testset. (Params corrected from an earlier -cc 10 -t 2, which didn't match the golden file's own cc20t4 name; test/80mm-test-ball-cc20t4-golden-sample.step was generated with cc=20/t=4, so the scenario's params were changed to match it. Golden file renamed from test/80mm-test-ball-cc20t4.step to test/80mm-test-ball-cc20t4-golden-sample.step 2026-08-09.) |
-| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5.step, generation < 60 minutes — harness implemented as `tools/e2e.jl`'s `dense-lattice e2e` testset, but it self-skips because the golden sample does not exist yet. Originally specified at -cc 5 -t 1, the one attempt to generate that denser golden sample ran for hours and was manually terminated (not a crash — the run's own log recorded exactly what was happening throughout; see docs/algorithm.md §11.2 for the full investigation): an auto-tuned tile size well past the fuse-time performance knee left assembly with 11k+ unfused solids, and the (now-fixed) unconditional sub-threshold cleanup rule was deleting connected junction material one solid at a time for over an hour. Root cause diagnosed and fixed (docs/algorithm.md §7.1, §6.3, §8); the scenario's params were changed 2026-08-09 to -cc 10 -t 1.5 (a less dense lattice capable of finishing within a reasonable time) with a 60-minute budget. Regenerating the golden sample at these params is a follow-up step, not automated here (committing a golden sample is a decision for whoever reviews the regenerated run's output). |
+| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 60 minutes — harness implemented as `tools/e2e.jl`'s `dense-lattice e2e` testset, but it self-skips because the golden sample does not exist yet. Originally specified at -cc 5 -t 1, the one attempt to generate that denser golden sample ran for hours and was manually terminated (not a crash — the run's own log recorded exactly what was happening throughout; see docs/algorithm.md §11.2 for the full investigation): an auto-tuned tile size well past the fuse-time performance knee left assembly with 11k+ unfused solids, and the (now-fixed) unconditional sub-threshold cleanup rule was deleting connected junction material one solid at a time for over an hour. Root cause diagnosed and fixed (docs/algorithm.md §7.1, §6.3, §8); the scenario's params were changed 2026-08-09 to -cc 10 -t 1.5 (a less dense lattice capable of finishing within a reasonable time) with a 60-minute budget. Regenerating the golden sample at these params is a follow-up step, not automated here (committing a golden sample is a decision for whoever reviews the regenerated run's output). |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 --workers 1 --tile-cells 4 (strut size `t` >= cell edge `a=cc/√2`) | exits nonzero (exit 2), no `.step` or `.log` file written — implemented as `tools/e2e.jl`'s `invalid-input e2e` testset |
 
 ### 6.2 Automated pass/fail checks
@@ -193,28 +193,27 @@ TBD
 *Anything you're unsure about — list it here explicitly so it doesn't get silently
 assumed by default. Delete each line once resolved.*
 
-- **`dense-lattice` golden sample still needs to be generated and reviewed — and its
-  current input file is now blocked outright, not just unreviewed.** [TODO: needs
-  decision] The earlier appearance of a crash (§6.1) was root-caused and fixed — see
-  docs/algorithm.md §11.2 — but no one has yet reviewed a full run's output and
-  committed it as the golden sample test/test-cylinder-cc10t1.5.step (params changed
-  2026-08-09 from the original -cc 5 -t 1 to a less dense -cc 10 -t 1.5, §6.1). That
-  review was already a separate, pending step before the finding below.
+- **`dense-lattice` golden sample still needs to be generated and reviewed.**
+  [TODO: needs decision] The earlier appearance of a crash (§6.1) was root-caused and
+  fixed — see docs/algorithm.md §11.2 — but no one has yet reviewed a full run's output
+  and committed it as the golden sample
+  test/test-cylinder-cc10t1.5-golden-sample.step (params changed
+  2026-08-09 from the original -cc 5 -t 1 to a less dense -cc 10 -t 1.5, §6.1).
+  Committing a golden sample is a judgement call about what "correct output" is, so it
+  stays a decision for whoever owns the test fixture rather than something to pick a
+  default for.
 
-  **New finding (2026-08-09):** investigating a separate "missing lattice" report (a
-  different, silent bug — resolved, docs/algorithm.md §11.3) found that
-  `test/test-cylinder.STEP` itself has a real CAD defect: gmsh's mesher cannot fully
-  tessellate one of its faces, at any tested `-cc`/`-t`, `Mesh.Algorithm` choice, or
-  OCCT healing option (docs/algorithm.md §11.3's investigation). The classification
-  pipeline now correctly refuses to run against this file at all (`InputGeometryError`,
-  exit 3) rather than silently producing an incomplete lattice — which is the correct,
-  precision-first behavior (specification.md "Key Considerations"), but it also means
-  the `dense-lattice` scenario **cannot be run to completion with its current input
-  file** until one of the following is decided and done: (a) repair the defective face
-  in `test/test-cylinder.STEP` using a CAD tool and re-export it, (b) replace
-  `test-cylinder.STEP` with a different dense-lattice test geometry, or (c) some other
-  resolution. This is a decision for whoever owns the test fixture, not something to
-  silently pick a default for.
+  **Resolved (2026-08-09), previously listed here as a blocker:** a prior revision of
+  this item recorded that `test/test-cylinder.STEP` had a real CAD defect gmsh could not
+  tessellate, blocking this scenario outright. That was **wrong** — the mesh was correct
+  and the file needs no repair. The pipeline's own mesh-coverage gate was testing mesh
+  completeness against OCC's deliberately over-estimating bounding box and falsely
+  rejecting the file; the gate now compares against exact trimmed face area instead.
+  See docs/algorithm.md §11.3 for the corrected investigation. The scenario has since
+  been run end-to-end at these params (exit 0, 25m 55s, inside the 60-minute budget;
+  output verified manifold, free of self-intersections, and reaching the part's true
+  extent), so no decision about replacing or repairing the test fixture is needed —
+  only the golden-sample review above remains.
 
 ---
 

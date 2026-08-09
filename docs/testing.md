@@ -61,7 +61,12 @@ Run unit tests for parameter validation and intermediate calculations
    changed 2026-08-09 to -cc 10 -t 1.5 (a less dense lattice capable of finishing
    within a reasonable time) with a 60-minute runtime budget. Regenerating the
    golden sample and committing it is a follow-up step, tracked as an open item in
-   specification.md §9, not automated here. Until that sample exists, `tools/e2e.jl`
+   specification.md §9, not automated here — **and, as of a separate 2026-08-09
+   finding, currently blocked outright**: `test/test-cylinder.STEP` has a CAD defect
+   in one face that gmsh cannot fully tessellate (docs/algorithm.md §11.3), so this
+   scenario now correctly fails fast (exit 3, `InputGeometryError`) instead of running
+   to completion at all, pending the decision recorded in specification.md §9. Until
+   that sample exists, `tools/e2e.jl`
    provides the `smoke-fast`/`smoke-verified` output `.step` files (and console/log
    summaries) for manual user verification, and automatically ensures the generated
    geometry is manifold, non-self-intersecting, and that sub-threshold-solid removals

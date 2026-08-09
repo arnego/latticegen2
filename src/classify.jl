@@ -29,7 +29,8 @@ tolerance `d` (docs/algorithm.md §5.1): `d = min(t, a) / 10`."""
 mesh_chordal_target(lp::LatticeParams) = min(lp.t, lp.a) / 10
 
 """
-    check_surface_mesh_coverage(lp::LatticeParams; tol_factor::Real=4.0)
+    check_surface_mesh_coverage(lp::LatticeParams; tol_factor::Real=4.0,
+                                 min_tol::Real=0.05, max_tol::Real=3.0)
 
 Defensive completeness gate on the 2D surface mesh gmsh just produced,
 called from `tessellate_surface` immediately after `gmsh.model.mesh.generate(2)`
@@ -39,11 +40,27 @@ compares the OCCT/CAD-reported bounding box of that face
 mesh) against the bounding box of the mesh nodes gmsh actually generated for
 it. A healthy, CAD-conforming mesh places its boundary nodes essentially
 exactly on the true face boundary, so any face whose meshed extent falls
-short of its true extent by more than `tol_factor * min(t, a)` (a few mesh
-elements' worth of slack — generous enough to tolerate ordinary
-curvature-driven quantization, nowhere close to letting a genuinely missing
-region through) indicates the mesher silently produced an incomplete or
-mis-parametrized triangulation for that face.
+short of its true extent by more than `tol` indicates the mesher silently
+produced an incomplete or mis-parametrized triangulation for that face.
+
+`tol = clamp(tol_factor * mesh_chordal_target(lp), min_tol, max_tol)` — a few
+of the *finest* elements' worth of slack (`mesh_chordal_target`, the
+curvature-refinement floor `d`, not the coarser `min(t, a)` cap most of a
+mesh is actually sized at), **clamped to an absolute `[min_tol, max_tol]`
+mm range independent of `t`/`cc`**. This clamp matters: an earlier version of
+this check scaled its tolerance directly off `min(t, a)` with no ceiling, so
+at larger `-cc`/`-t` the tolerance itself grew past the size of the very
+defect this check exists to catch — e.g. at `cc=10, t=5` the old formula gave
+a 20 mm tolerance against the ~18.7 mm real-world truncation this check was
+built to catch (§11.3), silently defeating the guard at exactly the
+parameter range a larger lattice would use. A completeness gate whose
+sensitivity depends on unrelated CLI parameters rather than on the actual
+mesh/geometry is not a real guarantee; the absolute ceiling keeps `tol`
+comfortably below that defect's scale (and any question about the CAD kernel
+producing something similarly-sized on other geometry) regardless of how
+large `t`/`cc` are chosen. The floor (`min_tol`) exists purely so an
+extremely fine lattice doesn't get an unrealistically-tight, floating-point-
+noise-level tolerance.
 
 This is a real, observed gmsh/OCCT failure mode, not a hypothetical one:
 investigating a "large volumes of missing lattice" report against
@@ -68,8 +85,9 @@ this check exists to convert the failure from silent data loss into a loud,
 diagnosable one (`InputGeometryError`, exit 3) until/unless a real fix is
 found (docs/algorithm.md §11.3).
 """
-function check_surface_mesh_coverage(lp::LatticeParams; tol_factor::Real=4.0)
-    tol = tol_factor * min(lp.t, lp.a)
+function check_surface_mesh_coverage(lp::LatticeParams; tol_factor::Real=4.0,
+                                      min_tol::Real=0.05, max_tol::Real=3.0)
+    tol = clamp(tol_factor * mesh_chordal_target(lp), min_tol, max_tol)
     for (d, tag) in gmsh.model.getEntities(2)
         xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(2, tag)
         _, _, elemNodeTags = gmsh.model.mesh.getElements(2, tag)

@@ -1185,16 +1185,27 @@ silently proceeding with an unfaithful mesh, `tessellate_surface` now calls
 `check_surface_mesh_coverage` immediately after `generate(2)`: for every face in the
 model, it compares that face's OCCT-reported bounding box (`getBoundingBox(2, tag)`,
 from the exact B-rep, not the mesh) against the bounding box of the mesh nodes gmsh
-actually generated for *that specific face*, with a generous tolerance
-(`4 * min(t, a)` — comfortably wider than any legitimate curvature-driven quantization,
-nowhere close to letting an 18 mm-scale defect through). A face whose mesh falls short
-raises `InputGeometryError` (exit 3) naming the offending face and the observed vs.
-expected extents, rather than letting a silently-incomplete mesh feed classification.
-This converts the failure mode from "silently produce a wrong lattice" to "fail loudly
-with a diagnosable message" — consistent with the "worst case is more work, never a
-wrong result" guarantee §10 states for every other optimization in this pipeline, which
-this failure mode had been quietly violating. Regression-tested directly against
-`test/test-cylinder.STEP` at `cc=10, t=1.5` (`test/test_classify.jl`): this exact
+actually generated for *that specific face*, with tolerance
+`clamp(4 * mesh_chordal_target(lp), 0.05, 3.0)` mm — a few of the *finest* elements'
+worth of slack (the curvature-refinement floor `d`, not the coarser `min(t, a)` cap),
+**clamped to an absolute range independent of `t`/`cc`**. That clamp is itself a fix
+for a real gap found during code review of this change: an earlier version of this
+tolerance scaled directly off `min(t, a)` with no ceiling, so at `cc=10, t=5` it
+computed a 20 mm tolerance against the very ~18.7 mm defect this check exists to catch
+— silently defeating the guard at exactly the larger parameter range a bigger lattice
+would use, since the tolerance was tracking the CLI parameters rather than the mesh's
+actual fidelity or the defect's actual size. Verified directly across the documented
+parameter range (`cc=10,t=1.5`; `cc=10,t=5`; `cc=20,t=4`; `cc=50,t=20`, the upper
+bound of both ranges): the same defect on `test/test-cylinder.STEP` is caught at every
+one of them with the corrected, ceiling-clamped tolerance. A face whose mesh falls
+short raises `InputGeometryError` (exit 3) naming the offending face and the observed
+vs. expected extents, rather than letting a silently-incomplete mesh feed
+classification. This converts the failure mode from "silently produce a wrong lattice"
+to "fail loudly with a diagnosable message" — consistent with the "worst case is more
+work, never a wrong result" guarantee §10 states for every other optimization in this
+pipeline, which this failure mode had been quietly violating. Regression-tested
+directly against `test/test-cylinder.STEP` at `cc=10, t=1.5` (`test/test_classify.jl`):
+this exact
 input/parameter combination now raises `InputGeometryError` instead of completing with
 missing geometry.
 

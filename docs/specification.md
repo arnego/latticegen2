@@ -193,12 +193,28 @@ TBD
 *Anything you're unsure about — list it here explicitly so it doesn't get silently
 assumed by default. Delete each line once resolved.*
 
-- **`dense-lattice` golden sample still needs to be generated and reviewed.** The
-  earlier appearance of a crash (§6.1) was root-caused and fixed — see
+- **`dense-lattice` golden sample still needs to be generated and reviewed — and its
+  current input file is now blocked outright, not just unreviewed.** [TODO: needs
+  decision] The earlier appearance of a crash (§6.1) was root-caused and fixed — see
   docs/algorithm.md §11.2 — but no one has yet reviewed a full run's output and
   committed it as the golden sample test/test-cylinder-cc10t1.5.step (params changed
   2026-08-09 from the original -cc 5 -t 1 to a less dense -cc 10 -t 1.5, §6.1). That
-  review is a separate step from this fix.
+  review was already a separate, pending step before the finding below.
+
+  **New finding (2026-08-09):** investigating a separate "missing lattice" report (a
+  different, silent bug — resolved, docs/algorithm.md §11.3) found that
+  `test/test-cylinder.STEP` itself has a real CAD defect: gmsh's mesher cannot fully
+  tessellate one of its faces, at any tested `-cc`/`-t`, `Mesh.Algorithm` choice, or
+  OCCT healing option (docs/algorithm.md §11.3's investigation). The classification
+  pipeline now correctly refuses to run against this file at all (`InputGeometryError`,
+  exit 3) rather than silently producing an incomplete lattice — which is the correct,
+  precision-first behavior (specification.md "Key Considerations"), but it also means
+  the `dense-lattice` scenario **cannot be run to completion with its current input
+  file** until one of the following is decided and done: (a) repair the defective face
+  in `test/test-cylinder.STEP` using a CAD tool and re-export it, (b) replace
+  `test-cylinder.STEP` with a different dense-lattice test geometry, or (c) some other
+  resolution. This is a decision for whoever owns the test fixture, not something to
+  silently pick a default for.
 
 ---
 

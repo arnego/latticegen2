@@ -215,6 +215,14 @@ boolean workload into an O(boundary struts) ≈ O(surface area / cell area) work
   necessary on large, gently-curved surfaces, at a severe performance cost (~1.2M
   triangles / 47s vs. ~12K triangles / 0.4s on the 80mm test ball with curvature-
   adaptive sizing instead) — see §11.
+- Immediately after meshing, `check_surface_mesh_coverage` verifies every face's mesh
+  actually covers that face's own true (OCCT-reported) extent, and raises
+  `InputGeometryError` (exit 3) if not — a defensive gate against a real, observed gmsh
+  meshing-robustness failure where the mesher silently recovers a truncated parametric
+  domain for a face, producing a mesh that is still a well-formed closed 2-manifold but
+  geometrically incomplete (§11.3). Every classification decision below depends entirely
+  on this mesh being faithful to the input solid, so this check exists to convert that
+  failure mode from "silently misclassify" into "fail loudly."
 - Build a uniform spatial hash grid over the resulting triangles, with cell size ≈ 2×
   the median triangle edge length. Each grid cell stores indices of triangles whose
   AABB overlaps it.
@@ -686,15 +694,22 @@ end
      punching a hole in connected geometry; keeping it risks silently reporting success
      with material that was never actually verified safe. Priority #1 (precision) over
      completing the run.
-  5. Every remaining sub-threshold solid is now a genuine singleton — safe to remove.
+  5. Before removal, one `sync_model()` call brings gmsh's separate **model-level**
+     entity list up to date with every fuse step 3 performed — `gmsh.model.occ.fuse`
+     is an OCC-**kernel**-level operation and does not itself synchronize the
+     model-level list, so without this call that list (and therefore the export that
+     follows) would still reflect the *pre-fuse*, un-merged fragments rather than the
+     resolved geometry `kept` actually represents (found and fixed via §11.4 — a real
+     run whose own summary claimed 2 solids written while the exported file held 113).
+     Every remaining sub-threshold solid is now a genuine singleton — safe to remove.
      Removal uses `remove_model_entities` (`gmsh.model.removeEntities`), not
      `gmsh.model.occ.remove`: measured 16× faster removing 300 solids from a
      648-solid model (11.97 s vs. 0.74 s, §11.2) — the OCC-kernel-level path
      recomputes bookkeeping the model-level path doesn't need. This is a **model-level**
      removal, not an OCC-kernel one: it edits gmsh's own entity list without touching
-     the underlying OCC document, so any `gmsh.model.occ.synchronize()` afterwards
-     would re-populate the model list from the (unmodified) kernel state and silently
-     undo the removal. The export write that follows is therefore always the
+     the underlying OCC document, so any `gmsh.model.occ.synchronize()` *after this
+     point* would re-populate the model list from the (unmodified) kernel state and
+     silently undo the removal. The export write that follows is therefore always the
      `sync=false` form of `write_model` — never a syncing write.
   6. Every removal is logged as **one aggregate line** (total count, total volume,
      min/max, up to 20 sample volumes) — never one line per solid, which is what
@@ -826,6 +841,9 @@ Because priority #1 is precision, every optimization above is designed so that i
 - The round-trip re-import (§8) and the external verification in
   [testing.md](testing.md) (manifold check, self-intersection check) catch any
   regression before a run is reported as successful.
+- `check_surface_mesh_coverage` (§5.1) fails loudly (exit 3) rather than silently
+  classifying against an incomplete input-surface mesh — one real failure mode
+  (§11.3) that this principle had been quietly violating until found and fixed.
 
 ---
 
@@ -882,6 +900,8 @@ The optimization levers, restated as a single reference table (also referenced f
 | Threaded classification loop (`Threads.@threads`) | Parallel, allocation-free per-strut classification within each process, layered under the existing process-level parallelism — requires launching Julia with `-t auto`/`JULIA_NUM_THREADS` set (the provided wrapper scripts do); a plain `julia src/main.jl` with no thread flag runs it single-threaded |
 | Wall-clock circuit breaker on every fuse call, per-tile and per-merge-round (correctness safety net, not a speed lever) | Prevents a truly runaway fuse from hanging, deliberately set generously since cutting fusing off early risks leaving self-intersecting geometry un-fused; the tile stage's per-call budget (§7.1) is itself derived from the tile-sizing target so a stuck tile is bounded and *logged*, not silently absorbing three unbudgeted 600 s stalls |
 | Bounded memory-watchdog backpressure pause (correctness/stability safety net) | `rl.max_rss` is a high-water mark that can never fall on its own — an unbounded wait would be a guaranteed hang the first time it trips, not a slow pause (§7.2) |
+| `check_surface_mesh_coverage` post-tessellation completeness gate (correctness safety net, not a speed lever) | Catches a real, observed gmsh meshing-robustness failure — a silently truncated/mis-parametrized face mesh that is still a valid closed 2-manifold, so ordinary manifold checks miss it — before it can silently misclassify struts as OUTSIDE; fails loudly (exit 3) instead (§5.1, §11.3) |
+| `sync_model()` before `filter_floating!`'s removal/export step (correctness safety net, not a speed lever) | `gmsh.model.occ.fuse` doesn't synchronize gmsh's model-level entity list itself; without this call, export could silently write stale pre-fuse fragments instead of the resolved geometry the run believes it wrote (§8, §11.4) |
 | Calibration probe + tile sizing + RSS watchdog | Memory stability on 32 GB target |
 | .brep disk staging in temp/<ts> for tile/merge-round IPC (never for the final assembly result) | Small IPC, restartable analysis on failure; the final hand-off from assembly to export instead shares one gmsh session (see §6.5) so the completed lattice is never serialized to disk only to be immediately reparsed |
 
@@ -1109,6 +1129,121 @@ end-to-end through the distributed path. Re-running the original failing
 that originally exposed the bugs, is tracked as a follow-up verification step (see the
 project's test plan) rather than included here, since it is a multi-tens-of-minutes
 run in its own right.
+
+---
+
+## 11.3 Investigation history: silent gmsh mesh truncation on `test-cylinder-cc10t1.5`
+
+A user-reported run (`-i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 16`)
+completed with exit 0 and a plausible-looking log, but visual inspection of the output
+against the input showed a large, contiguous region of the input volume with no lattice
+at all — not scattered gaps, a hard-edged missing slab at one end of the part.
+
+**Root cause: `tessellate_surface`'s `gmsh.model.mesh.generate(2)` call (§5.1) silently
+produced an incomplete triangulation of one face of the input solid.** Direct
+measurement: the run's own logged input bounding box reached `x=190.25`, but the actual
+tessellated mesh's own bounding box (`mesh_bounds`) stopped at `x=171.58` — an ~18.7 mm
+gap. Since every classification decision (`classify_strut`, §5.2) — both the
+distance-to-surface test and the ray-cast point-in-solid test — depends entirely on this
+mesh, every candidate strut beyond the un-meshed region was silently misclassified
+`OUTSIDE`, exactly matching the observed missing slab. This was reproduced with a
+~15-line standalone `Gmsh.jl` script containing **no** latticegen2 code at all (no
+`with_gmsh`, no `import_shapes`, no project-specific mesh-size logic), ruling out
+anything project-side: gmsh's Frontal-Delaunay mesher recovers a truncated parametric
+domain for one large, curved-boundary planar face of this specific part (a `Plane`
+entity whose OCCT-reported parameter bounds, printed at `General.Verbosity=99`, are far
+smaller than the face's true physical extent). Critically, the resulting mesh is still a
+perfectly well-formed **closed 2-manifold** — every edge shared by exactly 2 triangles —
+so a `manifold_check`-style edge-count test (the one thing this pipeline already had to
+validate a mesh, per `tools/verify_geometry.jl`) does not catch this at all. A
+total-surface-area comparison doesn't catch it either: the truncated mesh for that face
+covers 99.99% of the *total* model's true surface area, because the mesher's recovered
+(wrong) parametric patch happens to be nearly the same *size*, just the wrong *shape and
+location* — only a per-face bounding-box comparison against that face's own true,
+OCCT-reported extent reveals the defect.
+
+**Mitigation attempts that did *not* fix it** (each independently verified against the
+same reproduction script): a uniform, curvature-independent mesh size (ruling out
+`Mesh.MeshSizeFromCurvature` interacting badly with a large flat face); three different
+`Mesh.Algorithm` choices (`MeshAdapt`, `Delaunay`, and the default `Frontal-Delaunay`,
+ruling out the 2D triangulation algorithm itself — the truncation happens upstream, in
+boundary-curve/parametric-domain recovery, common to all of them); OCCT's import-time
+healing options (`Geometry.OCCFixDegenerated`, `OCCFixSmallEdges`, `OCCFixSmallFaces`,
+`OCCSewFaces`, `OCCMakeSolids`); and `gmsh.model.occ.healShapes()` (OCCT's own
+`ShapeFix`/`ShapeUpgrade` healing pipeline, run explicitly on the imported shape). All
+five reproduced the identical truncation, to within meshing-order floating-point noise.
+No gmsh/OCCT-level workaround is currently known; this appears to be a genuine OCCT
+B-rep parametrization defect for this specific face, not a Julia-side or an
+option-tuning problem. Resolving it further would likely require either repairing the
+source face in the originating CAD tool, or a deeper investigation into OCCT's own
+curve-to-parameter-space projection for this surface type — out of scope for a
+gmsh-option-level fix.
+
+**Fix implemented: fail loudly instead of silently (`check_surface_mesh_coverage`,
+`src/classify.jl`).** Since priority #1 (precision, specification.md) rules out
+silently proceeding with an unfaithful mesh, `tessellate_surface` now calls
+`check_surface_mesh_coverage` immediately after `generate(2)`: for every face in the
+model, it compares that face's OCCT-reported bounding box (`getBoundingBox(2, tag)`,
+from the exact B-rep, not the mesh) against the bounding box of the mesh nodes gmsh
+actually generated for *that specific face*, with tolerance
+`clamp(4 * mesh_chordal_target(lp), 0.05, 3.0)` mm — a few of the *finest* elements'
+worth of slack (the curvature-refinement floor `d`, not the coarser `min(t, a)` cap),
+**clamped to an absolute range independent of `t`/`cc`**. That clamp is itself a fix
+for a real gap found during code review of this change: an earlier version of this
+tolerance scaled directly off `min(t, a)` with no ceiling, so at `cc=10, t=5` it
+computed a 20 mm tolerance against the very ~18.7 mm defect this check exists to catch
+— silently defeating the guard at exactly the larger parameter range a bigger lattice
+would use, since the tolerance was tracking the CLI parameters rather than the mesh's
+actual fidelity or the defect's actual size. Verified directly across the documented
+parameter range (`cc=10,t=1.5`; `cc=10,t=5`; `cc=20,t=4`; `cc=50,t=20`, the upper
+bound of both ranges): the same defect on `test/test-cylinder.STEP` is caught at every
+one of them with the corrected, ceiling-clamped tolerance. A face whose mesh falls
+short raises `InputGeometryError` (exit 3) naming the offending face and the observed
+vs. expected extents, rather than letting a silently-incomplete mesh feed
+classification. This converts the failure mode from "silently produce a wrong lattice"
+to "fail loudly with a diagnosable message" — consistent with the "worst case is more
+work, never a wrong result" guarantee §10 states for every other optimization in this
+pipeline, which this failure mode had been quietly violating. Regression-tested
+directly against `test/test-cylinder.STEP` at `cc=10, t=1.5` (`test/test_classify.jl`):
+this exact
+input/parameter combination now raises `InputGeometryError` instead of completing with
+missing geometry.
+
+## 11.4 Investigation history: `filter_floating!`'s export silently reflected stale, pre-fuse geometry
+
+Found while investigating §11.3 above: the same run's own end-of-run summary read
+`Solids written: 2`, but the actual exported `.step` file, opened independently,
+contained **113** solids — mostly small, repeated-volume fragments typical of un-fused
+per-tile junction pieces, plus a couple of much larger bodies.
+
+**Root cause:** `filter_floating!` (§8) resolves an *ambiguous* (>1-member) overlap
+component by calling `fuse_fn` (`fuse_all` by default) and classifying whatever tags
+it returns. `gmsh.model.occ.fuse` (used inside `fuse_all`) is an OCC-**kernel**-level
+operation — it does not itself call `gmsh.model.occ.synchronize()`, so gmsh's separate
+**model**-level entity list (what `gmsh.write`/`remove_model_entities` actually operate
+on) keeps reflecting the *pre-fuse* fragments until something explicitly synchronizes.
+`run_pipeline` calls `write_model(...; sync=false)` immediately after `filter_floating!`
+by design (§8 — a syncing write would resurrect whatever `remove_model_entities` had
+just removed), so nothing in that call sequence ever synchronized the model to pick up
+the *new*, fused-together entities `fuse_fn` had actually produced. The result: the
+run's own accounting (`kept`, and the "Solids written" summary line) correctly reflected
+the small, properly-fused result, but the file gmsh actually wrote still held the model's
+stale pre-fuse entity list (113 = 114 stale fragments − 1 model-level removal) —
+mutually-overlapping, un-merged fragments delivered as the "final" output, a real
+self-intersection risk (§6.5), not merely a cosmetic miscount.
+
+**Fix:** `filter_floating!` now calls `sync_model()` once, after every ambiguous
+component has been resolved and *before* `remove_model_entities`/the caller's
+`write_model(...; sync=false)` — bringing the model-level entity list up to date with
+every fuse the resolution loop performed, so removal and export both operate on the
+kernel's true current state rather than a stale pre-fuse snapshot. This one extra sync
+is O(whole model) (§6.5's own documented cost), but `filter_floating!` runs exactly once
+per pipeline execution — never per-tile or per-merge-round — so it does not reproduce
+the O(n²)-per-round sync-cost regression §6.5/§11.2 already fixed elsewhere. Verified
+directly (`test/test_cleanup.jl`): a test that mirrors `run_pipeline`'s exact call
+sequence (`filter_floating!` → `write_model(...; sync=false)`, no synchronize in
+between) reproduces the bug exactly (`2 == 1` — the stale pre-fuse pair vs. the one
+properly-fused solid) when the fix is reverted, and passes with it applied.
 
 ---
 

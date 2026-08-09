@@ -7,6 +7,8 @@
 # bottom, guarded so it only runs when this file is included from the
 # gmsh-dependent testset.
 
+import Gmsh: gmsh
+
 # --- Synthetic icosphere mesh (test-only helper, not part of src/) --------
 
 function _icosahedron()
@@ -212,6 +214,58 @@ end
                 for vi in (a, b, c)
                     @test norm3(mesh.verts[vi]) ≈ 40.0 atol = 0.5
                 end
+            end
+        end
+    end
+
+    @testset "check_surface_mesh_coverage" begin
+        @testset "no false positive on a well-formed, fully-meshed box" begin
+            lp = LatticeParams(10.0, 2.0)
+            with_gmsh() do
+                new_model("coverage-ok")
+                gmsh.model.occ.addBox(0, 0, 0, 20, 20, 20)
+                gmsh.model.occ.synchronize()
+                # Must not throw: tessellate_surface calls this internally,
+                # and a healthy mesh of a simple box must pass cleanly.
+                mesh = tessellate_surface(lp)
+                @test length(mesh.tris) > 0
+            end
+        end
+
+        @testset "raises InputGeometryError when a face's mesh doesn't cover its own CAD extent" begin
+            lp = LatticeParams(10.0, 2.0)
+            with_gmsh() do
+                new_model("coverage-bad")
+                gmsh.model.occ.addBox(0, 0, 0, 20, 20, 20)
+                gmsh.model.occ.synchronize()
+                gmsh.option.setNumber("Mesh.MeshSizeMax", 2.0)
+                gmsh.option.setNumber("Mesh.MeshSizeMin", 0.2)
+                gmsh.model.mesh.generate(2)
+                # Simulate the real failure mode directly (no known gmsh
+                # option reproduces it on demand, docs/algorithm.md §11.3):
+                # delete every mesh element belonging to one face, so that
+                # face's meshed extent trivially falls short of its true CAD
+                # extent -- exactly what check_surface_mesh_coverage exists
+                # to catch (the true bug leaves a partially-, not
+                # zero-element, face, but the "zero elements" branch is the
+                # same code path and just as real a failure to guard against).
+                gmsh.model.mesh.clear([(2, 1)])
+                @test_throws InputGeometryError check_surface_mesh_coverage(lp)
+            end
+        end
+
+        @testset "regression: test-cylinder.STEP at cc=10/t=1.5 is caught, not silently misclassified" begin
+            # docs/algorithm.md §11.3: this exact input/parameter combination
+            # was the one that produced a run whose output was missing an
+            # entire ~18.7mm slab of lattice with no error at all -- gmsh's
+            # mesher silently recovers a truncated parametric domain for one
+            # face of this part. Regression-guards that this now fails loudly
+            # (exit 3) instead of silently proceeding with an incomplete mesh.
+            lp = LatticeParams(10.0, 1.5)
+            with_gmsh() do
+                new_model("coverage-test-cylinder")
+                import_shapes(joinpath(@__DIR__, "test-cylinder.STEP"))
+                @test_throws InputGeometryError tessellate_surface(lp)
             end
         end
     end

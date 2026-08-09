@@ -1,0 +1,15 @@
+name = "latticegen2-build"
+authors = ["latticegen2 contributors"]
+
+# Isolated build-only environment for tools/build_app.jl. PackageCompiler.jl
+# is deliberately kept out of the root Project.toml: it is never a runtime
+# dependency of latticegen2 itself (licenses/libraries.md's own note is "only
+# Gmsh.jl is a direct dependency"), only a tool used to produce the
+# standalone-executable distribution described in specification.md §2. Keeping
+# it in its own environment means an ordinary `julia --project=. src/main.jl`
+# run never has to resolve or instantiate it.
+[deps]
+PackageCompiler = "9b87118b-4619-50d2-8e1e-99f35a4d4d9d"
+
+[compat]
+julia = "1.10"

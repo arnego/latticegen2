@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **latticegen2** is a geometry generation tool that generates complex 3D lattice structures based on input parameters and a provided volume. 
 Read @docs/specification.md
 The file @docs/specification.md can be modified by claude following the rules defined in the top section of the document.
+The detailed, normative algorithm implementation (exact math, pipeline diagrams, optimization strategy) is in @docs/algorithm.md — source code must match it exactly.
 
 ## Key Considerations
 
@@ -21,7 +22,9 @@ Goals from most important to least important:
 
 Before implementing features, establish:
 - **Dependencies** for geometry processing (note down selected geometries here)
+  - Geometry kernel: **Gmsh SDK** (bundles Open CASCADE / OCCT), accessed from Julia via the `Gmsh.jl` package. Used for STEP/BREP I/O, B-rep primitive construction, and boolean operations (fuse/common). It is the only third-party Julia dependency; everything else is stdlib. License texts live in `licenses/` (GPL-2+ for Gmsh, LGPL-2.1 for the bundled OCCT), cross-referenced in `licenses/libraries.md`. See [docs/algorithm.md](docs/algorithm.md) for how it's used in the pipeline.
 - **Testing framework** for geometry validation
+  - Julia stdlib `Test` for unit tests (`test/runtests.jl`), plus standalone scripts in `tools/` (`e2e.jl`, `verify_geometry.jl`) for end-to-end and geometry-validity checks. See [docs/testing.md](docs/testing.md).
 
 ### Review code
 

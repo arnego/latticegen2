@@ -169,4 +169,48 @@ import Gmsh: gmsh
     # filter_floating! decision-logic tests live in test_cleanup.jl, kept
     # separate since it's its own priority-#1-critical cleanup gate
     # (docs/algorithm.md §8, §11.2).
+
+    @testset "assert_no_stray_solids (docs/algorithm.md §6.5, §8, §11.2)" begin
+        # Regression coverage for the safeguard that replaced the implicit
+        # guarantee assembly's old write-assembled.brep-then-reimport design
+        # gave for free: with assembly and export now sharing one gmsh
+        # session, nothing else forces the model to contain *only* the
+        # tags the caller thinks it does.
+        @testset "clean model: no strays, does not throw" begin
+            with_gmsh() do
+                new_model("stray-check-clean")
+                a = Int32(gmsh.model.occ.addBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+                b = Int32(gmsh.model.occ.addBox(10.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+                gmsh.model.occ.synchronize()
+                @test assert_no_stray_solids(Int32[a, b]) === nothing
+            end
+        end
+
+        @testset "leaked solid not in final_tags: throws ProcessingError naming it" begin
+            with_gmsh() do
+                new_model("stray-check-leak")
+                kept = Int32(gmsh.model.occ.addBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+                leaked = Int32(gmsh.model.occ.addBox(100.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+                gmsh.model.occ.synchronize()
+                err = nothing
+                try
+                    assert_no_stray_solids(Int32[kept])
+                catch e
+                    err = e
+                end
+                @test err isa ProcessingError
+                @test occursin(string(leaked), sprint(showerror, err))
+            end
+        end
+
+        @testset "model_solids reflects exactly the model's dim-3 entities" begin
+            with_gmsh() do
+                new_model("model-solids")
+                a = Int32(gmsh.model.occ.addBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+                b = Int32(gmsh.model.occ.addBox(10.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+                gmsh.model.occ.synchronize()
+                @test sort(model_solids()) == sort(Int32[a, b])
+            end
+        end
+    end
 end

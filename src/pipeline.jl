@@ -920,7 +920,7 @@ function do_merge_round(specs::Dict{TileKey,Tuple{String,Vec3}}, round_idx::Inte
 end
 
 """
-    assemble(lp, tile_results, ref_key, full_interior_keys, n, tmpdir, rl; max_seconds=600.0) -> Vector{Int32}
+    assemble!(lp, tile_results, ref_key, full_interior_keys, n, tmpdir, rl; max_seconds=600.0) -> Vector{Int32}
 
 Distributed hierarchical assembly (docs/algorithm.md §6.5): builds the
 round-0 `TileKey => (path, offset)` map (every tile that wrote a `.brep` at
@@ -939,19 +939,26 @@ This keeps peak *master* memory bounded to the last round's survivors
 `.brep` at once — the original single-session design imported and held all
 of them simultaneously.
 
-The final step always runs on the master, in one gmsh session: import every
-surviving `(path, offset)` entry, translate the non-zero-offset ones,
-`balanced_fuse!` everything together, and write `tmpdir/assembled.brep`
-unconditionally (even if empty — `run_pipeline` checks the returned tag
-count and raises a clear `ProcessingError` rather than this function
-guessing what "no geometry" should mean). The volume-threshold cleanup gate
-is **not** applied here — it runs exactly once, later, in the export stage's
+**Requires an already-open gmsh session on the master**, with the model the
+caller wants the result in already created via `new_model` — this function
+does not open, close, or rename the session itself (previously it did, and
+wrote its own result to a `tmpdir/assembled.brep` staging file that
+`run_pipeline`'s export stage immediately re-imported into a *second* fresh
+session, purely to get the right STEP part name; merging the two sessions
+removes that full OCCT serialize+reparse of the entire finished lattice, at
+the cost of the caller now being responsible for verifying the model
+contains exactly what it expects — see `model_solids` — before writing it
+out). The final step imports every surviving `(path, offset)` entry,
+translates the non-zero-offset ones, and `balanced_fuse!`s everything
+together into the caller's ambient model. Returns the resulting top-level
+solid tags, live in that session. The volume-threshold cleanup gate is
+**not** applied here — it runs exactly once, later, in the export stage's
 `filter_floating!` (docs/algorithm.md §8), so there is a single place in the
 pipeline that decides what gets discarded.
 """
-function assemble(lp::LatticeParams, tile_results::Dict{TileKey,Any}, ref_key::Union{TileKey,Nothing},
-                   full_interior_keys::Vector{TileKey}, n::Integer, tmpdir::AbstractString, rl::RunLog;
-                   max_seconds::Real=600.0)
+function assemble!(lp::LatticeParams, tile_results::Dict{TileKey,Any}, ref_key::Union{TileKey,Nothing},
+                    full_interior_keys::Vector{TileKey}, n::Integer, tmpdir::AbstractString, rl::RunLog;
+                    max_seconds::Real=600.0)
     specs = Dict{TileKey,Tuple{String,Vec3}}()
     for (key, stat) in tile_results
         stat.wrote && (specs[key] = (tile_brep_path(tmpdir, key), Vec3(0.0, 0.0, 0.0)))
@@ -983,26 +990,51 @@ function assemble(lp::LatticeParams, tile_results::Dict{TileKey,Any}, ref_key::U
         round_idx += 1
     end
 
-    local final_tags::Vector{Int32}
-    with_gmsh() do
-        new_model("assembly-final")
-        all_tags = Int32[]
-        for (key, (path, offset)) in sort(collect(specs); by=kv -> (kv[1].bi, kv[1].bj, kv[1].bk))
-            vols = import_shapes(path)
-            tags = Int32[t for (_, t) in vols]
-            if offset.x == 0.0 && offset.y == 0.0 && offset.z == 0.0
-                append!(all_tags, tags)
-            else
-                for t in tags
-                    push!(all_tags, copy_translate(t, offset))
-                end
-                remove_entities(tags)
+    all_tags = Int32[]
+    for (key, (path, offset)) in sort(collect(specs); by=kv -> (kv[1].bi, kv[1].bj, kv[1].bk))
+        vols = import_shapes(path)
+        tags = Int32[t for (_, t) in vols]
+        if offset.x == 0.0 && offset.y == 0.0 && offset.z == 0.0
+            append!(all_tags, tags)
+        else
+            for t in tags
+                push!(all_tags, copy_translate(t, offset))
             end
+            remove_entities(tags)
         end
-        final_tags = balanced_fuse!(all_tags; rl=rl, max_seconds=max_seconds)
-        write_model(joinpath(tmpdir, "assembled.brep"))
     end
-    return final_tags
+    return balanced_fuse!(all_tags; rl=rl, max_seconds=max_seconds)
+end
+
+"""
+    assert_no_stray_solids(final_tags::Vector{Int32})
+
+Defensive check, meant to be called immediately after `assemble!` returns
+and before anything else touches the session: the model's dim-3 entity list
+(`model_solids()`) must be *exactly* `final_tags`, no more and no fewer.
+Throws `ProcessingError` naming the offending tags otherwise, refusing to
+export ambiguous geometry.
+
+Now that assembly and export share one gmsh session (docs/algorithm.md §6.5)
+instead of assembly writing `assembled.brep` for export to re-import into a
+fresh model, this replaces the implicit guarantee a virgin re-import used to
+give for free — that the model contains exactly the returned tags and
+nothing else. It exists to catch the same class of bug as the historical
+`build_prototypes` leak that once silently exported un-consumed intermediate
+solids into every tile `.brep`.
+
+**Call only when safe to synchronize** — i.e. before any model-level-only
+removal (`remove_model_entities`, `filter_floating!`) has happened yet in
+this session; `model_solids`'s own `sync_model()` call would otherwise
+resurrect exactly what such a removal just deleted (see `remove_model_entities`'s
+docstring)."""
+function assert_no_stray_solids(final_tags::Vector{Int32})
+    stray = setdiff(model_solids(), final_tags)
+    isempty(stray) || throw(ProcessingError(
+        "Assembly left $(length(stray)) unexpected solid(s) in the model that are not " *
+        "part of the fused lattice result (tags $stray); refusing to export ambiguous " *
+        "geometry. This indicates a leaked intermediate solid upstream of assembly."))
+    return nothing
 end
 
 # --- Floating-body cleanup (docs/algorithm.md §8, §11.2) -----------------
@@ -1250,25 +1282,25 @@ function run_pipeline(args::CliArgs, rl::RunLog)
     end
     tile_results = Dict{TileKey,Any}(r.key => r for r in tile_results_vec)
 
-    final_tags = @timed_stage rl "assembly" begin
-        assemble(lp, tile_results, ref_key, fi_keys, n_tile, tmpdir, rl)
-    end
-    length(final_tags) == 0 && throw(ProcessingError(
-        "Generation produced no geometry at all — the lattice may not intersect the input volume; " *
-        "check that -cc/-t are appropriate for the input geometry's scale."))
+    n_written, n_removed = with_gmsh() do
+        new_model(part_name(args.input, args.cc, args.t))
 
-    n_written, n_removed = @timed_stage rl "export" begin
-        with_gmsh() do
-            new_model(part_name(args.input, args.cc, args.t))
-            vols = import_shapes(joinpath(tmpdir, "assembled.brep"))
+        final_tags = @timed_stage rl "assembly" begin
+            assemble!(lp, tile_results, ref_key, fi_keys, n_tile, tmpdir, rl)
+        end
+        length(final_tags) == 0 && throw(ProcessingError(
+            "Generation produced no geometry at all — the lattice may not intersect the input volume; " *
+            "check that -cc/-t are appropriate for the input geometry's scale."))
+        assert_no_stray_solids(final_tags)
+
+        @timed_stage rl "export" begin
             threshold = args.t^3
-            tags = Int32[t for (_, t) in vols]
             # filter_floating! only ever deletes solids proven to be
             # genuinely disconnected floating bodies (specification.md §5);
             # a sub-threshold solid that remains connected to other
             # geometry after an attempted fuse is a hard failure, not a
             # silent deletion (docs/algorithm.md §8, §11.2).
-            kept, removed, removed_vols = filter_floating!(tags, threshold; rl=rl)
+            kept, removed, removed_vols = filter_floating!(final_tags, threshold; rl=rl)
             kept_count = length(kept)
             kept_count == 0 && throw(ProcessingError("No solids remain after floating-body cleanup (all below t^3 = $threshold mm^3)"))
             if removed > 0

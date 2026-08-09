@@ -10,6 +10,44 @@ const _BALL_STEP = joinpath(@__DIR__, "80mm-test-ball.step")
 const _HX_STEP = joinpath(@__DIR__, "TD_HX_Indre_Volum.step")
 
 @testset "geomkernel.jl" begin
+    @testset "capture_output (pipe-based, docs/algorithm.md §6.2)" begin
+        # Regression coverage for the deadlock hazard documented on
+        # capture_output itself: an OS pipe's kernel buffer is small (as
+        # low as a few KB), so anything that writes more than that and is
+        # only drained *after* it finishes would hang forever. This writes
+        # well past any plausible pipe buffer size and must still return
+        # promptly with the full text intact.
+        @testset "large output does not deadlock and is captured intact" begin
+            n = 20_000
+            elapsed = @elapsed begin
+                result, text = capture_output() do
+                    for i in 1:n
+                        println("line $i " * "x"^40)
+                    end
+                    return :done
+                end
+                @test result == :done
+                @test occursin("line 1 ", text)
+                @test occursin("line $n ", text)
+                @test count(c -> c == '\n', text) == n
+            end
+            @test elapsed < 30.0   # generous; a real deadlock never returns at all
+        end
+
+        @testset "stdout is restored even when f() throws" begin
+            old = stdout
+            @test_throws ErrorException capture_output() do
+                println("before throw")
+                error("boom")
+            end
+            @test stdout === old
+            # A normal call afterwards must still work — confirms the pipe
+            # redirect machinery itself wasn't left in a broken state.
+            result, text = capture_output(() -> 7)
+            @test result == 7
+        end
+    end
+
     @testset "import test fixtures" begin
         with_gmsh() do
             new_model("ball")

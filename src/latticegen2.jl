@@ -30,7 +30,7 @@ export
     aabbs_overlap, overlap_components,
     # geomkernel.jl
     with_gmsh, capture_output, import_shapes, bounding_box, write_model,
-    sync_model, bounding_box_nosync, bounding_boxes, remove_model_entities,
+    sync_model, bounding_box_nosync, bounding_boxes, remove_model_entities, model_solids,
     new_model, build_prototype, build_prototypes, instantiate_strut,
     fuse_all, common_with, cut_with, volume_of, remove_entities, copy_translate,
     # classify.jl
@@ -48,8 +48,8 @@ export
     make_run_tempdir, set_below_normal_priority!, shutdown_workers!, tile_brep_path, part_name,
     determine_worker_count, calibrate, derive_tile_size, process_tile, trim_disjoint,
     drop_tile_local_islands, DEFAULT_TILE_FUSE_BUDGET_SECONDS, MEMORY_WATCHDOG_MAX_PAUSE_SECONDS,
-    dispatch_jobs, dispatch_tiles, balanced_fuse!, filter_floating!,
-    merge_group, do_merge_round, assemble, run_pipeline,
+    dispatch_jobs, dispatch_tiles, balanced_fuse!, filter_floating!, assert_no_stray_solids,
+    merge_group, do_merge_round, assemble!, run_pipeline,
     # stepmeta.jl
     generation_params_text, rewrite_step_header!, round_trip_check
 

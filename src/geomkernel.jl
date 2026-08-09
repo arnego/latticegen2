@@ -45,19 +45,41 @@ output (e.g. STEP writer "Statistics on Transfer") bypasses gmsh's own
 `General.Terminal`/`General.Verbosity` options entirely. The caller routes
 `text` into the run log at file-only verbosity (docs/algorithm.md §9) rather
 than discarding it, so it remains available for diagnostics.
+
+Captures via an OS pipe (`redirect_stdout()`'s no-arg form), not a temp file
+— this call sits on the hot path (once per tile/merge-round import and
+export, potentially thousands of times in a large run), so it avoids
+creating and deleting a filesystem entry per call. The redirect itself is
+the same OS-level fd dup2 either way (a pipe write-end is as valid a
+`redirect_stdout` target as a file), so this changes only *where* the bytes
+land, not what gets captured.
+
+**Deadlock hazard, and why the reader runs concurrently:** an OS pipe's
+kernel buffer is small (a handful of KB up to ~64 KB depending on platform).
+A large OCCT trace (or many small `capture_output` calls' worth of output,
+for whichever tile/import is currently active) would fill it and block the
+writer — including inside gmsh's own C++ code — until something drains the
+read end. The `@async` reader task below starts draining *before* `f()`
+runs, so the pipe never has a chance to back up regardless of how much
+output `f()` produces (verified directly: >1 MB of output round-trips
+correctly with no hang). Do not replace this with a synchronous
+`read(rd, String)` positioned after `f()` — that reintroduces exactly this
+deadlock for any `f()` that emits more than the kernel buffer's worth of
+text.
 """
 function capture_output(f::Function)
-    path, io = mktemp()
+    old_stdout = stdout
+    rd, wr = redirect_stdout()
+    reader = @async read(rd, String)
     local result
     try
-        redirect_stdout(io) do
-            result = f()
-        end
+        result = f()
     finally
-        close(io)
+        redirect_stdout(old_stdout)
+        close(wr)
     end
-    text = read(path, String)
-    rm(path; force=true)
+    text = fetch(reader)
+    close(rd)
     return result, text
 end
 
@@ -179,6 +201,22 @@ function remove_model_entities(tags::Vector{Int32})
     isempty(tags) && return nothing
     gmsh.model.removeEntities([(3, t) for t in tags], true)
     return nothing
+end
+
+"""
+    model_solids() -> Vector{Int32}
+
+Dim-3 entity tags currently in gmsh's **model-level** entity list (syncs
+first via `sync_model`, so — like `remove_model_entities` — only safe to call
+when no synchronize-would-resurrect-a-removal hazard is in play; see that
+function's caveat). Used as a defensive check that a model contains exactly
+the solids a caller expects before writing it out, catching the same class
+of bug as the historical `build_prototypes` leak that once silently exported
+un-consumed prototype solids into every tile `.brep` (docs/algorithm.md §8,
+§11.2)."""
+function model_solids()
+    sync_model()
+    return Int32[t for (d, t) in gmsh.model.getEntities(3) if d == 3]
 end
 
 """Start a fresh named model in the current gmsh session (used for the STEP

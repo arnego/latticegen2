@@ -418,8 +418,8 @@ sequenceDiagram
         W1->>W1: import each spec's .brep, translate\nnon-zero-offset members, balanced_fuse!,\nwrite merge_r<round>_<bi>_<bj>_<bk>.brep
         W1-->>M: (n_solids, elapsed, peak RSS, diag)
     end
-    M->>M: final round: import survivors, translate,\nbalanced_fuse!, write assembled.brep
-    M->>M: filter_floating! cleanup, STEP export, header rewrite
+    M->>M: final round: new_model(part_name), import survivors,\ntranslate, balanced_fuse! (assembly and export\nshare this one session — no intermediate write/reimport)
+    M->>M: verify model contents, filter_floating! cleanup,\nSTEP export, header rewrite
 ```
 
 **Round 0 — the periodicity shortcut, made distributable.** One `(path, offset)` spec
@@ -455,14 +455,23 @@ distributed phase got. A round that plateaus because the remaining super-blocks 
 simply spatially far apart (nothing left to co-locate into a shared 2×2×2 group) is an
 expected, healthy termination, not a failure.
 
-**The final round always runs on the master**, in one gmsh session: import every
-surviving spec, translate the non-zero-offset ones, `balanced_fuse!` everything
-together, and write `assembled.brep` — unconditionally, even if the result is empty
-(`run_pipeline` checks the returned solid count and raises a clear error rather than
-this step guessing what "no geometry" should mean). The volume-threshold cleanup gate
-is **not** applied here; it runs exactly once, later, in the export stage's
-`filter_floating!` (§8), so there is a single place in the whole pipeline that decides
-what gets discarded — never at intermediate merge/assembly stages.
+**The final round always runs on the master**, in the *same* gmsh session the export
+stage goes on to use: `run_pipeline` opens one session, names its model
+`part_name(...)` up front, and calls `assemble!` to import every surviving spec,
+translate the non-zero-offset ones, and `balanced_fuse!` everything together — leaving
+the result live in that session rather than writing it to a `tmpdir/assembled.brep`
+staging file (`run_pipeline` checks the returned solid count and raises a clear error
+if it's empty, rather than this step guessing what "no geometry" should mean). Earlier
+revisions gave assembly its own session and its own `assembled.brep`, which the export
+stage then re-imported into a *second* fresh session purely to get the STEP model
+renamed to `part_name(...)`; merging the two removes a full OCCT serialize+reparse of
+the entire finished lattice, at the cost of an explicit check —
+`assert_no_stray_solids` (`run_pipeline`, right after `assemble!` returns), built on
+`model_solids` — standing in for the guarantee a virgin re-import used to give for
+free: that the model contains exactly the returned tags and nothing else. The volume-threshold cleanup gate is **not** applied inside
+`assemble!`; it runs exactly once, later, in the export stage's `filter_floating!` (§8),
+so there is a single place in the whole pipeline that decides what gets discarded —
+never at intermediate merge/assembly stages.
 
 **Fuse-failure fallback — and its real limit:** OCCT's boolean fuse can throw on certain
 degenerate/sliver inputs (a known kernel robustness limit, e.g. an internal "non-joining
@@ -545,9 +554,10 @@ too — parallelism is layered (across processes via tiles, within a process via
 
 The result of the final master-side fuse may be more than one solid — this is expected
 and allowed by spec §1: if the input geometry trims struts such that some rods become
-disconnected from the main body, they persist as separate solids in `assembled.brep`
-and, ultimately, the output (subject to the floating-body-only cleanup gate in §8,
-which is the *only* place any of them can actually be discarded).
+disconnected from the main body, they persist as separate top-level solids in the
+shared assembly/export session and, ultimately, the output (subject to the
+floating-body-only cleanup gate in §8, which is the *only* place any of them can
+actually be discarded).
 
 ---
 
@@ -873,7 +883,7 @@ The optimization levers, restated as a single reference table (also referenced f
 | Wall-clock circuit breaker on every fuse call, per-tile and per-merge-round (correctness safety net, not a speed lever) | Prevents a truly runaway fuse from hanging, deliberately set generously since cutting fusing off early risks leaving self-intersecting geometry un-fused; the tile stage's per-call budget (§7.1) is itself derived from the tile-sizing target so a stuck tile is bounded and *logged*, not silently absorbing three unbudgeted 600 s stalls |
 | Bounded memory-watchdog backpressure pause (correctness/stability safety net) | `rl.max_rss` is a high-water mark that can never fall on its own — an unbounded wait would be a guaranteed hang the first time it trips, not a slow pause (§7.2) |
 | Calibration probe + tile sizing + RSS watchdog | Memory stability on 32 GB target |
-| .brep disk staging in temp/<ts> | Small IPC, restartable analysis on failure |
+| .brep disk staging in temp/<ts> for tile/merge-round IPC (never for the final assembly result) | Small IPC, restartable analysis on failure; the final hand-off from assembly to export instead shares one gmsh session (see §6.5) so the completed lattice is never serialized to disk only to be immediately reparsed |
 
 ---
 

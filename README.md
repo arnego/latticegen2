@@ -245,9 +245,12 @@ describes the full model; in summary:
   continuous pause per dispatching task before resuming anyway (memory usage is a
   monotonic high-water mark within a run, so an unbounded wait here would be a
   guaranteed hang, not a slow pause).
-- Large intermediate results are staged to disk as `.brep` files under
-  `temp/<yyyymmdd-HHMMSS>/`, next to the output file (specification.md §4.4) — kept for
-  post-mortem analysis on failure, deleted automatically on success.
+- Large intermediate results — the imported input body, each tile's fused geometry, and
+  each distributed assembly merge round's output — are staged to disk as `.brep` files
+  under `temp/<yyyymmdd-HHMMSS>/`, next to the output file (specification.md §4.4) —
+  kept for post-mortem analysis on failure, deleted automatically on success. The final
+  hand-off from assembly to export is the one exception: it stays in one gmsh session
+  rather than round-tripping the completed lattice through disk a last time.
 - With `--workers`/`--tile-cells` given explicitly instead, no calibration runs; memory
   behavior is directly determined by the tile size you choose — smaller tiles use less
   memory per worker at some cost to speed (fewer struts fused per boolean operation

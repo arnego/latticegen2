@@ -9,19 +9,23 @@
 #                      pass/fail signal without paying for the golden-sample diff.
 #   - invalid-input:   always run, no golden sample needed (rejected pre-computation).
 #   - smoke-verified:  always run; compares against the committed golden sample
-#                      test/80mm-test-ball-cc20t4.step via golden_sample_volume_diff.
-#   - dense-lattice:   only runs if test/test-cylinder-cc5t1.step (the golden
-#                      sample) is present on disk. A prior attempt to produce
-#                      that golden sample ran for hours and was manually
-#                      terminated mid-run (not a crash — see
-#                      docs/algorithm.md §11.2's investigation): an
+#                      test/80mm-test-ball-cc20t4-golden-sample.step via
+#                      golden_sample_volume_diff.
+#   - dense-lattice:   only runs if test/test-cylinder-cc10t1.5.step (the
+#                      golden sample) is present on disk. Originally specified
+#                      at -cc 5 -t 1, an attempt to produce that golden sample
+#                      ran for hours and was manually terminated mid-run (not a
+#                      crash — see docs/algorithm.md §11.2's investigation): an
 #                      auto-tuned tile size well past the fuse-time knee left
 #                      assembly with 11k+ unfused solids, and the (now-fixed)
 #                      unconditional sub-threshold cleanup rule was deleting
 #                      connected junction material one solid at a time. Root
 #                      cause diagnosed and fixed (docs/algorithm.md §7.1,
-#                      §6.3, §8, §11.2); this scenario stays gated on the
-#                      golden sample's presence rather than being auto-run
+#                      §6.3, §8, §11.2). The scenario's params were changed to
+#                      -cc 10 -t 1.5 (a less dense lattice than -cc 5 -t 1,
+#                      capable of finishing within a reasonable time) with a
+#                      60-minute runtime budget. This scenario stays gated on
+#                      the golden sample's presence rather than being auto-run
 #                      here, since committing a golden sample is a decision
 #                      for whoever reviews the regenerated run's output, not
 #                      something this harness should do unattended.
@@ -225,7 +229,7 @@ println("=== latticegen2 e2e: smoke-verified ===")
 # filename, test/80mm-test-ball-cc20t4.step; -cc 20 -t 4 is what that file was
 # actually generated with, so the scenario's params were corrected to match
 # the golden sample rather than the other way around, per user decision).
-const VERIFIED_GOLDEN = joinpath(ROOT, "test", "80mm-test-ball-cc20t4.step")
+const VERIFIED_GOLDEN = joinpath(ROOT, "test", "80mm-test-ball-cc20t4-golden-sample.step")
 const VERIFIED_OUTDIR = mktempdir()
 const VERIFIED_OUTPUT = joinpath(VERIFIED_OUTDIR, "smoke-verified.step")
 const VERIFIED_BUDGET_SECONDS = 20 * 60.0
@@ -306,9 +310,10 @@ println("=== latticegen2 e2e: dense-lattice ===")
 # silently, which looks like a native OCCT/gmsh crash rather than a normal
 # failure path, and that has not yet been root-caused.
 const DENSE_INPUT = joinpath(ROOT, "test", "test-cylinder.STEP")
-const DENSE_GOLDEN = joinpath(ROOT, "test", "test-cylinder-cc5t1.step")
-const DENSE_CC = 5.0
-const DENSE_T = 1.0
+const DENSE_GOLDEN = joinpath(ROOT, "test", "test-cylinder-cc10t1.5.step")
+const DENSE_CC = 10.0
+const DENSE_T = 1.5
+const DENSE_BUDGET_SECONDS = 60 * 60.0   # less dense than the original -cc 5 -t 1 scenario; 60-minute budget for now
 
 if !isfile(DENSE_GOLDEN)
     println("SKIPPED: golden sample not found at $DENSE_GOLDEN.")
@@ -334,7 +339,10 @@ else
                 @test dense_proc.exitcode == 0
             end
 
-            println("Elapsed: $(round(dense_elapsed, digits=1))s")
+            @testset "runtime under performance budget" begin
+                println("Elapsed: $(round(dense_elapsed, digits=1))s (budget $(DENSE_BUDGET_SECONDS)s)")
+                @test dense_elapsed < DENSE_BUDGET_SECONDS
+            end
 
             @testset "STEP file written and non-empty" begin
                 @test isfile(DENSE_OUTPUT)

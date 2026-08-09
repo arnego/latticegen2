@@ -50,13 +50,16 @@ Run unit tests for parameter validation and intermediate calculations
 
 2. Verification: `tools/e2e.jl` also runs `smoke-verified` (specification.md §6.1),
    which compares its output against the committed golden sample
-   `test/80mm-test-ball-cc20t4.step` via `golden_sample_volume_diff`. `dense-lattice`
-   is implemented the same way but self-skips: its golden sample
-   (`test/test-cylinder-cc5t1.step`) does not exist yet. The one attempt to generate it
-   ran for hours before being manually terminated — root-caused and fixed (not a
-   crash: an auto-tuned tile size past the fuse-time performance knee, plus an
-   unconditional sub-threshold cleanup rule that was deleting connected junction
-   material; see docs/algorithm.md §11.2 for the full investigation). Regenerating the
+   `test/80mm-test-ball-cc20t4-golden-sample.step` via `golden_sample_volume_diff`.
+   `dense-lattice` is implemented the same way but self-skips: its golden sample
+   (`test/test-cylinder-cc10t1.5.step`) does not exist yet. Originally specified at
+   -cc 5 -t 1, the one attempt to generate that denser golden sample ran for hours
+   before being manually terminated — root-caused and fixed (not a crash: an
+   auto-tuned tile size past the fuse-time performance knee, plus an unconditional
+   sub-threshold cleanup rule that was deleting connected junction material; see
+   docs/algorithm.md §11.2 for the full investigation). The scenario's params were
+   changed 2026-08-09 to -cc 10 -t 1.5 (a less dense lattice capable of finishing
+   within a reasonable time) with a 60-minute runtime budget. Regenerating the
    golden sample and committing it is a follow-up step, tracked as an open item in
    specification.md §9, not automated here. Until that sample exists, `tools/e2e.jl`
    provides the `smoke-fast`/`smoke-verified` output `.step` files (and console/log

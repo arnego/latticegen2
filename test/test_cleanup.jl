@@ -92,6 +92,39 @@ import Gmsh: gmsh
         @test isempty(kept) && removed == 0 && isempty(vols)
     end
 
+    @testset "filter_floating! logs progress for ambiguous components" begin
+        # Minimal regression test for the progress-logging fix
+        # (specification.md §10 "filter_floating! has no time budget or
+        # progress logging") -- two separate ambiguous (touching-pair)
+        # components, resolved with progress_seconds=0 so every resolved
+        # component is guaranteed to trigger a progress line, then check the
+        # log file (not console) got the up-front, per-component, and
+        # completion lines. No genuinely slow geometry is needed.
+        with_gmsh() do
+            new_model("filter-progress-log")
+            a1 = Int32(gmsh.model.occ.addBox(0,0,0, 0.3,0.3,0.3))
+            a2 = Int32(gmsh.model.occ.addBox(0.3,0,0, 0.3,0.3,0.3))     # touches a1
+            b1 = Int32(gmsh.model.occ.addBox(100,0,0, 0.3,0.3,0.3))
+            b2 = Int32(gmsh.model.occ.addBox(100.3,0,0, 0.3,0.3,0.3))   # touches b1, far from a1/a2
+            gmsh.model.occ.synchronize()
+
+            logpath = tempname() * ".log"
+            rl = open_runlog(logpath)
+            try
+                filter_floating!(Int32[a1, a2, b1, b2], 1.0; rl=rl, progress_seconds=0.0)
+            finally
+                close_runlog(rl)
+            end
+            logtext = read(logpath, String)
+            rm(logpath; force=true)
+
+            @test occursin("filter_floating!:", logtext)
+            @test occursin("2 ambiguous", logtext)
+            @test occursin(r"resolved \d+/2 ambiguous component", logtext)
+            @test occursin("finished resolving 2 ambiguous component", logtext)
+        end
+    end
+
     @testset "everything sub-threshold and floating -> kept is empty (caller decides how to react)" begin
         with_gmsh() do
             new_model("filter-all-floating")

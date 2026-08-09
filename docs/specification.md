@@ -208,14 +208,18 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### `filter_floating!` has no time budget or progress logging
+### `filter_floating!` has no time budget (progress logging added 2026-08-09)
 
 **What's broken:** `filter_floating!` (`src/pipeline.jl`, the export-stage
 floating-body-only cleanup gate — docs/algorithm.md §8) has **no `max_seconds` circuit
-breaker and no per-component progress logging**, unlike `balanced_fuse!`, which has
-both (docs/algorithm.md §6.5). Its per-component `overlap_components` resolution loop
-calls `fuse_all` on every ambiguous multi-member component with nothing bounding how
-long that can take in aggregate, and nothing logged between attempts.
+breaker**, unlike `balanced_fuse!`, which has both a budget and progress logging
+(docs/algorithm.md §6.5). Its per-component `overlap_components` resolution loop calls
+`fuse_all` on every ambiguous multi-member component with nothing bounding how long
+that can take in aggregate. **Progress logging (item 3 below) was added on 2026-08-09**
+— one line up front (solid/component/ambiguous-component counts), one line every 10s
+of wall time while resolving, one summary line when done, all via `log_line(rl, ...)`
+so they land in the `.log` file always and on console when `-v`/`rl.verbose` — but the
+loop still has no upper bound on total time (items 1, 2 below remain open).
 
 **How it was found:** re-verifying the `test-cylinder-cc5t1` scenario
 (`-i test/test-cylinder.STEP -cc 5 -t 1 --cores 6 --ram 20 -bg`) after the fixes in
@@ -238,9 +242,13 @@ long-running cleanup step) the whole session's fix work was aimed at eliminating
    is — hard-fail (`ProcessingError`, exit 4) per the existing policy of never
    guessing whether an unresolved connected fragment is safe to delete. Do not
    silently keep or drop it just because the clock ran out.
-3. Add per-component progress logging (e.g. every N components resolved, or every M
-   seconds elapsed) so a long resolution pass is visible in the `.log` file while it's
-   running, not only after it finishes or is killed.
+3. ~~Add per-component progress logging~~ **Done (2026-08-09):** `filter_floating!`
+   now takes a `progress_seconds::Real=10.0` keyword and logs an up-front summary line,
+   a progress line every `progress_seconds` of wall time while resolving ambiguous
+   (multi-member) components, and a completion summary line — see the updated
+   docstring in `src/pipeline.jl`. Deliberately scoped to logging only, per explicit
+   user request; items 1, 2, 4, 5 below remain open follow-up work, not implied by
+   this change.
 4. Add a regression test exercising a slow/many-component scenario (an injectable
    `fuse_fn` — already supported for the hard-fail test in `test/test_cleanup.jl` —
    can simulate this without needing genuinely slow geometry).
@@ -249,9 +257,14 @@ long-running cleanup step) the whole session's fix work was aimed at eliminating
    compare the whole run against the pass-criteria table used for this fix (tile_cells
    ≤ 8, full-interior > 0, no un-budgeted silent stage, tile_stage < 20 min).
 
-**Where things stand:** not started. The verification run that found this was killed
-by explicit user choice rather than left running indefinitely or fixed on the spot.
-~944 MB of diagnostic temp files from that killed run may still be on disk in whatever
+**Where things stand:** progress logging (item 3) implemented and covered by a minimal
+unit test in `test/test_cleanup.jl` (`filter_floating! logs progress for ambiguous
+components`, using the existing injectable-`fuse_fn` pattern with a synthetic 2-member
+component — no genuinely slow geometry needed). The `max_seconds` circuit breaker
+(items 1, 2) and the full `test-cylinder-cc5t1` end-to-end re-run (item 5) are still
+not started. The verification run that originally found this issue was killed by
+explicit user choice rather than left running indefinitely or fixed on the spot. ~944 MB
+of diagnostic temp files from that killed run may still be on disk in whatever
 scratchpad directory that session used, under `cylinder_verify/temp/20260809-002344`,
 if useful for follow-up analysis — treat that path as ephemeral and verify it still
 exists before relying on it.

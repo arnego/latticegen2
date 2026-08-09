@@ -1055,7 +1055,7 @@ function _classify_solid!(t::Int32, threshold::Real, kept::Vector{Int32},
 end
 
 """
-    filter_floating!(tags, threshold; rl=nothing) -> (kept, n_removed, removed_vols)
+    filter_floating!(tags, threshold; rl=nothing, fuse_fn=fuse_all, progress_seconds=10.0) -> (kept, n_removed, removed_vols)
 
 Decide which of the model's top-level solids `tags` are safe to delete as
 sub-threshold "floating" bodies (specification.md §5), and remove exactly
@@ -1101,6 +1101,16 @@ else booleans touch potentially-overlapping solids (docs/algorithm.md §6.3):
 deliberately-failing stub to exercise the hard-fail path (step 4) without
 needing to manufacture a genuine OCCT boolean-robustness failure.
 
+When `rl` is given, progress is logged: one line up front (total solids,
+total components, ambiguous-component count), one line every
+`progress_seconds` of wall time while resolving ambiguous components (step
+3), and one summary line once all ambiguous components are resolved. This
+does not bound how long resolution can take (no `max_seconds` circuit
+breaker — see specification.md §10) — it only makes an in-progress run
+visible in the `.log` file (and on console when `-v`/`rl.verbose`) instead
+of producing no output at all until it finishes or is killed, which is what
+happened for 56+ minutes on the `test-cylinder-cc5t1` run.
+
 Returns `(kept, n_removed, removed_vols)`: `kept` is every surviving tag
 (sub-threshold survivors of an ambiguous-but-still->=threshold component
 included — a large solid can legitimately share an overlap component with a
@@ -1110,16 +1120,31 @@ separate), `n_removed` the count of deleted floating bodies, and
 line — never one log line per solid, docs/algorithm.md §9).
 """
 function filter_floating!(tags::Vector{Int32}, threshold::Real; rl::Union{RunLog,Nothing}=nothing,
-                           fuse_fn::Function=fuse_all)
+                           fuse_fn::Function=fuse_all, progress_seconds::Real=10.0)
     isempty(tags) && return (Int32[], 0, Float64[])
 
     boxes = bounding_boxes(tags)
     comps = overlap_components(tags, boxes)
+    n_ambiguous = count(c -> length(c) > 1, comps)
+    # Progress visibility only, no time budget (specification.md §10): this
+    # loop's per-component `fuse_fn` call is the exact "invisible, unbounded
+    # long-running cleanup step" that ran silently for 56+ minutes on the
+    # `test-cylinder-cc5t1` scenario (docs/algorithm.md's roadmap item) —
+    # logging here at least makes a long resolution pass visible in the
+    # `.log` file (and on console when `-v`/`rl.verbose`) while it runs,
+    # rather than only after it finishes or is killed.
+    rl !== nothing && log_line(rl, "filter_floating!: $(length(tags)) solid(s) in $(length(comps)) " *
+                                    "overlap component(s), $n_ambiguous ambiguous (>1 member) requiring " *
+                                    "a fuse attempt to resolve.")
 
     kept = Int32[]
     floating = Int32[]
     removed_vols = Float64[]
     unresolved_vols = Float64[]
+
+    t_start = time()
+    t_last_log = t_start
+    n_resolved = 0
 
     for c in comps
         if length(c) == 1
@@ -1141,7 +1166,16 @@ function filter_floating!(tags::Vector{Int32}, threshold::Real; rl::Union{RunLog
                 v < threshold ? push!(unresolved_vols, v) : push!(kept, t)
             end
         end
+        n_resolved += 1
+        if rl !== nothing && (time() - t_last_log >= progress_seconds)
+            log_line(rl, "filter_floating!: resolved $n_resolved/$n_ambiguous ambiguous component(s) " *
+                          "($(format_duration(time() - t_start)) elapsed)")
+            t_last_log = time()
+        end
     end
+    rl !== nothing && n_ambiguous > 0 && log_line(rl, "filter_floating!: finished resolving " *
+                                                        "$n_ambiguous ambiguous component(s) in " *
+                                                        "$(format_duration(time() - t_start))")
 
     if !isempty(unresolved_vols)
         sample = first(sort(unresolved_vols), min(5, length(unresolved_vols)))

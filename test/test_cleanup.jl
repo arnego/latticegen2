@@ -125,6 +125,40 @@ import Gmsh: gmsh
         end
     end
 
+    @testset "export after resolving an ambiguous component reflects the fused result, not stale pre-fuse fragments" begin
+        # Regression test for a bug found investigating a "missing lattice"
+        # report (docs/algorithm.md §11.3): fuse_fn's ambiguous-component
+        # fuse is an OCC-kernel-level operation that does not itself update
+        # gmsh's separate model-level entity list, so a caller that mirrors
+        # run_pipeline's actual sequence -- filter_floating! then
+        # write_model(...; sync=false), with no synchronize in between --
+        # would silently export the stale, pre-fuse, un-merged fragments
+        # instead of the resolved geometry `kept` claims to represent. A
+        # real run's own summary said "Solids written: 2" while the actual
+        # exported .step file held 113 solids.
+        with_gmsh() do
+            new_model("filter-model-sync")
+            a = Int32(gmsh.model.occ.addBox(0,0,0, 10,10,10))
+            b = Int32(gmsh.model.occ.addBox(10,0,0, 10,10,10))    # shares the x=10 face -> resolves to 1
+            gmsh.model.occ.synchronize()
+            kept, removed, vols = filter_floating!(Int32[a, b], 1.0)
+            @test removed == 0
+            @test length(kept) == 1
+
+            # Mirror run_pipeline's actual export call exactly: a sync-free
+            # write immediately after filter_floating!, no intervening
+            # synchronize of any kind.
+            outpath = tempname() * ".step"
+            try
+                write_model(outpath; sync=false)
+                vols_out = import_shapes(outpath)
+                @test length(vols_out) == length(kept)
+            finally
+                rm(outpath; force=true)
+            end
+        end
+    end
+
     @testset "everything sub-threshold and floating -> kept is empty (caller decides how to react)" begin
         with_gmsh() do
             new_model("filter-all-floating")

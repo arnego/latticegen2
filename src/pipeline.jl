@@ -1093,9 +1093,14 @@ else booleans touch potentially-overlapping solids (docs/algorithm.md §6.3):
    Priority #1 (precision) over completing the run (docs/algorithm.md's
    "Key Considerations").
 5. Every remaining sub-threshold, fully-resolved solid is now a genuine
-   singleton — safe to remove. Removed via `remove_model_entities` (the
-   fast model-level path, docs/algorithm.md §8); the caller must follow up
-   with `write_model(path; sync=false)`, never a syncing write.
+   singleton — safe to remove. Before removal, a single `sync_model()` call
+   brings gmsh's model-level entity list up to date with every fuse step 3
+   performed (an OCC-kernel-level operation that does not itself update the
+   model-level list — docs/algorithm.md §11.3); removal then uses
+   `remove_model_entities` (the fast model-level path, docs/algorithm.md §8).
+   The caller must follow up with `write_model(path; sync=false)`, never a
+   syncing write, since a second sync at that point would resurrect exactly
+   what this step just removed.
 
 `fuse_fn` defaults to `fuse_all` and exists so tests can inject a
 deliberately-failing stub to exercise the hard-fail path (step 4) without
@@ -1188,6 +1193,28 @@ function filter_floating!(tags::Vector{Int32}, threshold::Real; rl::Union{RunLog
             "diagnostics."))
     end
 
+    # Synchronize before touching the model-level entity list at all (docs/
+    # algorithm.md §11.3): every ambiguous component resolved above via
+    # `fuse_fn` (`fuse_all` by default) creates its merged result as a new
+    # OCC-*kernel*-level entity, but `gmsh.model.occ.fuse` does not itself
+    # synchronize gmsh's separate model-level entity list — that list still
+    # reflects the *pre-fuse* fragments until something calls
+    # `gmsh.model.occ.synchronize()`. `remove_model_entities` and the
+    # `write_model(...; sync=false)` write that follows in `run_pipeline`
+    # both operate purely on that model-level list (that's the whole point of
+    # the fast model-level path, docs/algorithm.md §8) — without this sync,
+    # `remove_model_entities(floating)` would try to remove tags that came
+    # from `fuse_fn`'s *new* result and may not even be present in the
+    # (still-stale) model list yet, and the exported STEP would silently
+    # contain the original, un-merged, mutually-overlapping fragments instead
+    # of the resolved geometry `kept` claims to represent. Found via a real
+    # run whose own summary said "Solids written: 2" while the actual
+    # exported file held 113 solids — exactly the stale pre-fuse fragment
+    # count minus the one singleton actually removed (docs/algorithm.md
+    # §11.3). This one extra sync is O(whole model) but `filter_floating!`
+    # runs exactly once per pipeline execution, never per-tile or per-round,
+    # so it does not reproduce the O(n²)-sync cost bug fixed in §6.5/§11.2.
+    sync_model()
     isempty(floating) || remove_model_entities(floating)
     return (kept, length(floating), removed_vols)
 end

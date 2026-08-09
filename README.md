@@ -184,6 +184,15 @@ coordinate system — no re-centering or scaling). Both files under
 [test/](test/) are real example inputs (an 80 mm test sphere and a larger real
 heat-exchanger cavity volume).
 
+**Known limitation:** on rare inputs, gmsh's surface mesher can silently produce an
+incomplete triangulation of one face (usually a large, curved-boundary planar face) —
+one specific STEP file in `test/` triggers this. Since every classification decision
+depends on this mesh, the tool actively checks for it after tessellation and fails with
+a clear `InputGeometryError` (exit 3) naming the offending face rather than silently
+generating a lattice with a region missing (docs/algorithm.md §11.3). If you hit this,
+the input face likely needs repair in the originating CAD tool — no workaround inside
+this tool is currently known.
+
 ## Output format
 
 - **Schema:** STEP AP214 (`AUTOMOTIVE_DESIGN`), exact B-rep solid geometry, millimeters

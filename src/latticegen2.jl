@@ -35,7 +35,7 @@ export
     fuse_all, common_with, cut_with, volume_of, remove_entities, copy_translate,
     # classify.jl
     StrutClass, INTERIOR, BOUNDARY, OUTSIDE,
-    TriMesh, mesh_chordal_target, tessellate_surface, tri_aabb,
+    TriMesh, mesh_chordal_target, tessellate_surface, check_surface_mesh_coverage, tri_aabb,
     SpatialHash, build_spatial_hash, query_cells,
     closest_point_segment, dist_point_segment, closest_point_triangle,
     dist_point_triangle, dist_segment_segment, dist_segment_triangle,

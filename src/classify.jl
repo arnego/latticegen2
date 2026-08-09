@@ -29,6 +29,83 @@ tolerance `d` (docs/algorithm.md §5.1): `d = min(t, a) / 10`."""
 mesh_chordal_target(lp::LatticeParams) = min(lp.t, lp.a) / 10
 
 """
+    check_surface_mesh_coverage(lp::LatticeParams; tol_factor::Real=4.0)
+
+Defensive completeness gate on the 2D surface mesh gmsh just produced,
+called from `tessellate_surface` immediately after `gmsh.model.mesh.generate(2)`
+(docs/algorithm.md §5.1, §11.3). For every face currently in the model,
+compares the OCCT/CAD-reported bounding box of that face
+(`gmsh.model.getBoundingBox(2, tag)`, computed from the exact B-rep, not the
+mesh) against the bounding box of the mesh nodes gmsh actually generated for
+it. A healthy, CAD-conforming mesh places its boundary nodes essentially
+exactly on the true face boundary, so any face whose meshed extent falls
+short of its true extent by more than `tol_factor * min(t, a)` (a few mesh
+elements' worth of slack — generous enough to tolerate ordinary
+curvature-driven quantization, nowhere close to letting a genuinely missing
+region through) indicates the mesher silently produced an incomplete or
+mis-parametrized triangulation for that face.
+
+This is a real, observed gmsh/OCCT failure mode, not a hypothetical one:
+investigating a "large volumes of missing lattice" report against
+`test/test-cylinder.STEP` (docs/algorithm.md §11.3) found that gmsh's
+Frontal-Delaunay mesher recovered a truncated parametric domain for one
+large, curved-boundary planar face of that part, silently producing a
+mesh that covers only part of the face's true extent — and, worse, the
+resulting mesh is still a perfectly well-formed *closed 2-manifold* (a
+`manifold_check`-style edge-sharing test does not catch it at all; the
+mesh is geometrically wrong, not topologically broken). Every downstream
+classification decision (`classify_strut`, docs/algorithm.md §5.2) depends
+entirely on this mesh faithfully representing the input solid's boundary, so
+this failure mode silently misclassified every strut beyond the
+mis-tessellated region as `OUTSIDE`, with no error or warning anywhere —
+exactly the opposite of the "worst case is more work, never a wrong result"
+guarantee docs/algorithm.md §10 promises for every other optimization in this
+pipeline. Multiple mitigation attempts (curvature-independent uniform sizing,
+three different `Mesh.Algorithm` choices, OCCT's import-time `OCCFix*`/
+`OCCSewFaces` healing options, and `gmsh.model.occ.healShapes`) all
+reproduced the identical truncation, so no gmsh-level workaround is known;
+this check exists to convert the failure from silent data loss into a loud,
+diagnosable one (`InputGeometryError`, exit 3) until/unless a real fix is
+found (docs/algorithm.md §11.3).
+"""
+function check_surface_mesh_coverage(lp::LatticeParams; tol_factor::Real=4.0)
+    tol = tol_factor * min(lp.t, lp.a)
+    for (d, tag) in gmsh.model.getEntities(2)
+        xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(2, tag)
+        _, _, elemNodeTags = gmsh.model.mesh.getElements(2, tag)
+        nodetags = Int[]
+        for arr in elemNodeTags
+            append!(nodetags, arr)
+        end
+        isempty(nodetags) && throw(InputGeometryError(
+            "Surface tessellation produced zero elements for face $tag (CAD bounding box " *
+            "lo=($xmin,$ymin,$zmin) hi=($xmax,$ymax,$zmax)); the input geometry could not be " *
+            "faithfully meshed for boundary classification (docs/algorithm.md §11.3)."))
+        mlo = Vec3(Inf, Inf, Inf)
+        mhi = Vec3(-Inf, -Inf, -Inf)
+        for t in unique(nodetags)
+            coord, _, _, _ = gmsh.model.mesh.getNode(t)
+            mlo = Vec3(min(mlo.x, coord[1]), min(mlo.y, coord[2]), min(mlo.z, coord[3]))
+            mhi = Vec3(max(mhi.x, coord[1]), max(mhi.y, coord[2]), max(mhi.z, coord[3]))
+        end
+        if mlo.x > xmin + tol || mlo.y > ymin + tol || mlo.z > zmin + tol ||
+           mhi.x < xmax - tol || mhi.y < ymax - tol || mhi.z < zmax - tol
+            throw(InputGeometryError(
+                "Surface tessellation for face $tag does not cover its own geometry " *
+                "(docs/algorithm.md §11.3): CAD bounding box lo=($xmin,$ymin,$zmin) " *
+                "hi=($xmax,$ymax,$zmax) vs. meshed bounding box lo=($(mlo.x),$(mlo.y),$(mlo.z)) " *
+                "hi=($(mhi.x),$(mhi.y),$(mhi.z)) (tolerance $(round(tol, digits=4)) mm). This " *
+                "indicates gmsh's mesher silently produced an incomplete or mis-parametrized " *
+                "triangulation for this face — classification against this mesh would silently " *
+                "misclassify struts near the missing region as OUTSIDE rather than fail. No " *
+                "gmsh-level mitigation is currently known (docs/algorithm.md §11.3); the input " *
+                "face likely needs repair in the originating CAD tool."))
+        end
+    end
+    return nothing
+end
+
+"""
     tessellate_surface(lp::LatticeParams) -> TriMesh
 
 Mesh the 2D boundary of every volume currently in the gmsh model, and
@@ -45,6 +122,13 @@ and produces a chordal deviation far smaller than needed on large
 gently-curved surfaces (e.g. ~1.2M triangles / 47s on the 80mm test ball,
 against ~12K triangles / 0.4s with curvature-adaptive sizing) — see
 docs/algorithm.md §11 for why this matters for the optimization strategy.
+
+After meshing, `check_surface_mesh_coverage` verifies every face's mesh
+actually covers that face's true CAD extent before this function returns —
+see its docstring for the real, observed gmsh meshing-robustness failure
+this guards against (docs/algorithm.md §11.3): a mesher-recovered
+parametric domain that silently omits part of a face without any error, and
+without even breaking the resulting mesh's own 2-manifold closure.
 """
 function tessellate_surface(lp::LatticeParams)
     gmsh.model.occ.synchronize()
@@ -54,6 +138,7 @@ function tessellate_surface(lp::LatticeParams)
     gmsh.option.setNumber("Mesh.MeshSizeMin", floor_)
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 20)
     gmsh.model.mesh.generate(2)
+    check_surface_mesh_coverage(lp)
 
     nodeTags, coords, _ = gmsh.model.mesh.getNodes()
     n = length(nodeTags)

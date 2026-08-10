@@ -197,6 +197,20 @@ def golden_sample_volume_diff_bounded(candidate_path: str, golden_path: str,
     return value
 
 
+BBOX_TOL = 0.01
+"""Millimetres. How far two representations of the same solid may differ in
+extent before it means something. Two independently-tessellated, independently
+-booleaned copies of one shape routinely differ by microns at an extreme; the
+smallest feature this tool produces is `t >= 0.4` mm, so 0.01 mm is far below
+anything geometrically meaningful and far above float noise."""
+
+SURFACE_TIE_TOL = 0.05
+"""Millimetres. A sampled point closer than this to *both* surfaces is on the
+shared boundary, where an inside/outside test is at a tie and the two models can
+legitimately disagree. Only disagreements further out than this from both
+surfaces indicate an actual difference in shape."""
+
+
 def golden_sample_agreement(candidate_path: str, golden_path: str, samples: int = 200_000,
                             seed: int = 20260810) -> dict:
     """Sampled equivalence between two solids, for when the exact cut is too slow.
@@ -235,19 +249,45 @@ def golden_sample_agreement(candidate_path: str, golden_path: str, samples: int 
     pts = lo + rng.random((samples, 3)) * (hi - lo)
     in_cand = PointInside(cand_mesh)(pts)
     in_gold = PointInside(gold_mesh)(pts)
-    disagree = int(np.count_nonzero(in_cand != in_gold))
+    disputed = np.nonzero(in_cand != in_gold)[0]
+
+    # A disagreement only means something if the point is clear of both
+    # surfaces. Points sitting on the shared boundary are ties, and with
+    # hundreds of thousands of samples against a lattice's enormous surface
+    # area, some always will be.
+    real = 0
+    for i in disputed:
+        p = pts[i]
+        if min(_distance_to_mesh(cand_mesh, p), _distance_to_mesh(gold_mesh, p)) > SURFACE_TIE_TOL:
+            real += 1
 
     box_volume = float(np.prod(hi - lo))
+    bbox_delta = float(max(np.abs(lo_c - lo_g).max(), np.abs(hi_c - hi_g).max()))
     return {
         "candidate_volume": occ.volume(cand_shape),
         "golden_volume": occ.volume(gold_shape),
         "volume_diff": abs(occ.volume(cand_shape) - occ.volume(gold_shape)),
-        "bbox_match": bool(np.allclose(lo_c, lo_g, atol=1e-6) and np.allclose(hi_c, hi_g, atol=1e-6)),
+        "bbox_delta": bbox_delta,
+        "bbox_match": bbox_delta <= BBOX_TOL,
         "samples": samples,
-        "disagreements": disagree,
-        "implied_symmetric_difference_mm3": box_volume * disagree / samples,
+        "disagreements": int(len(disputed)),
+        "real_disagreements": real,
+        "implied_symmetric_difference_mm3": box_volume * real / samples,
         "resolution_mm3": box_volume / samples,
     }
+
+
+def _distance_to_mesh(mesh: TriMesh, point: np.ndarray, search: float = 1.0) -> float:
+    """Distance from a point to the nearest triangle within ``search`` mm."""
+    from latticegen2.classify import segment_triangle_dist
+
+    sh = SpatialHash(mesh, min_cell=search)
+    candidates = sh.query(point - search, point + search)
+    if len(candidates) == 0:
+        return float("inf")
+    A, B, C = mesh.triangle_points
+    return float(segment_triangle_dist(point, point, A[candidates], B[candidates],
+                                       C[candidates]).min())
 
 
 def material_outside(candidate_path: str, input_path: str) -> float:

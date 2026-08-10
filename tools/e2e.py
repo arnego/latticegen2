@@ -87,14 +87,16 @@ def geometry_checks(rep: Report, output: str, input_path: str, cc: float, t: flo
               "0 crossing pairs" if no_cross else f"{len(pairs)}+ crossing pairs")
 
 
-GOLDEN_EXACT_BUDGET_S = 300.0
+GOLDEN_EXACT_BUDGET_S = 1800.0
 """How long the exact boolean comparison gets before falling back.
 
-Not a correctness knob. The exact test is a general boolean between two complete
-lattices, so its cost grows far faster than the lattice does: seconds on the
-~10 k-face smoke output, still unfinished after 20 minutes on the ~100 k-face
-dense one. The budget bounds the harness's runtime; it never converts an
-unmeasured result into a pass.
+Not a correctness knob, and deliberately generous. The exact test is a general
+boolean between two complete lattices, so its cost grows far faster than the
+lattice does: seconds on the ~10 k-face smoke output, **306 s** on the
+~100 k-face dense one. An earlier 300 s budget missed that by six seconds and
+sent a scenario that passes exactly (0 mm³) down the weaker sampled path — the
+budget exists to stop a runaway, not to decide the common case. The fallback
+never converts an unmeasured result into a pass.
 """
 
 
@@ -117,11 +119,14 @@ def golden_check(rep: Report, output: str, golden: str, t: float) -> None:
     rep.check("golden sample: total volume matches", agree["volume_diff"] < tol,
               f"candidate {agree['candidate_volume']:.4f} vs golden "
               f"{agree['golden_volume']:.4f} mm^3 (diff {agree['volume_diff']:.6g})")
-    rep.check("golden sample: bounding boxes match", agree["bbox_match"])
+    rep.check("golden sample: bounding boxes match", agree["bbox_match"],
+              f"worst extent difference {agree['bbox_delta']:.3g} mm "
+              f"(tolerance {vg.BBOX_TOL} mm)")
     rep.check("golden sample: sampled membership agrees (weaker than the exact test)",
-              agree["disagreements"] == 0,
-              f"{agree['disagreements']} disagreements over {agree['samples']} points; "
-              f"one sample = {agree['resolution_mm3']:.4g} mm^3")
+              agree["real_disagreements"] == 0,
+              f"{agree['real_disagreements']} substantive of {agree['disagreements']} raw "
+              f"disagreements over {agree['samples']} points; one sample = "
+              f"{agree['resolution_mm3']:.4g} mm^3")
 
 
 def scenario_smoke_fast(outdir: str) -> Report:

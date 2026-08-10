@@ -49,11 +49,24 @@ def _make_tmpdir(output_path: str) -> str:
 
 
 def run_pipeline(args: Args, rl: RunLog) -> dict:
-    """Generate the lattice and write it, returning the stats for the summary."""
+    """Generate the lattice and write it, returning the stats for the summary.
+
+    On any failure the temporary directory is left in place for post-mortem
+    analysis and its path is reported on the console, not just in the log
+    (specification.md §4.4, §7).
+    """
+    tmpdir = _make_tmpdir(args.output)
+    try:
+        return _run(args, rl, tmpdir)
+    except BaseException:
+        rl.always(f"Intermediate files kept for analysis in: {tmpdir}")
+        raise
+
+
+def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     occ.quiet_kernel()
     lp = lattice_params(args.cc, args.t)
     stats: dict[str, object] = {}
-    tmpdir = _make_tmpdir(args.output)
     rl.line(f"temp directory: {tmpdir}")
 
     # The template also validates the parameter pair geometrically: it fails
@@ -167,8 +180,7 @@ def run_pipeline(args: Args, rl: RunLog) -> dict:
         raise ProcessingError(
             f"Stitching produced {len(result_solids)} solids where the junction "
             f"graph proves there are {len(keep_labels)} connected components. Some "
-            f"interface did not close, which would mean a non-watertight body. "
-            f"Intermediate geometry kept in {tmpdir} for analysis."
+            f"interface did not close, which would mean a non-watertight body."
         )
 
     with Timer(rl, "validate"):
@@ -177,7 +189,7 @@ def run_pipeline(args: Args, rl: RunLog) -> dict:
     if invalid:
         raise ProcessingError(
             f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
-            f"BRepCheck_Analyzer validity check. Intermediate geometry kept in {tmpdir}."
+            f"BRepCheck_Analyzer validity check."
         )
     rl.line(f"validity: all {len(result_solids)} solid(s) pass BRepCheck_Analyzer")
     stats["solids_written"] = len(result_solids)

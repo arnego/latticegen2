@@ -64,9 +64,18 @@ the current design closes that. The assembly stage must not merely be made faste
 expected — the lattice is a simple cubic grid rotated so [1,1,1] ∥ Z, and the struts
 are cube edges). Consequence: at every node, the six incident half-struts run along
 ±3 orthogonal axes, and the volumetric overlap between struts sharing a node extends
-at most ~`r = t/√2` from the node along each axis. For every practically relevant
-parameter combination (`t < cc/2`, which covers `cc=5,t=1` with 2.5× margin), the
-overlap is confined **well inside the near half of each strut**.
+at most ~`r = t/√2` from the node along each axis, so the overlap is confined
+**inside the near half of each strut**.
+
+> **Resolved during implementation (2026-08-10).** This section originally flagged
+> `t < cc/2` as the parameter window where the overlap stays clear of the mid-strut
+> interfaces, and §4/§7 carried it as a caveat needing a Phase-0 measurement. The
+> real bound is looser and exact: the overlap reach along an orthogonal axis is the
+> profile's **inradius** `t/2`, not its circumradius `r`, because a diamond profile
+> presents an edge rather than a corner to every orthogonal strut direction. Caps
+> therefore stay intact for exactly `t < a` — the constraint the CLI already
+> enforces — so there is **no narrower window and no fallback path needed**. See
+> docs/algorithm.md §3.3.
 
 ### Insight 2 — all lattice-only geometry is planar-polyhedral
 

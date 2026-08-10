@@ -21,10 +21,23 @@ Goals from most important to least important:
 ### Initial Setup
 
 Before implementing features, establish:
+- **Language/runtime**: **Python 3.11+**. (The project was originally written in
+  Julia; that implementation was replaced for performance reasons and now lives,
+  unmaintained, in `old-julia/` — see [old-julia/README.md](old-julia/README.md).)
 - **Dependencies** for geometry processing (note down selected geometries here)
-  - Geometry kernel: **Gmsh SDK** (bundles Open CASCADE / OCCT), accessed from Julia via the `Gmsh.jl` package. Used for STEP/BREP I/O, B-rep primitive construction, and boolean operations (fuse/common). It is the only third-party Julia dependency; everything else is stdlib. License texts live in `licenses/` (GPL-2+ for Gmsh, LGPL-2.1 for the bundled OCCT), cross-referenced in `licenses/libraries.md`. See [docs/algorithm.md](docs/algorithm.md) for how it's used in the pipeline.
+  - Geometry kernel: **Open CASCADE (OCCT)**, accessed directly through the
+    **OCP** bindings (`cadquery-ocp` wheels, which bundle the OCCT binaries).
+    Used for STEP I/O, B-rep primitive construction, the single junction fuse,
+    per-junction intersection, sewing, meshing, and `BRepCheck_Analyzer` validity
+    checking. **NumPy** is the only other dependency. License texts live in
+    `licenses/`, cross-referenced in `licenses/libraries.md`. See
+    [docs/algorithm.md](docs/algorithm.md) for how the kernel is used in the
+    pipeline, and note that the design deliberately keeps boolean operations off
+    the hot path.
 - **Testing framework** for geometry validation
-  - Julia stdlib `Test` for unit tests (`test/runtests.jl`), plus standalone scripts in `tools/` (`e2e.jl`, `verify_geometry.jl`) for end-to-end and geometry-validity checks. See [docs/testing.md](docs/testing.md).
+  - `pytest` for unit tests (`test/test_*.py`), plus standalone scripts in
+    `tools/` (`e2e.py`, `verify_geometry.py`) for end-to-end and geometry-validity
+    checks. See [docs/testing.md](docs/testing.md).
 
 ### Review code
 
@@ -46,4 +59,17 @@ Maintain project documentation in README.md, including:
 - Example usage and typical workflows
 - Document memory usage patterns and limits for large lattices
 - Algorithm overview for the lattice generation method including implemented optimization strategy
+
+## Tone Preference
+Keep responses focused, brief, and concise. Lead with the outcome — the first
+sentence should answer "what happened" or "what did I find" — with supporting
+detail after it for anyone who wants more.
+
+Before your first tool call, say in one sentence what you're about to do.
+While working, give an update only when you find something important or
+change direction. Skip narration of routine steps.
+
+Only flag a correction to something you said earlier if the error would
+change my code, conclusions, or decisions. State it plainly and move on.
+For slips that change nothing for me, just fix it silently.
 

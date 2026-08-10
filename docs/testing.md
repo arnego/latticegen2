@@ -1,131 +1,144 @@
 # Testing Reference Guide
 
-This file contains the required verification and testing procedures for this project.
-All test files and assets shall reside within the test/ folder.
+Required verification and testing procedures for this project. Test code and
+assets live in `test/`; the harnesses that drive whole runs live in `tools/`.
 
-## Unit testing:
+All commands assume a Python 3.11+ interpreter with the two dependencies from
+[../README.md](../README.md) installed. Set `LATTICEGEN2_PYTHON` if the
+interpreter you want is not the default `python`.
 
-Run unit tests for parameter validation and intermediate calculations
+## Unit testing
 
-- Run all tests:
+Parameter validation, lattice mathematics, the junction template, the interior
+shell build, classification, the mesh gates, the connectivity rule, and the STEP
+header rewrite.
+
+- Run everything:
   ```
-  julia --project=. -e "using Pkg; Pkg.test()"
+  python -m pytest test -q
   ```
-  (equivalently: `julia --project=. test/runtests.jl`)
-- Run only the fast, gmsh-independent subset (pure math: cli.jl, runlog.jl, lattice.jl,
-  tiling.jl, stepmeta.jl) during iterative development:
+- Run the fast, kernel-free subset (pure maths — CLI, lattice, connectivity,
+  STEP header) during iterative development:
   ```
-  julia --project=. -e "using Test; include(\"src/latticegen2.jl\"); using .latticegen2; @testset \"pure-math\" begin; include(\"test/test_runlog.jl\"); include(\"test/test_cli.jl\"); include(\"test/test_lattice.jl\"); include(\"test/test_tiling.jl\"); include(\"test/test_stepmeta.jl\"); end"
+  python -m pytest test/test_cli.py test/test_lattice.py test/test_connect.py test/test_stepmeta.py -q
   ```
-- Run a single test file directly (each is a self-contained `@testset`, included by `test/runtests.jl`):
+- Run one file:
   ```
-  julia --project=. -e "using Test; include(\"src/latticegen2.jl\"); using .latticegen2; include(\"test/test_lattice.jl\")"
+  python -m pytest test/test_junction.py -q
   ```
-  Substitute the file for any of: `test_runlog.jl`, `test_cli.jl`, `test_lattice.jl`,
-  `test_tiling.jl`, `test_stepmeta.jl` (fast, no gmsh), or `test_geomkernel.jl`,
-  `test_classify.jl`, `test_pipeline.jl`, `test_cleanup.jl` (slower, require the
-  gmsh/OCCT kernel). `test_cleanup.jl` covers `filter_floating!`'s floating-body-only
-  cleanup gate specifically (docs/algorithm.md §8) — kept separate from
-  `test_pipeline.jl`'s broader orchestration tests since it's a priority-#1-critical
-  correctness gate on its own.
 
-## E2E verification:
+| File | Covers | Needs the geometry kernel |
+|---|---|---|
+| `test_lattice.py` | docs/algorithm.md §2.3's verified identities, including the mutual orthogonality the architecture rests on; index ranges; naming | no |
+| `test_cli.py` | Flags, ranges, the `t < a` cross-constraint, path resolution, preflight checks | no |
+| `test_connect.py` | The junction graph and the floating-body rule's three outcomes | no |
+| `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
+| `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
+| `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates | yes |
 
-1. Run the script with the project's verification input geometry and parameters. The
-   run's log file (`<output-stem>.log`, specification.md §3) already contains the
-   required run data — input parameters, start date/time, duration, run characteristics
-   (tile counts, worker counts, per-stage timings), and maximum memory usage — save this
-   file for analysis and attach it to the pull request.
+## E2E verification
 
-   ```
-   julia --project=. src/main.jl -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke-fast.step --workers 4 --tile-cells 6 -v
-   ```
+```
+python tools/e2e.py
+```
 
-   Or run the full automated harness, which invokes the scenario above as a subprocess
-   and performs every check in §6.2 below automatically:
+Runs every scenario in [specification.md](specification.md) §6.1 as a subprocess
+and applies every applicable §6.2 check. Scenarios are independent — one failing
+scenario does not prevent the others from running — and the exit code reflects the
+run as a whole. `--only smoke-fast,invalid-input` restricts the set.
 
-   ```
-   julia --project=. tools/e2e.jl
-   ```
+Each generated run writes its own `<output-stem>.log` containing the required run
+data (parameters, start time, duration, run characteristics, peak memory). Save
+it for analysis and attach it to the pull request.
 
-2. Verification: `tools/e2e.jl` also runs `smoke-verified` (specification.md §6.1),
-   which compares its output against the committed golden sample
-   `test/80mm-test-ball-cc20t4-golden-sample.step` via `golden_sample_volume_diff`.
-   `dense-lattice` is implemented the same way but self-skips: its golden sample
-   (`test/test-cylinder-cc10t1.5-golden-sample.step`) does not exist yet. Originally specified at
-   -cc 5 -t 1, the one attempt to generate that denser golden sample ran for hours
-   before being manually terminated — root-caused and fixed (not a crash: an
-   auto-tuned tile size past the fuse-time performance knee, plus an unconditional
-   sub-threshold cleanup rule that was deleting connected junction material; see
-   docs/algorithm.md §11.2 for the full investigation). The scenario's params were
-   changed 2026-08-09 to -cc 10 -t 1.5 (a less dense lattice capable of finishing
-   within a reasonable time) with a 60-minute runtime budget. Regenerating the
-   golden sample and committing it is a follow-up step, tracked as an open item in
-   specification.md §9, not automated here. (A prior revision of this note said the
-   scenario was blocked outright by a CAD defect in `test/test-cylinder.STEP` that
-   gmsh could not tessellate. That was a false positive in the pipeline's own
-   mesh-coverage gate, not a defect in the file — corrected, with the gate fixed, in
-   docs/algorithm.md §11.3. The scenario runs to completion again.) Until
-   that sample exists, `tools/e2e.jl`
-   provides the `smoke-fast`/`smoke-verified` output `.step` files (and console/log
-   summaries) for manual user verification, and automatically ensures the generated
-   geometry is manifold, non-self-intersecting, and that sub-threshold-solid removals
-   stayed a small fraction of total solids (a regression check on its own — this is
-   exactly the signal that would have caught the `dense-lattice` blow-up before its
-   multi-hour cleanup tail, docs/algorithm.md §11.2):
+To drive a single scenario by hand:
 
-   ```
-   julia --project=. tools/e2e.jl
-   ```
+```
+python src/main.py -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke.step -v
+```
 
-   When a golden sample *is* configured for a future scenario, similarity is checked by
-   subtracting the candidate and golden geometries both ways (near-zero remainder means
-   equivalent volume) via `tools/verify_geometry.jl`'s `golden_sample_volume_diff`:
+### What the harness checks
 
-   ```julia
-   include("tools/verify_geometry.jl")   # after include("src/latticegen2.jl"); using .latticegen2
-   golden_sample_volume_diff("path/to/candidate.step", "path/to/golden.step")
-   ```
+| Check | How |
+|---|---|
+| Exit code and one human-readable reason line | subprocess return code and stderr |
+| STEP written and non-empty | filesystem |
+| Parses back successfully | `STEPControl_Reader` round trip |
+| **Exact B-rep validity** | `BRepCheck_Analyzer` on every solid |
+| Closed manifold | every mesh edge used by exactly 2 triangles |
+| No self-intersections | `triangles_properly_cross` — plane-straddle pre-check, then edge piercing |
+| No material outside the input body | boolean cut of output against input, volume ≈ 0 |
+| Bounding box within input + (cc+t) | direct comparison |
+| Runtime budget | wall clock: 10 min for `smoke-fast` and `dense-lattice`, 20 min for `smoke-verified` |
+| Golden-sample match | symmetric-difference volume both ways, tolerance `t³` |
 
-## Goal oriented performance optimization:
+The self-intersection check's plane-straddle pre-check is load-bearing, not
+decoration: without it, two separate solids merely *touching* along a coincident
+face report hundreds of false crossings purely because their independent
+triangulations are not vertex-aligned (docs/algorithm.md §13.1).
 
-The log file written by every run (`<output-stem>.log`) records, per docs/algorithm.md
-§9: a full run header (all input parameters, start timestamp), one line per pipeline
-stage (import, tessellate, classify, tiling, tile_stage, assembly, export, verify) with
-its wall-clock duration, per-tile stats as each tile completes — strut counts, total
-elapsed time, peak RSS, **and** the per-stage breakdown within the tile
-(`t_interior`/`t_boundary`/`t_final`, the three `balanced_fuse!` calls a tile makes)
-and its `dropped_islands` count (docs/algorithm.md §6.4a) — one line per distributed
-assembly merge-round group as it completes (docs/algorithm.md §6.5), calibration-probe
-results when `--cores`/`--ram` auto-tuning ran (now `mem_per_strut`, the probe's
-`(struts, elapsed)` pair, and which of `n_mem`/`n_time` bound the chosen tile size —
-docs/algorithm.md §7.1), and the mandatory end-of-run summary. Any warning a tile's
-`balanced_fuse!`/boundary-trim step produced is also logged, prefixed with the tile's
-key — previously invisible whenever a tile happened to run on a worker process, since
-workers have no log file of their own to write to. To iterate on performance:
+### Golden samples
 
-1. Run with `-v` for full console visibility, or just inspect the `.log` file afterward
-   (it is always written in full regardless of `-v` — specification.md §3).
-2. Compare the per-stage timings across runs/parameter sets to identify the current
-   bottleneck stage.
-3. Cross-reference docs/algorithm.md §11 (Complexity analysis and optimization strategy
-   summary) for the specific lever expected to affect that stage.
-4. Re-run and compare the same stage's timing before/after a change.
+`test/80mm-test-ball-cc20t4-golden-sample.step` and
+`test/test-cylinder-cc10t1.5-golden-sample.step` were produced by the previous
+Julia/gmsh implementation. They are compared with
+`golden_sample_volume_diff`, which cuts candidate and golden against each other
+both ways and takes the larger remainder.
 
-## Verification Checklist
+A mismatch is a stop-the-line result: **never adjust a tolerance to make it
+pass**, and do not assume the generator is at fault either — these samples predate
+the current implementation. Investigate, and escalate to the user for manual
+verification.
 
-1. Ensure all linting passes (`julia --project=. -e "using Pkg; Pkg.test()"` — Julia has
-   no separate lint step for this project; test failures are the linting signal).
-2. Verify edge cases for any modified boundary logic — in particular:
-   - Parameter range boundaries (`-cc`/`-t` at 0.4/50/20, the `t < cc/√2` cross-constraint).
-   - Classification margin edge cases (a strut exactly at the `r + d` boundary).
-   - Tile-partition edges (negative lattice indices, `is_full_interior`'s fringe-tile guard).
-   - AABB-overlap-graph edge cases (`overlap_components`): a chain that must merge into
-     one component vs. two genuinely separate clusters (docs/algorithm.md §6.3, §8).
-   - `filter_floating!`'s three-way outcome (removed / kept / hard-fail) at each
-     boundary: singleton-and-small, connected-and-resolves, connected-and-unresolvable
-     (docs/algorithm.md §8 — `test/test_cleanup.jl`).
-   - `derive_tile_size`'s dual memory/time bound and its `n <= 8` hard cap
-     (docs/algorithm.md §7.1).
-3. Run `tools/e2e.jl` and confirm all checks pass before opening a pull request.
-4. Run `/code-review` (per CLAUDE.md) and address any findings before pushing.
+To compare two files directly:
+
+```python
+import sys; sys.path.insert(0, "tools")
+import verify_geometry as vg
+vg.golden_sample_volume_diff("candidate.step", "test/80mm-test-ball-cc20t4-golden-sample.step")
+```
+
+## Performance work
+
+Every run writes `<output-stem>.log` with a header, one line per pipeline stage
+with its wall-clock duration, template and mesh statistics, classification counts,
+boundary-trim progress, the aggregate floating-body line, and the end-of-run
+summary including peak memory. To iterate:
+
+1. Run with `-v`, or just read the `.log` afterwards — it is always written in
+   full regardless of `-v`.
+2. Compare per-stage timings across runs to find the current bottleneck.
+3. Cross-reference [algorithm.md](algorithm.md) §12 for the lever that affects
+   that stage.
+4. Re-run and compare the same stage.
+
+For reference, the two committed scenarios on a 6-core / 32 GB workstation:
+
+| Scenario | Total | Dominant stages |
+|---|---|---|
+| 80 mm ball, `cc=20 t=4` | ~7 s | boundary trim, export |
+| test cylinder, `cc=10 t=1.5` | ~77 s | classify, export/verify, sewing |
+
+The Phase-0 de-risking measurements that chose the architecture (junction cap
+integrity, join-mechanism throughput, per-junction intersection latency, STEP
+writer throughput) are in
+[`../tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md), with the
+scripts that produced them alongside. Re-run one with, e.g.:
+
+```
+python tools/prototypes/g2_instancing_join.py
+```
+
+## Verification checklist
+
+1. `python -m pytest test -q` passes. (Python has no separate lint step here;
+   test failures are the signal.)
+2. Edge cases for any modified boundary logic, in particular:
+   - Parameter bounds (`-cc`/`-t` at 0.4/50/20) and the `t < a` cross-constraint.
+   - Classification margin edges (a strut exactly at `r + d`).
+   - Cap integrity at high `t/cc` ratios (docs/algorithm.md §3.3).
+   - The interior shell's edge-use tally: every edge twice, opposite directions.
+   - The floating-body rule's three outcomes: dropped, kept-because-connected,
+     and kept-because-large.
+3. `python tools/e2e.py` passes.
+4. Run `/code-review` (per CLAUDE.md) and address findings before pushing.

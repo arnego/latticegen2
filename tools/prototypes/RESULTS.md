@@ -95,24 +95,42 @@ trimmed boundary junctions, which scales with surface area rather than volume.
 
 ---
 
-## G3 — per-junction intersection latency
+## G3 — per-junction intersection latency ✅ PASS
 
 One single-operand `BRepAlgoAPI_Common` per boundary junction, against
-`test/test-cylinder.STEP`. Bar: median < 50 ms, p95 < 250 ms.
+`test/test-cylinder.STEP` at `cc=10, t=1.5`, over 200 of the run's 968 boundary
+junctions.
 
-See the script output; the end-to-end figure corroborates it — the
-`dense-lattice` run trims **968 boundary junctions in 6.1 s** across 5 worker
-processes.
+| | Bar | Measured |
+|---|---|---|
+| median | < 50 ms | **24.0 ms** |
+| p95 | < 250 ms | **31.7 ms** |
+| max | — | 39.6 ms |
+
+The tight spread is the point: these are constant-size, independent jobs, which
+is what makes the boundary stage trivially parallel. Corroborated end-to-end —
+the `dense-lattice` run trims all 968 boundary junctions in **6.1 s** across 5
+worker processes.
+
+The localisation optimisation the proposal held in reserve (intersect the input
+body once per spatial bucket, then trim junctions against the local piece) is
+**not needed** at this input complexity and was not built.
 
 ---
 
-## G4 — STEP writer throughput and round trip
+## G4 — STEP writer throughput and round trip ✅ PASS
 
-`STEPControl_Writer` on an instanced interior shell, then re-read. Bar:
-≥ 3,000 faces/s, with solid count and total volume preserved.
+`STEPControl_Writer` on a 12×12×12 instanced interior shell, then re-read.
 
-Corroborated end-to-end: `dense-lattice` writes a 94 MB / ~100 k-face file in
-9.3 s and re-reads it in 23.5 s.
+| | Bar | Measured |
+|---|---|---|
+| write throughput | ≥ 3,000 faces/s | **3,569 faces/s** (42,336 faces, 131.9 MB, 11.9 s) |
+| round trip | solid count and volume preserved | 1 solid, volume relative error **5.8 × 10⁻¹³** |
+
+Re-reading took 28.1 s — reading is slower than writing, and at the projected
+64× scale the file itself (multi-GB) becomes the dominant cost, exactly as the
+proposal's §4 predicted. That remains an open item for the scale rehearsal
+(specification.md §10).
 
 ---
 

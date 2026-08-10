@@ -106,7 +106,10 @@ def bounding_box(shape: TopoDS_Shape, tol: float = 0.0) -> tuple[np.ndarray, np.
     """
     box = Bnd_Box()
     box.SetGap(tol)
-    BRepBndLib.Add_s(shape, box, True)
+    # useTriangulation=False: compute from the exact geometry. A triangulation,
+    # if one happens to be present, gives a box that can sit slightly *inside*
+    # the true surface, and this box is what bounds candidate node enumeration.
+    BRepBndLib.Add_s(shape, box, False)
     if box.IsVoid():
         raise InputGeometryError("Shape has an empty bounding box (no geometry).")
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()

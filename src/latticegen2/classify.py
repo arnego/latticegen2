@@ -440,9 +440,21 @@ def _cell_assignments(lo: np.ndarray, hi: np.ndarray, cell: float):
 
 
 class SpatialHash:
-    """Uniform grid over triangle AABBs, for exact near-surface queries."""
+    """Uniform grid over triangle AABBs, for exact near-surface queries.
 
-    def __init__(self, mesh: TriMesh):
+    Cell size follows the triangles (2x the median edge), but ``min_cell`` lets a
+    caller stop it going finer than its own queries need. That floor matters:
+    query cost is proportional to the number of cells the query box covers, and
+    the box is a half-strut inflated by the margin — roughly the cell edge ``a``.
+    On a part where the mesh is far finer than the lattice (large ``cc`` with
+    small ``t``, where ``d = t/10`` drives a fine tessellation of a coarse
+    lattice), an edge-derived cell size alone would put hundreds of cells along
+    each axis of every query and turn an index lookup into a sweep of the whole
+    grid. A coarser cell only means more candidate triangles per query, which is
+    a graceful, bounded cost.
+    """
+
+    def __init__(self, mesh: TriMesh, min_cell: float = 0.0):
         a, b, c = mesh.triangle_points
         edges = np.concatenate(
             [
@@ -451,7 +463,7 @@ class SpatialHash:
                 np.linalg.norm(a - c, axis=1),
             ]
         )
-        self.cell = max(2.0 * float(np.median(edges)), 1e-9)
+        self.cell = max(2.0 * float(np.median(edges)), float(min_cell), 1e-9)
         self.mesh = mesh
         lo = np.minimum(np.minimum(a, b), c)
         hi = np.maximum(np.maximum(a, b), c)
@@ -681,7 +693,9 @@ def classify_nodes(lp: LatticeParams, mesh: TriMesh, candidates: np.ndarray) -> 
        distances, six segments each.
     """
     margin = lp.r + mesh.deviation
-    sh = SpatialHash(mesh)
+    # Keep the grid no finer than a quarter of the largest query box, so each
+    # half-strut query touches a handful of cells regardless of mesh density.
+    sh = SpatialHash(mesh, min_cell=(lp.a / 2.0 + 2.0 * margin) / 4.0)
     positions = nodes(lp, candidates)
 
     inside = PointInside(mesh)(positions)

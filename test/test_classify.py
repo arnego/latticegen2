@@ -125,6 +125,38 @@ def test_spatial_hash_finds_the_triangles_near_a_box():
     assert len(far) == 0
 
 
+def test_spatial_hash_honours_a_minimum_cell_size():
+    """A fine mesh must not force a fine grid — that is what bounds query cost."""
+    mesh = icosphere(10.0, subdivisions=3)
+    fine = SpatialHash(mesh)
+    coarse = SpatialHash(mesh, min_cell=5.0)
+    assert coarse.cell >= 5.0
+    assert coarse.cell > fine.cell
+    # Coarsening must not lose anything: a query still finds every triangle it
+    # would have found, it just returns more candidates.
+    lo = np.array([-11.0, -11.0, -11.0])
+    hi = np.array([11.0, 11.0, 11.0])
+    assert set(fine.query(lo, hi).tolist()) <= set(coarse.query(lo, hi).tolist())
+
+
+def test_classification_is_unchanged_by_a_much_finer_mesh():
+    """Mesh density must not move nodes between classes.
+
+    The grid's cell size is derived from the mesh, so this also guards the
+    minimum-cell floor above: if coarsening the grid dropped candidate
+    triangles, near-surface nodes would silently stop being BOUNDARY.
+    """
+    lp = lattice_params(10.0, 1.5)
+    cand = candidate_nodes(lp, np.array([-20.0] * 3), np.array([20.0] * 3))
+    coarse = icosphere(18.0, subdivisions=2)
+    fine = icosphere(18.0, subdivisions=4)
+    coarse.deviation = fine.deviation = 1.0
+    a = classify_nodes(lp, coarse, cand)
+    b = classify_nodes(lp, fine, cand)
+    differing = int(np.count_nonzero(a.node_class != b.node_class))
+    assert differing <= 2, f"{differing} nodes changed class with mesh density"
+
+
 def test_occupancy_is_conservative_but_excludes_the_far_field():
     mesh = icosphere(10.0, subdivisions=2)
     occupancy = Occupancy(mesh, 2.0)

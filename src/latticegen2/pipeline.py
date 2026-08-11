@@ -124,8 +124,15 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     )}
 
     with Timer(rl, "boundary"):
+        # Reported per decile crossed rather than on an exact modulo: the parallel
+        # path advances in whole batches, so a `done % step == 0` test lands on a
+        # multiple only by luck and most of the run goes unreported.
+        reported = [0]
+
         def progress(done: int, total: int) -> None:
-            if done == total or done % max(1, total // 10) == 0:
+            step = max(1, total // 10)
+            if done >= total or done - reported[0] >= step:
+                reported[0] = done
                 rl.line(f"  boundary trim: {done}/{total}")
 
         boundary = trim_boundary(
@@ -140,6 +147,10 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     stats["boundary_empty"] = boundary.n_empty
     stats["workers"] = args.workers
     if boundary.max_worker_rss:
+        # Folded into the run's high-water mark as well as reported separately:
+        # the summary's "Peak memory" must be the maximum this run used anywhere,
+        # not just in the master (specification.md §3).
+        rl.note_worker_rss(boundary.max_worker_rss)
         rl.line(f"peak worker memory: {format_bytes(boundary.max_worker_rss)}")
         stats["peak_worker_memory"] = format_bytes(boundary.max_worker_rss)
 

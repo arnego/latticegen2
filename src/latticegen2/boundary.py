@@ -227,10 +227,14 @@ def trim_boundary(
             pieces = trim_junction(lp, tpl, positions[i], body, int(masks[i]))
             if not pieces:
                 result.n_empty += 1
-                continue
-            node = tuple(int(x) for x in boundary_nodes[i])
-            for shell, caps, vol in pieces:
-                result.pieces.append(BoundaryPiece(node=node, shell=shell, caps=caps, volume=vol))
+            else:
+                node = tuple(int(x) for x in boundary_nodes[i])
+                for shell, caps, vol in pieces:
+                    result.pieces.append(
+                        BoundaryPiece(node=node, shell=shell, caps=caps, volume=vol)
+                    )
+            # Reported unconditionally: a junction that produced nothing is still
+            # a junction processed, and skipping it would make the counter jump.
             if progress is not None:
                 progress(i + 1, len(boundary_nodes))
         return result
@@ -252,12 +256,22 @@ def trim_boundary(
     ctx = mp.get_context("spawn")
     with ctx.Pool(processes=workers) as pool:
         done = 0
-        for path, meta, n_empty, rss in pool.imap_unordered(_worker_trim, jobs):
+        # Ordered `imap`, not `imap_unordered`: batches still run in parallel, but
+        # results are consumed in job order, so `result.pieces` — and therefore the
+        # shape list handed to sewing — is identical run to run. Sewing resolves
+        # near-coincident vertices in the order it receives them, so an arbitrary
+        # completion order would let two runs of the same command produce
+        # byte-different output.
+        for batch_index, (path, meta, n_empty, rss) in enumerate(
+            pool.imap(_worker_trim, jobs)
+        ):
             result.n_empty += n_empty
             result.max_worker_rss = max(result.max_worker_rss, rss)
-            done += 1
+            # Report junctions, the same unit the sequential path reports, rather
+            # than batches — `imap` is ordered, so batch i is the i'th job.
+            done += len(batches[batch_index][0])
             if progress is not None:
-                progress(done, len(jobs))
+                progress(done, len(boundary_nodes))
             if path is None:
                 continue
             shape = _read_brep(path)

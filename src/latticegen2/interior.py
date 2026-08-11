@@ -293,12 +293,16 @@ class _ShellBuilder:
                 bad += 1
         return free, bad
 
-    def result(self) -> TopoDS_Shell:
-        """The shell, with OCCT's ``Closed`` flag set to the computed truth.
+    def result(self) -> tuple[TopoDS_Shell, int]:
+        """``(shell, free_edge_count)``, with OCCT's ``Closed`` flag set correctly.
 
         ``BRep_Builder`` leaves the flag false on a hand-built shell regardless
         of the geometry, and downstream code (``BRepBuilderAPI_MakeSolid``,
         validity checking) reads the flag rather than recomputing it.
+
+        The free-edge count is returned rather than left for the caller to ask
+        for again: ``closure()`` walks every edge, and at scale that map holds
+        millions of them.
         """
         free, bad = self.closure()
         if bad:
@@ -308,7 +312,7 @@ class _ShellBuilder:
                 f"orientable surface, which would make the output non-manifold."
             )
         self.shell.Closed(free == 0)
-        return self.shell
+        return self.shell, free
 
     @property
     def n_vertices(self) -> int:
@@ -387,8 +391,7 @@ def build_interior_shell(
                 out_loop.append(got)
             builder.face(out_loop, tmesh.face_normal[fi])
 
-    shell = builder.result()
-    free, _ = builder.closure()
+    shell, free = builder.result()
     stats = {
         "interior_faces": builder.n_faces,
         "interior_vertices": builder.n_vertices,

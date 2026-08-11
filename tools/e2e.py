@@ -100,7 +100,7 @@ never converts an unmeasured result into a pass.
 """
 
 
-def golden_check(rep: Report, output: str, golden: str, t: float) -> None:
+def golden_check(rep: Report, output: str, golden: str, cc: float, t: float) -> None:
     if not os.path.isfile(golden):
         print(f"  [SKIP] golden-sample comparison — {os.path.basename(golden)} not present")
         return
@@ -115,7 +115,7 @@ def golden_check(rep: Report, output: str, golden: str, t: float) -> None:
     # nothing — and label it, so a reader never mistakes it for the exact one.
     print(f"  [NOTE] exact golden comparison exceeded {GOLDEN_EXACT_BUDGET_S:.0f}s; "
           f"falling back to a sampled equivalence check")
-    agree = vg.golden_sample_agreement(output, golden)
+    agree = vg.golden_sample_agreement(output, golden, cc, t)
     rep.check("golden sample: total volume matches", agree["volume_diff"] < tol,
               f"candidate {agree['candidate_volume']:.4f} vs golden "
               f"{agree['golden_volume']:.4f} mm^3 (diff {agree['volume_diff']:.6g})")
@@ -154,7 +154,7 @@ def scenario_smoke_verified(outdir: str) -> Report:
     rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, BALL, 20.0, 4.0)
-        golden_check(rep, out, BALL_GOLDEN, 4.0)
+        golden_check(rep, out, BALL_GOLDEN, 20.0, 4.0)
     return rep
 
 
@@ -169,7 +169,7 @@ def scenario_dense_lattice(outdir: str) -> Report:
     rep.check("runtime under 10 minutes", elapsed < 600, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, CYLINDER, 10.0, 1.5)
-        golden_check(rep, out, CYLINDER_GOLDEN, 1.5)
+        golden_check(rep, out, CYLINDER_GOLDEN, 10.0, 1.5)
     return rep
 
 

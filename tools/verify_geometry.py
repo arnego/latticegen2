@@ -211,8 +211,8 @@ legitimately disagree. Only disagreements further out than this from both
 surfaces indicate an actual difference in shape."""
 
 
-def golden_sample_agreement(candidate_path: str, golden_path: str, samples: int = 200_000,
-                            seed: int = 20260810) -> dict:
+def golden_sample_agreement(candidate_path: str, golden_path: str, cc: float, t: float,
+                            samples: int = 200_000, seed: int = 20260810) -> dict:
     """Sampled equivalence between two solids, for when the exact cut is too slow.
 
     Measured: the exact boolean difference between two ~100 k-face lattices had
@@ -235,8 +235,8 @@ def golden_sample_agreement(candidate_path: str, golden_path: str, samples: int 
     """
     from latticegen2.classify import PointInside
 
-    cand_mesh = mesh_of(candidate_path, 10.0, 1.5)
-    gold_mesh = mesh_of(golden_path, 10.0, 1.5)
+    cand_mesh = mesh_of(candidate_path, cc, t)
+    gold_mesh = mesh_of(golden_path, cc, t)
     cand_shape = occ.read_step(candidate_path)
     gold_shape = occ.read_step(golden_path)
 
@@ -256,10 +256,18 @@ def golden_sample_agreement(candidate_path: str, golden_path: str, samples: int 
     # hundreds of thousands of samples against a lattice's enormous surface
     # area, some always will be.
     real = 0
-    for i in disputed:
-        p = pts[i]
-        if min(_distance_to_mesh(cand_mesh, p), _distance_to_mesh(gold_mesh, p)) > SURFACE_TIE_TOL:
-            real += 1
+    if len(disputed):
+        # Built once, outside the loop: each of these indexes every triangle in
+        # the mesh, so building them per disputed point would make the cost of
+        # this check scale with the number of disagreements times the mesh size.
+        cand_hash = SpatialHash(cand_mesh, min_cell=_SEARCH_RADIUS)
+        gold_hash = SpatialHash(gold_mesh, min_cell=_SEARCH_RADIUS)
+        for i in disputed:
+            p = pts[i]
+            near_cand = _distance_to_mesh(cand_mesh, cand_hash, p)
+            near_gold = _distance_to_mesh(gold_mesh, gold_hash, p)
+            if min(near_cand, near_gold) > SURFACE_TIE_TOL:
+                real += 1
 
     box_volume = float(np.prod(hi - lo))
     bbox_delta = float(max(np.abs(lo_c - lo_g).max(), np.abs(hi_c - hi_g).max()))
@@ -277,12 +285,20 @@ def golden_sample_agreement(candidate_path: str, golden_path: str, samples: int 
     }
 
 
-def _distance_to_mesh(mesh: TriMesh, point: np.ndarray, search: float = 1.0) -> float:
-    """Distance from a point to the nearest triangle within ``search`` mm."""
+_SEARCH_RADIUS = 1.0
+"""Millimetres. How far ``_distance_to_mesh`` looks before giving up and calling
+the point far from the surface. Well above ``SURFACE_TIE_TOL``, which is the only
+threshold the answer is ever compared against."""
+
+
+def _distance_to_mesh(mesh: TriMesh, sh: SpatialHash, point: np.ndarray) -> float:
+    """Distance from a point to the nearest triangle within ``_SEARCH_RADIUS`` mm.
+
+    Takes a prebuilt index: the caller is expected to reuse one across points.
+    """
     from latticegen2.classify import segment_triangle_dist
 
-    sh = SpatialHash(mesh, min_cell=search)
-    candidates = sh.query(point - search, point + search)
+    candidates = sh.query(point - _SEARCH_RADIUS, point + _SEARCH_RADIUS)
     if len(candidates) == 0:
         return float("inf")
     A, B, C = mesh.triangle_points

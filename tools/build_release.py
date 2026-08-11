@@ -65,9 +65,16 @@ PBS_TRIPLE = {
     "linux-x86_64": "x86_64-unknown-linux-gnu",
 }
 
-# Fixed timestamp for every archive entry. Real mtimes would make otherwise
-# identical builds differ, which would make the published SHA-256 useless as a
-# build fingerprint. 1980-01-01 is the earliest a ZIP can represent.
+# Fixed timestamp for every archive entry, so that rebuilding a commit does not
+# differ merely because time passed. 1980-01-01 is the earliest a ZIP can
+# represent.
+#
+# This makes the wheels bundle byte-identical across rebuilds. It does NOT make
+# the portable bundle so: pip generates the Windows console-script wrappers in
+# runtime/Scripts/ by appending a zip to a launcher stub, and that zip carries a
+# build timestamp we do not control. Measured, two clean builds of one ref: 8 of
+# 7366 members differ, all of them those wrappers plus the two RECORD files
+# hashing them. See docs/release.md for why they are not stripped.
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 

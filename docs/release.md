@@ -34,9 +34,37 @@ also drags in matplotlib and its dependency tree, taking the wheel set from 3
 packages to 14. See [requirements-bundle.txt](../requirements-bundle.txt) for
 the measurements behind that, including what happens if you try to remove it.
 
-Builds are reproducible: archive entries are sorted and timestamps fixed, so
-rebuilding the same commit gives a byte-identical archive (verified). That makes
-the published SHA-256 a build fingerprint rather than just a transfer checksum.
+### How reproducible the builds actually are
+
+Archive entries are sorted and their timestamps fixed, so the **wheels** bundle
+is byte-identical when the same commit is rebuilt (verified: two builds of one
+ref, same SHA-256).
+
+The **portable** bundle is not, and the reason is worth knowing before you treat
+a hash as a fingerprint. Measured across two clean sequential builds of one ref:
+7366 members, of which **8 differ** —
+
+* six `runtime/Scripts/*.exe` console-script wrappers (`f2py`, `numpy-config`,
+  `fonttools`, `pyftmerge`, `pyftsubset`, `ttx`), which pip generates by
+  appending a zip to a launcher stub, and that zip carries a build timestamp;
+* the two `.dist-info/RECORD` files that list those wrappers' hashes.
+
+Everything else — the interpreter, OCCT, OCP, VTK, NumPy, the source payload —
+is identical. None of the six wrappers is used by latticegen2.
+
+They are deliberately **not** stripped: deleting them would leave `RECORD`
+describing files that are not there, and a clean pip install tree is exactly
+what the LGPL replaceability argument in
+[`licenses/libraries.md`](../licenses/libraries.md) depends on. Trading that for
+a reproducible hash would be a bad bargain.
+
+So treat `SHA256SUMS.txt` as what it primarily is: **an integrity check for the
+transfer**, verified by the recipient against the published value. It is a build
+fingerprint for the wheels bundles only.
+
+The Linux portable bundle may well be reproducible — console scripts there are
+plain text with a shebang and no timestamp — but that has not been measured, so
+do not assume it.
 
 ---
 

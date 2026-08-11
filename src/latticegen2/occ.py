@@ -4,10 +4,9 @@ Everything in this module is a small wrapper whose only job is to keep OCCT's
 C++-shaped API (static ``*_s`` methods, out-parameters, 1-based arrays) out of
 the rest of the codebase. No lattice logic lives here.
 
-Why OCP rather than gmsh: the fuse-free architecture needs sewing, shared
-topology construction, located instances and exact validity checking, none of
-which gmsh's scripting API exposes — see
-docs/research/perf-rearchitecture-proposal.md §2 "Insight 4".
+OCP is used rather than a higher-level wrapper because this design needs the
+whole OCCT surface: sewing, shared-topology construction, located instances and
+exact validity checking.
 """
 
 from __future__ import annotations
@@ -92,7 +91,7 @@ def area(shape: TopoDS_Shape) -> float:
 
     On a trimmed face this is the *trimmed* area — the tight quantity the
     mesh-coverage gate needs, as opposed to the deliberately conservative
-    bounding box (docs/algorithm.md §11.3).
+    bounding box (docs/algorithm.md §5.1).
     """
     props = GProp_GProps()
     BRepGProp.SurfaceProperties_s(shape, props)
@@ -105,7 +104,7 @@ def bounding_box(shape: TopoDS_Shape, tol: float = 0.0) -> tuple[np.ndarray, np.
     OCCT's box is a deliberate **over-estimate** (control-point hull for
     B-splines, untrimmed UV rectangle for planes), so it is only ever sound to
     use as an upper bound — never to test whether geometry *reaches* something
-    (docs/algorithm.md §11.3).
+    (docs/algorithm.md §5.1).
     """
     box = Bnd_Box()
     box.SetGap(tol)
@@ -122,10 +121,9 @@ def bounding_box(shape: TopoDS_Shape, tol: float = 0.0) -> tuple[np.ndarray, np.
 def is_valid(shape: TopoDS_Shape) -> bool:
     """OCCT's exact B-rep validity check.
 
-    This is the gate the Julia/gmsh implementation could not express at all —
-    docs/algorithm.md §11.1 had to settle for indirect, mesh-based evidence
-    because ``BRepCheck_Analyzer`` is not reachable through gmsh's scripting
-    API.
+    This is an *exact* check on the B-rep itself, not a mesh-based approximation
+    of one, which is what makes it worth running on every output solid before a
+    run reports success (docs/algorithm.md §9).
     """
     return BRepCheck_Analyzer(shape).IsValid()
 
@@ -224,8 +222,8 @@ def mesh_shape(shape: TopoDS_Shape, deflection: float, angle: float = 0.35) -> N
     ``deflection`` is OCCT's linear (chordal) deviation target, so it *is* the
     ``d`` of docs/algorithm.md §5 rather than a proxy for it — a planar face
     meshes to a couple of exact triangles regardless of size, while curvature
-    drives refinement automatically. That is why this needs no separate maximum
-    element size the way gmsh's curvature-based sizing did.
+    drives refinement automatically, so no separate maximum element size is
+    needed.
     """
     BRepMesh_IncrementalMesh(shape, deflection, False, angle, True)
 

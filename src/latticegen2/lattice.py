@@ -12,7 +12,7 @@ The one concept this module adds beyond docs/algorithm.md is the **half-strut**:
 the half of a strut adjacent to one node, obtained by cutting every strut at its
 midpoint. Each node owns exactly six of them (``±e_k`` for ``k = 0, 1, 2``), and
 their union is the junction solid ``J`` that the whole fuse-free architecture is
-built on — see docs/research/perf-rearchitecture-proposal.md §2.
+built on — see docs/algorithm.md §3.2.
 """
 
 from __future__ import annotations
@@ -54,8 +54,7 @@ class LatticeParams:
     """All lattice geometry derived from the CLI parameters ``cc`` and ``t``.
 
     Attributes are indexed ``0:3`` for strut families ``e0, e1, e2``, matching
-    the ``k`` of docs/algorithm.md (the Julia implementation used 1-based
-    ``1:3`` for the same thing).
+    the ``k`` of docs/algorithm.md.
 
     ``e``, ``u`` and ``v`` are ``(3, 3)`` arrays whose **rows** are the
     per-direction vectors; ``B`` is the ``(3, 3)`` basis matrix whose
@@ -197,7 +196,7 @@ def candidate_nodes(lp: LatticeParams, lo: np.ndarray, hi: np.ndarray) -> np.nda
 def format_param(x: float) -> str:
     """Format a float for file names and part names without trailing zeros.
 
-    ``20.0 -> "20"``, ``1.5 -> "1.5"`` (docs/algorithm.md §8's naming rules).
+    ``20.0 -> "20"``, ``1.5 -> "1.5"`` (docs/algorithm.md §9's naming rules).
     """
     if x == int(x):
         return str(int(x))

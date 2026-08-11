@@ -3,7 +3,7 @@
 Cut every strut at its midpoint and assign each half to its nearer node. Every
 node then owns exactly six half-struts whose union is a solid that is
 **congruent at every node of the lattice**, differing only by a translation
-(docs/research/perf-rearchitecture-proposal.md §2, Insight 3). Because the three
+(docs/algorithm.md §3.2). Because the three
 strut directions are mutually orthogonal, all strut-strut overlap is contained
 inside that solid: two adjacent junctions never overlap volumetrically, they
 meet exactly on the shared mid-strut cap quad.

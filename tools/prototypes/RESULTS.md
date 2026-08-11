@@ -1,9 +1,9 @@
-# Phase 0 — de-risking measurements
+# Design measurements
 
-The five load-bearing assumptions behind the fuse-free architecture
-([../../docs/research/perf-rearchitecture-proposal.md](../../docs/research/perf-rearchitecture-proposal.md)),
-measured before the implementation was built out. Each script in this directory
-prints PASS/FAIL against its own bar and can be re-run:
+The load-bearing assumptions behind the lattice-generation architecture
+([../../docs/algorithm.md](../../docs/algorithm.md)), measured rather than
+assumed. Each script in this directory prints PASS/FAIL against its own bar and
+can be re-run:
 
 ```
 python tools/prototypes/g1_cap_integrity.py
@@ -31,9 +31,9 @@ prediction computed from independent pairwise/triple intersections.
 | `volume(J)` vs inclusion-exclusion | agreement to **≤ 4.4 × 10⁻¹⁶** relative, every combination |
 | Build time | 38–51 ms |
 
-**The expected parameter restriction does not exist.** The proposal anticipated
-needing roughly `t < cc/2`. A sweep of `t/cc` from 0.45 up to the `t < a` limit,
-at `cc ∈ {5, 10, 20}` mm, keeps all six caps throughout — the caps only stop
+**Cap integrity imposes no restriction of its own.** It was expected to need
+roughly `t < cc/2`. A sweep of `t/cc` from 0.45 up to the `t < a` limit, at
+`cc ∈ {5, 10, 20}` mm, keeps all six caps throughout — the caps only stop
 existing where the CLI already rejects the parameters. The reason is exact: a
 half-strut's reach toward an orthogonal strut direction is the profile's
 **inradius** `t/2`, not its circumradius `r = t/√2`, because a diamond profile
@@ -41,12 +41,9 @@ presents an edge rather than a corner to every orthogonal direction. So caps are
 intact for exactly `t < a`. See docs/algorithm.md §3.3; asserted in
 `test/test_junction.py`.
 
-**Consequence:** the "fall back to the legacy pipeline outside the fast path's
-parameter window" branch the guide called for was not needed and does not exist.
-
 ---
 
-## G2 — instancing and join throughput ✅ PASS (with a redesign)
+## G2 — how the interior gets joined ✅ PASS
 
 Three candidate mechanisms for joining instanced junctions, over an `m × m × m`
 grid.
@@ -71,14 +68,13 @@ from 1,000 inputs — no merging at all. Rejected.
 pairing that is already known exactly, and the cost grows clearly worse than
 linearly: 14.9 s at 1,000 junctions, still running after 250 s of CPU at 8,000.
 
-**The indexed build was written in response** and became the interior path
-(docs/algorithm.md §6): global vertices keyed by `(owning node, local template
-vertex)` through a precomputed cap correspondence, so neighbouring instances
-reference the same `TopoDS_Vertex`/`TopoDS_Edge` objects and the shell is
-watertight by construction. It is linear — **64,000 junctions / 1.55 M faces in
-199 s**, inside the gate's 5-minute bar — and its volume matches
-`N × volume(J)` exactly, which is a sound identity here because adjacent
-junctions have zero-volume contact.
+**The indexed build is what the interior path uses** (docs/algorithm.md §6):
+global vertices keyed by `(owning node, local template vertex)` through a
+precomputed cap correspondence, so neighbouring instances reference the same
+`TopoDS_Vertex`/`TopoDS_Edge` objects and the shell is watertight by
+construction. It is linear — **64,000 junctions / 1.55 M faces in 199 s** — and
+its volume matches `N × volume(J)` exactly, which is a sound identity here
+because adjacent junctions have zero-volume contact.
 
 Two things this cost to get right, both recorded in the code:
 
@@ -86,7 +82,7 @@ Two things this cost to get right, both recorded in the code:
   normal, producing a shell that is closed but encloses zero volume. Faces must
   be built on a plane whose normal is stated from the template's outward normal.
 * `BRep_Builder` leaves a hand-built shell's `Closed` flag false regardless of
-  the geometry, and `BRepBuilderAPI_MakeSolid` reads the flag. Closure is now
+  the geometry, and `BRepBuilderAPI_MakeSolid` reads the flag. Closure is
   computed from the edge-use tally (every edge exactly twice, opposite
   directions) and the flag set from that.
 
@@ -112,9 +108,9 @@ is what makes the boundary stage trivially parallel. Corroborated end-to-end —
 the `dense-lattice` run trims all 968 boundary junctions in **6.1 s** across 5
 worker processes.
 
-The localisation optimisation the proposal held in reserve (intersect the input
-body once per spatial bucket, then trim junctions against the local piece) is
-**not needed** at this input complexity and was not built.
+The localisation optimisation held in reserve (intersect the input body once per
+spatial bucket, then trim junctions against the local piece) is **not needed** at
+this input complexity and was not built.
 
 ---
 
@@ -127,33 +123,28 @@ body once per spatial bucket, then trim junctions against the local piece) is
 | write throughput | ≥ 3,000 faces/s | **3,569 faces/s** (42,336 faces, 131.9 MB, 11.9 s) |
 | round trip | solid count and volume preserved | 1 solid, volume relative error **5.8 × 10⁻¹³** |
 
-Re-reading took 28.1 s — reading is slower than writing, and at the projected
-64× scale the file itself (multi-GB) becomes the dominant cost, exactly as the
-proposal's §4 predicted. That remains an open item for the scale rehearsal
-(specification.md §10).
+Re-reading took 28.1 s — reading is slower than writing, and at large scale the
+file itself becomes the dominant cost. That remains an open item for the scale
+rehearsal (specification.md §10).
 
 ---
 
-## G5 — does COMMON preserve untouched faces bit-exactly? — **not needed**
+## Same-domain unification
 
-The gate existed to decide whether trimmed boundary junctions could be attached
-by exact index pairing, with tolerance-based sewing as the fallback. The
-implementation takes the fallback **by design**, for a reason the gate did not
-anticipate: a trimmed junction's faces come back from the boolean as new
-topology that cannot be re-indexed against the template at all, whatever the
-vertices happen to be. Boundary interfaces are therefore always stitched with a
-tolerance (1e-6 mm, against a ~1e-14 mm real discrepancy and a ≥ 0.4 mm smallest
-feature), and exact index pairing is used only on the interior path, where both
-sides are template instances and no boolean has intervened.
+Instancing merges nothing, so across every shared mid-strut interface two
+coplanar lateral faces sit unmerged — every strut carrying eight lateral faces
+where four suffice. `ShapeUpgrade_UnifySameDomain` before export recovers it, on
+`dense-lattice`:
 
-This is not a weakening: the interior is where the scaling is, and it is exact.
+| | Before | After |
+|---|---|---|
+| Faces | 29,974 | **15,966** |
+| Edges | 122,556 | **67,898** |
+| Triangles (re-tessellated) | 85,832 | **62,152** |
+| File size | 98.9 MB | **52.6 MB** |
+| Volume (mm³) | 43574.0966 | 43574.0965 |
 
----
-
-## What Phase 0 changed about the plan
-
-1. **No parameter-window restriction, and no legacy fallback path** (G1).
-2. **The interior join is a custom indexed build, not sewing or glue** (G2) — the
-   guide listed this as a "v2, only if needed" escalation; it was needed
-   immediately.
-3. **G5 became moot** once the boundary attachment strategy was settled.
+It costs ~8 s and pays for itself: export drops 9.3 s → 5.7 s and the round-trip
+check 23.5 s → 13.5 s. The template itself is already minimal — unifying it
+leaves 30 faces — so the redundancy is created entirely by instancing. See
+docs/algorithm.md §9.

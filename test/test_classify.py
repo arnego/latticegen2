@@ -1,8 +1,8 @@
 """Classification: distance primitives, the mesh gate, and node classes.
 
-Ported from the Julia ``test/test_classify.jl``, which likewise tested the pure
-algorithm against a synthetic analytic mesh so the maths is covered without a
-CAD file, plus the mesh-coverage gate cases from docs/algorithm.md §11.3.
+The pure algorithm is tested against a synthetic analytic mesh so the maths is
+covered without needing a CAD file, alongside the mesh-coverage gate cases from
+docs/algorithm.md §5.1.
 """
 
 import os
@@ -227,7 +227,7 @@ def test_interior_nodes_never_neighbour_an_outside_node():
 
 @pytest.mark.parametrize("part,cc,t", [(CYLINDER, 10.0, 1.5), (BALL, 20.0, 4.0)])
 def test_real_cad_tessellates_and_passes_the_coverage_gate(part, cc, t):
-    """docs/algorithm.md §11.3: this input was once falsely rejected outright."""
+    """Real CAD must pass the coverage gate, not merely fail to crash it."""
     lp = lattice_params(cc, t)
     shape = occ.read_step(part)
     mesh = tessellate_surface(shape, lp)
@@ -236,7 +236,8 @@ def test_real_cad_tessellates_and_passes_the_coverage_gate(part, cc, t):
 
 
 def test_every_face_of_the_cylinder_is_meshed_to_its_exact_area():
-    """The measurement that exonerated the mesh in docs/algorithm.md §11.3."""
+    """Every face must mesh to its exact trimmed area, the tight quantity the
+    coverage gate compares against (docs/algorithm.md §5.1)."""
     lp = lattice_params(10.0, 1.5)
     shape = occ.read_step(CYLINDER)
     occ.mesh_shape(shape, chordal_target(lp))
@@ -268,7 +269,7 @@ def test_coverage_gate_tolerates_a_sliver_shortfall():
 
     A pure relative test trips on the thousands of tiny trimmed faces a lattice
     has; the absolute floor is what keeps this function usable on generated
-    output as well as on input CAD (docs/algorithm.md §11.3).
+    output as well as on input CAD (docs/algorithm.md §5.1).
     """
     lp = lattice_params(10.0, 1.5)
     shape = occ.read_step(CYLINDER)

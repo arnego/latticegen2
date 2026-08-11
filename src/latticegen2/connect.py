@@ -2,9 +2,9 @@
 
 specification.md §5 forbids emitting a floating body smaller than ``t³``, and is
 emphatic that "floating" means *provably disconnected* — a small fragment that is
-still attached to the rest must never be deleted. The Julia implementation had to
-establish that by experiment, attempting a fuse and seeing what merged, which is
-both slow and inconclusive when the fuse itself fails (docs/algorithm.md §8).
+still attached to the rest must never be deleted. Establishing that by experiment,
+attempting a boolean and seeing what merges, is both slow and inconclusive when
+the boolean itself fails on degenerate input.
 
 Here connectivity is known by construction. Two junctions are joined exactly
 when they share a mid-strut cap interface, and which caps survived is recorded

@@ -134,7 +134,7 @@ def check_surface_mesh_coverage(
     over-estimates it — control-point hull for B-spline edges, untrimmed UV
     rectangle for planes — and an earlier version of this gate that required the
     mesh to *reach* it rejected a perfectly valid input file outright
-    (docs/algorithm.md §11.3). A conservative over-estimate is sound to test
+    (docs/algorithm.md §5.1). A conservative over-estimate is sound to test
     containment against and meaningless to test coverage against.
     """
     min_deficit = min_deficit_factor * min(lp.t, lp.a) ** 2
@@ -254,9 +254,8 @@ def tessellate_surface(shape: TopoDS_Shape, lp: LatticeParams) -> TriMesh:
     upper bound on the mesh's own error, which is the property the whole
     "ambiguity always degrades to BOUNDARY" guarantee rests on.
 
-    Unlike gmsh's element-size-based sizing this needs no maximum element size:
-    a planar face meshes to a couple of exact triangles however large it is, and
-    only curvature drives refinement.
+    No maximum element size is needed: a planar face meshes to a couple of exact
+    triangles however large it is, and only curvature drives refinement.
     """
     requested = chordal_target(lp)
     occ.mesh_shape(shape, requested, MESH_ANGLE)

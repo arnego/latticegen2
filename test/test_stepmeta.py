@@ -1,4 +1,4 @@
-"""STEP header rewriting — ported from the Julia ``test/test_stepmeta.jl``."""
+"""STEP header rewriting (docs/algorithm.md §9)."""
 
 import pytest
 

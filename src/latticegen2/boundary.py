@@ -4,9 +4,11 @@ Each BOUNDARY node contributes exactly one intersection: its instanced junction
 solid against the input solid. That is deliberately **one object operand per
 call**. OCCT's general boolean runs over all object operands together, so two
 overlapping objects in one call are *partitioned* against the tool rather than
-each trimmed independently — the fragmentation that cost the Julia pipeline
-dearly (docs/algorithm.md §6.3). A single already-fused junction cannot trigger
-it, by construction.
+each trimmed independently. Measured directly: three struts sharing one lattice
+node, intersected against a containing box in a single call, come back as **7**
+fragment solids instead of the 1 solid produced by fusing them first. A single
+already-fused junction cannot trigger that, by construction — which is why this
+module needs no machinery to keep operands disjoint (docs/algorithm.md §7).
 
 After trimming, every face lying in an interface cap plane is dropped, exactly
 as the interior path drops caps, so the trimmed junction presents the same
@@ -15,9 +17,9 @@ interfaces is decided by classification, not by inspecting geometry: a cap is an
 interface iff the node across it is itself kept.
 
 The work is embarrassingly parallel — constant-size, independent jobs — so it is
-distributed over worker processes with the same small-IPC discipline the Julia
-implementation used: the input body goes to disk once as a ``.brep`` and workers
-read it directly; only file paths and small metadata cross the process boundary.
+distributed over worker processes under a small-IPC discipline: the input body
+goes to disk once as a ``.brep`` and workers read it directly; only file paths
+and small metadata cross the process boundary, never geometry.
 """
 
 from __future__ import annotations

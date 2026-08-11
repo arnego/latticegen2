@@ -4,7 +4,7 @@ Builds the junction template ``J`` for every ``(cc, t)`` in the documented CLI
 range and checks that all six mid-strut cap quads survive the fuse as intact
 ``t x t`` faces, and that ``volume(J)`` matches an independent
 inclusion-exclusion prediction computed from separate pairwise/triple
-intersections (the cross-check technique of docs/algorithm.md §11.1).
+intersections, so the fuse result is never used to check itself.
 
 Pass bar: all six caps intact for every combination with ``t < cc/2``, and the
 exact boundary where they start failing recorded.

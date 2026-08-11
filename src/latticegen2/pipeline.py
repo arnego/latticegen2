@@ -336,9 +336,9 @@ def _partition_kept(comps, keep_labels: set[int], boundary_pieces):
 def _log_dropped(rl: RunLog, comps, dropped: set[int], threshold: float) -> None:
     """Report floating-body removals as one aggregate line, never one per body.
 
-    The Julia implementation logged a line per removed solid, which turned a
-    pathological run into a multi-hour, multi-thousand-line tail
-    (docs/algorithm.md §11.2). One line carries the same information.
+    A line per removed solid turns a run that drops many of them into a
+    multi-thousand-line tail, which buries the rest of the log and slows the run
+    down for no gain. One aggregate line carries the same information.
     """
     if not dropped:
         rl.line(f"floating bodies: none below the {threshold:g} mm^3 threshold")

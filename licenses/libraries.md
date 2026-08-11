@@ -20,13 +20,5 @@ satisfied by the fact that the OCCT binaries are the stock ones distributed in
 the `cadquery-ocp` wheel and can be replaced by installing a different build of
 that wheel.
 
-## Removed dependencies
-
-The previous implementation (now in [`../old-julia/`](../old-julia/)) depended on
-Julia, the Gmsh SDK, the `Gmsh.jl` binding and PackageCompiler.jl. None of them
-are used any more, so their license texts were removed along with them; they
-remain on the `v1.0` tag alongside the code that needed them.
-
-Note that dropping Gmsh also removes a **GPL-2.0-or-later** component from the
-dependency set. The remaining licenses are LGPL-2.1, Apache-2.0 and BSD-3-Clause,
-none of which imposes GPL's copyleft on this project's own source.
+No dependency carries a GPL copyleft obligation: the set is LGPL-2.1,
+Apache-2.0 and BSD-3-Clause.

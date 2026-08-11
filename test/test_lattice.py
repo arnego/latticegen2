@@ -1,7 +1,7 @@
 """Lattice mathematics — docs/algorithm.md §2.3's verified identities.
 
-Ported from the Julia ``test/test_lattice.jl``, plus the orthogonality identity
-the fuse-free architecture depends on.
+Includes the mutual-orthogonality identity the whole instancing architecture
+depends on.
 """
 
 import numpy as np

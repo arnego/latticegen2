@@ -1,7 +1,6 @@
 """STEP export: header metadata rewrite and the round-trip success gate.
 
-Ported from the Julia implementation's ``src/stepmeta.jl`` (docs/algorithm.md
-§8). STEP (ISO-10303-21) headers are plain ASCII entities of the form
+See docs/algorithm.md §9. STEP (ISO-10303-21) headers are plain ASCII entities of the form
 ``NAME(arg, ...);`` where arguments nest and quoted strings escape a literal
 ``'`` by doubling it. The helpers below are small quote-aware scanners —
 deliberately not a general STEP parser, just enough to edit the three header
@@ -171,7 +170,7 @@ def round_trip_check(path: str) -> int:
     """Re-read the written file and confirm it still contains solids.
 
     The mandatory success gate: a run only exits 0 after the file it just wrote
-    has been parsed back independently (docs/algorithm.md §8).
+    has been parsed back independently (docs/algorithm.md §9).
     """
     shape = occ.read_step(path)
     found = occ.solids(shape)

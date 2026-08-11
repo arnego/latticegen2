@@ -30,12 +30,12 @@ Run data from the script including:
 ## 2. Deployment Target & Constraints
 
 - **Runtime environment:** Windows 11 offline workstation and Linux command line
-- **Language/runtime:** **Python 3.11+**. (Originally Julia 1.10; that implementation was replaced 2026-08-10 for performance and now lives, unmaintained, in [`old-julia/`](../old-julia/).)
+- **Language/runtime:** **Python 3.11+**.
 - **Offline requirement:** Package must run with **zero network access**. Satisfied: the two dependencies (`cadquery-ocp`, `numpy`) are ordinary wheels that can be downloaded on a connected machine and installed with `pip install --no-index --find-links` offline — see README.md "Installation". Nothing contacts the network at run time: no package manager, license check or telemetry.
 - **Packaging form:** invoked as `python src/main.py <args>`, with a thin `latticegen2.bat` (Windows) / `latticegen2.sh` (Linux) wrapper provided for convenience (implemented: [latticegen2.bat](../latticegen2.bat), [latticegen2.sh](../latticegen2.sh)). No install step is needed; `pip install .` optionally provides a `latticegen2` console script.
-  [TODO: needs decision] A single-file standalone executable is no longer produced. The Julia route (PackageCompiler.jl) went away with the Julia implementation, and it was never actually built or tested. If a single-file distribution is still wanted, PyInstaller is the equivalent for this stack — say so and it can be added; otherwise a checkout plus two wheels is the distribution.
+  [TODO: needs decision] No single-file standalone executable is produced. If one is wanted, PyInstaller is the tool for this stack — say so and it can be added; otherwise a checkout plus two wheels is the distribution.
 - **Target machine specs / limits:** Main development system: 32 GB RAM, 6 core CPU, Nvidia RTX 3080 GPU, disk space for intermediate files.
-RAM and CPU cores may optionally be provided as input parameters. Since the tiling/fusion stage that genuinely needed hand-tuning no longer exists, they are now *hints* rather than a mandatory pair: without them the worker count is derived from the machine. See README.md "Changes from the Julia implementation".
+RAM and CPU cores may optionally be provided as input parameters. They are *hints* rather than a mandatory pair: without them the worker count is derived from the machine, since boundary-junction jobs are constant-size and independent.
 - **Allowed third-party libraries:** Must be compatible with the target OS/arch. License text must be obtained and put into /licenses folder, and @/licenses/libraries.md must be updated with the cross reference between the library used and the corresponding license text file valid for that library.
 - **License constraints:** TBD
 
@@ -59,10 +59,9 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | --ram | float | optional | GB | 1 - 1024 | NA | Memory budget. Advisory: recorded in the run log. |
 | --workers | int | optional | count | 1 - 128 | from `--cores`, else from the machine | Parallel worker processes for the boundary-junction stage. Overrides `--cores`. |
 
-`--tile-cells` was removed along with the tiling stage it configured, and the
-optimization parameters are no longer a mandatory either-or pair — see README.md
-"Changes from the Julia implementation" for the full list of CLI changes and why
-each was made.
+The optimization parameters are hints, not a mandatory pair: an explicit
+`--workers` overrides everything, `--cores` derives it, and with neither given it
+follows from the machine.
 
 **Exit:** 
 
@@ -126,14 +125,14 @@ Since this involves computational geometry:
   discarded once it is verified to have no geometric connection to the rest of the
   output, never merely because its own volume happens to fall below t³. A
   sub-threshold solid that is still connected to other geometry is kept.
-  Connectivity is now **proven by construction** rather than resolved
+  Connectivity is **proven by construction** rather than resolved
   experimentally: two junctions are joined exactly when they share a surviving
   mid-strut interface, so the rule is a connected-components query over a graph
-  (docs/algorithm.md §8). There is consequently no "cannot determine connectivity"
-  case left, and the exit-4 refusal the previous implementation needed is
-  unreachable. docs/algorithm.md §13.2 records the investigation that found the
-  earlier, unconditional "volume < t³ → delete" reading of this rule was deleting
-  connected junction material, not floating debris.
+  (docs/algorithm.md §8). There is consequently no "cannot determine
+  connectivity" case. Note that the distinction this rule draws is not academic:
+  a boolean intersection can leave sub-threshold junction wedges that are
+  genuinely *connected* material, and reading the rule as an unconditional
+  "volume < t³ → delete" would punch holes in the output.
   
 - **STEP schema/AP:** AP214
 
@@ -160,8 +159,8 @@ All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
 | smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | generation < 10 minutes. **Measured: 8.6 s.** |
-| smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 8.3 s, symmetric-difference volume 0.0000 mm³.** (Params corrected from an earlier -cc 10 -t 2, which didn't match the golden file's own cc20t4 name. Golden file renamed to `-golden-sample.step` 2026-08-09.) |
-| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step. Budget tightened from 60 minutes to **10 minutes** on 2026-08-10; **measured: 61 s.** The golden sample was replaced on 2026-08-10 with this implementation's own (user-verified) output, and again once same-domain unification landed; the exact symmetric-difference volume was **0 mm³** at each step, so both changed the sample's provenance and compactness, not its geometry. (Originally specified at -cc 5 -t 1; the one attempt to generate that denser golden sample under the Julia implementation ran for hours and was terminated by hand — see docs/algorithm.md §13.2 for the investigation. Params were changed 2026-08-09 to -cc 10 -t 1.5.) |
+| smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 8.3 s, symmetric-difference volume 0.0000 mm³.** |
+| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 61 s, symmetric-difference volume 0 mm³.** |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
 ### 6.2 Automated pass/fail checks
@@ -171,9 +170,7 @@ For every scenario the harness must verify, without human intervention:
 - [x] STEP file parses back successfully (round-trip read)
 - [x] Geometry is a valid closed manifold solid (no open edges / non-manifold edges)
 - [x] **Geometry passes OCCT's exact B-rep validity check** (`BRepCheck_Analyzer`) —
-      added 2026-08-10; the previous implementation could not express this test at
-      all, which is why docs/algorithm.md §13.1's self-intersection question stayed
-      open for so long
+      an exact test on the B-rep itself, not an inference from a tessellation
 - [x] No self-intersections
 - [x] **No generated material lies outside the input body** (boolean cut of output
       against input leaves ~zero volume) — a direct check of §1's "fits exactly
@@ -232,9 +229,8 @@ junctions, 1.55 M faces, 199 s — `tools/prototypes/g2_instancing_join.py`), bu
 full end-to-end run with classification, boundary trimming and STEP export at that
 size has not happened.
 
-**Why it matters:** the projection in
-docs/research/perf-rearchitecture-proposal.md §4 expects STEP *writing* to become
-the dominant cost at that scale, producing a multi-GB file with ~3 M faces. If that
+**Why it matters:** STEP *writing* is expected to become the dominant cost at
+that scale, producing a multi-GB file with ~3 M faces. If that
 holds, the bottleneck moves outside this tool — into whether SolidWorks/Catia can
 usefully import such a file — and that is a user-level decision about the output
 contract, not something to change unilaterally.

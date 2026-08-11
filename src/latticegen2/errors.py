@@ -1,9 +1,7 @@
 """Typed failure modes and their process exit codes.
 
 Every non-zero exit prints exactly one human-readable reason line naming what
-failed and why (specification.md §7). The codes below keep docs/algorithm.md
-§9's meanings, minus the ones whose failure mode the fuse-free architecture
-removed — see README.md's "Changes from the Julia implementation".
+failed and why (specification.md §7). The full table is in docs/algorithm.md §10.
 """
 
 from __future__ import annotations

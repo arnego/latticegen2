@@ -1,10 +1,7 @@
-"""CLI parsing and validation — ported from the Julia ``test/test_cli.jl``.
+"""CLI parsing and validation (specification.md §3).
 
-The flag set differs from the original (``--tile-cells`` is gone and the
-optimization parameters are optional hints now — see README.md's "Changes from
-the Julia implementation"), so the cases here follow the current surface. What
-carries over unchanged is the *validation*: ranges, the ``t < a`` cross
-constraint, and the rule that a rejected run touches no files.
+Covers the ranges, the ``t < a`` cross-constraint, path resolution, and the rule
+that a rejected run touches no files.
 """
 
 import os

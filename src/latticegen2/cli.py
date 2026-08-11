@@ -1,20 +1,12 @@
-"""Command-line surface.
+"""Command-line surface (specification.md §3).
 
-Based on specification.md §3, simplified where the fuse-free architecture made a
-parameter meaningless. The two changes, both recorded in README.md's "Changes
-from the Julia implementation":
+``--workers``, ``--cores`` and ``--ram`` are optional hints. Boundary-junction
+jobs are constant-size and independent, so a sensible worker count follows from
+the machine; an explicit ``--workers`` overrides everything.
 
-* ``--tile-cells`` is **gone**. It sized the tiles of a tiling/fusion stage that
-  no longer exists — there is nothing left for it to control.
-* ``--workers``/``--cores``/``--ram`` are now **optional hints** rather than a
-  mandatory either-or pair. Tile sizing was the thing that genuinely could not
-  be guessed safely; boundary-junction jobs are constant-size and independent,
-  so a sensible worker count follows from the machine. An explicit ``--workers``
-  still overrides everything.
-
-A hand-rolled parser is kept (rather than ``argparse``) so that ``-cc`` and
-``-t`` keep their single-dash spelling from the original tool, which ``argparse``
-would treat as clusters of short flags.
+A hand-rolled parser is used rather than ``argparse`` so that ``-cc`` and ``-t``
+can keep their single-dash spelling, which ``argparse`` would treat as clusters
+of short flags.
 """
 
 from __future__ import annotations

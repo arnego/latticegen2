@@ -110,9 +110,9 @@ Every non-zero exit prints one human-readable reason line.
 
 ## How it works
 
-Full detail is in [docs/algorithm.md](docs/algorithm.md); the reasoning behind
-the design is in
-[docs/research/perf-rearchitecture-proposal.md](docs/research/perf-rearchitecture-proposal.md).
+Full detail is in [docs/algorithm.md](docs/algorithm.md); the measurements behind
+the design choices are in
+[tools/prototypes/RESULTS.md](tools/prototypes/RESULTS.md).
 
 ```
 import → tessellate → classify → instance interior → trim boundary
@@ -137,7 +137,7 @@ Instancing does have one cost, and it is paid at the end. Because nothing is eve
 merged, two neighbouring junctions leave their coplanar lateral faces sitting
 side by side unmerged at every strut interface — twice as many faces as the
 geometry needs. A same-domain unification pass before export merges them back,
-which is what the removed boolean used to do for free.
+halving the face count and the file size.
 
 | Lever | Effect |
 |---|---|
@@ -154,72 +154,26 @@ which is what the removed boolean used to do for free.
 ### Memory
 
 Peak memory is dominated by the finished B-rep held in the master process before
-export. Measured: **305 MB** for the 80 mm test ball at `cc=20, t=4`, **1.06 GB**
-for the test cylinder at `cc=10, t=1.5` (~14 k interior faces plus 1.1 k trimmed
-boundary pieces). It scales roughly linearly with face count, which scales with
-the number of lattice nodes. Worker processes each hold one junction and the
-input body, and are negligible by comparison.
+export. Measured: **270 MB** for the 80 mm test ball at `cc=20, t=4`, **762 MB**
+for the test cylinder at `cc=10, t=1.5`. It scales roughly linearly with face
+count, which scales with the number of lattice nodes. Worker processes each hold
+one junction and the input body — 214 MB at peak on the cylinder — and the run
+log reports their high-water mark alongside the master's.
 
 ### Performance
 
-Measured on a 6-core / 32 GB Windows workstation, against the previous
-Julia/gmsh implementation (now in [`old-julia/`](old-julia/)):
+Measured on a 6-core / 32 GB Windows workstation:
 
-| Scenario | Julia/gmsh | This implementation |
-|---|---|---|
-| 80 mm ball, `cc=20 t=4` | 13 m 52 s | **7.0 s** |
-| test cylinder, `cc=10 t=1.5` | 25 m 55 s | **1 m 01 s** |
+| Scenario | Nodes (interior / boundary) | Faces | Output | Time |
+|---|---|---|---|---|
+| 80 mm ball, `cc=20 t=4` | 27 / 176 | 1,338 | 4.7 MB | **7 s** |
+| test cylinder, `cc=10 t=1.5` | 594 / 968 | 15,966 | 52.6 MB | **1 m 01 s** |
 
-Both produce the same geometry: against the golden samples the
-symmetric-difference volume is 0 mm³.
-
-Output compactness is also at parity — 15,966 faces / 52.6 MB for the test
-cylinder, against the old pipeline's 15,969 / 53.1 MB. That does not come for
-free from instancing, which merges nothing; it comes from a same-domain
-unification pass before export, which recovers what the removed boolean used to
-do as a side effect. See "How it works".
+Both match their golden samples with a symmetric-difference volume of 0 mm³, put
+0 mm³ of material outside the input body, and pass `BRepCheck_Analyzer` with zero
+self-intersections.
 
 ---
-
-## Changes from the Julia implementation
-
-The command-line surface, log format, exit codes and STEP metadata were treated
-as a starting point to improve on rather than a contract to reproduce (a
-deliberate decision — see ground rule 6 of
-[the implementation guide](docs/research/perf-rearchitecture-implementation-guide.md)).
-Everything that changed:
-
-1. **`--tile-cells` is removed.** It sized the tiles of a tiling-and-fusion stage
-   that no longer exists.
-2. **`--workers`, `--cores` and `--ram` are optional hints, not a mandatory
-   either-or pair.** The old CLI required either `--cores` *and* `--ram`, or
-   `--workers` *and* `--tile-cells`, because tile sizing genuinely could not be
-   guessed safely. Boundary-junction jobs are constant-size and independent, so a
-   worker count follows from the machine. `--workers` still overrides everything.
-3. **`--ram` is advisory.** It is recorded in the run log. There is no tile-sizing
-   calculation left for it to feed, and no memory watchdog: the stage that used to
-   need backpressure (a distributed assembly holding every tile at once) is gone.
-4. **The `t < a` cross-constraint is the only one.** An intermediate revision of
-   this implementation also rejected `t >= cc/2`, expecting the junction's
-   mid-strut interfaces to be swallowed by the node overlap. Measurement showed
-   they are not, at any valid parameters, so that restriction was removed rather
-   than shipped — see [docs/algorithm.md](docs/algorithm.md) §3.
-5. **Log lines are reformatted** (timestamped lines, one block per stage, a single
-   summary table). Every field specification.md §3 requires is still there:
-   parameters, start time, duration, run characteristics, peak memory, output
-   path.
-6. **Exit code 5 (resource limits) is retained but currently unreachable**, since
-   the memory watchdog it belonged to is gone. It is kept rather than renumbered
-   so existing codes keep their meanings.
-7. **`filter_floating!`'s exit-4 "unresolvable fragment" case cannot occur.**
-   Connectivity is proven by construction now, so there is no case where the tool
-   has to refuse to guess. The exit code still covers other processing failures.
-8. **New: exact B-rep validation.** Every output solid is checked with OCCT's
-   `BRepCheck_Analyzer` before the run reports success. The gmsh-based
-   implementation could not express this check at all.
-
-The verification tooling moved with it: `tools/verify_geometry.jl` and
-`tools/e2e.jl` are now `tools/verify_geometry.py` and `tools/e2e.py`.
 
 ## Repository layout
 
@@ -228,10 +182,9 @@ The verification tooling moved with it: `tools/verify_geometry.jl` and
 | `src/latticegen2/` | The package |
 | `src/main.py` | Runnable entry point for a bare checkout |
 | `test/` | pytest suite and the STEP test assets |
-| `tools/` | `e2e.py`, `verify_geometry.py`, and the Phase-0 `prototypes/` |
-| `docs/` | Specification, algorithm, testing guide, and the re-architecture research |
+| `tools/` | `e2e.py`, `verify_geometry.py`, and `prototypes/` (standalone benchmarks for the design's load-bearing assumptions) |
+| `docs/` | Specification, algorithm, and testing guide |
 | `licenses/` | Dependency license texts |
-| `old-julia/` | The superseded Julia/gmsh implementation, kept for reference |
 
 ## Testing
 

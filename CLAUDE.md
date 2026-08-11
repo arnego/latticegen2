@@ -21,9 +21,7 @@ Goals from most important to least important:
 ### Initial Setup
 
 Before implementing features, establish:
-- **Language/runtime**: **Python 3.11+**. (The project was originally written in
-  Julia; that implementation was replaced for performance reasons and now lives,
-  unmaintained, in `old-julia/` — see [old-julia/README.md](old-julia/README.md).)
+- **Language/runtime**: **Python 3.11+**.
 - **Dependencies** for geometry processing (note down selected geometries here)
   - Geometry kernel: **Open CASCADE (OCCT)**, accessed directly through the
     **OCP** bindings (`cadquery-ocp` wheels, which bundle the OCCT binaries).

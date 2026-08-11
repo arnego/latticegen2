@@ -75,24 +75,23 @@ python src/main.py -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke.step -v
 The self-intersection check's plane-straddle pre-check is load-bearing, not
 decoration: without it, two separate solids merely *touching* along a coincident
 face report hundreds of false crossings purely because their independent
-triangulations are not vertex-aligned (docs/algorithm.md §13.1).
+triangulations are not vertex-aligned. Measured on two boxes sharing one exact
+face with zero volume overlap: 344 false positives without the pre-check, 0 with
+it.
 
 ### Golden samples
 
-`test/80mm-test-ball-cc20t4-golden-sample.step` was produced by the previous
-Julia/gmsh implementation and is still the original file — the current
-implementation reproduces it with a symmetric-difference volume of 0.0000 mm³,
-so it remains a genuinely independent cross-check.
+`test/80mm-test-ball-cc20t4-golden-sample.step` and
+`test/test-cylinder-cc10t1.5-golden-sample.step` are reviewed baselines,
+committed after manual verification of the geometry they contain. Both are
+reproduced by the current implementation with a symmetric-difference volume of
+0 mm³.
 
-`test/test-cylinder-cc10t1.5-golden-sample.step` was **replaced on 2026-08-10**
-with the current implementation's output, after the user verified it, and then
-replaced again the same day once same-domain unification landed
-(docs/algorithm.md §9). Both replacements were geometrically no-ops — the exact
-symmetric-difference volume was 0 mm³ each time, first against the
-Julia-produced sample and then against the un-unified one — but they change the
-sample's provenance, and it is no longer an independent check of the generator
-against a different implementation. It now carries 15,966 faces in 55 MB, against
-the 29,974 faces / 98.9 MB the un-unified pipeline produced for the same solid.
+Regenerating one is a review decision, not a routine step: a golden sample only
+has value while somebody has actually looked at it. If you do replace one,
+confirm the volume-based comparison against the *existing* sample first — that
+is what distinguishes a change in how the geometry is described from a change in
+the geometry itself.
 
 Both are compared with `golden_sample_volume_diff`, which cuts candidate and
 golden against each other both ways and takes the larger remainder. That
@@ -141,7 +140,7 @@ has a *negative* net cost: it takes ~8 s but halves the face count, which takes
 more than that back out of export and the round-trip check. Removing it would
 make the run slower as well as the output twice as large.
 
-The Phase-0 de-risking measurements that chose the architecture (junction cap
+The measurements behind the architecture's load-bearing choices (junction cap
 integrity, join-mechanism throughput, per-junction intersection latency, STEP
 writer throughput) are in
 [`../tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md), with the

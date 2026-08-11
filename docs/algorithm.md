@@ -11,13 +11,6 @@ All coordinates are in millimetres, in the same coordinate system as the input
 STEP file. All angles are computed from expressions (`arcsin`, `arccos`, `sqrt`,
 …), never as hard-coded decimals, so precision is IEEE-754 double throughout.
 
-**Scope note.** This describes the current implementation, which builds the
-lattice by *instancing* one pre-fused junction solid rather than by fusing struts
-together. The previous Julia/gmsh implementation was organised around large
-boolean fusions; its design and the investigations that led to its replacement
-are preserved in §13 (History), because several of its findings are still
-load-bearing here.
-
 ---
 
 ## 1. Terminology and symbols
@@ -189,8 +182,7 @@ required, and rejected valid parameters accordingly. Measurement disproved it: a
 sweep of `t/cc` from 0.45 up to the `t < a` limit at `cc ∈ {5, 10, 20}` mm keeps
 all six caps throughout, and the analytic support calculation above explains why.
 The restriction was removed rather than shipped — refusing valid input is not an
-acceptable failure mode, which is the same lesson §13.3 records from the previous
-implementation.
+acceptable failure mode, the same principle §5.1's mesh-coverage gate rests on.
 
 `build_template` still verifies cap integrity geometrically at the run's actual
 parameters. It is a cheap defensive gate, not a documented limit: if a future
@@ -237,7 +229,7 @@ flowchart TD
     P --> Q[Print and log end-of-run summary, exit 0]
 ```
 
-Each stage maps to one source module — see §12.
+Each stage maps to one source module — see §13.
 
 ---
 
@@ -253,10 +245,11 @@ Tessellate the input solid's boundary with OCCT's `BRepMesh_IncrementalMesh`,
 asking for a linear chordal deviation of `min(t, a)/10` and an angular deflection
 of 0.2 rad.
 
-No maximum element size is needed, unlike the gmsh-based predecessor: a planar
-face meshes to a couple of *exact* triangles however large it is, and only
-curvature drives refinement. This is why the mesh is now ~1,000 triangles for the
-test cylinder where the old pipeline produced ~52,000, with no loss of fidelity.
+No maximum element size is needed: a planar face meshes to a couple of *exact*
+triangles however large it is, and only curvature drives refinement. The mesh
+stays small as a result — ~1,000 triangles for the test cylinder — without any
+loss of fidelity, because the fidelity that matters is measured directly by the
+second gate below rather than bought with element count.
 
 Two gates run on the result.
 
@@ -271,15 +264,28 @@ is used*:
   quadrature) versus the summed area of that face's triangles. Rejected only when
   the shortfall clears **both** a relative bar (`area_rel_tol`, default 0.25) and
   an absolute one (`min_deficit = min(t, a)²`, one coarsest element's worth of
-  area). Both are needed and both fire on real data — see §13.3.
+  area). Both bars are needed and both fire on real data: a relative bar alone
+  false-positives on the thousands of tiny trimmed sliver faces a *lattice* has
+  (this gate also runs on generated output, where one 0.0403 mm² face meshes to
+  75% of its area over a physically irrelevant 0.01 mm² shortfall), while an
+  absolute bar alone misses a large fractional loss on a large face (an 18.5 mm²
+  shortfall at a 0.990 ratio, measured on a heat-exchanger part).
 * **Containment** against the face's CAD bounding box as an **upper bound only** —
   every mesh node must lie inside it, inflated by 1 mm.
 
-A face with zero elements is always an error. The bounding box is deliberately
-never used to test coverage: OCCT returns the control-point hull for B-spline
-edges and the untrimmed UV rectangle for planar faces, so it over-estimates the
-true extent, and a version of this gate that required the mesh to *reach* it
-blocked a valid input file outright (§13.3).
+A face with zero elements is always an error.
+
+**The bounding box is deliberately never used to test coverage**, and this
+distinction is the whole reason the gate is split in two. OCCT's box is a
+deliberate over-estimate: for a B-spline edge it returns the hull of the control
+points, for a planar face the untrimmed UV rectangle. On a real part, one face
+reported reaching `x=190.25` while sampling its own boundary curve at 2001 points
+put the true maximum at `x=171.58` — an 18.7 mm over-reach. A conservative
+over-estimate is perfectly sound to test *containment* against (nothing may lie
+outside it) and meaningless to test *coverage* against (the mesh is not required
+to reach it). Testing coverage against it rejects valid input, which is a worse
+failure than the one the gate exists to catch: a correctness gate is only as
+trustworthy as the tightness of the quantity it compares.
 
 **Gate 2 — measured chordal deviation.** The classification margin below depends
 on a bound for how far the mesh departs from the true surface. That bound is
@@ -432,12 +438,14 @@ intersected with the input solid.
 
 **One object operand per call, always.** OCCT's general boolean runs over all
 object operands together, so two overlapping objects in one call are
-*partitioned* against the tool rather than each trimmed independently. That
-fragmentation cost the previous implementation dearly (§13.2, finding 1): three
-struts sharing a node, intersected against a containing box in one call, returned
-7 fragment solids instead of 1. A single already-fused junction cannot trigger it,
-by construction — which is why this design needs no equivalent of the old
-`trim_disjoint` machinery.
+*partitioned* against the tool rather than each trimmed independently. Measured:
+three struts sharing a node, intersected against a containing box in one call,
+return **7** fragment solids (four 0.125 mm³ junction wedges plus three 3.16 mm³
+pieces) instead of the 1 solid of 9.98 mm³ produced by fusing them first. Those
+wedges are exactly the kind of sub-threshold fragment the floating-body rule (§8)
+must never mistake for debris. A single already-fused junction cannot trigger the
+fragmentation at all, by construction — which is why this design needs no
+machinery to keep operands disjoint.
 
 After trimming, every face lying in an **interface cap plane** is dropped, exactly
 as the interior path drops caps, so the trimmed junction presents the same square
@@ -482,9 +490,9 @@ every pair is joined rather than left ambiguous: over-connecting can only keep a
 body that might have been droppable, never delete one that was attached.
 
 Removals are logged as **one aggregate line** (count, total volume, min/max, up to
-20 sample volumes), never one line per body — the pattern that turned a
-pathological run into a multi-hour logging tail in the old implementation
-(§13.2).
+20 sample volumes), never one line per body. A line per body turns a run that
+drops many of them into a multi-thousand-line tail that buries the rest of the
+log, for no information the aggregate does not already carry.
 
 **Stitching.** The interior shell and the surviving trimmed boundary pieces are
 then sewn together. Because both are fed as *shells* whose interior edges are
@@ -523,8 +531,9 @@ realistic coordinates), and stays far below the smallest real feature
   both halves of that finding.
 
   Measured on `dense-lattice`: **29,974 → 15,966 faces**, 122,556 → 67,898 edges,
-  98.9 MB → 52.6 MB — within three faces of what the old pipeline produced for
-  the same geometry. It costs ~8 s and *pays for itself*: export drops from 9.3 s
+  98.9 MB → 52.6 MB, with the exact symmetric-difference volume against the
+  un-unified solid confirming no geometry moved. It costs ~8 s and *pays for
+  itself*: export drops from 9.3 s
   to 5.7 s and the round-trip check from 23.5 s to 13.5 s, so the whole run gets
   faster. Re-tessellation also drops from 85,832 to 62,152 triangles, so
   downstream meshing and display get cheaper too.
@@ -547,10 +556,10 @@ realistic coordinates), and stays far below the smallest real feature
   becomes the bottleneck at scale (~0.24 ms/face).
 
 * **Validity gate.** Every output solid is checked with OCCT's
-  `BRepCheck_Analyzer` before export. This is an *exact* B-rep check, not a
-  mesh-based approximation of one — the gmsh-based predecessor could not express
-  it at all, which is why §13.1's self-intersection question could only be
-  answered there with indirect evidence.
+  `BRepCheck_Analyzer` before export. This is an *exact* B-rep check rather than a
+  mesh-based approximation of one, which matters because mesh-based
+  self-intersection tests have well-known false-positive modes on this kind of
+  geometry (see the plane-straddle pre-check in `tools/verify_geometry.py`).
 * **Units.** STEP I/O is pinned to millimetres defensively, even though that is
   the default: a mismatched unit would silently corrupt every dimension rather
   than fail.
@@ -565,8 +574,10 @@ realistic coordinates), and stays far below the smallest real feature
   standard document rather than a hand-patched hybrid.
 * **Round-trip self-check.** Before declaring success the written file is re-read
   and its solid count compared against what the run believes it wrote. A mismatch
-  is a failure (exit 6), not a warning — the previous implementation shipped a run
-  whose summary claimed 2 solids while the file held 113 (§13.4).
+  is a failure (exit 6), not a warning: a run whose own accounting disagrees with
+  the file it produced has not established that it wrote what it thinks it did,
+  and a summary claiming success over a file nobody checked is worse than a
+  visible error.
 
 ---
 
@@ -619,7 +630,9 @@ Because priority #1 is precision, every optimization is designed so that its
   and compared before success is reported (§9).
 * `check_surface_mesh_coverage` fails loudly rather than classifying against an
   incomplete mesh — while being careful that the gate is only as trustworthy as
-  the tightness of the quantity it compares, which is the lesson of §13.3.
+  the tightness of the quantity it compares (§5.1). A gate that rejects valid
+  input is its own violation of the principle above: "do more work" is an
+  acceptable failure mode, "refuse correct input" is not.
 
 ---
 
@@ -661,126 +674,17 @@ Alternatives evaluated and rejected:
 
 * **Voxel / marching-cubes implicit surfacing:** approximate, faceted output;
   violates the exact-B-rep requirement (spec §5).
-* **Fusing struts or tiles:** the previous architecture. OCCT boolean fuse cost
-  grows at roughly N^2.5 in operand count (§13.2), which is what made it
-  unreachable at scale.
+* **Fusing struts, or blocks of struts, into the lattice:** OCCT's boolean fuse
+  cost grows at roughly N^2.5 in operand count — measured, 192 struts in 12.4 s
+  against 648 struts in 256 s — so any design with fusion on the volume-scaling
+  path becomes unreachable well before the sizes this tool targets.
 * **`BOPAlgo_GlueFull`:** measured, does not merge (§6).
 * **CGAL Nef polyhedra:** correct and robust, but redundant once no large boolean
   exists to perform.
 
 ---
 
-## 13. History: the superseded Julia/gmsh implementation
-
-The sections below record investigations into the previous implementation, which
-built the lattice by fusing struts into tiles and then hierarchically fusing
-tiles. They are kept because several of their findings still constrain this
-design — in particular the COMMON operand-disjointness invariant (§7), the
-floating-body rule's insistence on proof before deletion (§8), the mesh-coverage
-gate's calibration (§5.1) and the export-synchronisation lesson (§9). The
-implementation itself is in [`../old-julia/`](../old-julia/) and is not
-maintained.
-
-### 13.1 Residual self-intersections on multi-tile boundary assembly
-
-`tools/verify_geometry.jl`'s self-intersection check reported ~4,343 crossing
-triangle pairs on the `smoke-fast` scenario. Two root causes were found. The
-first was a genuine bug **in the checker**: its edge-piercing test flagged two
-separate solids merely *touching* along a coincident face, because their
-independent triangulations were not vertex-aligned — 344 false positives on two
-boxes sharing one exact face. Adding a plane-straddle pre-check
-(`triangles_properly_cross`, carried forward into `tools/verify_geometry.py`)
-fixed that and dropped the count from ~18,400–32,500 to 4,343.
-
-The residual 4,343 were traced to a minimal case — three struts sharing one node,
-fused, no trimming or tiling — and attributed to thin-fold tessellation aliasing at
-non-mitered strut junctions, on five lines of converging evidence: a
-fuzzy-tolerance sweep showed no trend; refinement *increased* the count
-(0 → 52 → 926 as resolution rose, the signature of an aliasing artefact rather
-than a real crossing); inclusion-exclusion predicted the fused volume exactly
-(`79.8528137423857`, difference 0.0); the exact B-rep topology was clean (15
-faces, 36 edges, every edge bordering exactly 2 faces); and the flagged pairs lay
-between *non-adjacent* faces at reflex corners. The conclusion was recorded as
-evidenced but not proven, because no exact validity check was reachable through
-gmsh's API.
-
-**Resolved.** The current implementation has `BRepCheck_Analyzer`, and the same
-scenario now reports **0 crossing pairs** and passes exact B-rep validation. The
-open question is closed, and the diagnosis above was correct.
-
-### 13.2 The `test-cylinder-cc5t1` assembly/cleanup blow-up
-
-That scenario never completed: 1h 38m in the tile stage, then assembly hit its
-600 s circuit breaker with 11,395 of 11,443 solids still unfused, then 3,740
-"removed sub-threshold solid" log lines over 65 minutes. Four defects:
-
-1. **`common_with` fragmented overlapping boundary-strut groups, and cleanup then
-   deleted the fragments.** Three struts sharing a node, intersected against a box
-   in one call, returned **7** solids (four 0.125 mm³ junction wedges plus three
-   3.16 mm³ pieces) instead of 1 solid of 9.98 mm³ — and 0.125/0.25 were the two
-   most common values in the removal histogram. *Carried forward:* §7's
-   one-object-operand rule makes this structurally impossible.
-2. **`bounding_box`'s implicit synchronize made the AABB pre-filter a net loss.**
-   `gmsh.model.occ.synchronize()` is O(whole model) and was called once per solid,
-   per group, per round: 200 one-at-a-time box queries took 22.47 s against 0.11 s
-   for one shared sync plus 200 lookups — **202×**. *Carried forward:* the general
-   lesson that an O(model) refresh can hide inside an O(1)-looking call.
-3. **Auto-tuned tile size sat far past the fuse-cost knee.** Measured fuse cost:
-   192 struts in 12.4 s, 648 struts in 256 s — far worse than quadratic (~N^2.5).
-   The run had picked ~3,993 struts per tile from a memory-only formula. *Carried
-   forward:* the N^2.5 figure is the quantitative reason this design removes
-   fusion from the hot path entirely.
-4. **Sub-threshold removal used the slow API.** `gmsh.model.removeEntities` was
-   16× faster than the OCC-kernel `remove` for the same batch (0.74 s vs 11.97 s).
-
-An unrelated correctness bug found while investigating: `build_prototypes` left
-three "master" strut solids in the session that `gmsh.write` then exported into
-*every* tile `.brep`, adding phantom material 90+ mm outside the part.
-
-### 13.3 The mesh-coverage gate's bounding-box false positive
-
-A run produced output visibly missing a large region of lattice; the input's
-logged bounding box reached `x=190.25` while the mesh stopped at `x=171.58`. That
-was read as a truncated tessellation, and a per-face bounding-box completeness
-gate was added — which then rejected the entire `dense-lattice` scenario.
-
-**The diagnosis was wrong.** `getBoundingBox` is a deliberate over-estimate: for a
-B-spline edge it returns the control-point hull, for a planar face the untrimmed
-UV rectangle. Face 9 of `test-cylinder.STEP` reported `xmax=190.25`; sampling its
-own boundary B-spline at 2001 points gave `171.58`, and the mesh agreed. Measured
-against **exact trimmed area** instead, every face of that part was meshed to
-within 0.12%, face 9 to 0.999958. The missing lattice had a different cause
-entirely — §13.4's stale export.
-
-The gate was rebuilt to use each quantity only in the direction it is sound in
-(§5.1), with both a relative and an absolute bar, each calibrated and each shown
-to be load-bearing on real data: at `cc=10 t=1.5` a lattice *output* face of
-0.0403 mm² meshed to 75.0% (trips the relative bar, spared by the absolute one),
-while `TD_HX_Indre_Volum.step` at `cc=5 t=1` had an 18.5 mm² shortfall at a 0.990
-ratio (the reverse).
-
-**The lesson, which §3.3 of this document repeats in a new form:** a correctness
-gate is only as trustworthy as the tightness of the quantity it compares, and
-"refuse valid input" is not an acceptable failure mode even when "do more work"
-is.
-
-### 13.4 Export silently reflected stale, pre-fuse geometry
-
-A run's summary read `Solids written: 2` while the exported file contained
-**113**. `gmsh.model.occ.fuse` is an OCC-kernel-level operation and does not
-synchronize gmsh's separate model-level entity list, and the export deliberately
-used the non-syncing write (a syncing write would have resurrected entities that
-had just been removed). So the run's accounting was right and the file was stale —
-mutually-overlapping un-merged fragments delivered as the final output. Fixed
-there by an explicit `sync_model()` before removal and export.
-
-*Carried forward:* §9's round-trip check now compares the re-read solid count
-against what the run believes it wrote, so this class of discrepancy fails the run
-instead of shipping.
-
----
-
-## 14. Mapping to source modules
+## 13. Mapping to source modules
 
 | Module | Implements |
 |---|---|

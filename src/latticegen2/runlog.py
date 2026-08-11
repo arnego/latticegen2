@@ -1,11 +1,9 @@
 """Run logging: the always-on ``.log`` file, stage timings, and the summary.
 
-Follows docs/algorithm.md §9's intent — a full log is written every run
-regardless of ``-v``, which only raises *console* verbosity, and the end-of-run
-summary carries every field specification.md §3 requires (parameters, start
-time, duration, run characteristics, peak memory, output path). The exact line
-shapes are this implementation's own; see README.md's "Changes from the Julia
-implementation".
+A full log is written every run regardless of ``-v``, which only raises *console*
+verbosity, and the end-of-run summary carries every field specification.md §3
+requires: parameters, start time, duration, run characteristics, peak memory and
+output path (docs/algorithm.md §10).
 """
 
 from __future__ import annotations

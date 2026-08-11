@@ -1,0 +1,111 @@
+name: release
+
+# Pushing a v* tag builds, smoke-tests and publishes the offline bundles.
+# workflow_dispatch runs everything except the publish job, so it is a real dry
+# run rather than a different code path. See docs/release.md.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TARGET_PYTHON: '3.11'
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One failing platform should not hide the state of the other.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win64
+          - os: ubuntu-latest
+            platform: linux-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # build_release.py packages `git archive HEAD`, and the version gate
+          # compares against the tag, so the full ref is needed.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          # Must match TARGET_PYTHON: the wheels are downloaded by this
+          # interpreter and installed into a bundled runtime of the same version.
+          python-version: ${{ env.TARGET_PYTHON }}
+
+      - name: Check tag matches __version__
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          version="$(python -c "import re,pathlib; print(re.search(r'__version__\s*=\s*[\"\']([^\"\']+)', pathlib.Path('src/latticegen2/__init__.py').read_text()).group(1))")"
+          echo "tag=$tag  __version__=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "FAILED: tag v$tag does not match __version__ $version." >&2
+            echo "Fix src/latticegen2/__init__.py or re-tag; do not publish a mislabelled release." >&2
+            exit 1
+          fi
+
+      - name: Install and run unit tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+          python -m pytest test -q
+
+      - name: Build bundles
+        run: python tools/build_release.py --flavour both --target-python "${{ env.TARGET_PYTHON }}"
+
+      - name: Smoke-test the built bundles
+        shell: bash
+        run: python tools/smoke_bundle.py --platform "${{ matrix.platform }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundles-${{ matrix.platform }}
+          # Only the archives; dist/wheels is build scratch.
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          merge-multiple: true
+
+      - name: Collect assets and checksums
+        run: |
+          mkdir -p dist
+          find staged -type f \( -name '*.zip' -o -name '*.tar.gz' \) -exec mv {} dist/ \;
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          echo "--- release assets ---"
+          ls -lh
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF#refs/tags/}" \
+            --title "latticegen2 ${GITHUB_REF#refs/tags/v}" \
+            --generate-notes \
+            dist/*

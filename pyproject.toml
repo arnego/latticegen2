@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "latticegen2"
-version = "2.0.0"
+# Single-sourced from src/latticegen2/__init__.py so a release tag has exactly
+# one version to agree with (docs/release.md). Do not add a literal back here.
+dynamic = ["version"]
 description = "Parameterised diamond-strut lattice generation into a STEP boundary volume"
 requires-python = ">=3.11"
 dependencies = [
@@ -20,6 +22,9 @@ test = ["pytest>=7.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "latticegen2.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

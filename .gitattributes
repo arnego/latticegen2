@@ -1,0 +1,32 @@
+# Line endings. Deliberately surgical rather than a repo-wide `* text=auto`, so
+# adding this file does not renormalise everything. Shell scripts must reach the
+# Linux bundle with LF: a CRLF latticegen2.sh fails with "bad interpreter", and
+# the archive is built on a Windows checkout where autocrlf would otherwise
+# apply.
+*.sh    text eol=lf
+*.bat   text eol=crlf
+
+# Files excluded from `git archive`, and therefore from the release bundles that
+# tools/build_release.py assembles from it. Keeping the payload to tracked files
+# only is what guarantees a stray working-tree directory can never reach a
+# published asset.
+#
+# Rationale per entry:
+#   .claude/          local agent state, including a full duplicate checkout
+#   .github/          CI definitions, of no use to an end user
+#   CLAUDE.md         instructions for the coding agent, not for the operator
+#   docs/usernotes.md private working notes
+#   docs/release.md   the developer's release manual (docs/release.md itself)
+#   test/             59 MB of fixtures and golden samples; verification runs in
+#                     CI only (docs/specification.md §6.3)
+#   tools/            dev harnesses and the release builder
+
+/.claude            export-ignore
+/.github            export-ignore
+/.gitattributes     export-ignore
+/.gitignore         export-ignore
+/CLAUDE.md          export-ignore
+/docs/usernotes.md  export-ignore
+/docs/release.md    export-ignore
+/test               export-ignore
+/tools              export-ignore

@@ -15,8 +15,18 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 
 if [ -n "$LATTICEGEN2_PYTHON" ]; then
     PY="$LATTICEGEN2_PYTHON"
-elif [ -x "$DIR/runtime/bin/python3" ]; then
+elif [ -d "$DIR/runtime" ]; then
+    # A portable bundle. Never fall through to a system interpreter from here:
+    # that one has no numpy or OCP, so the operator would get a confusing
+    # ModuleNotFoundError instead of the actual problem, which is almost always
+    # an extraction that dropped the executable bit.
     PY="$DIR/runtime/bin/python3"
+    if [ ! -x "$PY" ]; then
+        echo "FAILED: $PY is not executable." >&2
+        echo "  Extracting this bundle lost file permissions. Restore them with:" >&2
+        echo "    chmod +x '$DIR/latticegen2.sh' '$DIR/runtime/bin/'*" >&2
+        exit 1
+    fi
 elif [ -x "$DIR/.venv/bin/python" ]; then
     PY="$DIR/.venv/bin/python"
 else

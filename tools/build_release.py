@@ -114,6 +114,17 @@ def human(size: int) -> str:
     return f"{size / 1e6:.1f} MB"
 
 
+def write_text(path: Path, text: str):
+    """Write a generated file with LF endings on every build host.
+
+    Path.write_text() opens in text mode, so on Windows it silently turns every
+    \\n into \\r\\n -- which would ship a CRLF install.sh. .gitattributes pins the
+    committed shell scripts to LF for exactly this reason; generated ones bypass
+    git entirely, so they have to say it here.
+    """
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def rmtree(path: Path):
     if path.exists():
         shutil.rmtree(path, onerror=_force_remove)
@@ -347,10 +358,9 @@ def collect_runtime_licenses(runtime: Path, stage: Path, asset: str):
         print("    WARNING: no LICENSE.txt in the runtime distribution; "
               "licenses/runtime/ will be incomplete -- check the archive layout")
 
-    (dest / "README.md").write_text(
-        RUNTIME_LICENSE_README.format(
-            asset=asset, repo=PBS_REPO, release=PBS_RELEASE),
-        encoding="utf-8")
+    write_text(dest / "README.md",
+               RUNTIME_LICENSE_README.format(
+                   asset=asset, repo=PBS_REPO, release=PBS_RELEASE))
 
 
 # --------------------------------------------------------------------------
@@ -464,12 +474,14 @@ echo "Done. Run: ./latticegen2.sh -i part.step -cc 10 -t 1.5"
 def write_install_scripts(stage: Path, target_python: str):
     major, minor = target_python.split(".")[:2]
     bat = stage / "install.bat"
+    # install.bat is deliberately CRLF: cmd.exe is the consumer, and some older
+    # shells mis-parse a LF-only batch file. install.sh must be LF.
     bat.write_text(
         INSTALL_BAT.replace("__TARGET__", target_python)
                    .replace("__MAJOR__", major).replace("__MINOR__", minor),
-        encoding="utf-8")
+        encoding="utf-8", newline="\r\n")
     sh = stage / "install.sh"
-    sh.write_text(INSTALL_SH.replace("__TARGET__", target_python), encoding="utf-8")
+    write_text(sh, INSTALL_SH.replace("__TARGET__", target_python))
     sh.chmod(0o755)
 
 
@@ -555,7 +567,7 @@ OCCT is LGPL-2.1 and ships as stock, unmodified shared libraries inside the
 build of that wheel using the bundled pip, which is what preserves your rights
 under that licence. See `licenses/libraries.md`.
 '''}"""
-    (stage / "README-OFFLINE.md").write_text(text, encoding="utf-8")
+    write_text(stage / "README-OFFLINE.md", text)
 
 
 def write_bundle_info(stage: Path, *, version: str, flavour: str,
@@ -578,7 +590,7 @@ def write_bundle_info(stage: Path, *, version: str, flavour: str,
         if line and not line.startswith("#"):
             lines.append(f"  {line}")
     lines.append("")
-    (stage / "BUNDLE-INFO.txt").write_text("\n".join(lines), encoding="utf-8")
+    write_text(stage / "BUNDLE-INFO.txt", "\n".join(lines))
 
 
 # --------------------------------------------------------------------------
@@ -619,7 +631,11 @@ def make_zip(stage: Path, top: str, out: Path):
             info.compress_type = zipfile.ZIP_DEFLATED
             mode = 0o755 if is_executable(path, rel) else 0o644
             info.external_attr = mode << 16
-            zf.writestr(info, path.read_bytes())
+            # Streamed rather than read whole: the bundle contains an 87.6 MB
+            # OCP extension module and comparable VTK libraries, and writestr
+            # would hold each one entirely in memory.
+            with path.open("rb") as src, zf.open(info, "w") as dst:
+                shutil.copyfileobj(src, dst, 1 << 20)
 
 
 def make_targz(stage: Path, top: str, out: Path):

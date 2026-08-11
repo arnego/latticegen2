@@ -62,6 +62,12 @@ jobs:
           python -m pytest test -q
 
       - name: Build bundles
+        env:
+          # build_release.py resolves the python-build-standalone asset through
+          # api.github.com. Unauthenticated that is 60 requests/hour per IP, and
+          # runners share egress addresses, so without this the build fails with
+          # an HTTP 403 that looks nothing like a rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python tools/build_release.py --flavour both --target-python "${{ env.TARGET_PYTHON }}"
 
       - name: Smoke-test the built bundles

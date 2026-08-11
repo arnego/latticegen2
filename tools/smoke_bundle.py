@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -41,11 +42,29 @@ def fail(message: str) -> int:
     return 1
 
 
+def read_version() -> str:
+    """Read __version__ without importing the package."""
+    text = (ROOT / "src" / "latticegen2" / "__init__.py").read_text(encoding="utf-8")
+    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.M)
+    if not match:
+        raise SystemExit("FAILED: no __version__ in src/latticegen2/__init__.py")
+    return match.group(1)
+
+
 def find_archive(dist: Path, platform: str, flavour: str) -> Path | None:
+    """Locate the archive for the version currently in the source tree.
+
+    Matching the exact version rather than taking the newest-looking name is
+    deliberate: dist/ is not cleared between builds, and sorting names as
+    strings puts 2.9.0 after 2.10.0, so a "pick the last one" rule would happily
+    smoke-test a stale bundle and report PASSED for something that is not the
+    artifact about to be published.
+    """
+    version = read_version()
     for suffix in (".zip", ".tar.gz"):
-        matches = sorted(dist.glob(f"latticegen2-*-{platform}-{flavour}{suffix}"))
-        if matches:
-            return matches[-1]
+        candidate = dist / f"latticegen2-{version}-{platform}-{flavour}{suffix}"
+        if candidate.exists():
+            return candidate
     return None
 
 
@@ -93,13 +112,23 @@ def check_exec_bits(bundle: Path, flavour: str) -> int:
 
 
 def check_crlf(bundle: Path) -> int:
-    sh = bundle / "latticegen2.sh"
-    if not sh.exists():
+    """Every shell script in the bundle must be LF, whatever host built it.
+
+    Checked for all of them, not just the committed launcher: install.sh is
+    generated at build time and so bypasses .gitattributes entirely.
+    """
+    problems = 0
+    scripts = [p for p in (bundle / "latticegen2.sh", bundle / "install.sh")
+               if p.exists()]
+    if not any(p.name == "latticegen2.sh" for p in scripts):
         return fail("latticegen2.sh missing from bundle")
-    if b"\r\n" in sh.read_bytes():
-        return fail("latticegen2.sh has CRLF line endings; it will not run on Linux")
-    print("  [ok]   latticegen2.sh has LF line endings")
-    return 0
+    for script in scripts:
+        if b"\r\n" in script.read_bytes():
+            problems += fail(
+                f"{script.name} has CRLF line endings; it will not run on Linux")
+        else:
+            print(f"  [ok]   {script.name} has LF line endings")
+    return problems
 
 
 def run_install(bundle: Path) -> int:

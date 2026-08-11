@@ -25,9 +25,19 @@ Linux uses `.tar.gz` rather than `.zip` on purpose: ZIP loses the executable
 bit in most extractors, and a portable Linux bundle whose `runtime/bin/python3`
 is not executable is inert.
 
-Measured on Windows: **182 MB** portable, **158 MB** wheels. Linux is larger —
-its `vtk` wheel is 146 MB against Windows' 81 MB — but has not been built yet at
-the time of writing; the first CI run will tell you.
+Measured sizes, from the first full CI run of both platforms:
+
+| Bundle | Size |
+|---|---|
+| `win64-portable.zip` | 182.3 MB |
+| `win64-wheels.zip` | 157.7 MB |
+| `linux-x86_64-portable.tar.gz` | 282.5 MB |
+| `linux-x86_64-wheels.tar.gz` | 251.4 MB |
+
+Linux is the larger of the two because its wheel set is 255 MB against Windows'
+160 MB — the `vtk` wheel alone is 146 MB there versus 81 MB. A full release is
+therefore roughly 875 MB across the four assets, all well inside GitHub's 2 GB
+per-asset limit.
 
 About 60% of a bundle is VTK, which latticegen2 never calls but cannot drop. It
 also drags in matplotlib and its dependency tree, taking the wheel set from 3

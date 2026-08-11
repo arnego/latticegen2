@@ -30,13 +30,13 @@ jobs:
             platform: linux-x86_64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # build_release.py packages `git archive HEAD`, and the version gate
           # compares against the tag, so the full ref is needed.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           # Must match TARGET_PYTHON: the wheels are downloaded by this
           # interpreter and installed into a bundled runtime of the same version.
@@ -74,7 +74,7 @@ jobs:
         shell: bash
         run: python tools/smoke_bundle.py --platform "${{ matrix.platform }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bundles-${{ matrix.platform }}
           # Only the archives; dist/wheels is build scratch.
@@ -90,9 +90,9 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: staged
           merge-multiple: true

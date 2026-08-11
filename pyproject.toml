@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "latticegen2"
+version = "2.0.0"
+description = "Parameterised diamond-strut lattice generation into a STEP boundary volume"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "cadquery-ocp>=7.7",
+]
+
+[project.scripts]
+latticegen2 = "latticegen2.__main__:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+python_files = ["test_*.py"]

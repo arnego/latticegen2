@@ -30,12 +30,12 @@ Run data from the script including:
 ## 2. Deployment Target & Constraints
 
 - **Runtime environment:** Windows 11 offline workstation and Linux command line
-- **Julia version:** 1.10
-- **Offline requirement:** Package must run with **zero network access**. List anything that currently requires network (package managers, license checks, telemetry) so it can be eliminated or vendored.
-- **Packaging form:** Julia project invoked as `julia --project=. src/main.jl <args>`, with a thin `latticegen2.bat` (Windows) / `latticegen2.sh` (Linux) wrapper script provided for convenience (implemented: [latticegen2.bat](../latticegen2.bat), [latticegen2.sh](../latticegen2.sh)).
-Using PackageCompiler.jl a standalone-executable distribution for windows must be created. Build tooling implemented: [`tools/build_app.jl`](../tools/build_app.jl) (isolated build-time dependency in [`tools/build/Project.toml`](../tools/build/Project.toml), entry point [`src/app_entry.jl`](../src/app_entry.jl)) — see README.md "Building a standalone executable". The actual compiled `.exe` has not yet been built or tested; running `tools/build_app.jl` takes ~15-45+ minutes and was deferred by user decision (2026-08-08) to keep this session's footprint small — do so before relying on this for distribution.
-- **Target machine specs / limits:** Main development system: 32 GB RAM, 6 cure CPU, Nvidia RTX 3080 GPU , disk space for intermediate meshes
-RAM and CPU cores should optinally be provided as input parameters, and optimization parameters should be determined automatically thereafter. If RAM and CPU cores are not provided, the optimization parameters must be provided explicitly instead.
+- **Language/runtime:** **Python 3.11+**.
+- **Offline requirement:** Package must run with **zero network access**. Satisfied: the two dependencies (`cadquery-ocp`, `numpy`) are ordinary wheels that can be downloaded on a connected machine and installed with `pip install --no-index --find-links` offline — see README.md "Installation". Nothing contacts the network at run time: no package manager, license check or telemetry.
+- **Packaging form:** invoked as `python src/main.py <args>`, with a thin `latticegen2.bat` (Windows) / `latticegen2.sh` (Linux) wrapper provided for convenience (implemented: [latticegen2.bat](../latticegen2.bat), [latticegen2.sh](../latticegen2.sh)). No install step is needed; `pip install .` optionally provides a `latticegen2` console script.
+  [TODO: needs decision] No single-file standalone executable is produced. If one is wanted, PyInstaller is the tool for this stack — say so and it can be added; otherwise a checkout plus two wheels is the distribution.
+- **Target machine specs / limits:** Main development system: 32 GB RAM, 6 core CPU, Nvidia RTX 3080 GPU, disk space for intermediate files.
+RAM and CPU cores may optionally be provided as input parameters. They are *hints* rather than a mandatory pair: without them the worker count is derived from the machine, since boundary-junction jobs are constant-size and independent.
 - **Allowed third-party libraries:** Must be compatible with the target OS/arch. License text must be obtained and put into /licenses folder, and @/licenses/libraries.md must be updated with the cross reference between the library used and the corresponding license text file valid for that library.
 - **License constraints:** TBD
 
@@ -50,15 +50,18 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | Flag | Type | Required | Units | Range | Default | Description |
 |------|------|----------|-------|-------|---------|-------------|
 | -i --input | path | required | NA | NA | NA | Path to STEP file defining the lattice bounds |
-| -o --output | path | optional | NA | NA | NA | Path and name of the output .step file, otherwise generated (e.g. input_file_name-cc5t1|
-| -cc | float | required | mm | 0.4 - 50 | NA | Distance between the bottom nodes of two adjecent cells |
-| -t | float | required  | mm | 0.4 - 20 | NA | Side length of the diamond rod profile |
-| -bg --background | flag | optional | NA | NA | disabled | Run worker processes at below-normal priority to reduce desktop impact |
+| -o --output | path | optional | NA | NA | `<input_stem>-cc<cc>t<t>.step` | Path and name of the output .step file |
+| -cc | float | required | mm | 0.4 - 50 | NA | Distance between the bottom nodes of two adjacent cells |
+| -t | float | required  | mm | 0.4 - 20 | NA | Side length of the diamond rod profile. Must be smaller than the cell edge `a = cc/√2`; that is the only cross-constraint. |
+| -bg --background | flag | optional | NA | NA | disabled | Run at below-normal priority to reduce desktop impact |
 | -v --verbose | flag | optional | NA | NA | disabled | Enable verbose console diagnostics while always writing a full `.log` file. |
-| --cores | int | optional | count | 1 - 128 | NA | Physical CPU cores available for auto-tuning optimization parameters (§2). Mutually exclusive with `--workers`/`--tile-cells`. |
-| --ram | int | optional | GB | 1 - 1024 | NA | RAM budget available for auto-tuning optimization parameters (§2). Mutually exclusive with `--workers`/`--tile-cells`. |
-| --workers | int | required if `--cores`/`--ram` not given, forbidden otherwise | count | 1 - 128 | NA | Explicit number of parallel worker processes for the tiling stage (§2). |
-| --tile-cells | int | required if `--cores`/`--ram` not given, forbidden otherwise | count | 2 - 64 | NA | Explicit lattice-cell edge length (cells per tile axis) for the tiling stage (§2). |
+| --cores | int | optional | count | 1 - 128 | detected | Physical CPU cores available; `--workers` is derived from it as `min(cores-1, 8)`. |
+| --ram | float | optional | GB | 1 - 1024 | NA | Memory budget. Advisory: recorded in the run log. |
+| --workers | int | optional | count | 1 - 128 | from `--cores`, else from the machine | Parallel worker processes for the boundary-junction stage. Overrides `--cores`. |
+
+The optimization parameters are hints, not a mandatory pair: an explicit
+`--workers` overrides everything, `--cores` derives it, and with neither given it
+follows from the machine.
 
 **Exit:** 
 
@@ -66,13 +69,13 @@ Upon success the script shall produce an end of run summary report in the .log f
  - The runs input parameters 
  - Date and time of run start
  - Duration from start to completion
- - Run characteristics (number of tiles, number of parallel threads per stage of the generation procedure, etc)
+ - Run characteristics (node classification counts, boundary pieces, worker count, connected components, face/vertex/edge counts of the assembled shell, etc)
  - Maximum memory usage
  - Path to output .step file 
 
 Upon failure, the script shall output a human readable reason for the failure, e.g.: parameter bounds exceeded, issues with input geometry, issues with resarouces from the run-time system, write or read access issues, etc.
 
-Upon cancellation by the user (Ctrl+C), the script shall shut down gracefully rather than terminate abruptly: worker processes are stopped in an orderly way (force-stopped only if they do not respond within a short grace period), a single human readable `CANCELLED` line is written to console and `.log` file, the temporary folder is left in place for analysis, and the exit code is 130. See docs/algorithm.md §9.1.
+Upon cancellation by the user (Ctrl+C), the script shall shut down gracefully rather than terminate abruptly: worker processes are stopped in an orderly way (force-stopped only if they do not respond within a short grace period), a single human readable `CANCELLED` line is written to console and `.log` file, the temporary folder is left in place for analysis, and the exit code is 130. See docs/algorithm.md §10.
   
 **Logging:**
 
@@ -83,10 +86,10 @@ A log file should be produced every run with the same name as the output file wh
 ## 4. Geometry Domain Specification
 
 ### 4.1 Lattice unit cell type
-The base geometry for the lattice is a strut-based uniform grid forming cube-like cells standing on its tip. The struts form the boundries of the cells along each edge. The struts have the profile of a square standing on one corner, like a diamond. In other words; for each strut the square profile is oriented so one diagonal lies in the vertical plane containing the strut axis and the Z-axis, and the other diagonal is horizontal. See docs/algorithm.md §2.2 for the exact frame construction. Verified: [`profile_vertices`](../src/lattice.jl) builds each profile from `u_k = normalize(cross((0,0,1), e_k))` (horizontal) and `v_k = cross(e_k, u_k)` (vertical-plane) exactly per docs/algorithm.md §3.1.
+The base geometry for the lattice is a strut-based uniform grid forming cube-like cells standing on its tip. The struts form the boundries of the cells along each edge. The struts have the profile of a square standing on one corner, like a diamond. In other words; for each strut the square profile is oriented so one diagonal lies in the vertical plane containing the strut axis and the Z-axis, and the other diagonal is horizontal. See docs/algorithm.md §3.1 for the exact frame construction. Verified: [`profile_vertices`](../src/latticegen2/lattice.py) builds each profile from `u_k = normalize(cross((0,0,1), e_k))` (horizontal) and `v_k = cross(e_k, u_k)` (vertical-plane) exactly per docs/algorithm.md §3.1, and `test/test_lattice.py` asserts both the frame orientation and that the profile is a square of side `t`.
 
 The dimentions of the square profile is defined by input parameter `t`. Upon inspection of the end result, the struts are reclined from the normal axis (Z-axis) in degrees by the following calculation in numpy: np.degrees(np.arcsin(np.sqrt(2/3)))
-Make sure to sure the native exact definition in native Jula language. It should be close to 55 degrees (but not exactly).
+Make sure to use the exact expression rather than a decimal literal. It should be close to 55 degrees (but not exactly).
 The distance between base points of each cell on the XY plane is defined by input parameter `cc`.
 Upon inspection the rods protruding up from the xy plane from an intersecting node are separated by an angle of 120 degrees around the Z-axis.
 
@@ -104,14 +107,15 @@ Upon inspection the rods protruding up from the xy plane from an intersecting no
 ### 4.4 Performance & Optimization
 
 See [algorithm.md](algorithm.md) for the full normative algorithm specification,
-including the exact lattice math, pipeline/classification/tiling diagrams, and the
-detailed optimization strategy this section summarizes.
+including the exact lattice math, the pipeline and classification diagrams, and
+the detailed optimization strategy this section summarizes.
 
 Since this involves computational geometry:
 - Profile geometry generation routines to identify bottlenecks
-- Consider vectorization or parallelization for lattice tiling
-- Cache expensive calculations (e.g., basis functions for triply-periodic surfaces)
-- If caching to disk is used, put the files in a temporary folder `temp/<date><time>` where the output file is generated to. Clean up after a sucessful run. Leave for error analysis if the fun failes.
+- Consider vectorization or parallelization
+- Cache expensive calculations — the dominant instance of this is the junction
+  template, computed once per run and instanced at every node (algorithm.md §3.2)
+- If caching to disk is used, put the files in a temporary folder `temp/<date><time>` where the output file is generated to. Clean up after a sucessful run. Leave for error analysis if the run fails.
 
 ---
 
@@ -120,13 +124,15 @@ Since this involves computational geometry:
   This rule targets **floating (disconnected) bodies only** — a solid is only ever
   discarded once it is verified to have no geometric connection to the rest of the
   output, never merely because its own volume happens to fall below t³. A
-  sub-threshold solid that is still connected to other geometry (e.g. a junction
-  fragment produced by an upstream boolean operation that hasn't fully converged) is
-  kept, and if that connectivity cannot be resolved automatically the run fails rather
-  than guessing (exit 4). See docs/algorithm.md §8 for the exact resolve-then-classify
-  algorithm and docs/algorithm.md §11.2 for the investigation that found the earlier,
-  unconditional "volume < t³ → delete" reading of this rule was deleting connected
-  junction material, not floating debris.
+  sub-threshold solid that is still connected to other geometry is kept.
+  Connectivity is **proven by construction** rather than resolved
+  experimentally: two junctions are joined exactly when they share a surviving
+  mid-strut interface, so the rule is a connected-components query over a graph
+  (docs/algorithm.md §8). There is consequently no "cannot determine
+  connectivity" case. Note that the distinction this rule draws is not academic:
+  a boolean intersection can leave sub-threshold junction wedges that are
+  genuinely *connected* material, and reading the rule as an unconditional
+  "volume < t³ → delete" would punch holes in the output.
   
 - **STEP schema/AP:** AP214
 
@@ -148,29 +154,40 @@ List concrete parameter sets that must be run automatically (at minimum: one sma
 case, one large/dense case, one edge case at parameter boundaries, one expected-failure
 case for invalid input).
 
+All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
+
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
-| smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | generation < 10 minutes, quick test not applicable for output geometry verification |
-| smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step — implemented as `tools/e2e.jl`'s `smoke-verified e2e` testset. (Params corrected from an earlier -cc 10 -t 2, which didn't match the golden file's own cc20t4 name; test/80mm-test-ball-cc20t4-golden-sample.step was generated with cc=20/t=4, so the scenario's params were changed to match it. Golden file renamed from test/80mm-test-ball-cc20t4.step to test/80mm-test-ball-cc20t4-golden-sample.step 2026-08-09.) |
-| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 60 minutes — harness implemented as `tools/e2e.jl`'s `dense-lattice e2e` testset, but it self-skips because the golden sample does not exist yet. Originally specified at -cc 5 -t 1, the one attempt to generate that denser golden sample ran for hours and was manually terminated (not a crash — the run's own log recorded exactly what was happening throughout; see docs/algorithm.md §11.2 for the full investigation): an auto-tuned tile size well past the fuse-time performance knee left assembly with 11k+ unfused solids, and the (now-fixed) unconditional sub-threshold cleanup rule was deleting connected junction material one solid at a time for over an hour. Root cause diagnosed and fixed (docs/algorithm.md §7.1, §6.3, §8); the scenario's params were changed 2026-08-09 to -cc 10 -t 1.5 (a less dense lattice capable of finishing within a reasonable time) with a 60-minute budget. Regenerating the golden sample at these params is a follow-up step, not automated here (committing a golden sample is a decision for whoever reviews the regenerated run's output). |
-| invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 --workers 1 --tile-cells 4 (strut size `t` >= cell edge `a=cc/√2`) | exits nonzero (exit 2), no `.step` or `.log` file written — implemented as `tools/e2e.jl`'s `invalid-input e2e` testset |
+| smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | generation < 10 minutes. **Measured: 8.6 s.** |
+| smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 8.3 s, symmetric-difference volume 0.0000 mm³.** |
+| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 61 s, symmetric-difference volume 0 mm³.** |
+| invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
 ### 6.2 Automated pass/fail checks
 For every scenario the harness must verify, without human intervention:
-- [ ] Process exits with expected console output
-- [ ] STEP file is written and non-empty
-- [ ] STEP file parses back successfully (round-trip read with the same or an
-      independent library)
-- [ ] Geometry is a valid closed manifold solid (no open edges / non-manifold edges)
-- [ ] No self-intersections
-- [ ] Bounding box of output matches requested `--input` within tolerance
-- [ ] Runtime stays under an agreed performance budget for each scenario size: `smoke-fast` < 10 minutes and `smoke-verified` < 20 minutes (both measured against the 80mm test ball; enforced in `tools/e2e.jl`'s `BUDGET_SECONDS`/`VERIFIED_BUDGET_SECONDS`). `dense-lattice`'s budget remains TBD until a golden sample exists to establish a baseline against (§6.1).
-- [ ] If golden sample is defined, check similarity of geometriers by running a geometry check script that inspects if the output geometry is inhibiting the same volume as the golden sample (e.g. subtraction either way should leave near zero volume). 
+- [x] Process exits with expected console output
+- [x] STEP file is written and non-empty
+- [x] STEP file parses back successfully (round-trip read)
+- [x] Geometry is a valid closed manifold solid (no open edges / non-manifold edges)
+- [x] **Geometry passes OCCT's exact B-rep validity check** (`BRepCheck_Analyzer`) —
+      an exact test on the B-rep itself, not an inference from a tessellation
+- [x] No self-intersections
+- [x] **No generated material lies outside the input body** (boolean cut of output
+      against input leaves ~zero volume) — a direct check of §1's "fits exactly
+      within the user's boundary geometry", independent of any golden sample
+- [x] Bounding box of output matches requested `--input` within tolerance
+- [x] Runtime stays under an agreed performance budget: `smoke-fast` and
+      `dense-lattice` < 10 minutes, `smoke-verified` < 20 minutes
+- [x] If a golden sample is defined, check similarity of geometries by subtracting
+      candidate and golden both ways; the larger remainder must be near zero
 
 
 ### 6.3 How verification runs offline
 - Verification runs only in the dev/CI environment.
-- Test runner: Test scripts and assets are separated into separate `tools/` folder.
+- Test runner: `pytest` for unit tests in `test/` (alongside the STEP assets the
+  scenarios reference); whole-run harnesses and geometry checks are in `tools/`
+  (`e2e.py`, `verify_geometry.py`). Both run offline — the only extra dependency
+  over the tool itself is `pytest`.
 - Results are reported as console summary for analysis and addition to the pull-request.
 
 ---
@@ -193,28 +210,6 @@ TBD
 *Anything you're unsure about — list it here explicitly so it doesn't get silently
 assumed by default. Delete each line once resolved.*
 
-- **`dense-lattice` golden sample still needs to be generated and reviewed.**
-  [TODO: needs decision] The earlier appearance of a crash (§6.1) was root-caused and
-  fixed — see docs/algorithm.md §11.2 — but no one has yet reviewed a full run's output
-  and committed it as the golden sample
-  test/test-cylinder-cc10t1.5-golden-sample.step (params changed
-  2026-08-09 from the original -cc 5 -t 1 to a less dense -cc 10 -t 1.5, §6.1).
-  Committing a golden sample is a judgement call about what "correct output" is, so it
-  stays a decision for whoever owns the test fixture rather than something to pick a
-  default for.
-
-  **Resolved (2026-08-09), previously listed here as a blocker:** a prior revision of
-  this item recorded that `test/test-cylinder.STEP` had a real CAD defect gmsh could not
-  tessellate, blocking this scenario outright. That was **wrong** — the mesh was correct
-  and the file needs no repair. The pipeline's own mesh-coverage gate was testing mesh
-  completeness against OCC's deliberately over-estimating bounding box and falsely
-  rejecting the file; the gate now compares against exact trimmed face area instead.
-  See docs/algorithm.md §11.3 for the corrected investigation. The scenario has since
-  been run end-to-end at these params (exit 0, 25m 55s, inside the 60-minute budget;
-  output verified manifold, free of self-intersections, and reaching the part's true
-  extent), so no decision about replacing or repairing the test fixture is needed —
-  only the golden-sample review above remains.
-
 ---
 
 ## 10. Roadmap features or bugs to fix in later sessions
@@ -224,63 +219,48 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### `filter_floating!` has no time budget (progress logging added 2026-08-09)
+### Scale rehearsal at the stated future size has not been run
 
-**What's broken:** `filter_floating!` (`src/pipeline.jl`, the export-stage
-floating-body-only cleanup gate — docs/algorithm.md §8) has **no `max_seconds` circuit
-breaker**, unlike `balanced_fuse!`, which has both a budget and progress logging
-(docs/algorithm.md §6.5). Its per-component `overlap_components` resolution loop calls
-`fuse_all` on every ambiguous multi-member component with nothing bounding how long
-that can take in aggregate. **Progress logging (item 3 below) was added on 2026-08-09**
-— one line up front (solid/component/ambiguous-component counts), one line every 10s
-of wall time while resolving, one summary line when done, all via `log_line(rl, ...)`
-so they land in the `.log` file always and on console when `-v`/`rl.verbose` — but the
-loop still has no upper bound on total time (items 1, 2 below remain open).
+**What's missing:** the stated future workload is parts ~8× larger in volume at
+`cc=5, t=1` — roughly 64× more lattice cells than `dense-lattice`. Nothing at that
+size has actually been generated. The architecture was chosen partly on projections
+for it, and the interior path was measured standalone at that scale (64,000
+junctions, 1.55 M faces, 199 s — `tools/prototypes/g2_instancing_join.py`), but a
+full end-to-end run with classification, boundary trimming and STEP export at that
+size has not happened.
 
-**How it was found:** re-verifying the `test-cylinder-cc5t1` scenario
-(`-i test/test-cylinder.STEP -cc 5 -t 1 --cores 6 --ram 20 -bg`) after the fixes in
-docs/algorithm.md §11.2. `tile_stage` completed in 11 minutes (vs. 1h 38m before,
-confirming those fixes work). Assembly then left roughly 239–325 solids unresolved per
-merge group — curved-surface boundary-trim fragments that don't share exactly
-coincident faces after trimming, a known OCCT robustness limit (docs/algorithm.md §6.5
-"Fuse-failure fallback"), not a new bug. `filter_floating!` then ran **silently for 56+
-minutes with zero log output** before being manually killed at ~2.5h total elapsed.
-This reproduces, in new code, the exact class of problem (an invisible, unbounded
-long-running cleanup step) the whole session's fix work was aimed at eliminating.
+**Why it matters:** STEP *writing* is expected to become the dominant cost at
+that scale, producing a multi-GB file with ~3 M faces. If that
+holds, the bottleneck moves outside this tool — into whether SolidWorks/Catia can
+usefully import such a file — and that is a user-level decision about the output
+contract, not something to change unilaterally.
 
-**How to fix it:**
-1. Add a `max_seconds` parameter to `filter_floating!`, checked before each
-   ambiguous component's `fuse_all` attempt — mirror `balanced_fuse!`'s pattern
-   exactly (check-then-attempt, not mid-call preemption, since OCCT calls can't be
-   interrupted once started).
-2. On budget exhaustion, any sub-threshold member of a component that hasn't yet been
-   resolved must be treated as **unresolved**, exactly like a fuse-failure case already
-   is — hard-fail (`ProcessingError`, exit 4) per the existing policy of never
-   guessing whether an unresolved connected fragment is safe to delete. Do not
-   silently keep or drop it just because the clock ran out.
-3. ~~Add per-component progress logging~~ **Done (2026-08-09):** `filter_floating!`
-   now takes a `progress_seconds::Real=10.0` keyword and logs an up-front summary line,
-   a progress line every `progress_seconds` of wall time while resolving ambiguous
-   (multi-member) components, and a completion summary line — see the updated
-   docstring in `src/pipeline.jl`. Deliberately scoped to logging only, per explicit
-   user request; items 1, 2, 4, 5 below remain open follow-up work, not implied by
-   this change.
-4. Add a regression test exercising a slow/many-component scenario (an injectable
-   `fuse_fn` — already supported for the hard-fail test in `test/test_cleanup.jl` —
-   can simulate this without needing genuinely slow geometry).
-5. Re-run the full `test-cylinder-cc5t1` scenario end-to-end afterward and confirm the
-   export stage now completes (or hard-fails) within a bounded, logged time, then
-   compare the whole run against the pass-criteria table used for this fix (tile_cells
-   ≤ 8, full-interior > 0, no un-budgeted silent stage, tile_stage < 20 min).
+**How to do it:** scale `test/test-cylinder.STEP` 2× linearly, run at `cc=5, t=1`,
+and record the per-stage table, peak RSS, output file size and write time. Compare
+against the proposal's projections. Report the file-size finding to the user rather
+than acting on it.
 
-**Where things stand:** progress logging (item 3) implemented and covered by a minimal
-unit test in `test/test_cleanup.jl` (`filter_floating! logs progress for ambiguous
-components`, using the existing injectable-`fuse_fn` pattern with a synthetic 2-member
-component — no genuinely slow geometry needed). The `max_seconds` circuit breaker
-(items 1, 2) and the full `test-cylinder-cc5t1` end-to-end re-run (item 5) are still
-not started. The verification run that originally found this issue was killed by
-explicit user choice rather than left running indefinitely or fixed on the spot. ~944 MB
-of diagnostic temp files from that killed run may still be on disk in whatever
-scratchpad directory that session used, under `cylinder_verify/temp/20260809-002344`,
-if useful for follow-up analysis — treat that path as ephemeral and verify it still
-exists before relying on it.
+**Watch the `simplify` stage there specifically.** Same-domain unification
+(docs/algorithm.md §9) runs at roughly 0.24 ms/face, so ~3 M faces implies on the
+order of 12 minutes. At `dense-lattice` scale it more than pays for itself by
+halving the file that export and the round-trip check then have to handle, but
+that trade has only been measured at ~30 k faces. It unifies each solid
+independently, so it parallelises across solids if it needs to.
+
+### Boundary stitching is the remaining superlinear step
+
+**What it is:** the interior is built by indexed instancing and is linear, but
+trimmed boundary junctions are joined with `BRepBuilderAPI_Sewing`, which was
+measured at 14.9 s per 1,000 shells and growing worse than linearly
+(docs/algorithm.md §6). Boundary count grows with surface area rather than volume,
+so this is not currently a bottleneck — `dense-lattice` spends 12.5 s there — but it
+is the term that will bite first at the 64× size above.
+
+**How to fix it if needed:** the pairing is not arbitrary. Each trimmed junction
+knows which cap interfaces it kept, so the stitching could be done per-interface
+against known partners instead of by global geometric search, or the interior
+shell's own index could be extended to absorb boundary pieces whose caps came
+through the trim intact (which is the common case — see docs/algorithm.md §5.3).
+Measure before building either: this only matters once the boundary count is in the
+tens of thousands.
+

@@ -1,314 +1,196 @@
 # latticegen2
 
-Parametric generation of PCM heat exchanger lattice geometry. `latticegen2` fills the
-solid volume of an input STEP part with a diamond-strut lattice, trimmed exactly to the
-input geometry's boundary, and writes the result as a single watertight AP214 STEP file
-(possibly multiple bodies if the input geometry cuts the lattice into disconnected
-islands). See [docs/specification.md](docs/specification.md) for the full requirements
-this tool implements, and [docs/algorithm.md](docs/algorithm.md) for the exact algorithm
-and optimization strategy.
+Generates a parameterised diamond-strut lattice that fills the solid volume of an
+input STEP file, and writes it back out as an exact B-rep AP214 STEP body in the
+same coordinate system.
 
-## Contents
+```bash
+latticegen2.bat -i part.step -cc 10 -t 1.5
+```
 
-- [Dependencies](#dependencies)
-- [Installation](#installation)
-- [Offline deployment](#offline-deployment)
-- [Usage](#usage)
-- [Parameter reference](#parameter-reference)
-- [Input format](#input-format)
-- [Output format](#output-format)
-- [Example workflows](#example-workflows)
-- [Memory usage](#memory-usage)
-- [Algorithm overview](#algorithm-overview)
-- [Testing](#testing)
+The lattice is a simple cubic grid of nodes rotated so its body diagonal points
+along +Z — cube cells standing on a tip. Struts run along the cube edges, each
+with a square profile turned 45° so one diagonal is horizontal (a "diamond"
+cross-section). `-cc` sets the XY-plane distance between the bottom nodes of
+adjacent cells and `-t` the strut profile's side length.
+
+---
 
 ## Dependencies
 
-| Dependency | Role | License |
-|---|---|---|
-| [Julia](https://julialang.org/) 1.10 | Language runtime | MIT |
-| [Gmsh.jl](https://github.com/JuliaFEM/Gmsh.jl) 0.3 | Only third-party Julia dependency: binds the Gmsh SDK (which bundles the OCCT B-rep kernel) for STEP/BREP I/O, meshing, and boolean geometry operations | MIT (binding); GPL-2.0-or-later w/ exception (gmsh SDK); LGPL-2.1 (OCCT) |
+| Dependency | Version | Why | License |
+|---|---|---|---|
+| Python | 3.11 or newer | Runtime | PSF |
+| [OCP](https://github.com/CadQuery/OCP) (`cadquery-ocp`) | 7.7+ | Python bindings for the Open CASCADE (OCCT) geometry kernel — STEP I/O, booleans, sewing, meshing, exact validity checking | Apache-2.0 (OCP), LGPL-2.1 (OCCT) |
+| NumPy | 1.24+ | Vectorised classification and indexing | BSD-3-Clause |
 
-Everything else used by `src/` is Julia standard library (`Dates`, `Distributed`,
-`LinearAlgebra`, `Printf`, `Test`) — no other third-party packages. License texts for
-all of the above are in [licenses/](licenses/), cross-referenced in
-[licenses/libraries.md](licenses/libraries.md).
+Nothing else. License texts are in [`licenses/`](licenses/), cross-referenced in
+[`licenses/libraries.md`](licenses/libraries.md).
+
+**Nothing contacts the network at runtime.** Installation does, once.
 
 ## Installation
 
-Requires Julia 1.10, managed via [juliaup](https://github.com/JuliaLang/juliaup):
-
-**Windows:**
-```bash
-winget install --id Julialang.Juliaup -e
-juliaup add 1.10
-juliaup default 1.10
-```
-
-**Linux:**
-```bash
-curl -fsSL https://install.julialang.org | sh
-juliaup add 1.10
-juliaup default 1.10
-```
-
-Then, from the repository root, resolve and precompile the project's one dependency
-(this is the **only step in the whole workflow that needs network access** —
-`specification.md` §2's offline requirement applies to every subsequent run):
+Online, on a machine that can reach PyPI:
 
 ```bash
-julia --project=. -e "using Pkg; Pkg.instantiate(); Pkg.precompile()"
+python -m pip install numpy cadquery-ocp
 ```
 
-Verify the install:
-```bash
-julia --project=. -e "using Pkg; Pkg.test()"
-```
-
-## Offline deployment
-
-`latticegen2` must run with zero network access once installed (specification.md §2).
-`Manifest.toml` is committed to this repository specifically so that `Pkg.instantiate()`
-always resolves to the exact same dependency versions — this is what makes the following
-offline transfer procedure reproducible:
-
-1. On a machine with network access, run the Installation steps above (this populates
-   `~/.julia` — or `%USERPROFILE%\.julia` on Windows — with every package/artifact
-   `latticegen2` needs, including the Gmsh SDK binaries).
-2. Copy the entire Julia install directory (from `juliaup`) and the entire `~/.julia`
-   depot directory to the offline machine, along with this repository.
-3. On the offline machine, either restore `juliaup`'s directory layout, or point Julia
-   at the copied depot via the `JULIA_DEPOT_PATH` environment variable.
-4. Run `julia --project=. -e "using Pkg; Pkg.instantiate()"` once more **offline** — with
-   the depot already populated, this only verifies/links the local cache and requires no
-   network access.
-
-## Building a standalone executable
-
-As an alternative to the depot-copy procedure above, [PackageCompiler.jl](https://github.com/JuliaLang/PackageCompiler.jl)
-can produce a self-contained Windows distribution — a `latticegen2.exe` with its own
-bundled Julia runtime, sysimage, and artifacts (the same `gmsh_jll`/`OCCT_jll` binaries
-the normal invocation uses) — that runs on a machine with no Julia install at all
-(specification.md §2). This is a **build-time-only** tool: `PackageCompiler` is declared
-in its own environment, [tools/build/Project.toml](tools/build/Project.toml), never in
-the root `Project.toml`, so it is never resolved by an ordinary
-`julia --project=. src/main.jl` run.
+Offline (the deployment target — specification.md §2), download the wheels on a
+connected machine and carry them over:
 
 ```bash
-# Once, on a machine with network access (fetches PackageCompiler.jl itself):
-julia --project=tools/build -e "using Pkg; Pkg.instantiate()"
-
-# Build (takes on the order of 15-45+ minutes; output is several hundred MB):
-julia --project=tools/build tools/build_app.jl
+python -m pip download numpy cadquery-ocp -d wheels
 ```
 
-This produces `build/latticegen2-app/bin/latticegen2.exe`, which takes the same
-arguments as `latticegen2.bat`:
+then, on the offline workstation:
 
 ```bash
-build\latticegen2-app\bin\latticegen2.exe -i <input.step> -cc <mm> -t <mm> [options]
+python -m pip install --no-index --find-links wheels numpy cadquery-ocp
 ```
 
-`build/` is gitignored — it's a local build artifact, not something checked in. The
-entry point PackageCompiler calls, [`julia_main()`](src/app_entry.jl), just `include`s
-`src/main.jl`, so the built executable and the `julia --project=. src/main.jl`/wrapper-
-script invocation run identical code (see `src/app_entry.jl`'s docstring for why it's
-structured that way rather than as an ordinary function).
+No install step is needed for latticegen2 itself — it runs straight from a
+checkout via `src/main.py` or the wrapper scripts. To install it as a command
+instead, `python -m pip install .` provides a `latticegen2` entry point.
 
 ## Usage
 
 ```bash
-julia --project=. src/main.jl -i <input.step> -cc <mm> -t <mm> [options]
+latticegen2.bat -i part.step -cc 10 -t 1.5 -v          # Windows
+./latticegen2.sh -i part.step -cc 10 -t 1.5 -v         # Linux
+python src/main.py -i part.step -cc 10 -t 1.5 -v       # directly
 ```
 
-or, using the convenience wrapper (equivalent, same arguments):
+Set `LATTICEGEN2_PYTHON` if the interpreter you want is not the default `python`.
 
-```bash
-./latticegen2.sh -i <input.step> -cc <mm> -t <mm> [options]      # Linux
-latticegen2.bat -i <input.step> -cc <mm> -t <mm> [options]       # Windows
-```
-
-Exactly one of the following two parameter pairs is required, in addition to `-i`,
-`-cc`, and `-t`:
-
-- `--cores <n> --ram <GB>` — auto-tune the number of parallel worker processes and tile
-  size from the given hardware budget (docs/algorithm.md §7.1).
-- `--workers <n> --tile-cells <n>` — use these optimization parameters directly, no
-  auto-tuning/calibration probe.
-
-Run `julia --project=. src/main.jl --help` for the full flag summary.
-
-The wrapper scripts pass `-t auto` to Julia, enabling Julia's own thread pool (distinct
-from the `--cores`/`--workers` `Distributed` *process* pool above) for the classification
-stage's threaded per-strut loop. Invoking `src/main.jl` directly without `-t auto` (or
-`JULIA_NUM_THREADS` set) still works, just single-threaded for that stage.
-
-### Cancelling a run
-
-Press **Ctrl+C** to stop a run in progress. The tool shuts down in order rather than
-dying on the spot: in-flight tiles are allowed to unwind, the worker processes are
-stopped (force-stopped only if one is stuck inside a long geometry-kernel operation
-and does not exit within ~2 seconds), a single `CANCELLED: ...` line goes to the
-console and the `.log` file, and the exit code is `130`. The run's `temp/<timestamp>/`
-directory is kept, so completed tiles remain available for inspection. See
-docs/algorithm.md §9.1.
-
-## Parameter reference
+### Parameters
 
 | Flag | Type | Required | Units | Range | Default | Description |
-|------|------|----------|-------|-------|---------|-------------|
-| `-i`, `--input` | path | **yes** | — | — | — | Input STEP file defining the lattice bounds |
-| `-o`, `--output` | path | no | — | — | `<input_stem>-cc<cc>t<t>.step`, next to the input | Output `.step` path |
-| `-cc` | float | **yes** | mm | 0.4–50 | 5 (see note below) | XY-plane distance between the bottom nodes of two adjacent cells (cube edge `a = cc/√2`) |
-| `-t` | float | **yes** | mm | 0.4–20, and `t < cc/√2` | 1 (see note below) | Side length of the diamond strut profile |
-| `--cores` | int | one of these two pairs required | count | 1–128 | — | Physical cores available, for auto-tuning |
-| `--ram` | float | " | GB | 1–1024 | — | RAM budget available, for auto-tuning |
-| `--workers` | int | " | count | 1–128 | — | Explicit parallel worker process count |
-| `--tile-cells` | int | " | count | 2–64 | — | Explicit tile edge length, in lattice cells. **Values above 8 are counter-productive**: per-tile fuse cost grows well past quadratic with strut count (~N^2.5, measured), so a tile past that point can take *much* longer to fuse than the memory savings are worth. Auto-tuning (`--cores`/`--ram`) never picks above 8 for this reason (docs/algorithm.md §7.1); prefer it over a large explicit `--tile-cells` unless you have a specific reason to pick your own. |
-| `-bg`, `--background` | flag | no | — | — | disabled | Run at below-normal OS scheduling priority |
-| `-v`, `--verbose` | flag | no | — | — | disabled | Verbose console output (the `.log` file is always written in full regardless) |
-| `-h`, `--help` | flag | no | — | — | — | Show usage and exit |
+|---|---|---|---|---|---|---|
+| `-i`, `--input` | path | yes | — | — | — | STEP file whose solid defines the lattice bounds |
+| `-cc` | float | yes | mm | 0.4 – 50 | — | XY distance between the bottom nodes of adjacent cells |
+| `-t` | float | yes | mm | 0.4 – 20 | — | Side length of the diamond strut profile |
+| `-o`, `--output` | path | no | — | — | `<input_stem>-cc<cc>t<t>.step` | Output STEP path |
+| `--workers` | int | no | count | 1 – 128 | from `--cores`, else from the machine | Worker processes for the boundary stage |
+| `--cores` | int | no | count | 1 – 128 | detected | Physical cores available; `--workers` is derived as `min(cores-1, 8)` |
+| `--ram` | float | no | GB | 1 – 1024 | — | Memory budget; recorded in the log |
+| `-bg`, `--background` | flag | no | — | — | off | Run at below-normal process priority |
+| `-v`, `--verbose` | flag | no | — | — | off | Verbose console output (a full `.log` is always written) |
+| `-h`, `--help` | flag | no | — | — | — | Usage |
 
+`-t` must be smaller than the cell edge `a = cc/√2`; a thicker strut cannot fit
+inside one cell. That is the only cross-constraint.
 
-Every parameter is validated — including the `t < cc/√2` cross-constraint (a strut
-thicker than the cube edge cannot fit in one lattice cell) — **before any computation
-starts** (specification.md §7). Invalid parameters exit with code `2` and a
-human-readable reason.
+### Output
 
-## Input format
+* **`<output>.step`** — the lattice, AP214, millimetres, exact B-rep. Usually one
+  solid; more if the input geometry trims struts into genuinely disconnected
+  islands (specification.md §1). The STEP header carries the part name
+  `<input_stem>+cc<cc>+t<t>` and the generation parameters.
+* **`<output>.log`** — always written, with the full run header, per-stage
+  timings, and the end-of-run summary. `-v` only raises *console* verbosity; it
+  never changes what the log contains.
 
-Any STEP file (AP203/AP214/AP242 — all import successfully via the OCCT kernel)
-containing at least one solid volume, in millimeters, in whatever coordinate system the
-output should be placed in (the lattice is generated directly in the input's own
-coordinate system — no re-centering or scaling). Both files under
-[test/](test/) are real example inputs (an 80 mm test sphere and a larger real
-heat-exchanger cavity volume).
+### Exit codes
 
-**Input mesh check:** every classification decision depends on the surface mesh gmsh
-builds from your STEP file, so after tessellation the tool verifies that each face's
-mesh covers that face's exact trimmed area (OCCT Gauss quadrature) and stays inside the
-face's CAD bounding box. A face that fails either test raises a clear
-`InputGeometryError` (exit 3) naming the face and the measured shortfall, rather than
-silently generating a lattice with a region missing. If you hit this, the input face
-likely needs repair in the originating CAD tool. (Note: an earlier release reported one
-of the STEP files in `test/` as defective under this check. That was a false positive —
-the check compared coverage against OCC's deliberately over-estimating bounding box; it
-now compares exact areas. See docs/algorithm.md §11.3.)
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 2 | Parameter validation failure (before any computation) |
+| 3 | Input geometry could not be read, parsed, or faithfully meshed |
+| 4 | Geometry processing failure |
+| 5 | Resource limit |
+| 6 | Output write failure or failed round-trip check |
+| 130 | Cancelled by the user with Ctrl+C |
 
-## Output format
+Every non-zero exit prints one human-readable reason line.
 
-- **Schema:** STEP AP214 (`AUTOMOTIVE_DESIGN`), exact B-rep solid geometry, millimeters
-  (specification.md §5 — the spec's original `AP203` requirement was changed to AP214 by
-  user decision, since the OCCT kernel used here writes AP214 natively).
-- **Bodies:** normally one solid; the file may contain **multiple** disconnected solid
-  bodies if the input geometry's boundary cuts some struts into islands disconnected
-  from the main lattice (specification.md §1) — this is expected, not an error. No
-  floating body smaller than `t³` mm³ is ever emitted (specification.md §5).
-- **No outer shell:** the lattice is not wrapped in a bounding solid shell — struts are
-  trimmed flush against the input boundary and are meant to be merged with an
-  enveloping part on import (specification.md §4.3).
-- **Metadata:** the STEP model/part name is `<input_stem>+cc<cc>+t<t>`, and the file's
-  `FILE_DESCRIPTION` header entry additionally records the full generation parameters
-  (input path, `cc`, `t`, generation timestamp) — see docs/algorithm.md §8.
-- **Log file:** every run also writes `<output_stem>.log` (never `<output>.step.log`),
-  containing the full run header, per-stage timings, and end-of-run summary
-  (specification.md §3) — always written in full regardless of `-v`.
+---
 
-## Example workflows
+## How it works
 
-Explicit worker/tile parameters (no auto-tuning, fully reproducible regardless of host):
-```bash
-julia --project=. src/main.jl -i test/80mm-test-ball.step -cc 10 -t 2 \
-    --workers 4 --tile-cells 6 -v
-```
-
-Auto-tuned from a 6-core / 32 GB workstation, running at below-normal priority so it
-doesn't disturb interactive desktop use:
-```bash
-julia --project=. src/main.jl -i test/TD_HX_Indre_Volum.step -cc 5 -t 1 \
-    --cores 6 --ram 24 -bg -v
-```
-
-Custom output path:
-```bash
-julia --project=. src/main.jl -i part.step -cc 8 -t 1.5 -o out/part_lattice.step \
-    --workers 8 --tile-cells 8
-```
-
-## Memory usage
-
-Priority #2 (after correctness): the tool must never destabilize the host by
-over-committing RAM (specification.md "Key Considerations"). docs/algorithm.md §7
-describes the full model; in summary:
-
-- With `--cores`/`--ram`, a small calibration probe (an isolated, synthetic 4×4×4-cell
-  reference block — independent of the actual input geometry) measures both
-  memory-per-strut and fuse time before any real work starts. Tile size is bounded by
-  **both**: memory (`workers × struts_per_tile × mem_per_strut ≤ 0.6 × RAM budget` —
-  the 0.6 factor reserves headroom for the master process, OS, and the geometry
-  kernel's own working memory beyond steady-state) *and* fuse time (extrapolated from
-  the probe, conservatively assuming worst-case quadratic growth), then hard-capped at
-  8 cells regardless — per-tile fuse cost was measured growing well past quadratic
-  (~N^2.5) with strut count, so memory headroom alone is not a safe sizing signal past
-  that point (docs/algorithm.md §7.1, §11.2).
-- A runtime watchdog pauses dispatch of new tiles (without killing in-flight work) if
-  observed memory trends toward 0.8× the RAM budget, bounded to at most 120 s of
-  continuous pause per dispatching task before resuming anyway (memory usage is a
-  monotonic high-water mark within a run, so an unbounded wait here would be a
-  guaranteed hang, not a slow pause).
-- Large intermediate results — the imported input body, each tile's fused geometry, and
-  each distributed assembly merge round's output — are staged to disk as `.brep` files
-  under `temp/<yyyymmdd-HHMMSS>/`, next to the output file (specification.md §4.4) —
-  kept for post-mortem analysis on failure, deleted automatically on success. The final
-  hand-off from assembly to export is the one exception: it stays in one gmsh session
-  rather than round-tripping the completed lattice through disk a last time.
-- With `--workers`/`--tile-cells` given explicitly instead, no calibration runs; memory
-  behavior is directly determined by the tile size you choose — smaller tiles use less
-  memory per worker at some cost to speed (fewer struts fused per boolean operation
-  amortizes worse — see the optimization table below).
-
-## Algorithm overview
-
-Full detail, exact math, and mermaid diagrams: **[docs/algorithm.md](docs/algorithm.md)**.
-In brief, the pipeline is:
+Full detail is in [docs/algorithm.md](docs/algorithm.md); the measurements behind
+the design choices are in
+[tools/prototypes/RESULTS.md](tools/prototypes/RESULTS.md).
 
 ```
-parse args -> import STEP -> tessellate surface -> classify every candidate
-strut (interior / boundary / outside, via mesh-distance + ray-cast) -> tile
-struts into n×n×n blocks -> process boundary tiles + one reference interior
-tile in parallel worker processes (trimming boundary struts via the
-operand-disjointness-safe trim_disjoint, dropping tile-local floating
-islands) -> reproduce every other full-interior tile via cheap
-copy+translate (periodicity shortcut) -> distributed hierarchical assembly
-(merge rounds across worker processes, final fuse on the master) ->
-floating-body-only cleanup (filter_floating!) -> export STEP + rewrite
-header -> round-trip verify
+import → tessellate → classify → instance interior → trim boundary
+       → connect → stitch → simplify → validate → write STEP → round-trip verify
 ```
 
-Optimization strategy (docs/algorithm.md §11/§11.2 has the full complexity analysis
-and investigation history):
+The load-bearing idea is that **the lattice needs almost no boolean operations at
+all.** The three strut directions are mutually orthogonal, so if every strut is
+cut at its midpoint and each half assigned to its nearer node, every node owns
+six half-struts whose union — the *junction solid* — is congruent at every node in
+the lattice. All strut-strut overlap lives inside that solid; two adjacent
+junctions never overlap in volume, they meet exactly on a shared square face.
+
+So the whole interior is one solid, instanced. Neighbouring instances drop their
+shared face and reference the *same* vertices and edges through a precomputed
+index correspondence, which makes the result watertight by construction rather
+than by tolerance. Only junctions that straddle the input surface need a boolean,
+and each gets exactly one single-operand intersection, distributed across worker
+processes.
+
+Instancing does have one cost, and it is paid at the end. Because nothing is ever
+merged, two neighbouring junctions leave their coplanar lateral faces sitting
+side by side unmerged at every strut interface — twice as many faces as the
+geometry needs. A same-domain unification pass before export merges them back,
+halving the face count and the file size.
 
 | Lever | Effect |
 |---|---|
-| Curvature-adaptive surface tessellation | Avoids over-refining large gently-curved regions (~100x fewer triangles than a uniform fine target on the 80mm test ball) |
-| Classify-before-boolean | Expensive OCCT booleans only run on the O(surface-area) boundary struts, not the whole O(volume) candidate set |
-| Spatial-hash-accelerated ray casting (3D DDA) | Point-in-solid tests only visit mesh triangles in cells the ray actually crosses, not the whole mesh |
-| Threaded classification (`Threads.@threads`, needs `-t auto`/`JULIA_NUM_THREADS` — the wrapper scripts set this) | Parallel per-strut classification within each process, layered under the process-level parallelism below |
-| `trim_disjoint` / COMMON operand-disjointness invariant | Prevents boundary-strut trimming from fragmenting mutually-overlapping struts into extra pieces — a correctness fix, not just a speed one (docs/algorithm.md §6.3, §11.2) |
-| Multi-operand fuse per tile | One n-way OCCT GeneralFuse beats incremental pairwise fusing |
-| Unit-tile copy+translate (periodicity shortcut) | The dominant interior-volume fuse cost collapses to one fuse total, plus cheap copies |
-| Worker-side floating-island removal | Drops provably-floating sub-threshold solids at the tile that produced them, before they ever reach assembly or export |
-| Process-parallel tiles *and* assembly (`Distributed`) | Scales across cores despite the geometry kernel not being thread-safe; assembly merges tiles in rounds across the same worker pool instead of one giant single-session master fuse, bounding peak master memory to the last round's survivors |
-| Longest-processing-time-first tile dispatch | Large tiles start first, so the tail of the tile stage isn't dominated by a handful of big tiles starting last while other workers sit idle |
-| Balanced hierarchical fuse, spatial-locality batched, AABB pre-filtered (one shared sync per round) | Bounded per-call operand complexity; batches of spatially-adjacent solids; groups with no bounding-box overlap (the only unconditionally-safe fallback case) skip the OCCT call entirely — with the box-lookup cost paid once per round, not once per solid (a per-solid sync was measured 202× slower and made this filter a net loss for a long time, docs/algorithm.md §11.2); a generous wall-clock circuit breaker guards against a runaway fuse without cutting off legitimate work, since doing so risks leaving self-intersecting geometry un-fused |
-| `filter_floating!`: resolve-then-classify cleanup | Only ever deletes solids proven disconnected (never merely "small"); an unresolvable connected sub-threshold fragment fails the run rather than being silently deleted or kept (docs/algorithm.md §8) |
-| Calibration probe (memory *and* time) + dual-bounded tile sizing + RSS watchdog | Memory stability on the target workstation, and tile sizes that stay below the measured fuse-time performance knee |
+| Classify before intersecting | Booleans run only for the O(surface area) boundary junctions, not the O(volume) interior |
+| One junction template, instanced | The only general fuse in the program is six operands, once per run (~40 ms) |
+| Indexed shared-topology shell | Interior assembly is O(nodes) with exact watertightness — no sewing, no tolerance |
+| One object operand per intersection | Makes OCCT's operand-fragmentation failure mode structurally unreachable |
+| Connectivity by graph, not by boolean | The floating-body rule is a BFS over surviving interfaces |
+| Sewing confined to the boundary | Stitching cost scales with surface area, not volume |
+| Process-parallel boundary junctions | Constant-size independent jobs |
+| Same-domain unification before export | Instancing merges nothing, so coplanar faces meet unmerged at every strut interface; unifying them halves the face count and file size — and makes the run *faster*, since export and verification then handle half as much |
+| Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |
+
+### Memory
+
+Peak memory is dominated by the finished B-rep held in the master process before
+export. Measured: **270 MB** for the 80 mm test ball at `cc=20, t=4`, **762 MB**
+for the test cylinder at `cc=10, t=1.5`. It scales roughly linearly with face
+count, which scales with the number of lattice nodes. Worker processes each hold
+one junction and the input body — 214 MB at peak on the cylinder — and the run
+log reports their high-water mark alongside the master's.
+
+### Performance
+
+Measured on a 6-core / 32 GB Windows workstation:
+
+| Scenario | Nodes (interior / boundary) | Faces | Output | Time |
+|---|---|---|---|---|
+| 80 mm ball, `cc=20 t=4` | 27 / 176 | 1,338 | 4.7 MB | **7 s** |
+| test cylinder, `cc=10 t=1.5` | 594 / 968 | 15,966 | 52.6 MB | **1 m 01 s** |
+
+Both match their golden samples with a symmetric-difference volume of 0 mm³, put
+0 mm³ of material outside the input body, and pass `BRepCheck_Analyzer` with zero
+self-intersections.
+
+---
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/latticegen2/` | The package |
+| `src/main.py` | Runnable entry point for a bare checkout |
+| `test/` | pytest suite and the STEP test assets |
+| `tools/` | `e2e.py`, `verify_geometry.py`, and `prototypes/` (standalone benchmarks for the design's load-bearing assumptions) |
+| `docs/` | Specification, algorithm, and testing guide |
+| `licenses/` | Dependency license texts |
 
 ## Testing
 
-See [docs/testing.md](docs/testing.md) for the full procedure. Quick reference:
-
 ```bash
-julia --project=. -e "using Pkg; Pkg.test()"    # unit tests
-julia --project=. tools/e2e.jl                  # end-to-end smoke-fast scenario
+python -m pytest test -q      # unit tests
+python tools/e2e.py           # end-to-end scenarios
 ```
+
+See [docs/testing.md](docs/testing.md).

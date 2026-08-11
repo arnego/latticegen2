@@ -1,13 +1,9 @@
-#!/usr/bin/env bash
-# Convenience wrapper for Linux. See specification.md §2 (Packaging form)
-# and README.md for usage. Forwards all arguments to src/main.jl using the
-# Julia project defined by Project.toml/Manifest.toml in this directory.
+#!/bin/sh
+# Convenience wrapper: ./latticegen2.sh -i part.step -cc 10 -t 1.5 [options]
 #
-# `-t auto` enables Julia's own thread pool (distinct from the --cores/
-# --workers Distributed *process* pool used for tiling, docs/algorithm.md
-# §6.2): the classification stage's per-strut loop is threaded
-# (docs/algorithm.md §11.2) and is otherwise silently single-threaded, since
-# Julia defaults to 1 thread unless told otherwise.
-set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec julia -t auto --project="$SCRIPT_DIR" "$SCRIPT_DIR/src/main.jl" "$@"
+# Uses $LATTICEGEN2_PYTHON if set, otherwise python3. The tool runs straight
+# from this checkout, with no install step, so an offline workstation only needs
+# Python plus the two dependencies listed in README.md.
+set -e
+DIR=$(cd "$(dirname "$0")" && pwd)
+"${LATTICEGEN2_PYTHON:-python3}" "$DIR/src/main.py" "$@"

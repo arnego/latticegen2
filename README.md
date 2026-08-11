@@ -27,9 +27,48 @@ adjacent cells and `-t` the strut profile's side length.
 Nothing else. License texts are in [`licenses/`](licenses/), cross-referenced in
 [`licenses/libraries.md`](licenses/libraries.md).
 
-**Nothing contacts the network at runtime.** Installation does, once.
+**Nothing contacts the network at runtime.** Installation does, once — unless
+you use a release bundle, which never does.
+
+## Releases (offline / air-gapped)
+
+Each tagged release publishes ready-made offline bundles on the
+[Releases page](../../releases), in two flavours per platform:
+
+| Asset | Python needed on the target? | Use when |
+|---|---|---|
+| `latticegen2-<ver>-win64-portable.zip` | **no** | The machine has no Python, or you cannot install anything |
+| `latticegen2-<ver>-win64-wheels.zip` | yes, exactly 3.11 x86-64 | The machine already has Python 3.11 |
+| `latticegen2-<ver>-linux-x86_64-portable.tar.gz` | **no** | as above |
+| `latticegen2-<ver>-linux-x86_64-wheels.tar.gz` | yes, exactly 3.11 x86-64 | as above |
+
+The portable bundles carry their own interpreter with every dependency
+installed: extract, run, no admin rights and no network at any point. Linux uses
+`.tar.gz` because ZIP loses the executable bit that `runtime/bin/python3` needs.
+
+After transferring the file, check it against the release's `SHA256SUMS.txt`:
+
+```bash
+sha256sum -c SHA256SUMS.txt
+```
+
+```bash
+certutil -hashfile latticegen2-2.0.0-win64-portable.zip SHA256
+```
+
+Then extract and run — each bundle contains a `README-OFFLINE.md` with the
+specifics for its flavour:
+
+```bash
+latticegen2.bat -i part.step -cc 10 -t 1.5
+```
+
+Every asset is extracted and run end to end by CI before it is published. The
+release procedure is documented in [docs/release.md](docs/release.md).
 
 ## Installation
+
+Not needed if you use a release bundle above. From a source checkout:
 
 Online, on a machine that can reach PyPI:
 
@@ -38,17 +77,27 @@ python -m pip install numpy cadquery-ocp
 ```
 
 Offline (the deployment target — specification.md §2), download the wheels on a
-connected machine and carry them over:
+connected machine and carry them over. Use `requirements-bundle.txt` so you get
+the exact versions the releases are built and tested against:
 
 ```bash
-python -m pip download numpy cadquery-ocp -d wheels
+python -m pip download -r requirements-bundle.txt -d wheels
 ```
 
 then, on the offline workstation:
 
 ```bash
-python -m pip install --no-index --find-links wheels numpy cadquery-ocp
+python -m pip install --no-index --find-links wheels -r requirements-bundle.txt
 ```
+
+Wheels are specific to a Python minor version, so download them with the same
+version you will install into.
+
+> `cadquery-ocp` requires `vtk`, which pulls in matplotlib and its dependencies.
+> latticegen2 never imports any of it, but the OCP extension module links
+> against the VTK libraries and will not load without them, so it cannot be
+> omitted — see [requirements-bundle.txt](requirements-bundle.txt) for the
+> measurements. It is most of the download size.
 
 No install step is needed for latticegen2 itself — it runs straight from a
 checkout via `src/main.py` or the wrapper scripts. To install it as a command

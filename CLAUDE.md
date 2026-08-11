@@ -45,6 +45,14 @@ User will run /code-review manually or ask for it explicitly when needed.
 
 Read @docs/testing.md 
 
+### Releases
+
+Offline release bundles and the tag-driven GitHub Actions workflow that
+publishes them are documented in @docs/release.md. The version is single-sourced
+from `src/latticegen2/__init__.py`; `pyproject.toml` derives it. Dependency pins
+live in `requirements-bundle.txt` and must stay in sync with
+`licenses/libraries.md`.
+
 ### Documentation
 
 Maintain project documentation in README.md, including:

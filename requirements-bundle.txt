@@ -1,0 +1,33 @@
+# Exact dependency pins for the offline release bundles.
+#
+# These are the versions the releases are built and tested against. Keep them in
+# sync with licenses/libraries.md, which records the same versions alongside the
+# license texts they correspond to; a mismatch between the two is a release
+# blocker, not a formatting detail. See docs/release.md.
+#
+# Deliberately pinned exactly rather than floored (pyproject.toml keeps the
+# floors, which describe what the source supports). A bundle is a fixed artifact
+# that has passed a smoke gate, so it should install the same bytes every time.
+
+numpy==2.4.6
+cadquery-ocp==7.9.3.1.1
+cadquery-ocp-proxy==7.9.3.1.1
+
+# vtk is listed explicitly because it is by far the largest thing in the bundle
+# (328 MB installed, ~60% of the payload) and latticegen2 never imports it.
+# It cannot be dropped. Measured, not assumed:
+#
+#   * cadquery-ocp 7.9.3.1.1 declares `vtk==9.6.2` as a hard requirement.
+#   * Installing without it fails at import: OCP/__init__.py calls
+#     os.add_dll_directory(<site-packages>/vtk.libs) with no isdir() guard.
+#   * Satisfying that with an empty vtk.libs/ directory gets one line further and
+#     then fails with "ImportError: DLL load failed while importing OCP" — the
+#     OCP extension module genuinely links against the VTK shared libraries.
+#   * Downgrading is no escape: cadquery-ocp 7.8.1.1 requires vtk==9.3.1, and it
+#     would move OCCT away from the version that produced the committed golden
+#     samples.
+#
+# Trimming VTK down to the DLLs OCP actually links against was considered and
+# rejected: fragile across versions, and it trades a correctness risk for disk
+# space when precision is priority #1 (CLAUDE.md).
+vtk==9.6.2

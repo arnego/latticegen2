@@ -15,3 +15,11 @@ venv/
 *.log
 *.step
 !/test/*.step
+
+# Release bundling scratch (tools/build_release.py). The wheels are downloaded
+# per build and shipped inside the published assets, not vendored here: the vtk
+# Linux wheel alone is 146 MB, over GitHub's hard per-file limit, and binary
+# wheels do not delta-compress, so committing them would grow history without
+# bound. See docs/release.md.
+/wheels/
+/.runtime-cache/

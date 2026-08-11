@@ -150,6 +150,36 @@ scripts that produced them alongside. Re-run one with, e.g.:
 python tools/prototypes/g2_instancing_join.py
 ```
 
+## Release bundles
+
+The offline bundles are built by `tools/build_release.py` and verified by
+`tools/smoke_bundle.py`. Both run locally, not only in CI:
+
+```
+python tools/build_release.py --flavour both
+```
+
+```
+python tools/smoke_bundle.py --platform win64
+```
+
+The smoke script is the gate that stands between a green build and a published
+release, and it deliberately tests the **archive** rather than the staging tree.
+Extraction is where the executable bit is lost, where a CRLF shebang bites, and
+where a relocated interpreter stops finding its own libraries — none of which
+appear in a build log. It extracts outside the repository, scrubs
+`LATTICEGEN2_PYTHON`/`PYTHONPATH`/`PYTHONHOME` from the environment so a bundle
+cannot borrow the development machine's interpreter, runs one generation through
+the bundle's own launcher, and checks the result with `tools/verify_geometry.py`
+(exact B-rep validity, no material outside the input, closed manifold).
+
+Note that the builder packages a **git ref**, not your working tree, so
+uncommitted changes will not appear in a bundle. It must also run under the
+Python version the bundle targets when downloading wheels, since wheels are
+version-specific; it says so plainly if you get that wrong.
+
+The full release procedure is [release.md](release.md).
+
 ## Verification checklist
 
 1. `python -m pytest test -q` passes. (Python has no separate lint step here;
@@ -162,4 +192,6 @@ python tools/prototypes/g2_instancing_join.py
    - The floating-body rule's three outcomes: dropped, kept-because-connected,
      and kept-because-large.
 3. `python tools/e2e.py` passes.
-4. Run `/code-review` (per CLAUDE.md) and address findings before pushing.
+4. If packaging, launchers or dependencies changed: `python tools/build_release.py`
+   then `python tools/smoke_bundle.py --platform <host>` passes.
+5. Run `/code-review` (per CLAUDE.md) and address findings before pushing.

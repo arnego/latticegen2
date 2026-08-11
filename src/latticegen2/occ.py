@@ -18,6 +18,7 @@ from typing import Iterable, Iterator
 import numpy as np
 
 from OCP.BRep import BRep_Builder, BRep_Tool
+from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeFace,
@@ -31,9 +32,11 @@ from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
 from OCP.Bnd import Bnd_Box
 from OCP.GProp import GProp_GProps
+from OCP.GeomAbs import GeomAbs_SurfaceType
 from OCP.IFSelect import IFSelect_ReturnStatus
 from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_Reader, STEPControl_StepModelType, STEPControl_Writer
+from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.TopAbs import TopAbs_ShapeEnum
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
@@ -180,6 +183,33 @@ def make_solid(shell: TopoDS_Shell) -> TopoDS_Shape:
     return BRepBuilderAPI_MakeSolid(shell).Solid()
 
 
+def unify_same_domain(shape: TopoDS_Shape) -> TopoDS_Shape:
+    """Merge adjacent faces (and edges) that lie on the same underlying surface.
+
+    A pure *representation* change: the point set is identical, only its
+    partition into faces differs. Instancing produces a lot of this redundancy
+    by construction — across every shared mid-strut interface the two junctions'
+    lateral faces are coplanar and share an edge, but nothing ever merges them
+    (docs/algorithm.md §9).
+
+    OCCT's default tolerances are used deliberately. The faces this is expected
+    to merge are exactly coplanar by construction, so the defaults suffice;
+    loosening them would let genuinely distinct faces merge, which would change
+    the geometry rather than just how it is described.
+    """
+    upgrade = ShapeUpgrade_UnifySameDomain(shape, True, True, False)
+    upgrade.Build()
+    return upgrade.Shape()
+
+
+def count_subshapes(shape: TopoDS_Shape) -> tuple[int, int]:
+    """``(faces, edges)`` in ``shape`` — the compactness of its B-rep."""
+    return (
+        sum(1 for _ in _explore(shape, TopAbs_ShapeEnum.TopAbs_FACE)),
+        sum(1 for _ in _explore(shape, TopAbs_ShapeEnum.TopAbs_EDGE)),
+    )
+
+
 def shells(shape: TopoDS_Shape) -> list[TopoDS_Shell]:
     """Every shell in ``shape``."""
     return [TopoDS.Shell_s(s) for s in _explore(shape, TopAbs_ShapeEnum.TopAbs_SHELL)]
@@ -202,9 +232,6 @@ def mesh_shape(shape: TopoDS_Shape, deflection: float, angle: float = 0.35) -> N
 
 def is_planar(face: TopoDS_Face) -> bool:
     """Is this face a plane? Planes are tessellated exactly, with zero deviation."""
-    from OCP.BRepAdaptor import BRepAdaptor_Surface
-    from OCP.GeomAbs import GeomAbs_SurfaceType
-
     return BRepAdaptor_Surface(face).GetType() == GeomAbs_SurfaceType.GeomAbs_Plane
 
 
@@ -217,8 +244,6 @@ def face_uv_triangulation(face: TopoDS_Face):
     are what :func:`latticegen2.classify.measure_face_deviation` needs to
     compare the mesh against the geometry it approximates.
     """
-    from OCP.BRepAdaptor import BRepAdaptor_Surface
-
     loc = TopLoc_Location()
     tri = BRep_Tool.Triangulation_s(face, loc)
     if tri is None or not tri.HasUVNodes():

@@ -79,16 +79,33 @@ triangulations are not vertex-aligned (docs/algorithm.md §13.1).
 
 ### Golden samples
 
-`test/80mm-test-ball-cc20t4-golden-sample.step` and
-`test/test-cylinder-cc10t1.5-golden-sample.step` were produced by the previous
-Julia/gmsh implementation. They are compared with
-`golden_sample_volume_diff`, which cuts candidate and golden against each other
-both ways and takes the larger remainder.
+`test/80mm-test-ball-cc20t4-golden-sample.step` was produced by the previous
+Julia/gmsh implementation and is still the original file — the current
+implementation reproduces it with a symmetric-difference volume of 0.0000 mm³,
+so it remains a genuinely independent cross-check.
+
+`test/test-cylinder-cc10t1.5-golden-sample.step` was **replaced on 2026-08-10**
+with the current implementation's output, after the user verified it, and then
+replaced again the same day once same-domain unification landed
+(docs/algorithm.md §9). Both replacements were geometrically no-ops — the exact
+symmetric-difference volume was 0 mm³ each time, first against the
+Julia-produced sample and then against the un-unified one — but they change the
+sample's provenance, and it is no longer an independent check of the generator
+against a different implementation. It now carries 15,966 faces in 55 MB, against
+the 29,974 faces / 98.9 MB the un-unified pipeline produced for the same solid.
+
+Both are compared with `golden_sample_volume_diff`, which cuts candidate and
+golden against each other both ways and takes the larger remainder. That
+comparison is a general boolean between two complete lattices, so it is slow at
+lattice scale: seconds for the ball, **306 s** for the cylinder. The harness
+gives it a generous budget (`GOLDEN_EXACT_BUDGET_S`) and only falls back to a
+sampled equivalence check if it is exceeded — the fallback is labelled as
+weaker wherever it is reported, and never turns an unmeasured result into a
+pass.
 
 A mismatch is a stop-the-line result: **never adjust a tolerance to make it
-pass**, and do not assume the generator is at fault either — these samples predate
-the current implementation. Investigate, and escalate to the user for manual
-verification.
+pass**, and do not assume the generator is at fault either. Investigate, and
+escalate to the user for manual verification.
 
 To compare two files directly:
 
@@ -117,7 +134,12 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 | Scenario | Total | Dominant stages |
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~7 s | boundary trim, export |
-| test cylinder, `cc=10 t=1.5` | ~77 s | classify, export/verify, sewing |
+| test cylinder, `cc=10 t=1.5` | ~61 s | sewing, classify, verify, simplify |
+
+Note that the `simplify` stage (same-domain unification, docs/algorithm.md §9)
+has a *negative* net cost: it takes ~8 s but halves the face count, which takes
+more than that back out of export and the round-trip check. Removing it would
+make the run slower as well as the output twice as large.
 
 The Phase-0 de-risking measurements that chose the architecture (junction cap
 integrity, join-mechanism throughput, per-junction intersection latency, STEP

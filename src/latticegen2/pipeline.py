@@ -183,6 +183,19 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
             f"interface did not close, which would mean a non-watertight body."
         )
 
+    with Timer(rl, "simplify"):
+        result_solids, simplify_stats = _unify(result_solids)
+    rl.line(
+        f"same-domain unification: {simplify_stats['faces_before']} -> "
+        f"{simplify_stats['output_faces']} faces, {simplify_stats['edges_before']} -> "
+        f"{simplify_stats['output_edges']} edges "
+        f"({100 * (1 - simplify_stats['output_faces'] / max(simplify_stats['faces_before'], 1)):.0f}% fewer); "
+        f"volume drift {simplify_stats['volume_drift']:.2e} "
+        f"(tolerance {UNIFY_VOLUME_TOL:g})"
+    )
+    stats["output_faces"] = simplify_stats["output_faces"]
+    stats["output_edges"] = simplify_stats["output_edges"]
+
     with Timer(rl, "validate"):
         invalid = [i for i, s in enumerate(result_solids) if not occ.is_valid(s)]
         total_volume = sum(occ.volume(s) for s in result_solids)
@@ -218,6 +231,76 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     stats["output"] = args.output
     shutil.rmtree(tmpdir, ignore_errors=True)
     return stats
+
+
+UNIFY_VOLUME_TOL = 1e-5
+"""Relative tolerance on the volume that same-domain unification must preserve.
+
+Unification re-describes the boundary without moving it, so the only expected
+drift is quadrature noise: merged faces are larger, more complex trimmed regions,
+and OCCT integrates them slightly differently. Calibrated against measurement —
+on purely planar geometry, where the volume is known analytically, the drift is
+**1.9e-15**, i.e. exact; the drift only appears on boundary solids carrying
+curved trimmed faces, at up to ~2e-7 relative on ``dense-lattice``. The bar sits
+roughly fifty times above that, and still well below ``t³``, the smallest volume
+this tool considers meaningful at all.
+
+The real guards against a bad merge are the solid-count check beside this one and
+the ``BRepCheck_Analyzer`` gate immediately after: merging two faces that are not
+the same surface distorts the boundary, which shows up as an invalid solid long
+before it shows up as a volume this close to unchanged. Every run logs the
+observed drift, so the margin this bar actually has is visible rather than
+assumed.
+"""
+
+
+def _unify(solids: list[TopoDS_Shape]):
+    """Compact each solid's B-rep, verifying the geometry is unchanged.
+
+    Each solid is unified on its own rather than as one compound: it keeps a 1:1
+    mapping so the count guard below is exact, and leaves the step
+    straightforward to parallelise if it ever becomes the bottleneck at scale.
+    """
+    faces_before = edges_before = 0
+    faces_after = edges_after = 0
+    worst_drift = 0.0
+    out: list[TopoDS_Shape] = []
+    for solid in solids:
+        f, e = occ.count_subshapes(solid)
+        faces_before += f
+        edges_before += e
+        pre_volume = occ.volume(solid)
+
+        merged = occ.unify_same_domain(solid)
+        produced = occ.solids(merged)
+        if len(produced) != 1:
+            raise ProcessingError(
+                f"Same-domain unification turned one solid into {len(produced)}. "
+                f"It must only re-describe the boundary, never re-partition the body."
+            )
+        post_volume = occ.volume(produced[0])
+        drift = abs(post_volume - pre_volume) / max(abs(pre_volume), 1.0)
+        worst_drift = max(worst_drift, drift)
+        if drift > UNIFY_VOLUME_TOL:
+            raise ProcessingError(
+                f"Same-domain unification changed a solid's volume from "
+                f"{pre_volume:.6f} to {post_volume:.6f} mm^3 ({drift:.2e} relative, "
+                f"tolerance {UNIFY_VOLUME_TOL:g}). Faces that are not genuinely the "
+                f"same surface were merged, so the boundary moved."
+            )
+
+        f, e = occ.count_subshapes(produced[0])
+        faces_after += f
+        edges_after += e
+        out.append(produced[0])
+
+    return out, {
+        "faces_before": faces_before,
+        "edges_before": edges_before,
+        "output_faces": faces_after,
+        "output_edges": edges_after,
+        "volume_drift": worst_drift,
+    }
 
 
 def _partition_kept(comps, keep_labels: set[int], boundary_pieces):

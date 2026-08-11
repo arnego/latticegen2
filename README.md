@@ -116,7 +116,7 @@ the design is in
 
 ```
 import → tessellate → classify → instance interior → trim boundary
-       → connect → stitch → validate → write STEP → round-trip verify
+       → connect → stitch → simplify → validate → write STEP → round-trip verify
 ```
 
 The load-bearing idea is that **the lattice needs almost no boolean operations at
@@ -133,6 +133,12 @@ than by tolerance. Only junctions that straddle the input surface need a boolean
 and each gets exactly one single-operand intersection, distributed across worker
 processes.
 
+Instancing does have one cost, and it is paid at the end. Because nothing is ever
+merged, two neighbouring junctions leave their coplanar lateral faces sitting
+side by side unmerged at every strut interface — twice as many faces as the
+geometry needs. A same-domain unification pass before export merges them back,
+which is what the removed boolean used to do for free.
+
 | Lever | Effect |
 |---|---|
 | Classify before intersecting | Booleans run only for the O(surface area) boundary junctions, not the O(volume) interior |
@@ -142,6 +148,7 @@ processes.
 | Connectivity by graph, not by boolean | The floating-body rule is a BFS over surviving interfaces |
 | Sewing confined to the boundary | Stitching cost scales with surface area, not volume |
 | Process-parallel boundary junctions | Constant-size independent jobs |
+| Same-domain unification before export | Instancing merges nothing, so coplanar faces meet unmerged at every strut interface; unifying them halves the face count and file size — and makes the run *faster*, since export and verification then handle half as much |
 | Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |
 
 ### Memory
@@ -161,10 +168,16 @@ Julia/gmsh implementation (now in [`old-julia/`](old-julia/)):
 | Scenario | Julia/gmsh | This implementation |
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | 13 m 52 s | **7.0 s** |
-| test cylinder, `cc=10 t=1.5` | 25 m 55 s | **1 m 17 s** |
+| test cylinder, `cc=10 t=1.5` | 25 m 55 s | **1 m 01 s** |
 
-Both produce the same geometry: against the committed golden samples the
-symmetric-difference volume is 0.0000 mm³.
+Both produce the same geometry: against the golden samples the
+symmetric-difference volume is 0 mm³.
+
+Output compactness is also at parity — 15,966 faces / 52.6 MB for the test
+cylinder, against the old pipeline's 15,969 / 53.1 MB. That does not come for
+free from instancing, which merges nothing; it comes from a same-domain
+unification pass before export, which recovers what the removed boolean used to
+do as a side effect. See "How it works".
 
 ---
 

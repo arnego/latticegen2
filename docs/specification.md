@@ -161,7 +161,7 @@ All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
 |----------|-----------|------------------|
 | smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | generation < 10 minutes. **Measured: 8.6 s.** |
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 8.3 s, symmetric-difference volume 0.0000 mm³.** (Params corrected from an earlier -cc 10 -t 2, which didn't match the golden file's own cc20t4 name. Golden file renamed to `-golden-sample.step` 2026-08-09.) |
-| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step. Budget tightened from 60 minutes to **10 minutes** on 2026-08-10; **measured: 71 s.** (Originally specified at -cc 5 -t 1; the one attempt to generate that denser golden sample under the Julia implementation ran for hours and was terminated by hand — see docs/algorithm.md §13.2 for the investigation. Params were changed 2026-08-09 to -cc 10 -t 1.5.) |
+| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step. Budget tightened from 60 minutes to **10 minutes** on 2026-08-10; **measured: 61 s.** The golden sample was replaced on 2026-08-10 with this implementation's own (user-verified) output, and again once same-domain unification landed; the exact symmetric-difference volume was **0 mm³** at each step, so both changed the sample's provenance and compactness, not its geometry. (Originally specified at -cc 5 -t 1; the one attempt to generate that denser golden sample under the Julia implementation ran for hours and was terminated by hand — see docs/algorithm.md §13.2 for the investigation. Params were changed 2026-08-09 to -cc 10 -t 1.5.) |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
 ### 6.2 Automated pass/fail checks
@@ -243,6 +243,13 @@ contract, not something to change unilaterally.
 and record the per-stage table, peak RSS, output file size and write time. Compare
 against the proposal's projections. Report the file-size finding to the user rather
 than acting on it.
+
+**Watch the `simplify` stage there specifically.** Same-domain unification
+(docs/algorithm.md §9) runs at roughly 0.24 ms/face, so ~3 M faces implies on the
+order of 12 minutes. At `dense-lattice` scale it more than pays for itself by
+halving the file that export and the round-trip check then have to handle, but
+that trade has only been measured at ~30 k faces. It unifies each solid
+independently, so it parallelises across solids if it needs to.
 
 ### Boundary stitching is the remaining superlinear step
 

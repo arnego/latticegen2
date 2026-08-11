@@ -507,6 +507,45 @@ realistic coordinates), and stays far below the smallest real feature
 
 ## 9. STEP export and metadata
 
+* **Same-domain unification.** Before anything else, each solid's B-rep is
+  compacted with `ShapeUpgrade_UnifySameDomain`, merging adjacent faces (and
+  edges) that lie on one underlying surface.
+
+  This is needed precisely *because* the lattice is instanced rather than fused.
+  Instancing merges nothing, so across every shared mid-strut interface junction
+  A's lateral face and junction B's are coplanar and share an edge yet remain two
+  faces — every strut carries eight lateral faces where four suffice. The old
+  fuse-based pipeline got this merge for free as a side effect of the boolean;
+  removing the boolean removed the merge with it. The junction template itself is
+  already minimal and unifies to itself (30 faces → 30): within one junction the
+  `+e_k` and `−e_k` lateral faces are coplanar but *not* adjacent, because the
+  other four half-struts cut them apart at the node. `test/test_junction.py` pins
+  both halves of that finding.
+
+  Measured on `dense-lattice`: **29,974 → 15,966 faces**, 122,556 → 67,898 edges,
+  98.9 MB → 52.6 MB — within three faces of what the old pipeline produced for
+  the same geometry. It costs ~8 s and *pays for itself*: export drops from 9.3 s
+  to 5.7 s and the round-trip check from 23.5 s to 13.5 s, so the whole run gets
+  faster. Re-tessellation also drops from 85,832 to 62,152 triangles, so
+  downstream meshing and display get cheaper too.
+
+  It is a **representation** change and must never become a geometry change, so
+  two guards bracket it, both hard failures: the solid count must be unchanged
+  (a change would also invalidate the junction-graph cross-check that precedes
+  it), and each solid's volume must be preserved to `UNIFY_VOLUME_TOL` (1e-5
+  relative). That bar is calibrated, not guessed: on purely planar geometry,
+  where the volume is known analytically, the drift is 1.9e-15 — exact; it only
+  appears on boundary solids carrying curved trimmed faces, where quadrature over
+  a larger merged region differs slightly, at 2.4e-7 on `dense-lattice`. Every run
+  logs the observed drift so the margin is visible rather than assumed. The
+  stronger guard is the validity gate below: merging faces that are not the same
+  surface moves the boundary, which shows up as an invalid solid long before it
+  shows up as a changed volume.
+
+  Each solid is unified independently rather than as one compound, which keeps the
+  count guard exact and leaves the step straightforward to parallelise if it ever
+  becomes the bottleneck at scale (~0.24 ms/face).
+
 * **Validity gate.** Every output solid is checked with OCCT's
   `BRepCheck_Analyzer` before export. This is an *exact* B-rep check, not a
   mesh-based approximation of one — the gmsh-based predecessor could not express
@@ -595,6 +634,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Tessellation | `O(input faces)`, independent of lattice density |
 | Classification | `O(N)` cheap tests + `O(S)` exact ones |
 | Interior | `O(N)` index operations and face constructions, **no booleans** |
+| Unification | `O(faces)`, ~0.24 ms/face |
 | Boundary | `O(S/W)` single-operand intersections |
 | Connectivity | `O(N + S)` union-find |
 | Stitching | `O(S)` free edges |
@@ -609,6 +649,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to boundary interfaces | Stitching scales with surface area, not volume |
+| Same-domain unification before export (§9) | Recovers the face merging the removed boolean used to do for free: 47% fewer faces and half the file size, and it makes the run *faster* by shrinking export and the round-trip check |
 | Process-parallel boundary junctions | Constant-size independent jobs |
 | Coarse occupancy pre-filter before exact distance tests | Only near-surface nodes pay for segment-triangle maths |
 | Vectorised ragged cell assignment in the spatial index | Building the index over a 200 k-triangle *output* mesh stays interactive |

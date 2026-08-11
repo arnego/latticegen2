@@ -133,6 +133,42 @@ def test_instanced_grid_is_watertight_with_exact_volume(template, m):
     assert occ.volume(solid) == pytest.approx(len(ns) * tpl.volume, rel=1e-9)
 
 
+def test_unification_is_a_no_op_on_the_template(template):
+    """The template is already minimal — the redundancy comes from instancing.
+
+    Pins the root-cause finding behind the export-time unification step: within
+    one junction the +k and -k lateral faces are coplanar but *not* adjacent,
+    because the other four half-struts cut them apart at the node. If a future
+    change to the profile or the fuse made the template itself reducible, the
+    reasoning in docs/algorithm.md §9 would need revisiting.
+    """
+    _, tpl, _ = template
+    merged = occ.unify_same_domain(tpl.solid)
+    assert len(occ.faces(merged)) == tpl.n_faces
+    assert occ.volume(merged) == pytest.approx(tpl.volume, rel=1e-12)
+
+
+def test_unification_halves_an_instanced_grid_without_moving_it(template):
+    """Across every shared cap, two coplanar lateral faces become one."""
+    lp, tpl, tmesh = template
+    ns = grid(3)
+    kept = {(int(a), int(b), int(c)) for a, b, c in ns}
+    shell, _ = build_interior_shell(lp, tpl, tmesh, ns, kept)
+    solid = occ.make_solid(shell)
+
+    before_faces, before_edges = occ.count_subshapes(solid)
+    merged = occ.unify_same_domain(solid)
+    after_faces, after_edges = occ.count_subshapes(merged)
+
+    # The exact count is OCCT's result, not ours; assert the effect, not a number.
+    assert after_faces < 0.75 * before_faces, (before_faces, after_faces)
+    assert after_edges < before_edges
+    # ...and that it only re-described the boundary, never moved it.
+    assert len(occ.solids(merged)) == 1
+    assert occ.volume(merged) == pytest.approx(len(ns) * tpl.volume, rel=1e-9)
+    assert occ.is_valid(merged)
+
+
 def test_adjacent_instances_share_topology(template):
     """Neighbours must reference one shared vertex set, not two coincident ones."""
     lp, tpl, tmesh = template

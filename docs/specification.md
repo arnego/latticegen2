@@ -55,7 +55,7 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | Flag | Type | Required | Units | Range | Default | Description |
 |------|------|----------|-------|-------|---------|-------------|
 | -i --input | path | required | NA | NA | NA | Path to STEP file defining the lattice bounds |
-| -o --output | path | optional | NA | NA | `<input_stem>-cc<cc>t<t>.step` | Path and name of the output .step file |
+| -o --output | path | optional | NA | NA | `<input_stem>-cc<cc>t<t>.step` | Path and name of the output .step file. Must name a **file**, not a directory: `-o .\` and friends are rejected (exit 2) rather than turned into `.\.step`. `.step` is appended if absent. |
 | -cc | float | required | mm | 0.4 - 50 | NA | Distance between the bottom nodes of two adjacent cells |
 | -t | float | required  | mm | 0.4 - 20 | NA | Side length of the diamond rod profile. Must be smaller than the cell edge `a = cc/√2`; that is the only cross-constraint. |
 | -bg --background | flag | optional | NA | NA | disabled | Run at below-normal priority to reduce desktop impact |

@@ -45,10 +45,20 @@ fi
 # mkl_intel_thread.2.dll" is not catchable as an exception) and exits 2,
 # colliding with the parameter-error code. Probing only after something has gone
 # wrong keeps the cost off every healthy run.
+#
+# The probe is scoped to codes that could actually be that. 3, 4, 5, 6 and 130
+# come from the pipeline's own error paths (docs/algorithm.md §10), so by then
+# the tool has demonstrably run and probing is pure delay -- which after a Ctrl+C
+# would mean an unexplained pause following a shutdown the spec asks to be clean.
+# Everything else can be an interpreter that never started: 1, 2, and the shell's
+# own 126/127 for something it could not execute.
 set +e
 "$PY" "$DIR/src/main.py" "$@"
 rc=$?
 [ "$rc" -eq 0 ] && exit 0
+case "$rc" in
+    3|4|5|6|130) exit "$rc" ;;
+esac
 "$PY" -c "import numpy, OCP.TopoDS" >/dev/null 2>&1 && exit "$rc"
 
 {

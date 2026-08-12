@@ -141,20 +141,28 @@ def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: 
             directory, f"{stem}-cc{format_param(cc)}t{format_param(t)}.step"
         )
     else:
-        _reject_directory_output(output_arg)
-        step_path = output_arg
+        # The validated string is the one used. Trailing space is stripped
+        # before both, or `-o "out.step "` would be approved as `out.step` and
+        # then fail its own extension test, landing as `out.step .step`.
+        step_path = _checked_output(output_arg)
         if not step_path.lower().endswith(".step"):
             step_path += ".step"
     return step_path, os.path.splitext(step_path)[0] + ".log"
 
 
-def _reject_directory_output(output_arg: str) -> None:
-    """Refuse an ``-o`` that cannot name a file.
+def _checked_output(output_arg: str) -> str:
+    """The ``-o`` argument, or :class:`ParamError` if it cannot name a file.
+
+    Returns the string the caller should actually use, so the value that was
+    validated and the value that gets built on are the same one.
 
     Two pure-syntax rules, so this stays free of the filesystem like the rest of
     parsing. A trailing separator (``.\\``, ``out/``) says "directory" on its
-    face whatever is on disk. A basename that is empty or all dots (``.``,
-    ``..``) has no stem to build a name from — appending the extension yields
+    face whatever is on disk — and *which characters those are is
+    platform-dependent*: a backslash separates on Windows and is an ordinary
+    filename character on POSIX, so the rule follows ``os.sep``/``os.altsep``
+    rather than assuming. A basename that is empty or all dots (``.``, ``..``)
+    has no stem to build a name from — appending the extension yields
     ``..step``, and the log then has no stem to share, so both files land under
     names the user never typed. Any real filename has at least one non-dot
     character in its basename, so neither rule can refuse a valid argument.
@@ -166,7 +174,7 @@ def _reject_directory_output(output_arg: str) -> None:
     separators = (os.sep, os.altsep) if os.altsep else (os.sep,)
     if trimmed and not trimmed.endswith(separators):
         if os.path.basename(trimmed).strip("."):
-            return
+            return trimmed
     # Quoted rather than repr()'d: on Windows the argument is full of
     # backslashes, and repr doubling them reads as if the tool mangled the
     # input. The quotes still make a whitespace-only argument visible.

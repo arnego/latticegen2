@@ -29,10 +29,21 @@ REM dependencies produces *before* main.py runs at all, and that case cannot be
 REM reported from inside Python: a native library aborting during import kills
 REM the process outright -- MKL's "cannot load mkl_intel_thread.2.dll" is not
 REM even catchable as an exception -- and it exits 2, colliding with the
-REM parameter-error code. So probe the interpreter only now, once something has
-REM already gone wrong: a healthy run never pays for it.
+REM parameter-error code.
+REM
+REM So probe, but only for codes that could actually be that. 3, 4, 5, 6 and 130
+REM come from the pipeline's own error paths (docs/algorithm.md S10), so by then
+REM the tool has demonstrably run and a probe is pure delay -- which after a
+REM Ctrl+C would mean an unexplained pause following a shutdown the spec asks to
+REM be clean. Everything else can be an interpreter that never started: 1, 2, and
+REM the shell's own 9009 for a command it could not find.
+for %%C in (3 4 5 6 130) do if "%RC%"=="%%C" exit /b %RC%
+
+REM `%ERRORLEVEL% NEQ 0` rather than `not errorlevel 1`: `if errorlevel N` tests
+REM >= N, so a probe that dies from a native fault (0xC0000005 arrives as a
+REM negative code) would read as success and suppress the diagnostic.
 "%PY%" -c "import numpy, OCP.TopoDS" >nul 2>&1
-if not errorlevel 1 exit /b %RC%
+if %ERRORLEVEL% EQU 0 exit /b %RC%
 
 REM `>&2 echo text` rather than `echo text >&2`: the redirect has to lead, or the
 REM space before it is echoed as trailing whitespace on every line.

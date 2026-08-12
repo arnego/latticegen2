@@ -149,9 +149,16 @@ def test_log_never_becomes_step_dot_log():
     assert log == "out.log"
 
 
-@pytest.mark.parametrize(
-    "bad", [".\\", "./", ".", "..", "out/", "out\\", "", "   "]
-)
+# Built from the platform's own separators rather than hard-coded. A backslash
+# is a directory separator on Windows but an ordinary filename character on
+# POSIX, so `out\` must be rejected on one and accepted on the other — listing
+# it unconditionally fails the Linux leg of the release workflow.
+DIRECTORY_LIKE = ["." + os.sep, ".", "..", "out" + os.sep, "", "   "]
+if os.altsep:
+    DIRECTORY_LIKE += ["." + os.altsep, "out" + os.altsep]
+
+
+@pytest.mark.parametrize("bad", DIRECTORY_LIKE)
 def test_output_that_names_a_directory_is_rejected(bad):
     """``-o`` names a file. A directory used to be silently turned into one.
 
@@ -161,6 +168,14 @@ def test_output_that_names_a_directory_is_rejected(bad):
     """
     with pytest.raises(ParamError, match="must name the output .step file"):
         resolve_output_paths("in.step", bad, 10.0, 1.5)
+
+
+@pytest.mark.skipif(os.altsep is not None, reason="backslash is a separator here")
+def test_a_backslash_is_an_ordinary_filename_character_on_posix():
+    """The rejection is about separators, and which characters those are is
+    platform-dependent. On POSIX ``out\\`` is a legal filename, not a directory."""
+    step, _ = resolve_output_paths("in.step", "out\\", 10.0, 1.5)
+    assert step == "out\\.step"
 
 
 @pytest.mark.parametrize(

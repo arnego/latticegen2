@@ -632,7 +632,7 @@ realistic coordinates), and stays far below the smallest real feature
   | Code | Meaning |
   |---|---|
   | 0 | Success |
-  | 1 | The launcher's interpreter cannot load the dependencies — the tool never ran (see below) |
+  | 1 | An unexpected exception reached the top level, or the launcher's interpreter cannot load the dependencies (see below) |
   | 2 | Parameter validation failure (before any computation) |
   | 3 | Input geometry read/parse failure, or a mesh too unfaithful to classify against |
   | 4 | Geometry processing failure (boundary trim, an interface that failed to close, an invalid output solid) |
@@ -643,21 +643,32 @@ realistic coordinates), and stays far below the smallest real feature
 * Every non-zero exit prints exactly one human-readable reason line. Exit 130
   prints `CANCELLED:` rather than `FAILED:` and no traceback: a cancelled run did
   what the user asked, it did not malfunction.
-* **Exit 1 belongs to the launcher, not to the pipeline**, and it exists because
-  this failure cannot be reported from inside Python. An interpreter that cannot
-  load `numpy` or `OCP` dies during import, before `main()` runs — and when the
-  cause is a native library it is not even an exception: MKL prints
+* **Exit 1 has two sources, and they are distinguishable by what got printed.**
+  From the pipeline it is an unexpected exception: `__main__` reports it as one
+  `FAILED: unexpected ...` line and then re-raises, so a traceback follows and
+  Python exits 1. From the launcher it means the tool never started, and it
+  exists because that failure cannot be reported from inside Python at all. An
+  interpreter that cannot load `numpy` or `OCP` dies during import, before
+  `main()` runs — and when the cause is a native library it is not even an
+  exception: MKL prints
   `Intel oneMKL FATAL ERROR: Cannot load mkl_intel_thread.2.dll` and aborts the
   process, uncatchable by `except BaseException`. Worse, it exits **2**, which
   would otherwise read as this tool rejecting a parameter.
 
   So `latticegen2.bat` / `latticegen2.sh` re-check the interpreter **after** a
-  non-zero exit, never before: a healthy run pays nothing, and a probe costs
-  ~1.2 s only once something has already failed. If `import numpy, OCP.TopoDS`
-  also fails, the launcher says so, shows the real error, names the interpreter
-  it chose, and exits 1 instead of passing on a code that would misattribute the
-  failure to the pipeline. If the probe succeeds, the child's own exit code goes
-  through untouched and the launcher stays silent.
+  non-zero exit, never before, so a healthy run pays nothing for it. The probe
+  is scoped further, because it costs ~1.2 s: codes 3, 4, 5, 6 and 130 above are
+  produced only by the pipeline's own error paths, which proves the tool ran, so
+  those return immediately. Probing them would be pure delay — and after a
+  Ctrl+C, an unexplained pause following the clean shutdown spec §3 asks for.
+  What remains is what an interpreter that never started can produce: 1, 2, and
+  the shell's own "cannot execute" codes.
+
+  If `import numpy, OCP.TopoDS` then also fails, the launcher says so, shows the
+  real error, names the interpreter it chose, and exits 1 instead of passing on a
+  code that would misattribute the failure to the pipeline. If the probe
+  succeeds, the child's own exit code goes through untouched and the launcher
+  stays silent.
 * If a failure occurs after `temp/<ts>/` has been created it is left in place for
   post-mortem analysis (spec §4.4), and the message says where.
 

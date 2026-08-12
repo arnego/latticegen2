@@ -355,10 +355,19 @@ def collect_runtime_licenses(runtime: Path, stage: Path, asset: str):
     dest = stage / "licenses" / "runtime"
     dest.mkdir(parents=True, exist_ok=True)
 
-    source = runtime / "LICENSE.txt"
-    if source.is_file():
+    # python-build-standalone's install_only(_stripped) archive puts LICENSE.txt
+    # at the archive root on Windows, but under lib/python3.X/ on Linux -- the
+    # root is empty there. Measured on the 3.11.15+20260807 linux-x86_64 asset:
+    # no top-level LICENSE.txt, but lib/python3.11/LICENSE.txt is the same PSF
+    # text. Root is checked first since that is the layout the Windows build has
+    # always used.
+    candidates = [runtime / "LICENSE.txt",
+                  *sorted(runtime.glob("lib/python3.*/LICENSE.txt"))]
+    source = next((c for c in candidates if c.is_file()), None)
+    if source is not None:
         shutil.copy2(source, dest / "CPYTHON-LICENSE.txt")
-        print("    copied runtime licence -> licenses/runtime/CPYTHON-LICENSE.txt")
+        print(f"    copied runtime licence ({source.relative_to(runtime).as_posix()}) "
+              f"-> licenses/runtime/CPYTHON-LICENSE.txt")
     else:
         # Not fatal to the build, but it is a compliance gap someone must close,
         # so say so loudly rather than shipping quietly.

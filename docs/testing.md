@@ -182,6 +182,67 @@ version-specific; it says so plainly if you get that wrong.
 
 The full release procedure is [release.md](release.md).
 
+## Testing the Linux bundles from Windows, via WSL
+
+The Windows dev machine can build and smoke-test the **linux-x86_64** bundles
+directly, using WSL, without a separate Linux box. This needs Python 3.11 on
+the WSL side (`python3` there defaults to whatever Ubuntu ships — 3.12 on
+24.04 "noble" — which is too new for the pinned wheels).
+
+**Install Python 3.11 in WSL once, ahead of time:**
+
+```bash
+sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update && sudo apt install -y python3.11 python3.11-venv
+```
+
+Ubuntu 24.04's own repos have no `python3.11` package at all (`apt-cache
+policy python3.11` returns nothing) — deadsnakes is the standard source for
+it. This needs a password prompt for `sudo`, so run it interactively yourself
+rather than through a non-interactive tool call.
+
+**Do the work from WSL's native filesystem, not the Windows-mounted repo.**
+A worktree's `.git` file points at an absolute Windows path
+(`E:\Git\...\.git\worktrees\...`), which WSL's `git` cannot resolve — `git
+archive`, which `tools/build_release.py` depends on, fails immediately with
+`fatal: not a git repository`. Clone into WSL's own filesystem instead (also
+faster than building on a DrvFs-mounted path):
+
+```bash
+git clone /mnt/e/Git/latticegen2 ~/build/latticegen2 && cd ~/build/latticegen2 && git checkout <commit-or-branch>
+```
+
+**Build and smoke-test:**
+
+```bash
+python3.11 tools/build_release.py --flavour both
+python3.11 -m venv ~/build/testenv
+~/build/testenv/bin/python -m pip install --no-index --find-links dist/wheels -r requirements-bundle.txt
+PATH="/path/to/python3.11/bin:$PATH" ~/build/testenv/bin/python tools/smoke_bundle.py --platform linux-x86_64
+```
+
+Two things that are easy to trip on:
+
+* `tools/smoke_bundle.py` imports `tools/verify_geometry.py`, which needs
+  `numpy`/`OCP` — the same "development interpreter" requirement `release.md`
+  describes for the host build. Running it with a bare `python3.11` that has
+  no packages installed fails at that import, not at anything the gate is
+  actually checking. Use the venv above.
+* The **wheels** flavour's own launcher and `install.sh` require a `python3`
+  on `PATH` that is exactly 3.11 (by design — see `docs/release.md`'s
+  reproducibility notes). If WSL's default `python3` is newer, the bundle
+  correctly refuses to install/run, and the smoke gate reports that as a
+  failure — which is the gate doing its job, not a bug. Put the 3.11
+  interpreter first on `PATH` for the smoke run so it matches what CI's
+  runner provides.
+
+**Unit tests and e2e** run the same way as anywhere else, just under the venv
+interpreter:
+
+```bash
+~/build/testenv/bin/python -m pytest test -q
+~/build/testenv/bin/python tools/e2e.py
+```
+
 ## Verification checklist
 
 1. `python -m pytest test -q` passes. (Python has no separate lint step here;

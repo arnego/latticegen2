@@ -126,6 +126,13 @@ def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: 
     Default name is ``<input_stem>-cc<cc>t<t>.step`` beside the input. The log
     always shares the output's stem with a ``.log`` extension — never
     ``<output>.step.log``.
+
+    ``-o`` names a *file*. A directory is rejected rather than quietly turned
+    into one: ``-o .\\`` used to append the extension to nothing and write
+    ``.\\.step`` beside a ``.\\.step.log``, because a basename that is all
+    extension has no stem for the log to share. Silently producing two files
+    under names the user never asked for is worse than refusing the argument
+    (specification.md §7).
     """
     if output_arg is None:
         stem = os.path.splitext(os.path.basename(input_path))[0]
@@ -134,10 +141,48 @@ def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: 
             directory, f"{stem}-cc{format_param(cc)}t{format_param(t)}.step"
         )
     else:
-        step_path = output_arg
+        # The validated string is the one used. Trailing space is stripped
+        # before both, or `-o "out.step "` would be approved as `out.step` and
+        # then fail its own extension test, landing as `out.step .step`.
+        step_path = _checked_output(output_arg)
         if not step_path.lower().endswith(".step"):
             step_path += ".step"
     return step_path, os.path.splitext(step_path)[0] + ".log"
+
+
+def _checked_output(output_arg: str) -> str:
+    """The ``-o`` argument, or :class:`ParamError` if it cannot name a file.
+
+    Returns the string the caller should actually use, so the value that was
+    validated and the value that gets built on are the same one.
+
+    Two pure-syntax rules, so this stays free of the filesystem like the rest of
+    parsing. A trailing separator (``.\\``, ``out/``) says "directory" on its
+    face whatever is on disk — and *which characters those are is
+    platform-dependent*: a backslash separates on Windows and is an ordinary
+    filename character on POSIX, so the rule follows ``os.sep``/``os.altsep``
+    rather than assuming. A basename that is empty or all dots (``.``, ``..``)
+    has no stem to build a name from — appending the extension yields
+    ``..step``, and the log then has no stem to share, so both files land under
+    names the user never typed. Any real filename has at least one non-dot
+    character in its basename, so neither rule can refuse a valid argument.
+
+    An ``-o`` whose *resolved* path is an existing directory is caught by
+    :func:`preflight_checks` instead, which is where filesystem checks belong.
+    """
+    trimmed = output_arg.rstrip()
+    separators = (os.sep, os.altsep) if os.altsep else (os.sep,)
+    if trimmed and not trimmed.endswith(separators):
+        if os.path.basename(trimmed).strip("."):
+            return trimmed
+    # Quoted rather than repr()'d: on Windows the argument is full of
+    # backslashes, and repr doubling them reads as if the tool mangled the
+    # input. The quotes still make a whitespace-only argument visible.
+    raise ParamError(
+        f'-o/--output must name the output .step file, not a directory '
+        f'(got "{output_arg}"). Give a filename, or omit -o to write '
+        f'<input_stem>-cc<cc>t<t>.step beside the input.'
+    )
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -229,6 +274,12 @@ def parse_args(argv: list[str]) -> Args:
 
 def preflight_checks(args: Args) -> None:
     """Filesystem checks that must pass before any geometry work begins."""
+    if os.path.isdir(args.output):
+        raise ParamError(
+            f"-o/--output must name the output .step file, but {args.output} is "
+            f"an existing directory. Give a filename inside it, or omit -o to "
+            f"write <input_stem>-cc<cc>t<t>.step beside the input."
+        )
     if not os.path.isfile(args.input):
         raise InputGeometryError(f"Input STEP file not found: {args.input}")
     try:

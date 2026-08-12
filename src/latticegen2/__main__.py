@@ -51,11 +51,14 @@ def main(argv: list[str] | None = None) -> int:
         rl.always("CANCELLED: interrupted by user (Ctrl+C). Intermediate files kept.")
         return CancelledError.exit_code
     except LatticeGenError as exc:
-        rl.always(f"FAILED: {exc}")
+        # `line(console=False)` rather than `always`: the reason goes to the log
+        # here and to stderr below. `always` would echo it to stdout as well and
+        # the user would see the same line twice.
+        rl.line(f"FAILED: {exc}", console=False)
         print(f"FAILED: {exc}", file=sys.stderr)
         return exc.exit_code
     except Exception as exc:  # unexpected: report it, but still as one line first
-        rl.always(f"FAILED: unexpected {type(exc).__name__}: {exc}")
+        rl.line(f"FAILED: unexpected {type(exc).__name__}: {exc}", console=False)
         print(f"FAILED: unexpected {type(exc).__name__}: {exc}", file=sys.stderr)
         raise
     finally:

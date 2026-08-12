@@ -149,6 +149,64 @@ def test_log_never_becomes_step_dot_log():
     assert log == "out.log"
 
 
+# Built from the platform's own separators rather than hard-coded. A backslash
+# is a directory separator on Windows but an ordinary filename character on
+# POSIX, so `out\` must be rejected on one and accepted on the other — listing
+# it unconditionally fails the Linux leg of the release workflow.
+DIRECTORY_LIKE = ["." + os.sep, ".", "..", "out" + os.sep, "", "   "]
+if os.altsep:
+    DIRECTORY_LIKE += ["." + os.altsep, "out" + os.altsep]
+
+
+@pytest.mark.parametrize("bad", DIRECTORY_LIKE)
+def test_output_that_names_a_directory_is_rejected(bad):
+    """``-o`` names a file. A directory used to be silently turned into one.
+
+    ``-o .\\`` appended the extension to nothing and wrote ``.\\.step`` beside
+    ``.\\.step.log`` — a basename that is all extension has no stem for the log
+    to share, so both files landed under names nobody typed.
+    """
+    with pytest.raises(ParamError, match="must name the output .step file"):
+        resolve_output_paths("in.step", bad, 10.0, 1.5)
+
+
+@pytest.mark.skipif(os.altsep is not None, reason="backslash is a separator here")
+def test_a_backslash_is_an_ordinary_filename_character_on_posix():
+    """The rejection is about separators, and which characters those are is
+    platform-dependent. On POSIX ``out\\`` is a legal filename, not a directory."""
+    step, _ = resolve_output_paths("in.step", "out\\", 10.0, 1.5)
+    assert step == "out\\.step"
+
+
+@pytest.mark.parametrize(
+    "good,stem",
+    [
+        ("hx", "hx"),
+        ("hx.step", "hx"),
+        (".hidden.step", ".hidden"),
+        (os.path.join("a.b", "hx"), "hx"),
+    ],
+)
+def test_ordinary_output_names_are_still_accepted(good, stem):
+    """The rejection is syntactic, so it must not catch a real filename.
+
+    Every valid basename has at least one non-dot character, including leading-
+    dot names and paths whose *directory* carries a dot.
+    """
+    step, log = resolve_output_paths("in.step", good, 10.0, 1.5)
+    assert os.path.basename(step) == stem + ".step"
+    assert os.path.basename(log) == stem + ".log"
+
+
+def test_preflight_rejects_an_output_that_is_an_existing_directory(tmp_path):
+    """The syntactic rule cannot see the filesystem; this case needs a look."""
+    target = tmp_path / "already.step"
+    target.mkdir()
+    args = parse_args(["-i", "in.step", "-cc", "10", "-t", "1.5", "-o", str(target)])
+    with pytest.raises(ParamError, match="existing directory"):
+        preflight_checks(args)
+
+
 def test_preflight_rejects_a_missing_input(tmp_path):
     args = parse_args(["-i", str(tmp_path / "nope.step"), "-cc", "10", "-t", "1.5",
                        "-o", str(tmp_path / "out.step")])

@@ -112,6 +112,19 @@ python src/main.py -i part.step -cc 10 -t 1.5 -v       # directly
 ```
 
 Set `LATTICEGEN2_PYTHON` if the interpreter you want is not the default `python`.
+The launchers otherwise fall through to whatever `python` resolves to on PATH,
+which on a machine with several environments is often not the prepared one:
+
+```bash
+set LATTICEGEN2_PYTHON=C:\path\to\python.exe
+```
+
+If that interpreter cannot load `numpy` and `OCP`, the launcher says so, shows
+the underlying error and exits 1 — worth knowing because the failure happens
+during import, before the tool runs, so it is not otherwise distinguishable from
+latticegen2's own errors. A conda environment invoked without being activated is
+the usual cause, and it can fail inside MKL rather than as a clean
+`ModuleNotFoundError`.
 
 ### Parameters
 
@@ -120,7 +133,7 @@ Set `LATTICEGEN2_PYTHON` if the interpreter you want is not the default `python`
 | `-i`, `--input` | path | yes | — | — | — | STEP file whose solid defines the lattice bounds |
 | `-cc` | float | yes | mm | 0.4 – 50 | — | XY distance between the bottom nodes of adjacent cells |
 | `-t` | float | yes | mm | 0.4 – 20 | — | Side length of the diamond strut profile |
-| `-o`, `--output` | path | no | — | — | `<input_stem>-cc<cc>t<t>.step` | Output STEP path |
+| `-o`, `--output` | path | no | — | — | `<input_stem>-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing |
 | `--workers` | int | no | count | 1 – 128 | from `--cores`, else from the machine | Worker processes for the boundary stage |
 | `--cores` | int | no | count | 1 – 128 | detected | Physical cores available; `--workers` is derived as `min(cores-1, 8)` |
 | `--ram` | float | no | GB | 1 – 1024 | — | Memory budget; recorded in the log |

@@ -173,63 +173,199 @@ def check_surface_mesh_coverage(
             )
 
 
-def measure_face_deviation(face) -> float:
-    """How far the current triangulation of ``face`` departs from the surface.
+def surface_samples(face) -> np.ndarray | None:
+    """Points on the *true* surface of ``face`` where a flat mesh is worst.
 
-    Sampled where a flat approximation is worst — the parametric midpoint of
-    every triangle edge and the parametric centroid of every triangle — and
-    measured as the distance from the true surface point to the *mesh element*
-    (the chord, or the triangle), not to the mesh point carrying the same
-    parameters.
+    Sampled at the parametric midpoint of every triangle edge and the parametric
+    centroid of every triangle — the places a chord or a triangle departs
+    furthest from the surface it interpolates.
 
-    That distinction matters: comparing same-parameter points would measure how
-    skewed the surface's parametrization is as much as how flat the mesh is.
-    Measuring to the element removes most of that tangential component.
-
-    The result is a deliberate **over-estimate**, for two reasons. It compares
-    each sample only against the triangle it parametrically belongs to, so on a
-    strongly non-uniform parametrization some lateral skew still leaks in; and
-    it takes the worst sample on the face rather than an average. Both err the
-    same way, and that way is the safe one — the value becomes the ``d`` of the
-    classification margin, where too large merely sends more junctions down the
-    (correct, slower) boundary path, while too small could let a strut that
-    genuinely touches the surface be treated as clear of it.
-
-    Measuring rather than assuming is not academic. Asked for 0.4 mm on
-    ``80mm-test-ball.step``, OCCT's mesher leaves samples up to ~2.8 mm off the
-    sphere; asked for 0.15 mm on ``TD_HX_Indre_Volum.step``, up to ~0.5 mm. A
-    margin built on the requested figure would have been too small in both
-    cases.
-
-    Planar faces return 0 with no work — a plane's triangulation is exact.
+    Planar faces return ``None`` with no work: a plane's triangulation is exact,
+    so it contributes nothing to the deviation.
     """
     if occ.is_planar(face):
-        return 0.0
+        return None
     data = occ.face_uv_triangulation(face)
     if data is None:
-        return 0.0
-    pts, uvs, tris, evaluate = data
+        return None
+    _pts, uvs, tris, evaluate = data
     if len(tris) == 0:
-        return 0.0
+        return None
 
+    out = [evaluate(uvs[tris].mean(axis=1))]
     edges = np.vstack([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
     edges = np.unique(np.sort(edges, axis=1), axis=0)
-    worst = 0.0
-
     if len(edges):
-        mids = evaluate(0.5 * (uvs[edges[:, 0]] + uvs[edges[:, 1]]))
-        A, B = pts[edges[:, 0]], pts[edges[:, 1]]
-        ab = B - A
-        denom = np.einsum("ij,ij->i", ab, ab)
-        safe = np.where(denom > 1e-300, denom, 1.0)
-        s = np.clip(np.einsum("ij,ij->i", mids - A, ab) / safe, 0.0, 1.0)
-        worst = float(np.linalg.norm(mids - (A + s[:, None] * ab), axis=1).max())
+        out.append(evaluate(0.5 * (uvs[edges[:, 0]] + uvs[edges[:, 1]])))
+    return np.vstack(out)
 
-    # `_point_triangle_dist` broadcasts row-wise, so one point per triangle is a
-    # single vectorized call.
-    centroids = evaluate(uvs[tris].mean(axis=1))
-    A, B, C = pts[tris[:, 0]], pts[tris[:, 1]], pts[tris[:, 2]]
-    return max(worst, float(_point_triangle_dist(centroids, A, B, C).max()))
+
+DEVIATION_CELL_FACTOR = 2.0
+"""Grid cell for the deviation search, as a multiple of the median triangle edge.
+
+A finer grid means fewer candidate triangles per sample, which is what this
+search wants — but the cost of *binning* runs the other way, and it is the side
+that bites. Triangle AABBs are inflated and expanded into cells, so a triangle
+far larger than the median occupies cells in proportion to its volume in them:
+halving the cell size costs 8x the rows. Real CAD makes that spread enormous.
+`TD_HX_Indre_Volum.step` meshes to a 341,000:1 edge-length ratio — 188 mm planar
+triangles beside a 1.26 mm median — where one triangle alone reaches 15,360
+cells at half this size, 4.1 M rows in total and a 570 MB peak, against 178 MB
+here for the same answer to six decimals. Matching :class:`SpatialHash`'s cell
+keeps the pathological case bounded, and the extra candidates per sample cost
+about 0.1 s.
+"""
+
+DEVIATION_CELL_SLACK = 0.5
+"""How far a triangle's AABB is inflated, in cells, before it is binned.
+
+A sample lies on the surface, so the triangle whose AABB contains it is found
+with no inflation at all; the slack is headroom for the *nearest* triangle being
+a neighbouring one. Measured, the answer is already converged without it — the
+three committed parts return the same deviation to six decimals at every
+inflation from 0 to 1 cell — so this buys margin, not correctness, and the cost
+of that margin is about 0.5 s on the 26 k-triangle heat-exchanger part.
+"""
+
+
+def _neighbour_triangles(points: np.ndarray, mesh: TriMesh, cell: float):
+    """``(offsets, counts, order)`` naming the triangles near each point.
+
+    The triangles for point ``i`` are ``order[offsets[i] : offsets[i] +
+    counts[i]]``. Triangle AABBs are inflated *before* they are assigned to the
+    grid, so a point only ever has to look up the single cell it falls in — which
+    makes the whole lookup one vectorized ``searchsorted`` instead of a 27-cell
+    query per point. On the heat-exchanger part that difference is most of the
+    stage's cost: 6,255 Python-level queries against one array operation.
+    """
+    a, b, c = mesh.triangle_points
+    slack = DEVIATION_CELL_SLACK * cell
+    lo = np.minimum(np.minimum(a, b), c) - slack
+    hi = np.maximum(np.maximum(a, b), c) + slack
+    tri_ids, cells = _cell_assignments(lo, hi, cell)
+    keys = _pack_cells(cells)
+    ordering = np.argsort(keys, kind="stable")
+    keys, tri_ids = keys[ordering], tri_ids[ordering]
+
+    point_keys = _pack_cells(np.floor(points / cell).astype(np.int64))
+    offsets = np.searchsorted(keys, point_keys, side="left")
+    counts = np.searchsorted(keys, point_keys, side="right") - offsets
+    return offsets, counts, tri_ids
+
+
+DEVIATION_PAIR_BUDGET = 1 << 17
+"""Most (sample, triangle) pairs held at once while measuring the deviation.
+
+Every intermediate in the inner loop is one row per pair, several of them
+``(P, 3)`` float64, so this sets the stage's working set outright rather than
+just its chunking. 2^17 holds it to ~22 MB on the 80 mm ball where 2^19 took
+86 MB, for the same answer and the same wall time — the larger chunk buys
+nothing, because the cost here is memory traffic rather than call overhead.
+"""
+
+
+def _max_distance_to_mesh(
+    points: np.ndarray, mesh: TriMesh, budget: int = DEVIATION_PAIR_BUDGET
+) -> float:
+    """Worst distance from any of ``points`` to the nearest triangle of ``mesh``.
+
+    The search is local — each point is tested only against the triangles in its
+    own grid neighbourhood — so cost scales with the sample count rather than
+    with sample × triangle count.
+
+    Restricting the search this way can only ever return a value **greater than
+    or equal to** the true nearest distance: it is a minimum over a subset of the
+    triangles. That is the safe direction. This number becomes the ``d`` of the
+    classification margin, where over-estimating merely sends more junctions down
+    the correct-but-slower boundary path, while under-estimating could let a
+    strut that genuinely touches the surface be treated as clear of it.
+
+    Two cheap bounds then spare most pairs the exact test, which dominates the
+    cost otherwise — a neighbourhood holds tens of triangles and only a couple of
+    them can be the nearest. The distance to a triangle's centroid is an **upper**
+    bound on the distance to that triangle, and the distance to its AABB is a
+    **lower** one, so a triangle whose AABB is further off than the best centroid
+    cannot be nearest and is discarded without any exact work. The triangle that
+    set a point's upper bound always survives its own test, so no point is left
+    without a candidate.
+
+    A point whose cell holds no triangle at all falls back to a full scan. A
+    sample lies on the surface the mesh covers, so that is a defensive path
+    rather than an expected one — it is not taken on any committed test part.
+    """
+    A, B, C = mesh.triangle_points
+    if len(A) == 0 or len(points) == 0:
+        return 0.0
+    centroids = (A + B + C) / 3.0
+    tri_lo = np.minimum(np.minimum(A, B), C)
+    tri_hi = np.maximum(np.maximum(A, B), C)
+
+    cell = _triangle_cell_size(mesh, DEVIATION_CELL_FACTOR)
+    offsets, counts, order = _neighbour_triangles(points, mesh, cell)
+    orphans = np.flatnonzero(counts == 0)
+    if len(orphans):
+        every = np.arange(len(A), dtype=np.int64)
+        order = np.concatenate([order, every])
+        offsets[orphans] = len(order) - len(every)
+        counts[orphans] = len(every)
+
+    worst = 0.0
+    cumulative = np.cumsum(counts)
+    start = 0
+    while start < len(points):
+        base = int(cumulative[start - 1]) if start else 0
+        stop = max(start + 1, int(np.searchsorted(cumulative, base + budget, "right")))
+        block = counts[start:stop]
+        # Expand this block of points into one flat (point, triangle) pair list.
+        pi = np.repeat(np.arange(len(block)), block)
+        heads = np.cumsum(block) - block
+        ki = order[np.repeat(offsets[start:stop], block) + np.arange(block.sum()) - heads[pi]]
+
+        p = points[start:stop][pi]
+        delta = p - centroids[ki]
+        upper = np.minimum.reduceat(np.einsum("ij,ij->i", delta, delta), heads)
+        gap = np.maximum(tri_lo[ki] - p, 0.0) + np.maximum(p - tri_hi[ki], 0.0)
+        keep = np.einsum("ij,ij->i", gap, gap) <= upper[pi]
+
+        p, ki, pi = p[keep], ki[keep], pi[keep]
+        exact = _point_triangle_dist(p, A[ki], B[ki], C[ki])
+        kept = np.bincount(pi, minlength=len(block))
+        nearest = np.minimum.reduceat(exact, np.cumsum(kept) - kept)
+        worst = max(worst, float(nearest.max()))
+        start = stop
+    return worst
+
+
+def measure_mesh_deviation(shape: TopoDS_Shape, mesh: TriMesh) -> float:
+    """How far ``mesh`` departs from the true surface of ``shape``.
+
+    The measurement runs from the surface *to* the mesh — the direction the
+    classification margin needs, since the guarantee it buys is that a strut far
+    from the mesh is also far from the true geometry.
+
+    Each sample is compared against the **nearest** triangle rather than against
+    the triangle that happens to own its surface parameters. That distinction is
+    the whole point. A parametric midpoint is not a geometric midpoint, and where
+    the parametrization is degenerate the two are nowhere near each other: at a
+    sphere's pole every cap triangle owns a vertex at ``v = ±π/2``, so the
+    midpoint of an edge running to the pole can land 90° of longitude away from
+    the triangle it parametrically belongs to. Measured on
+    ``80mm-test-ball.step`` at a requested 0.1 mm, comparing against the
+    parametrically-owning element reported 2.1988 mm — 28x the true worst
+    sagitta of 0.0786 mm, and enough to fail the ``a/4`` gate below on input that
+    is perfectly sound. Worse, it shrank only like ``O(h)`` under refinement
+    instead of a sagitta's ``O(h²)``, which is the signature of a lateral
+    artifact rather than a chordal error.
+
+    Measuring rather than trusting the mesher is still necessary, and the
+    evidence for it is unaffected: asked for 0.15 mm on
+    ``TD_HX_Indre_Volum.step``, OCCT delivers 0.49 mm. A margin built on the
+    requested figure would have been over three times too small there.
+    """
+    samples = [s for s in (surface_samples(f) for f in occ.faces(shape)) if s is not None]
+    if not samples:
+        return 0.0
+    return _max_distance_to_mesh(np.vstack(samples), mesh)
 
 
 MESH_ANGLE = 0.2
@@ -243,16 +379,20 @@ def tessellate_surface(shape: TopoDS_Shape, lp: LatticeParams) -> TriMesh:
 
     ``min(t, a)/10`` is what OCCT is *asked* for as a linear chordal deviation.
     What the classification margin then uses is the deviation the mesher
-    actually delivered, measured per face by :func:`occ.face_chordal_deviation`
-    and returned on the mesh.
+    actually delivered, measured against the welded mesh by
+    :func:`measure_mesh_deviation`.
 
-    That distinction is not pedantic. Measured on ``test-cylinder.STEP`` at
-    ``cc=10, t=1.5``, asking for 0.15 mm produced a mesh whose real worst-case
-    sagitta was around 0.4 mm — comfortably enough to make a margin of ``r +
-    0.15`` too small, and enough to misclassify a node that a ten-times finer
-    mesh puts on the boundary. Taking the larger of the two keeps the margin an
-    upper bound on the mesh's own error, which is the property the whole
-    "ambiguity always degrades to BOUNDARY" guarantee rests on.
+    That distinction is not pedantic. Measured on ``TD_HX_Indre_Volum.step``,
+    asking for 0.15 mm produced a mesh whose real worst-case sagitta was 0.49 mm
+    — comfortably enough to make a margin of ``r + 0.15`` too small, and enough
+    to misclassify a node that a ten-times finer mesh puts on the boundary.
+    Taking the larger of the two keeps the margin an upper bound on the mesh's
+    own error, which is the property the whole "ambiguity always degrades to
+    BOUNDARY" guarantee rests on.
+
+    The mesh is welded *before* it is measured, so a sample near a face boundary
+    is compared against the surrounding surface rather than against one face's
+    share of it.
 
     No maximum element size is needed: a planar face meshes to a couple of exact
     triangles however large it is, and only curvature drives refinement.
@@ -264,9 +404,7 @@ def tessellate_surface(shape: TopoDS_Shape, lp: LatticeParams) -> TriMesh:
     all_verts: list[np.ndarray] = []
     all_tris: list[np.ndarray] = []
     offset = 0
-    measured = 0.0
     for face in occ.faces(shape):
-        measured = max(measured, measure_face_deviation(face))
         tri = occ.face_triangulation(face)
         if tri is None:
             continue
@@ -280,7 +418,8 @@ def tessellate_surface(shape: TopoDS_Shape, lp: LatticeParams) -> TriMesh:
     if len(tris) == 0:
         raise InputGeometryError("Surface tessellation produced zero usable triangles.")
 
-    deviation = max(requested, measured)
+    mesh = TriMesh(verts=verts, tris=tris)
+    deviation = max(requested, measure_mesh_deviation(shape, mesh))
     if deviation > lp.a / 4.0:
         raise InputGeometryError(
             f"The surface tessellation deviates from the true geometry by up to "
@@ -288,7 +427,8 @@ def tessellate_surface(shape: TopoDS_Shape, lp: LatticeParams) -> TriMesh:
             f"edge ({lp.a:.4f} mm). Classification against this mesh would be "
             f"dominated by meshing error rather than by the geometry."
         )
-    return TriMesh(verts=verts, tris=tris, deviation=deviation)
+    mesh.deviation = deviation
+    return mesh
 
 
 # --- Distance primitives (vectorized over triangles) ------------------------
@@ -438,6 +578,19 @@ def _cell_assignments(lo: np.ndarray, hi: np.ndarray, cell: float):
     return item_ids, cells
 
 
+def _triangle_cell_size(mesh: TriMesh, factor: float = 2.0) -> float:
+    """Grid cell that follows the mesh: ``factor`` times the median triangle edge."""
+    a, b, c = mesh.triangle_points
+    edges = np.concatenate(
+        [
+            np.linalg.norm(b - a, axis=1),
+            np.linalg.norm(c - b, axis=1),
+            np.linalg.norm(a - c, axis=1),
+        ]
+    )
+    return max(factor * float(np.median(edges)), 1e-9)
+
+
 class SpatialHash:
     """Uniform grid over triangle AABBs, for exact near-surface queries.
 
@@ -455,14 +608,7 @@ class SpatialHash:
 
     def __init__(self, mesh: TriMesh, min_cell: float = 0.0):
         a, b, c = mesh.triangle_points
-        edges = np.concatenate(
-            [
-                np.linalg.norm(b - a, axis=1),
-                np.linalg.norm(c - b, axis=1),
-                np.linalg.norm(a - c, axis=1),
-            ]
-        )
-        self.cell = max(2.0 * float(np.median(edges)), float(min_cell), 1e-9)
+        self.cell = max(_triangle_cell_size(mesh), float(min_cell))
         self.mesh = mesh
         lo = np.minimum(np.minimum(a, b), c)
         hi = np.maximum(np.maximum(a, b), c)

@@ -19,6 +19,7 @@ import shutil
 
 import numpy as np
 from OCP.BRepTools import BRepTools
+from OCP.Standard import Standard_Failure
 from OCP.TopoDS import TopoDS_Shape
 
 from . import occ
@@ -204,8 +205,15 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         f"volume drift {simplify_stats['volume_drift']:.2e} "
         f"(tolerance {UNIFY_VOLUME_TOL:g})"
     )
+    if simplify_stats["unmerged_solids"]:
+        rl.always(
+            f"note: the geometry kernel declined to unify "
+            f"{simplify_stats['unmerged_solids']} of {len(result_solids)} solid(s); "
+            f"they are exported as built. The output is larger, not different."
+        )
     stats["output_faces"] = simplify_stats["output_faces"]
     stats["output_edges"] = simplify_stats["output_edges"]
+    stats["unmerged_solids"] = simplify_stats["unmerged_solids"]
 
     with Timer(rl, "validate"):
         invalid = [i for i, s in enumerate(result_solids) if not occ.is_valid(s)]
@@ -265,6 +273,40 @@ assumed.
 """
 
 
+def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
+    """Unify one solid, giving up on the parts of the job that will not run.
+
+    Returns the solid and whether the kernel ran at all, so the caller reports
+    what happened rather than inferring it from the face count. Those are not
+    the same thing: an already-minimal solid unifies *successfully* and changes
+    nothing — docs/algorithm.md §9 records the junction template doing exactly
+    that, 30 faces to 30 — so "nothing changed" must never be read as "the
+    kernel refused".
+
+    Unification is a size optimization, not a correctness step, so a kernel that
+    refuses to perform it must not end the run — spec §11's principle that "do
+    more work" is an acceptable failure mode while refusing sound input is not.
+    The output is simply described more verbosely, and every downstream gate
+    still applies to it.
+
+    Two rungs, because the failure is not all-or-nothing. Merging *edges*
+    (concatenating the collinear pairs left inside a merged wire) is the part
+    that throws, and it is nearly worthless here: measured on the 80 mm ball at
+    ``cc=10, t=1``, dropping it still merges 20,268 faces down to 10,554 and
+    81,816 edges down to 62,376, while OCCT's edge pass on its own removes 4
+    edges out of 81,816 — and, with face merging enabled alongside it, raises
+    ``Standard_Failure: Courbes non jointives`` instead.
+    """
+    try:
+        return occ.unify_same_domain(solid), True
+    except Standard_Failure:
+        pass
+    try:
+        return occ.unify_same_domain(solid, unify_edges=False), True
+    except Standard_Failure:
+        return solid, False
+
+
 def _unify(solids: list[TopoDS_Shape]):
     """Compact each solid's B-rep, verifying the geometry is unchanged.
 
@@ -275,6 +317,7 @@ def _unify(solids: list[TopoDS_Shape]):
     faces_before = edges_before = 0
     faces_after = edges_after = 0
     worst_drift = 0.0
+    skipped = 0
     out: list[TopoDS_Shape] = []
     for solid in solids:
         f, e = occ.count_subshapes(solid)
@@ -282,7 +325,9 @@ def _unify(solids: list[TopoDS_Shape]):
         edges_before += e
         pre_volume = occ.volume(solid)
 
-        merged = occ.unify_same_domain(solid)
+        merged, ran = _unify_one(solid)
+        if not ran:
+            skipped += 1
         produced = occ.solids(merged)
         if len(produced) != 1:
             raise ProcessingError(
@@ -311,6 +356,7 @@ def _unify(solids: list[TopoDS_Shape]):
         "output_faces": faces_after,
         "output_edges": edges_after,
         "volume_drift": worst_drift,
+        "unmerged_solids": skipped,
     }
 
 

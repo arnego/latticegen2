@@ -17,13 +17,15 @@ from latticegen2.classify import (
     PointInside,
     SpatialHash,
     TriMesh,
+    _max_distance_to_mesh,
     _point_triangle_dist,
     _segment_segment_dist,
     check_surface_mesh_coverage,
     chordal_target,
     classify_nodes,
-    measure_face_deviation,
+    measure_mesh_deviation,
     segment_triangle_dist,
+    surface_samples,
     tessellate_surface,
 )
 from latticegen2.errors import InputGeometryError
@@ -279,10 +281,78 @@ def test_coverage_gate_tolerates_a_sliver_shortfall():
     check_surface_mesh_coverage(shape, lp)
 
 
-def test_planar_faces_have_zero_measured_deviation():
+def test_planar_faces_are_not_sampled_for_deviation():
+    """A plane's triangulation is exact, so it contributes no samples at all."""
     lp = lattice_params(10.0, 1.5)
     shape = occ.read_step(CYLINDER)
     occ.mesh_shape(shape, chordal_target(lp))
     planar = [f for f in occ.faces(shape) if occ.is_planar(f)]
     assert planar
-    assert all(measure_face_deviation(f) == 0.0 for f in planar)
+    assert all(surface_samples(f) is None for f in planar)
+
+
+def test_sphere_deviation_is_the_real_sagitta_not_a_pole_artifact():
+    """Regression for issue #6.
+
+    The ball is two hemispherical faces, so it has a degenerate parametric edge
+    at each pole where every cap triangle owns a vertex at ``v = ±π/2``.
+    Comparing a sample against the triangle that owns its *parameters* — rather
+    than against the nearest one — put the worst sample 90° of longitude away
+    from the triangle it was measured against and reported 2.1988 mm on a mesh
+    whose true worst sagitta is 0.0786 mm. At ``cc=10`` that cleared ``a/4`` and
+    failed valid input (docs/algorithm.md §5.1).
+    """
+    lp = lattice_params(10.0, 1.0)
+    shape = occ.read_step(BALL)
+    mesh = tessellate_surface(shape, lp)
+
+    assert mesh.deviation < lp.a / 4.0
+    # Requested is min(t, a)/10 = 0.1 mm; the measured part must be of that
+    # order, not the 2.2 mm the parametric pairing produced.
+    assert mesh.deviation < 3.0 * chordal_target(lp)
+
+
+def test_measured_deviation_is_never_below_the_true_sagitta():
+    """The margin's guarantee needs ``d`` to be an upper bound on mesh error.
+
+    Over-estimating only sends more junctions down the boundary path; under-
+    estimating could let a strut that touches the surface pass as clear of it.
+    The ball is an exact sphere of radius 40 centred on the origin, so the true
+    sagitta at every triangle centroid is known analytically.
+
+    The sagitta is taken from the mesh `tessellate_surface` actually returned,
+    not from a second tessellation: meshing again with different parameters
+    would compare a deviation measured on one mesh against a reference measured
+    on another, and the assertion would only hold by coincidence.
+    """
+    lp = lattice_params(10.0, 1.0)
+    shape = occ.read_step(BALL)
+    mesh = tessellate_surface(shape, lp)
+
+    centroids = mesh.verts[mesh.tris].mean(axis=1)
+    true_sagitta = float((40.0 - np.linalg.norm(centroids, axis=1)).max())
+    assert true_sagitta > 0.0
+    assert mesh.deviation >= true_sagitta
+
+
+def test_deviation_search_matches_an_exhaustive_nearest_triangle_scan():
+    """The local search must agree with a brute-force scan over every triangle.
+
+    Restricting the search to a grid neighbourhood is only allowed to
+    over-estimate, and this pins that it does not need to.
+    """
+    lp = lattice_params(10.0, 1.5)
+    shape = occ.read_step(CYLINDER)
+    mesh = tessellate_surface(shape, lp)
+    samples = np.vstack(
+        [s for s in (surface_samples(f) for f in occ.faces(shape)) if s is not None]
+    )
+    subset = samples[::7]
+    a, b, c = mesh.triangle_points
+    brute = max(
+        float(_point_triangle_dist(np.repeat(p[None, :], len(a), axis=0), a, b, c).min())
+        for p in subset
+    )
+    assert _max_distance_to_mesh(subset, mesh) == pytest.approx(brute)
+    # And the full measurement is at least as large, since it sees every sample.
+    assert measure_mesh_deviation(shape, mesh) >= brute - 1e-12

@@ -161,7 +161,57 @@ Every step is a gate. None of them should be worked around.
    that has never had the development environment, and run one generation. CI
    proves the archive works; this proves the *download and transfer* works, and
    it is the only check that does.
-3. Edit the generated release notes if they need it.
+3. Replace the generated release notes — see below.
+
+### 6.1 Writing the release notes
+
+`gh release create --generate-notes` (in the workflow) publishes with an
+auto-generated `## What's Changed` / `Full Changelog` block only. Replace the
+whole body with the operator-facing notes described here — that block is kept,
+not thrown away, as the tail of the new body.
+
+The template is [v2.0.0's release notes](https://github.com/arnego/latticegen2/releases/tag/v2.0.0)
+(reproduced in the v2.0.1 update). Most of it is boilerplate that carries
+forward **unchanged in wording, only in version string**: the intro paragraph,
+the offline callout, the "After downloading" section (checksum commands,
+launcher invocation, the writable-output-directory note), the VTK size
+explanation, and the `SHA256SUMS.txt` reproducibility caveat. Do not rewrite
+these from scratch each time — copy the previous release's notes and
+find-and-replace the version number.
+
+What actually changes per release:
+
+1. **The "Which file do I want?" table's sizes.** Pull real numbers rather than
+   estimating:
+   ```bash
+   gh release view <tag> --json assets --jq '.assets[] | "\(.name)\t\(.size)"'
+   ```
+   Convert bytes to decimal MB (`/1e6`) and round to match the table's style
+   (no decimals, e.g. `182 MB`).
+2. **"Notes on this release."** A short paragraph or bullet list of what
+   actually changed since the last tag, written for someone who has already
+   read the previous release's notes — not a copy of commit messages. For a
+   patch release, name the specific bug(s) fixed, the issue/PR that tracked
+   each, and a one- or two-sentence account of what was wrong and what the fix
+   does. State plainly if nothing user-facing changed (CLI, parameters, output
+   format) versus what was corrected. For a feature release, this section
+   describes the feature instead.
+3. **The `## What's Changed` / `Full Changelog` tail.** Keep the block
+   `gh release create --generate-notes` produced — it already lists merged PRs
+   with author and links, and the compare-URL is already correct
+   (`vPREV...vNEW`). Fetch it before overwriting the body if you need it again:
+   ```bash
+   gh release view <tag> --json body --jq .body
+   ```
+
+Publish the finished notes:
+
+```bash
+gh release edit <tag> --notes-file notes.md
+```
+
+This edits public, already-downloadable release content — treat it accordingly
+(see the confirmation rules that apply to publishing).
 
 ## 7. Building bundles by hand
 

@@ -319,16 +319,19 @@ def test_measured_deviation_is_never_below_the_true_sagitta():
     estimating could let a strut that touches the surface pass as clear of it.
     The ball is an exact sphere of radius 40 centred on the origin, so the true
     sagitta at every triangle centroid is known analytically.
+
+    The sagitta is taken from the mesh `tessellate_surface` actually returned,
+    not from a second tessellation: meshing again with different parameters
+    would compare a deviation measured on one mesh against a reference measured
+    on another, and the assertion would only hold by coincidence.
     """
     lp = lattice_params(10.0, 1.0)
     shape = occ.read_step(BALL)
-    occ.mesh_shape(shape, chordal_target(lp))
-    verts, tris = occ.face_triangulation(occ.faces(shape)[0])
-    centroids = verts[tris].mean(axis=1)
+    mesh = tessellate_surface(shape, lp)
+
+    centroids = mesh.verts[mesh.tris].mean(axis=1)
     true_sagitta = float((40.0 - np.linalg.norm(centroids, axis=1)).max())
     assert true_sagitta > 0.0
-
-    mesh = tessellate_surface(shape, lp)
     assert mesh.deviation >= true_sagitta
 
 

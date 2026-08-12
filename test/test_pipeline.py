@@ -33,7 +33,9 @@ def two_boxes_sharing_a_face():
 def test_unification_merges_the_redundant_partition():
     solid = two_boxes_sharing_a_face()
     before, _ = occ.count_subshapes(solid)
-    after, _ = occ.count_subshapes(_unify_one(solid))
+    merged, ran = _unify_one(solid)
+    after, _ = occ.count_subshapes(merged)
+    assert ran
     assert after < before
     assert after == 6  # a fused pair of boxes is one 20x10x10 box
 
@@ -51,9 +53,27 @@ def test_unification_falls_back_to_face_only_merging(monkeypatch):
         return real(shape, unify_edges=False)
 
     monkeypatch.setattr(occ, "unify_same_domain", refuse_edge_merging)
-    faces, _ = occ.count_subshapes(_unify_one(solid))
+    merged, ran = _unify_one(solid)
+    faces, _ = occ.count_subshapes(merged)
     assert seen == [True, False]
+    assert ran  # the kernel did run, just not the edge pass
     assert faces == 6
+
+
+def test_an_already_minimal_solid_is_not_reported_as_a_refusal():
+    """Unifying to itself is success, not a kernel that declined.
+
+    docs/algorithm.md §9 records the junction template doing exactly this — 30
+    faces to 30 — so a stat inferred from "the face count did not change" would
+    make the run claim a failure that never happened.
+    """
+    minimal = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    before, _ = occ.count_subshapes(minimal)
+
+    _, stats = _unify([occ.solids(minimal)[0]])
+
+    assert stats["output_faces"] == before  # nothing to merge on a bare box
+    assert stats["unmerged_solids"] == 0
 
 
 def test_unification_that_cannot_run_at_all_returns_the_solid_unchanged(monkeypatch):

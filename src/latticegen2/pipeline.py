@@ -213,6 +213,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         )
     stats["output_faces"] = simplify_stats["output_faces"]
     stats["output_edges"] = simplify_stats["output_edges"]
+    stats["unmerged_solids"] = simplify_stats["unmerged_solids"]
 
     with Timer(rl, "validate"):
         invalid = [i for i, s in enumerate(result_solids) if not occ.is_valid(s)]
@@ -272,8 +273,15 @@ assumed.
 """
 
 
-def _unify_one(solid: TopoDS_Shape) -> TopoDS_Shape:
+def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
     """Unify one solid, giving up on the parts of the job that will not run.
+
+    Returns the solid and whether the kernel ran at all, so the caller reports
+    what happened rather than inferring it from the face count. Those are not
+    the same thing: an already-minimal solid unifies *successfully* and changes
+    nothing — docs/algorithm.md §9 records the junction template doing exactly
+    that, 30 faces to 30 — so "nothing changed" must never be read as "the
+    kernel refused".
 
     Unification is a size optimization, not a correctness step, so a kernel that
     refuses to perform it must not end the run — spec §11's principle that "do
@@ -290,13 +298,13 @@ def _unify_one(solid: TopoDS_Shape) -> TopoDS_Shape:
     ``Standard_Failure: Courbes non jointives`` instead.
     """
     try:
-        return occ.unify_same_domain(solid)
+        return occ.unify_same_domain(solid), True
     except Standard_Failure:
         pass
     try:
-        return occ.unify_same_domain(solid, unify_edges=False)
+        return occ.unify_same_domain(solid, unify_edges=False), True
     except Standard_Failure:
-        return solid
+        return solid, False
 
 
 def _unify(solids: list[TopoDS_Shape]):
@@ -317,7 +325,9 @@ def _unify(solids: list[TopoDS_Shape]):
         edges_before += e
         pre_volume = occ.volume(solid)
 
-        merged = _unify_one(solid)
+        merged, ran = _unify_one(solid)
+        if not ran:
+            skipped += 1
         produced = occ.solids(merged)
         if len(produced) != 1:
             raise ProcessingError(
@@ -335,11 +345,9 @@ def _unify(solids: list[TopoDS_Shape]):
                 f"same surface were merged, so the boundary moved."
             )
 
-        f2, e2 = occ.count_subshapes(produced[0])
-        if f2 == f and e2 == e:
-            skipped += 1
-        faces_after += f2
-        edges_after += e2
+        f, e = occ.count_subshapes(produced[0])
+        faces_after += f
+        edges_after += e
         out.append(produced[0])
 
     return out, {

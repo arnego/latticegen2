@@ -200,11 +200,20 @@ def surface_samples(face) -> np.ndarray | None:
     return np.vstack(out)
 
 
-DEVIATION_CELL_FACTOR = 1.0
+DEVIATION_CELL_FACTOR = 2.0
 """Grid cell for the deviation search, as a multiple of the median triangle edge.
 
-Finer than :class:`SpatialHash`'s own grid, because this search wants few
-candidates per cell rather than few cells per query.
+A finer grid means fewer candidate triangles per sample, which is what this
+search wants — but the cost of *binning* runs the other way, and it is the side
+that bites. Triangle AABBs are inflated and expanded into cells, so a triangle
+far larger than the median occupies cells in proportion to its volume in them:
+halving the cell size costs 8x the rows. Real CAD makes that spread enormous.
+`TD_HX_Indre_Volum.step` meshes to a 341,000:1 edge-length ratio — 188 mm planar
+triangles beside a 1.26 mm median — where one triangle alone reaches 15,360
+cells at half this size, 4.1 M rows in total and a 570 MB peak, against 178 MB
+here for the same answer to six decimals. Matching :class:`SpatialHash`'s cell
+keeps the pathological case bounded, and the extra candidates per sample cost
+about 0.1 s.
 """
 
 DEVIATION_CELL_SLACK = 0.5
@@ -244,8 +253,19 @@ def _neighbour_triangles(points: np.ndarray, mesh: TriMesh, cell: float):
     return offsets, counts, tri_ids
 
 
+DEVIATION_PAIR_BUDGET = 1 << 17
+"""Most (sample, triangle) pairs held at once while measuring the deviation.
+
+Every intermediate in the inner loop is one row per pair, several of them
+``(P, 3)`` float64, so this sets the stage's working set outright rather than
+just its chunking. 2^17 holds it to ~22 MB on the 80 mm ball where 2^19 took
+86 MB, for the same answer and the same wall time — the larger chunk buys
+nothing, because the cost here is memory traffic rather than call overhead.
+"""
+
+
 def _max_distance_to_mesh(
-    points: np.ndarray, mesh: TriMesh, budget: int = 1 << 19
+    points: np.ndarray, mesh: TriMesh, budget: int = DEVIATION_PAIR_BUDGET
 ) -> float:
     """Worst distance from any of ``points`` to the nearest triangle of ``mesh``.
 

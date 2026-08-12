@@ -181,7 +181,7 @@ def make_solid(shell: TopoDS_Shell) -> TopoDS_Shape:
     return BRepBuilderAPI_MakeSolid(shell).Solid()
 
 
-def unify_same_domain(shape: TopoDS_Shape) -> TopoDS_Shape:
+def unify_same_domain(shape: TopoDS_Shape, unify_edges: bool = True) -> TopoDS_Shape:
     """Merge adjacent faces (and edges) that lie on the same underlying surface.
 
     A pure *representation* change: the point set is identical, only its
@@ -190,12 +190,17 @@ def unify_same_domain(shape: TopoDS_Shape) -> TopoDS_Shape:
     lateral faces are coplanar and share an edge, but nothing ever merges them
     (docs/algorithm.md §9).
 
+    ``unify_edges`` also concatenates the collinear edge pairs left inside a
+    merged face's wire. It is the part of the algorithm that can throw on
+    otherwise sound geometry, and it is worth far less than the face merging —
+    see :func:`latticegen2.pipeline._unify`, which retries without it.
+
     OCCT's default tolerances are used deliberately. The faces this is expected
     to merge are exactly coplanar by construction, so the defaults suffice;
     loosening them would let genuinely distinct faces merge, which would change
     the geometry rather than just how it is described.
     """
-    upgrade = ShapeUpgrade_UnifySameDomain(shape, True, True, False)
+    upgrade = ShapeUpgrade_UnifySameDomain(shape, unify_edges, True, False)
     upgrade.Build()
     return upgrade.Shape()
 

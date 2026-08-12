@@ -291,21 +291,42 @@ trustworthy as the tightness of the quantity it compares.
 on a bound for how far the mesh departs from the true surface. That bound is
 **measured, not assumed**: for every curved face, the true surface is evaluated at
 the parametric midpoint of each triangle edge and the parametric centroid of each
-triangle, and compared against the distance to the corresponding mesh element.
-`d` is then `max(requested deflection, worst measured deviation)`.
+triangle, and each sample's distance to the **nearest** triangle of the welded
+mesh is taken. `d` is then `max(requested deflection, worst measured deviation)`.
 
-This matters because OCCT does not reliably deliver the deflection it is asked
-for. Measured: asked for 0.4 mm on `80mm-test-ball.step`, samples land up to
-~2.8 mm off the sphere; asked for 0.15 mm on `TD_HX_Indre_Volum.step`, up to
-~0.5 mm. A margin built on the requested figure would have been too small in both
-cases. The measurement is deliberately conservative — it compares each sample
-only against the element it parametrically belongs to, and takes the worst sample
-on the face — because over-estimating `d` only sends more junctions down the
-correct-but-slower boundary path, while under-estimating it could let a strut
-that genuinely touches the surface be treated as clear of it.
+Measuring is necessary because OCCT does not reliably deliver the deflection it
+is asked for: on `TD_HX_Indre_Volum.step`, asked for 0.15 mm, the real worst
+sagitta is 0.49 mm. A margin built on the requested figure would have been over
+three times too small there.
+
+**Nearest, not parametrically-owning, and the distinction is load-bearing.** A
+parametric midpoint is not a geometric midpoint, and where a surface's
+parametrization is degenerate the two are nowhere near each other. A sphere is
+the ordinary case: at `v = ±π/2` every pole-cap triangle owns a vertex at the
+pole, so the midpoint of an edge running to it can evaluate 90° of longitude away
+from the triangle that owns its parameters. Measuring against that triangle
+reported **2.1988 mm** on `80mm-test-ball.step` at a requested 0.1 mm, against a
+true worst sagitta of **0.0786 mm** — 28× too large, and past the `a/4` bar at
+`cc = 10`, so v2.0.0 refused sound input (issue #6). The giveaway was that it
+shrank like `O(h)` under refinement rather than a sagitta's `O(h²)`. Comparing
+against the nearest triangle instead gives 0.0848 mm and is unchanged on
+geometry that has no such degeneracy — 0.0726 mm on `test-cylinder.STEP`,
+0.4907 mm on the heat exchanger.
+
+The search is still deliberately conservative. It is restricted to the sample's
+own grid neighbourhood, which is a minimum over a *subset* of the triangles and
+therefore can only ever come out too large; and it takes the worst sample rather
+than an average. Both err the same way, and that way is the safe one —
+over-estimating `d` only sends more junctions down the correct-but-slower
+boundary path, while under-estimating it could let a strut that genuinely touches
+the surface be treated as clear of it. Measured, the restriction costs nothing:
+all three committed parts return the same deviation to six decimals whether the
+neighbourhood is searched or every triangle is.
 
 A deviation exceeding `a/4` is a hard failure: classification would then be
-dominated by meshing error rather than by geometry.
+dominated by meshing error rather than by geometry. The bar itself was never the
+problem in issue #6 — it fired correctly on the number it was given, and a gate
+is only as trustworthy as the quantity it compares, exactly as with Gate 1 above.
 
 Finally a uniform spatial hash is built over the triangles, plus a coarser
 occupancy grid sized to the near-surface query radius.
@@ -555,6 +576,22 @@ realistic coordinates), and stays far below the smallest real feature
   count guard exact and leaves the step straightforward to parallelise if it ever
   becomes the bottleneck at scale (~0.24 ms/face).
 
+  **A kernel that declines to unify must not end the run.** Unification makes the
+  output smaller, not more correct, so failing on it would refuse sound geometry
+  over a size optimization — §11's principle again. `ShapeUpgrade_UnifySameDomain`
+  does throw on geometry this tool legitimately produces: on the 80 mm ball at
+  `cc=10, t=1` it raises `Standard_Failure: Courbes non jointives` on a solid that
+  `BRepCheck_Analyzer` has already passed as valid. So the step degrades in two
+  rungs, and everything downstream still gates the result either way.
+
+  The rungs are chosen from where the value is. It is specifically the **edge**
+  merging — concatenating the collinear pairs left inside a merged wire — that
+  throws, and on this geometry it is worth almost nothing: run alone it removes
+  4 edges out of 81,816. Face merging, the part that matters, succeeds on the same
+  solid and takes it from 20,268 faces to 10,554 and 81,816 edges to 62,376. So
+  the first retry drops edge merging, and only if that fails too is the solid
+  exported as built, with an explicit note in the log and the summary.
+
 * **Validity gate.** Every output solid is checked with OCCT's
   `BRepCheck_Analyzer` before export. This is an *exact* B-rep check rather than a
   mesh-based approximation of one, which matters because mesh-based
@@ -633,6 +670,12 @@ Because priority #1 is precision, every optimization is designed so that its
   the tightness of the quantity it compares (§5.1). A gate that rejects valid
   input is its own violation of the principle above: "do more work" is an
   acceptable failure mode, "refuse correct input" is not.
+* The same reading applies to steps that are *optimizations* rather than
+  correctness requirements. Same-domain unification only makes the output
+  smaller, so when the kernel refuses to perform it the run degrades to a
+  larger file rather than failing (§9). Both halves of issue #6 were this
+  mistake: a sound part rejected first by a mis-measured mesh gate, then by an
+  optional compaction step that threw.
 
 ---
 
@@ -668,6 +711,8 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Vectorised ragged cell assignment in the spatial index | Building the index over a 200 k-triangle *output* mesh stays interactive |
 | One ray-parity test per node, not per half-strut | Justified by §5.3(a); a third of the work |
 | Planar faces skipped in deviation measurement | Lattice output is all planar, so verification re-tessellation stays cheap |
+| Deviation samples binned once against inflated triangle AABBs | One vectorised `searchsorted` replaces a 27-cell query per sample; on the 26 k-triangle heat exchanger that was most of the stage (§5.1) |
+| Centroid/AABB bounds before the exact point-triangle test | A neighbourhood holds tens of triangles and two can be nearest; the cheap bounds discard the rest without exact work |
 | Measured rather than assumed mesh deviation | Correctness safety net, not a speed lever (§5.1) |
 
 Alternatives evaluated and rejected:

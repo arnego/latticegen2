@@ -148,3 +148,74 @@ It costs ~8 s and pays for itself: export drops 9.3 s → 5.7 s and the round-tr
 check 23.5 s → 13.5 s. The template itself is already minimal — unifying it
 leaves 30 faces — so the redundancy is created entirely by instancing. See
 docs/algorithm.md §9.
+
+---
+
+## G5 — what makes boundary stitching expensive ⚠️ ARCHITECTURAL FINDING
+
+Run on the 21,955 trimmed boundary pieces (302,577 faces) the failed `cc=5, t=1`
+scale rehearsal left in its temp folder, so these are the real shapes that took
+4 h 45 m to sew, not a synthetic stand-in.
+
+```
+python tools/prototypes/g5_stitch_scaling.py --pieces path/to/temp/<stamp>
+```
+
+### G5a — scaling, and whether any configuration rescues it
+
+| Pieces | `default` | `minimal` | Free edges | Merged edges |
+|---|---|---|---|---|
+| 500 | 1.46 s | 1.44 s | 2,000 | 2,575 |
+| 1,000 | 5.99 s | 5.47 s | 4,378 | 5,263 |
+| 2,000 | 24.34 s | 23.81 s | 8,961 | 10,812 |
+| 4,000 | 77.16 s | 76.34 s | 16,235 | 20,587 |
+| 8,000 | 195.77 s | 194.29 s | 29,550 | 36,273 |
+| fitted exponent | **1.78** | **1.80** | | |
+
+`minimal` turns off every optional phase — `Cutting` (splitting free edges so they
+match), `Analysis` (degenerate-shape detection) and `SameParameter` (re-fitting
+merged edges). **All three together account for under 2 %.** There is no
+configuration of `BRepBuilderAPI_Sewing` that makes this affordable; the cost is
+the merging itself.
+
+Free edges grow linearly with piece count while time grows at `n^1.8`, so the
+cost is roughly *quadratic in the number of interfaces to pair up* — the
+signature of a search, which is exactly what it is. The pairing is already known
+exactly from the junction graph (docs/algorithm.md §7.1), and sewing rediscovers
+it.
+
+### G5b — the face count alone, with nothing to merge
+
+A **closed** instanced interior shell contributes faces and **zero** free edges,
+so anything it costs is the price of indexing faces, not of the search:
+
+| | Seconds |
+|---|---|
+| 4,000 pieces | **76.51** |
+| 4,000 pieces + one closed 194,400-face shell | **716.61** |
+| delta, for zero extra free edges | **+640.10** |
+
+**This refutes the assumption the pipeline was built on.** `latticegen2.occ.sew`
+documented that "sewing only works on free edges, so a shell whose interior edges
+are already shared contributes only its holes to the workload", and that is what
+justified handing `BRepBuilderAPI_Sewing` the whole interior shell. It is false:
+9.4× the cost for nothing to merge. The interior shell at rehearsal scale is
+705,000 faces — 3.6× the shell measured here — which is where the missing hours
+of the 5 h 04 m run went.
+
+### What this decides
+
+* **Tuning the sewing call is dead.** Under 2 % is available (G5a).
+* **Partitioning the boundary sew alone is not enough.** Even a perfectly tiled
+  boundary stitch still has to join the interior shell, and that is the dominant
+  term (G5b).
+* **The interior shell must never enter sewing.** Which means stitching has to
+  join known partners by index rather than by geometric search — the direction
+  [specification.md](../../docs/specification.md) §10 sketches, now measured
+  rather than assumed. Every interface is known from both sides after
+  docs/algorithm.md §7.1, and an interior↔boundary cap is provably the whole
+  template quad (§5.3(b)), so both sides' topology is addressable exactly.
+
+Note that the shell counts in G5a are an artefact of sewing a *prefix* of the
+boundary layer — an arbitrary subset has many genuinely unmatched free edges.
+Only the timings and edge counts are meaningful as scale indicators.

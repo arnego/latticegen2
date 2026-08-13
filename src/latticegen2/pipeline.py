@@ -1,14 +1,15 @@
 """Pipeline orchestration.
 
     parse -> template -> import -> tessellate -> classify
-          -> instance interior -> trim boundary -> connect -> sew
+          -> trim boundary -> connect -> instance interior -> weld
           -> validate -> write STEP -> round-trip -> summary
 
 The shape of this is deliberately flat. In the fuse-free architecture there is
 no tiling stage, no hierarchical assembly, no distributed merge rounds and no
 fuse-based cleanup, because there is nothing left for them to do: the interior is
-instanced rather than fused, and connectivity is a graph property rather than a
-boolean experiment.
+instanced rather than fused, connectivity is a graph property rather than a
+boolean experiment, and assembly is an index lookup rather than a geometric
+search.
 """
 
 from __future__ import annotations
@@ -16,31 +17,25 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import shutil
+from dataclasses import dataclass
 
 import numpy as np
 from OCP.BRepTools import BRepTools
 from OCP.Standard import Standard_Failure
 from OCP.TopoDS import TopoDS_Shape
 
-from . import occ
-from .boundary import trim_boundary
+from . import occ, weld
+from .boundary import CAP_AREA_REL_TOL, finalize_pieces, resolve_interfaces, trim_boundary
 from .classify import Klass, classify_nodes, tessellate_surface
 from .cli import Args
 from .connect import build_components
 from .errors import InputGeometryError, OutputError, ProcessingError
 from .interior import build_interior_shell, extract_template_mesh
 from .junction import build_template
-from .lattice import candidate_nodes, lattice_params, part_name
+from .lattice import candidate_nodes, lattice_params, neighbor_step, part_name
+from .lattice import node as lattice_node
 from .runlog import RunLog, Timer, format_bytes
 from .stepout import generation_params_text, rewrite_step_header, round_trip_check
-
-SEW_TOLERANCE = 1e-6
-"""Millimetres. Interfaces are geometrically identical by construction; this
-only has to absorb the last-ulp difference between computing a shared cap from
-one side of a strut or the other, which is ~1e-14 mm at realistic coordinates.
-It stays far below the smallest real feature (``t >= 0.4`` mm), so it can never
-weld two genuinely distinct vertices together."""
-
 
 def _make_tmpdir(output_path: str) -> str:
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -120,10 +115,6 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
             "smaller than one lattice cell at these parameters — try a smaller -cc."
         )
 
-    kept = {(int(a), int(b), int(c)) for a, b, c in np.vstack(
-        [x for x in (interior_nodes, boundary_nodes) if len(x)]
-    )}
-
     with Timer(rl, "boundary"):
         # Reported per decile crossed rather than on an exact modulo: the parallel
         # path advances in whole batches, so a `done % step == 0` test lands on a
@@ -137,7 +128,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
                 rl.line(f"  boundary trim: {done}/{total}")
 
         boundary = trim_boundary(
-            lp, tpl, boundary_nodes, kept, body, body_path, tmpdir,
+            lp, tpl, boundary_nodes, body, body_path, tmpdir,
             workers=args.workers, background=args.background, progress=progress,
         )
     rl.line(
@@ -156,10 +147,28 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         stats["peak_worker_memory"] = format_bytes(boundary.max_worker_rss)
 
     with Timer(rl, "connect"):
-        comps = build_components(interior_nodes, tpl.volume, boundary.pieces)
+        interior_set = {(int(a), int(b), int(c)) for a, b, c in interior_nodes} \
+            if len(interior_nodes) else set()
+        iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
+        # Weldability is settled here, while a rejection still only costs an
+        # extra solid: once a cap face has been given up, putting it back is an
+        # undo, and the caps are given up in `finalize_pieces` on the next line.
+        for node, h in weld.unweldable(
+            lp, tmesh, interior_set, boundary.pieces, iface.interfaces
+        ):
+            iface.decline(node, h)
+        finalize_pieces(boundary.pieces, iface.interfaces)
+        comps = build_components(
+            interior_nodes, tpl.volume, boundary.pieces, iface.interfaces
+        )
         threshold = lp.t ** 3
         dropped = comps.dropped(threshold)
         keep_labels = set(comps.volumes) - dropped
+    _log_interfaces(rl, lp, iface)
+    stats["interfaces"] = iface.n_pairs
+    stats["caps_unpaired"] = len(iface.unpaired)
+    stats["caps_mismatched"] = len(iface.mismatched)
+    stats["caps_unweldable"] = len(iface.unweldable)
     _log_dropped(rl, comps, dropped, threshold)
     stats["components"] = len(comps.volumes)
     stats["components_dropped"] = len(dropped)
@@ -170,29 +179,45 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
             f"{threshold:g} mm^3 (specification.md §5), leaving nothing to write."
         )
 
-    keep_interior, keep_pieces = _partition_kept(comps, keep_labels, boundary.pieces)
-    final_kept = {v.node for i, v in enumerate(comps.vertices) if comps.labels[i] in keep_labels}
+    kept = _partition_kept(comps, keep_labels, boundary.pieces)
+    want_rings = _rings_needed(kept.interior_groups, iface.interfaces)
+
+    # The boundary layer is sewn to itself first, because it is the only part
+    # whose pairing is genuinely unknown, and because the interior is then built
+    # onto whatever topology it ends up with (docs/algorithm.md §8).
+    with Timer(rl, "stitch"):
+        boundary_faces = weld.sew_boundary(kept.pieces, kept.piece_groups)
+        rings = weld.interface_rings(lp, tmesh, boundary_faces, want_rings)
+    rl.line(
+        f"boundary layer: {len(kept.pieces)} piece(s) sewn into "
+        f"{sum(len(f) for f in boundary_faces.values())} faces across "
+        f"{len(boundary_faces)} component(s); {len(rings)} interface ring(s) located"
+    )
+    stats["interior_interfaces"] = len(rings)
 
     with Timer(rl, "instance"):
-        shell, istats = build_interior_shell(lp, tpl, tmesh, keep_interior, final_kept)
-        pieces = ([shell] if shell is not None else []) + [p.shell for p in keep_pieces]
+        interior = build_interior_shell(
+            lp, tpl, tmesh, kept.interior_nodes, iface.interfaces,
+            groups=kept.interior_groups, adopted=rings,
+        )
+    istats = interior.stats
     stats.update(istats)
     rl.line(
         f"interior shell: {istats['interior_faces']} faces, "
-        f"{istats['interior_vertices']} shared vertices, {istats['interior_edges']} shared edges"
+        f"{istats['interior_vertices']} shared vertices, {istats['interior_edges']} shared edges, "
+        f"{istats['interior_open_edges']} open edges"
     )
-    rl.line(f"assembly input: {len(pieces)} shell(s) to stitch")
 
-    with Timer(rl, "sew"):
-        sewn = occ.sew(pieces, SEW_TOLERANCE)
-        result_solids = _close_solids(sewn)
-    rl.line(f"sewn into {len(result_solids)} solid(s)")
+    with Timer(rl, "assemble"):
+        shells = weld.assemble(interior.shells, boundary_faces)
+        result_solids, _ = weld.close_shells(shells)
+    rl.line(f"assembled {len(result_solids)} watertight solid(s)")
 
-    if len(result_solids) > len(keep_labels):
+    if len(result_solids) != len(keep_labels):
         raise ProcessingError(
-            f"Stitching produced {len(result_solids)} solids where the junction "
-            f"graph proves there are {len(keep_labels)} connected components. Some "
-            f"interface did not close, which would mean a non-watertight body."
+            f"Assembly produced {len(result_solids)} solids where the junction "
+            f"graph proves there are {len(keep_labels)} connected components. The "
+            f"faces were grouped wrongly, so the output cannot be trusted."
         )
 
     with Timer(rl, "simplify"):
@@ -360,23 +385,111 @@ def _unify(solids: list[TopoDS_Shape]):
     }
 
 
-def _partition_kept(comps, keep_labels: set[int], boundary_pieces):
-    """Split surviving graph vertices back into interior nodes and boundary pieces."""
+@dataclass
+class _Kept:
+    """The surviving graph vertices, split by kind and tagged with a component."""
+
+    interior_nodes: np.ndarray
+    interior_groups: dict[tuple[int, int, int], int]
+    pieces: list
+    piece_groups: list[int]
+
+
+def _partition_kept(comps, keep_labels: set[int], boundary_pieces) -> _Kept:
+    """Split surviving graph vertices back into interior nodes and boundary pieces.
+
+    The component label travels with each one, because that is what the assembly
+    groups faces by: two components share no interface, so grouping while
+    building is exact and free, where rediscovering the split afterwards would be
+    a geometric search over every face in the output.
+    """
     keep_interior: list[tuple[int, int, int]] = []
+    interior_groups: dict[tuple[int, int, int], int] = {}
     keep_pieces = []
+    piece_groups: list[int] = []
     for i, v in enumerate(comps.vertices):
-        if int(comps.labels[i]) not in keep_labels:
+        label = int(comps.labels[i])
+        if label not in keep_labels:
             continue
         if v.is_interior:
             keep_interior.append(v.node)
+            interior_groups[v.node] = label
         else:
             keep_pieces.append(boundary_pieces[v.piece_index])
+            piece_groups.append(label)
     nodes_arr = (
         np.array(keep_interior, dtype=np.int64)
         if keep_interior
         else np.empty((0, 3), dtype=np.int64)
     )
-    return nodes_arr, keep_pieces
+    return _Kept(nodes_arr, interior_groups, keep_pieces, piece_groups)
+
+
+def _rings_needed(interior_groups, interfaces) -> dict:
+    """``(node, half-strut) -> component`` for each cap the interior adopts.
+
+    Interior-to-interior caps are excluded: both sides come out of one index and
+    already share their topology, so there is nothing to adopt. At rehearsal
+    scale that is the difference between locating 18 thousand rings and 97
+    thousand.
+    """
+    steps = [tuple(int(x) for x in neighbor_step(h)) for h in range(6)]
+    out = {}
+    for node, group in interior_groups.items():
+        for h in range(6):
+            if (node, h) not in interfaces:
+                continue
+            step = steps[h]
+            if (node[0] + step[0], node[1] + step[1], node[2] + step[2]) not in interior_groups:
+                out[(node, h)] = group
+    return out
+
+
+def _log_interfaces(rl: RunLog, lp, iface) -> None:
+    """Report the interface tally, and anything the two sides disagreed about.
+
+    The two anomaly counts are the diagnostic this pipeline previously lacked.
+    The old one-sided rule dropped both of these categories regardless — leaving,
+    respectively, a hole with nothing behind it and two holes that do not match —
+    and either way the consequence surfaced only much later, as an unclosed shell
+    out of the stitcher with no indication of where it was. Sample world positions
+    are logged so the region can be found in the part.
+    """
+    rl.line(f"interfaces: {iface.n_pairs} cap(s) stitched across")
+    if iface.unpaired:
+        sample = ", ".join(
+            f"{node}h{h}@{np.round(lattice_node(lp, node), 3).tolist()}"
+            for node, h in iface.unpaired[:10]
+        )
+        rl.always(
+            f"note: {len(iface.unpaired)} cap(s) face a junction that produced no "
+            f"matching cap, so they are kept as exterior surface rather than opened "
+            f"as an interface. This is a boolean disagreeing with itself across a "
+            f"shared face; the output stays watertight. Samples: {sample}"
+            + (" ..." if len(iface.unpaired) > 10 else "")
+        )
+    if iface.mismatched:
+        sample = ", ".join(
+            f"{node}h{h} {a:.6g} vs {b:.6g} mm^2" for node, h, a, b in iface.mismatched[:10]
+        )
+        rl.always(
+            f"note: {len(iface.mismatched)} cap(s) were presented by both sides but "
+            f"with regions that disagree beyond {CAP_AREA_REL_TOL:g} relative, so they "
+            f"are not stitched across. Each leaves an extra solid in the output rather "
+            f"than a hole. Samples: {sample}"
+            + (" ..." if len(iface.mismatched) > 10 else "")
+        )
+    if iface.unweldable:
+        sample = ", ".join(
+            f"{node}h{h}@{np.round(lattice_node(lp, node), 3).tolist()}"
+            for node, h in iface.unweldable[:10]
+        )
+        rl.always(
+            f"note: {len(iface.unweldable)} cap(s) have holes on the two sides that "
+            f"do not correspond edge for edge, so they are not welded. Each leaves an "
+            f"extra solid in the output rather than a hole. Samples: {sample}"
+            + (" ..." if len(iface.unweldable) > 10 else "")
+        )
 
 
 def _log_dropped(rl: RunLog, comps, dropped: set[int], threshold: float) -> None:
@@ -399,25 +512,3 @@ def _log_dropped(rl: RunLog, comps, dropped: set[int], threshold: float) -> None
         + (" ..." if len(vols) > 20 else "")
     )
 
-
-def _close_solids(sewn: TopoDS_Shape) -> list[TopoDS_Shape]:
-    """Turn the sewing result into closed solids, rejecting any open shell."""
-    out: list[TopoDS_Shape] = []
-    found = occ.shells(sewn)
-    if not found:
-        raise ProcessingError(
-            "Stitching produced no shell at all — every interface failed to close."
-        )
-    open_shells = 0
-    for shell in found:
-        if not shell.Closed():
-            open_shells += 1
-            continue
-        out.append(occ.make_solid(shell))
-    if open_shells:
-        raise ProcessingError(
-            f"{open_shells} of {len(found)} stitched shells are not closed, so the "
-            f"output would not be watertight. This means two junction interfaces "
-            f"that should have matched did not."
-        )
-    return out

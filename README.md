@@ -135,7 +135,7 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `-t` | float | yes | mm | 0.4 – 20 | — | Side length of the diamond strut profile |
 | `-o`, `--output` | path | no | — | — | `<input_stem>-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing |
 | `--workers` | int | no | count | 1 – 128 | from `--cores`, else from the machine | Worker processes for the boundary stage |
-| `--cores` | int | no | count | 1 – 128 | detected | Physical cores available; `--workers` is derived as `min(cores-1, 8)` |
+| `--cores` | int | no | count | 1 – 128 | detected | Physical cores available; `--workers` is derived as `min(cores, 8)` — one worker per core |
 | `--ram` | float | no | GB | 1 – 1024 | — | Memory budget; recorded in the log |
 | `-bg`, `--background` | flag | no | — | — | off | Run at below-normal process priority |
 | `-v`, `--verbose` | flag | no | — | — | off | Verbose console output (a full `.log` is always written) |
@@ -195,6 +195,14 @@ than by tolerance. Only junctions that straddle the input surface need a boolean
 and each gets exactly one single-operand intersection, distributed across worker
 processes.
 
+*Which* shared faces get dropped is then decided once, on the master, with both
+sides of every face in hand: a face is opened only when the junctions on both
+sides of it opened theirs. Deciding that locally would be quicker and is unsound —
+the two sides come from two independent booleans, which can disagree on grazing
+geometry, and the result of an unmatched drop is a hole in the output rather than
+an error. Where the two sides genuinely disagree the face simply stays, which
+costs an extra solid in the file and is reported in the run log.
+
 Instancing does have one cost, and it is paid at the end. Because nothing is ever
 merged, two neighbouring junctions leave their coplanar lateral faces sitting
 side by side unmerged at every strut interface — twice as many faces as the
@@ -207,8 +215,9 @@ halving the face count and the file size.
 | One junction template, instanced | The only general fuse in the program is six operands, once per run (~40 ms) |
 | Indexed shared-topology shell | Interior assembly is O(nodes) with exact watertightness — no sewing, no tolerance |
 | One object operand per intersection | Makes OCCT's operand-fragmentation failure mode structurally unreachable |
+| Interfaces resolved from both sides | A shared face is opened only when both junctions opened it, so the output cannot contain a hole nothing fills |
 | Connectivity by graph, not by boolean | The floating-body rule is a BFS over surviving interfaces |
-| Sewing confined to the boundary | Stitching cost scales with surface area, not volume |
+| Sewing confined to the boundary | The boundary layer is sewn first and the interior is then built *onto* its topology, so the volume-scaling shell never enters a geometric search. Sewing's cost is dominated by total face count, so handing it the interior made stitching the bottleneck on large parts — see [docs/algorithm.md](docs/algorithm.md) §8 |
 | Process-parallel boundary junctions | Constant-size independent jobs |
 | Same-domain unification before export | Instancing merges nothing, so coplanar faces meet unmerged at every strut interface; unifying them halves the face count and file size — and makes the run *faster*, since export and verification then handle half as much |
 | Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |

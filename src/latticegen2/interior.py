@@ -19,14 +19,16 @@ is already known here exactly. Sewing is still the right tool where the pairing
 genuinely isn't known — stitching trimmed boundary junctions on — but it must not
 be on the path whose size scales with the volume of the part.
 
-Why all six caps of an INTERIOR node can always be dropped: a node is INTERIOR
-only when all six of its half-struts are, which puts every one of its cap planes
-strictly inside the input solid; the node across such a cap therefore has a
-half-strut that is not OUTSIDE and is never classified OUTSIDE itself
-(:mod:`latticegen2.classify`). The "neighbour absent" branch below is unreachable
-for a real INTERIOR node — it is kept so that a synthetic grid still closes and
-so a classification bug degrades into a closed, oversized solid rather than a
-hole in the output.
+Which caps get dropped is **not** decided here. It is handed in as the interface
+set resolved from both sides at once
+(:func:`latticegen2.boundary.resolve_interfaces`), because a cap may only be
+dropped when the junction across it drops the matching one. An INTERIOR node's
+six caps normally all qualify — a node is INTERIOR only when all six of its
+half-struts are, which puts every one of its cap planes strictly inside the input
+solid, so the trimmed junction across such a cap keeps that cap whole
+(docs/algorithm.md §5.3(b)). Where a boolean has nonetheless left nothing on the
+other side, the cap is simply kept, and the shell closes over it rather than
+opening a hole nothing will fill.
 """
 
 from __future__ import annotations
@@ -39,8 +41,8 @@ from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakeVertex
 from OCP.BRepTools import BRepTools, BRepTools_WireExplorer
 from OCP.GeomAbs import GeomAbs_SurfaceType
-from OCP.TopAbs import TopAbs_Orientation
-from OCP.TopoDS import TopoDS_Shell, TopoDS_Wire
+from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
+from OCP.TopoDS import TopoDS, TopoDS_Shell, TopoDS_Wire
 from OCP.gp import gp_Dir, gp_Pln
 
 from . import occ
@@ -52,6 +54,19 @@ _WELD = 9
 """Decimal places used to identify coincident template vertices. The template is
 built from exact expressions at millimetre scale, so coincident vertices agree
 far beyond this; it only guards against a last-ulp difference."""
+
+_ADOPT_TOL = 1e-6
+"""Millimetres. Whether an adopted edge starts at one corner or the other — a
+question about which of two corners a whole strut-width apart it is nearer, so
+the bar only has to be far below that."""
+
+
+def _first_vertex_position(edge) -> np.ndarray:
+    """Where the edge's own parametrisation starts, ignoring how it is used."""
+    fwd = TopoDS.Edge_s(edge).Oriented(TopAbs_Orientation.TopAbs_FORWARD)
+    first = next(occ._explore(fwd, TopAbs_ShapeEnum.TopAbs_VERTEX))
+    p = BRep_Tool.Pnt_s(TopoDS.Vertex_s(first))
+    return np.array([p.X(), p.Y(), p.Z()])
 
 
 @dataclass
@@ -218,8 +233,7 @@ class _ShellBuilder:
 
     def __init__(self):
         self.builder = BRep_Builder()
-        self.shell = TopoDS_Shell()
-        self.builder.MakeShell(self.shell)
+        self.shells: dict[int, TopoDS_Shell] = {}
         self._vertices: dict[tuple, object] = {}
         self._edges: dict[tuple[int, int], object] = {}
         self._vid: dict[tuple, int] = {}
@@ -227,6 +241,22 @@ class _ShellBuilder:
         self._net: dict[tuple[int, int], int] = {}
         self._pos: dict[int, np.ndarray] = {}
         self.n_faces = 0
+
+    def shell_for(self, group: int) -> TopoDS_Shell:
+        """The shell collecting ``group``'s faces, created on first use.
+
+        Faces are separated by junction-graph component as they are built, which
+        is exact and free: two components share no interface, so no edge and no
+        vertex can be common to both. The alternative — assemble everything and
+        rediscover the split geometrically — is the kind of search this module
+        exists to avoid.
+        """
+        got = self.shells.get(group)
+        if got is None:
+            got = TopoDS_Shell()
+            self.builder.MakeShell(got)
+            self.shells[group] = got
+        return got
 
     def vertex(self, key: tuple, position) -> int:
         """Intern a global vertex, creating its ``TopoDS_Vertex`` on first use."""
@@ -239,6 +269,54 @@ class _ShellBuilder:
             self._vertices[got] = BRepBuilderAPI_MakeVertex(occ._pnt(pos)).Vertex()
         return got
 
+    def adopt(self, keys: list[tuple], positions, verts, edges) -> None:
+        """Take an existing ring's vertices and edges as this index's own.
+
+        Used where the interior meets a boundary junction: rather than build our
+        own topology there and try to reconcile the two afterwards, the interior
+        is built *on* the boundary's, so the two are the same objects from the
+        start and nothing needs reconciling.
+
+        The direction is not arbitrary. `BRepTools_ReShape` will happily swap an
+        edge inside a face, but replacing that edge's **vertices** leaves the
+        neighbouring edges still referring to the old ones, and the wire comes
+        apart — `BRepCheck_NotConnected`, measured, with the volume quietly wrong
+        and every edge still used exactly twice. So the side that adapts has to
+        be the side whose faces we build ourselves, which is this one.
+
+        ``keys``, ``positions``, ``verts`` and ``edges`` are in loop order;
+        ``edges[i]`` joins ``keys[i]`` to ``keys[i + 1]``.
+        """
+        ids = []
+        for key, pos, vert in zip(keys, positions, verts):
+            got = self._vid.get(key)
+            if got is None:
+                got = len(self._vid)
+                self._vid[key] = got
+            self._pos[got] = np.asarray(pos, dtype=float)
+            # A vertex explored out of an edge carries FORWARD/REVERSED to say
+            # whether it is that edge's start or end. Passed on to
+            # `BRepBuilderAPI_MakeEdge` that flag swaps the new edge's endpoints,
+            # so edges we build on an adopted corner come out running the wrong
+            # way — and it is the *interior's own* edges that then disagree.
+            self._vertices[got] = TopoDS.Vertex_s(
+                vert.Oriented(TopAbs_Orientation.TopAbs_FORWARD))
+            ids.append(got)
+        for i, edge in enumerate(edges):
+            a, b = ids[i], ids[(i + 1) % len(ids)]
+            # `_edge` keys on the sorted id pair and `face` decides which way to
+            # traverse from that order alone, so every stored edge must run from
+            # the lower id to the higher one. An edge we made ourselves does by
+            # construction; an adopted one runs whichever way its own maker chose,
+            # and storing it unexamined makes the interior traverse it the same
+            # way round as the boundary does — the shell still closes, and the
+            # surface is no longer orientable.
+            natural = _first_vertex_position(edge)
+            forward = float(np.linalg.norm(natural - self._pos[a])) <= _ADOPT_TOL
+            if forward != (a < b):
+                edge = edge.Reversed()
+            self._edges[(a, b) if a < b else (b, a)] = edge
+
     def _edge(self, a: int, b: int):
         key = (a, b) if a < b else (b, a)
         edge = self._edges.get(key)
@@ -247,7 +325,23 @@ class _ShellBuilder:
             self._edges[key] = edge
         return edge, (a < b)
 
-    def face(self, loop: list[int], normal: np.ndarray) -> None:
+    def ring(self, loop: list[int]) -> tuple[list, list]:
+        """``(vertices, edges)`` of a cap loop that was dropped, by index only.
+
+        The four edges already exist: the cap face was skipped, but the four
+        lateral faces around it each created one of them. So the topology a
+        boundary junction has to be welded onto is four dictionary lookups, with
+        no geometric search and no tolerance anywhere in it (docs/algorithm.md
+        §8).
+        """
+        verts = [self._vertices[v] for v in loop]
+        edges = []
+        for i in range(len(loop)):
+            edge, _ = self._edge(loop[i], loop[(i + 1) % len(loop)])
+            edges.append(edge)
+        return verts, edges
+
+    def face(self, loop: list[int], normal: np.ndarray, group: int = 0) -> None:
         wire = TopoDS_Wire()
         self.builder.MakeWire(wire)
         for i in range(len(loop)):
@@ -258,10 +352,10 @@ class _ShellBuilder:
             key = (a, b) if forward else (b, a)
             self._use[key] = self._use.get(key, 0) + 1
             self._net[key] = self._net.get(key, 0) + (1 if forward else -1)
-            self.builder.Add(
-                wire,
-                edge if forward else edge.Oriented(TopAbs_Orientation.TopAbs_REVERSED),
-            )
+            # `Reversed()` flips relative to the edge's current flag; `Oriented`
+            # would set it absolutely and throw away an adopted edge's own
+            # direction, which is not ours to choose.
+            self.builder.Add(wire, edge if forward else edge.Reversed())
         # The plane is stated, never inferred: its normal is the template face's
         # outward normal, so the resulting face is FORWARD with that normal and
         # its wire traverses by the right-hand rule about it — which is exactly
@@ -272,7 +366,7 @@ class _ShellBuilder:
         maker = BRepBuilderAPI_MakeFace(plane, wire)
         if not maker.IsDone():
             raise ProcessingError("Could not build a planar face from an instanced wire.")
-        self.builder.Add(self.shell, maker.Face())
+        self.builder.Add(self.shell_for(group), maker.Face())
         self.n_faces += 1
 
     def closure(self) -> tuple[int, int]:
@@ -293,16 +387,15 @@ class _ShellBuilder:
                 bad += 1
         return free, bad
 
-    def result(self) -> tuple[TopoDS_Shell, int]:
-        """``(shell, free_edge_count)``, with OCCT's ``Closed`` flag set correctly.
-
-        ``BRep_Builder`` leaves the flag false on a hand-built shell regardless
-        of the geometry, and downstream code (``BRepBuilderAPI_MakeSolid``,
-        validity checking) reads the flag rather than recomputing it.
+    def result(self) -> tuple[dict[int, TopoDS_Shell], int]:
+        """``(shells by group, free_edge_count)``.
 
         The free-edge count is returned rather than left for the caller to ask
         for again: ``closure()`` walks every edge, and at scale that map holds
-        millions of them.
+        millions of them. The ``Closed`` flag is deliberately *not* set here —
+        these shells are open at every cap a boundary junction will be welded
+        into, and the flag is set once the assembly is complete
+        (:mod:`latticegen2.weld`).
         """
         free, bad = self.closure()
         if bad:
@@ -311,8 +404,7 @@ class _ShellBuilder:
                 f"twice in the same direction. The instanced lattice is not a valid "
                 f"orientable surface, which would make the output non-manifold."
             )
-        self.shell.Closed(free == 0)
-        return self.shell, free
+        return self.shells, free
 
     @property
     def n_vertices(self) -> int:
@@ -323,25 +415,43 @@ class _ShellBuilder:
         return len(self._edges)
 
 
+@dataclass
+class InteriorShells:
+    """The instanced interior, split by component, plus its weldable rings."""
+
+    shells: dict[int, TopoDS_Shell] = field(default_factory=dict)
+    """Component id -> that component's shell, open at every boundary interface."""
+    stats: dict = field(default_factory=dict)
+
+
 def build_interior_shell(
     lp: LatticeParams,
     tpl: JunctionTemplate,
     tmesh: TemplateMesh,
     interior_nodes: np.ndarray,
-    kept: set[tuple[int, int, int]],
-) -> tuple[TopoDS_Shell, dict]:
-    """Build the whole interior lattice as one shared-topology shell.
+    interfaces: set[tuple[tuple[int, int, int], int]],
+    groups: dict[tuple[int, int, int], int] | None = None,
+    adopted: dict[tuple[tuple[int, int, int], int], tuple[list, list]] | None = None,
+) -> InteriorShells:
+    """Build the interior lattice as shared-topology shells, one per component.
 
-    Returns the shell (open exactly where it meets a boundary junction) and a
-    small stats dict for the run log.
+    ``interfaces`` holds ``(node, half-strut)`` for every cap that is stitched
+    across; a cap face is dropped exactly when its key is in it, and kept
+    otherwise. ``groups`` maps a node to its junction-graph component, so the
+    faces are separated as they are built rather than rediscovered afterwards.
+
+    ``adopted`` supplies, per interface cap, the ``(vertices, edges)`` the
+    boundary side already has there, in the template cap's loop order. The
+    interior is then built directly on them, which is what joins the two without
+    any search, tolerance or repair — see :meth:`_ShellBuilder.adopt`.
     """
     if len(interior_nodes) == 0:
-        return None, {
+        return InteriorShells(stats={
             "interior_faces": 0,
             "interior_vertices": 0,
             "interior_edges": 0,
             "interior_open_edges": 0,
-        }
+        })
 
     positions = nodes(lp, interior_nodes)
     steps = [tuple(int(x) for x in neighbor_step(h)) for h in range(6)]
@@ -371,31 +481,40 @@ def build_interior_shell(
             node_pos[node] = base
         return base + verts[local]
 
+    def globals_of(node, loop, gid) -> list[int]:
+        out_loop = []
+        for local in loop:
+            got = gid.get(local)
+            if got is None:
+                key = owner(node, local)
+                got = builder.vertex(key, position(*key))
+                gid[local] = got
+            out_loop.append(got)
+        return out_loop
+
+    cap_face_of = {c: i for i, c in enumerate(tmesh.face_cap) if c >= 0}
+    for (node, h), (ring_verts, ring_edges) in (adopted or {}).items():
+        loop = tmesh.loops[cap_face_of[h]]
+        keys = [owner(node, local) for local in loop]
+        builder.adopt(keys, [position(*k) for k in keys], ring_verts, ring_edges)
+
     for idx in range(len(interior_nodes)):
         node = tuple(int(x) for x in interior_nodes[idx])
+        group = 0 if groups is None else groups[node]
         gid: dict[int, int] = {}
         for fi, loop in enumerate(tmesh.loops):
             cap = tmesh.face_cap[fi]
-            if cap >= 0:
-                step = steps[cap]
-                neighbour = (node[0] + step[0], node[1] + step[1], node[2] + step[2])
-                if neighbour in kept:
-                    continue  # interface: dropped from both sides
-            out_loop = []
-            for local in loop:
-                got = gid.get(local)
-                if got is None:
-                    key = owner(node, local)
-                    got = builder.vertex(key, position(*key))
-                    gid[local] = got
-                out_loop.append(got)
-            builder.face(out_loop, tmesh.face_normal[fi])
+            if cap >= 0 and (node, cap) in interfaces:
+                continue  # interface: dropped from both sides
+            builder.face(globals_of(node, loop, gid), tmesh.face_normal[fi], group)
 
-    shell, free = builder.result()
-    stats = {
-        "interior_faces": builder.n_faces,
-        "interior_vertices": builder.n_vertices,
-        "interior_edges": builder.n_edges,
-        "interior_open_edges": free,
-    }
-    return shell, stats
+    shells, free = builder.result()
+    return InteriorShells(
+        shells=shells,
+        stats={
+            "interior_faces": builder.n_faces,
+            "interior_vertices": builder.n_vertices,
+            "interior_edges": builder.n_edges,
+            "interior_open_edges": free,
+        },
+    )

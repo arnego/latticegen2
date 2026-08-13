@@ -283,6 +283,65 @@ halving the file that export and the round-trip check then have to handle, but
 that trade has only been measured at ~30 k faces. It unifies each solid
 independently, so it parallelises across solids if it needs to.
 
+### Fuse junction pairs whose two booleans disagree
+
+**Status: diagnosed precisely, decided, not yet built. This is what currently
+fails the scale rehearsal**, at minute 35 of a 35-minute run.
+
+**What happens.** `resolve_interfaces` (docs/algorithm.md §7.1) declines a cap
+when the two sides present regions that disagree. On `TD_HX_Indre_Volum` at
+`cc=5, t=1` that is 3 caps out of 122,180, all in one cluster around
+`[2055.4, -90.0, 969.6]`:
+
+| Cap | Side A | Side B |
+|---|---|---|
+| `(633,-97,-61)` h3 | present | absent |
+| `(633,-97,-61)` h0 | 1.000000 mm² | 0.014613 mm² |
+| `(633,-97,-62)` h2 | 0.736809 mm² | 1.000000 mm² |
+
+Declining means both sides keep their cap face. **That degradation is unsound,
+and the claim that it "leaves an extra solid rather than a hole" was wrong.**
+Where the two caps are the same region it is harmless, but these are *mismatched
+partial* caps, so keeping both leaves the overlap as non-manifold material and
+the remainder as an unfilled hole. `assemble` reports exactly that: **12 edges on
+1 face and 12 edges on 3 faces** — 3 caps × 4 ring edges, twice over.
+
+**The fix: fuse the disagreeing pair with a local boolean.** Where instancing's
+exactness argument has broken down because the kernel contradicted itself, fall
+back to the kernel's own general operation. It is sound, it produces correct
+geometry rather than trading a hole for a sliver, and at three occurrences its
+cost is irrelevant — this is nowhere near the volume-scaling path §12 keeps
+booleans off.
+
+The alternatives were considered and rejected: failing the run refuses sound
+input over a kernel defect, which is the one failure mode docs/algorithm.md §11
+rules out; dropping the offending pieces removes material, which §5 reserves for
+*floating* sub-`t³` bodies only.
+
+**What it needs.** The work is small except for one structural change:
+
+* `BoundaryPiece` assumes **one node per piece**. Its caps are keyed by
+  half-strut id alone and `connect.py` reads them as `(piece.node, h)`. A fused
+  pair spans two nodes, so `caps` and `cap_faces` must be keyed by `(node, h)`
+  throughout — boundary, connect, pipeline, weld and their tests. Nothing else
+  about the piece changes.
+* The fuse itself runs *before* `finalize_pieces`, while `faces` plus every entry
+  of `cap_faces` still form the piece's complete closed boundary, so each side
+  can be rebuilt as a solid, fused with `BRepAlgoAPI_Fuse`, and re-tagged with
+  `is_cap_plane_face` against **both** nodes.
+* Interfaces are then resolved as usual. The merged piece presents one agreed
+  region at the cap that disagreed, so nothing is declined there and the rest of
+  the pipeline is unchanged.
+* A fuse that returns more than one solid, or that throws, is a hard failure
+  naming the junctions — it means the two pieces did not even overlap
+  consistently, which is beyond what this repair can honestly fix.
+
+Regression to keep: two pieces whose shared cap disagrees must assemble into a
+closed orientable shell, with the edge-use tally clean. The synthetic case that
+does *not* reproduce it is two pristine template instances — their caps are
+identical, so nothing disagrees. The reproduction needs genuinely mismatched
+partial caps.
+
 ### Tile the boundary sew
 
 **Status: the interior is out of sewing; the boundary layer is not yet tiled.**

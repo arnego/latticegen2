@@ -537,10 +537,18 @@ Three caps out of 122,180 is also why the two committed scenarios never showed
 it: both report zero disagreements, and a rate of 2.5×10⁻⁵ needs a part of this
 size before it appears at all.
 
-Resolving it symmetrically makes "every hole has a partner" true by construction.
-The failure mode of the new rule is the acceptable one (§11): a cap that *should*
-have been an interface but is not recognised as one stays closed, leaving one
-extra solid in the output rather than a hole in it. Both counts are logged.
+Resolving it symmetrically makes "every hole has a partner" true by construction,
+and both counts are logged.
+
+**Declining is not by itself a safe degradation, and this was got wrong once.**
+Where the two sides present the *same* region, keeping both caps is harmless.
+Where they present *mismatched partial* regions — 1.000000 mm² against
+0.014613 mm² above — keeping both leaves the overlap as non-manifold material and
+the remainder as an unfilled hole, which §8's edge-use tally reports as 12 edges
+on one face and 12 on three. A cap the two booleans genuinely disagree about has
+to be repaired rather than sidestepped: the two junctions are fused with a local
+boolean, which is sound and costs nothing at three occurrences out of 122,180.
+See specification.md §10.
 
 A trim can legitimately split one junction into several disconnected pieces when
 the input surface cuts between its arms. Each piece becomes its own vertex in the

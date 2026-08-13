@@ -25,7 +25,13 @@ from OCP.Standard import Standard_Failure
 from OCP.TopoDS import TopoDS_Shape
 
 from . import occ, weld
-from .boundary import CAP_AREA_REL_TOL, finalize_pieces, resolve_interfaces, trim_boundary
+from .boundary import (
+    CAP_AREA_REL_TOL,
+    finalize_pieces,
+    fuse_disagreeing_pairs,
+    resolve_interfaces,
+    trim_boundary,
+)
 from .classify import Klass, classify_nodes, tessellate_surface
 from .cli import Args
 from .connect import build_components
@@ -150,6 +156,26 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         interior_set = {(int(a), int(b), int(c)) for a, b, c in interior_nodes} \
             if len(interior_nodes) else set()
         iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
+        n_fused = 0
+        if iface.mismatched:
+            # Declining a mismatched cap is not a safe degradation on its own:
+            # where the two sides present *different* partial regions, keeping
+            # both keeps the overlap as non-manifold material and the remainder
+            # as an unfilled hole (docs/algorithm.md §7.1). The repair falls back
+            # to the kernel's own general boolean and fuses the two disagreeing
+            # junctions into one solid, then interfaces are resolved again —
+            # the merged piece presents one agreed region, so nothing is
+            # declined there the second time.
+            boundary.pieces, n_fused = fuse_disagreeing_pairs(
+                lp, boundary.pieces, iface.mismatched
+            )
+            iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
+            if iface.mismatched:
+                raise ProcessingError(
+                    f"{len(iface.mismatched)} cap(s) still disagree after fusing "
+                    f"the junctions on either side; the local repair could not "
+                    f"reconcile them."
+                )
         # Weldability is settled here, while a rejection still only costs an
         # extra solid: once a cap face has been given up, putting it back is an
         # undo, and the caps are given up in `finalize_pieces` on the next line.
@@ -164,11 +190,18 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         threshold = lp.t ** 3
         dropped = comps.dropped(threshold)
         keep_labels = set(comps.volumes) - dropped
+    if n_fused:
+        rl.always(
+            f"note: {n_fused} disagreeing cap cluster(s) repaired with a local "
+            f"boolean fuse (docs/algorithm.md §7.1); the merged junctions present "
+            f"one agreed region rather than an extra solid."
+        )
     _log_interfaces(rl, lp, iface)
     stats["interfaces"] = iface.n_pairs
     stats["caps_unpaired"] = len(iface.unpaired)
     stats["caps_mismatched"] = len(iface.mismatched)
     stats["caps_unweldable"] = len(iface.unweldable)
+    stats["fused_cap_clusters"] = n_fused
     _log_dropped(rl, comps, dropped, threshold)
     stats["components"] = len(comps.volumes)
     stats["components_dropped"] = len(dropped)

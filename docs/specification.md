@@ -285,8 +285,39 @@ independently, so it parallelises across solids if it needs to.
 
 ### Fuse junction pairs whose two booleans disagree
 
-**Status: diagnosed precisely, decided, not yet built. This is what currently
-fails the scale rehearsal**, at minute 35 of a 35-minute run.
+**Status: built and unit-tested; not yet re-verified at the scale that found
+it.** Implemented in [`boundary.fuse_disagreeing_pairs`](../src/latticegen2/boundary.py)
+and wired into the pipeline's `connect` stage, between `resolve_interfaces` and
+`finalize_pieces`, exactly as designed below. `BoundaryPiece.caps` and
+`.cap_faces` are now keyed by `(node, half-strut)` throughout boundary, connect,
+pipeline and weld, as the structural change required.
+
+`test/test_boundary.py` reproduces the failure with a real boolean (a genuine
+corner cut off one side's cap via `BRepAlgoAPI_Cut`, not a synthetic uniform
+scale — the earlier tests in that file already covered the "declined, kept as
+exterior" path, so the new ones target specifically the fuse repair):
+`resolve_interfaces` reports the notched cap as mismatched; `fuse_disagreeing_pairs`
+fuses the pair into one solid whose volume is the exact sum, re-tagged so every
+*other* cap of both nodes survives correctly attributed to its own node (the
+`_owning_cap` proximity check earns its keep here — a plane-only
+`is_cap_plane_face` test alone cannot tell node A's caps from node B's along an
+axis orthogonal to the one separating them); resolved a second time the
+disagreement is simply gone, with neither side presenting that cap as a
+boundary face any more; and the merged piece assembles into a closed,
+orientable shell — `weld.shell_defects` reports zero open and zero misoriented
+edges, and `BRepCheck_Analyzer` passes it. `python -m pytest test -q` (160
+passed) and `python tools/e2e.py` (all four scenarios, matching golden samples
+exactly) both stay green — expected, since none of the committed scenarios
+contain a disagreeing pair, so this path is exercised only by the new tests.
+
+**Not yet done:** re-running the `TD_HX_Indre_Volum` rehearsal that found this
+bug in the first place, to confirm the three real disagreeing caps at
+`(633,-97,-61)`/`(633,-97,-62)` get repaired rather than declined. That re-run
+is still blocked on the boundary-sew tiling item below — the rehearsal reaches
+`sew` at minute ~35 today and `sew` itself is unchanged — so it cannot happen
+until that lands too.
+
+Original diagnosis, kept for reference:
 
 **What happens.** `resolve_interfaces` (docs/algorithm.md §7.1) declines a cap
 when the two sides present regions that disagree. On `TD_HX_Indre_Volum` at

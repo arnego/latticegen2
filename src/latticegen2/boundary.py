@@ -42,15 +42,23 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from OCP.BRep import BRep_Builder
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Fuse
 from OCP.BRepTools import BRepTools
 from OCP.TopoDS import TopoDS_Shape, TopoDS_Shell
 from OCP.TopTools import TopTools_ListOfShape
 
 from . import occ
+from .connect import UnionFind
 from .errors import ProcessingError
 from .junction import JunctionTemplate, build_template, is_cap_plane_face
-from .lattice import OPPOSITE_HALF, LatticeParams, lattice_params, neighbor_step, nodes
+from .lattice import (
+    OPPOSITE_HALF,
+    LatticeParams,
+    half_strut_offset,
+    lattice_params,
+    neighbor_step,
+    nodes,
+)
 
 NodeKey = tuple[int, int, int]
 
@@ -66,19 +74,30 @@ across it would weld two boundaries that are not the same curve."""
 
 @dataclass
 class BoundaryPiece:
-    """One connected solid produced by trimming one boundary junction."""
+    """One connected solid produced by trimming one boundary junction.
+
+    ``node`` is the piece's own trimmed junction, or — after
+    :func:`fuse_disagreeing_pairs` has merged two disagreeing pieces into one —
+    an arbitrary representative of the nodes it now spans. Nothing downstream
+    reads ``node`` to attribute a specific cap; ``caps`` and ``cap_faces`` carry
+    the owning node explicitly for exactly that reason, so a fused piece can
+    hold faces belonging to more than one node without ambiguity.
+    """
 
     node: NodeKey
     volume: float
     faces: list = field(default_factory=list)
     """Every face of the trimmed piece that does not lie in a cap plane."""
-    cap_faces: dict[int, list] = field(default_factory=dict)
-    """Half-strut id -> the cap-plane face(s) the trim left on this piece.
+    cap_faces: dict[tuple[NodeKey, int], list] = field(default_factory=dict)
+    """``(node, half-strut id)`` -> the cap-plane face(s) the trim left there.
 
     A trim can leave several disjoint fragments of one cap on the same piece, so
-    this is a list per half-strut, not a single face."""
-    caps: frozenset[int] = frozenset()
-    """Half-strut ids whose cap face this piece gave up as an interface.
+    this is a list per key, not a single face. Keyed by node as well as
+    half-strut id because a piece :func:`fuse_disagreeing_pairs` has merged can
+    hold caps belonging to either of the nodes it spans."""
+    caps: frozenset[tuple[NodeKey, int]] = frozenset()
+    """``(node, half-strut id)`` pairs whose cap face this piece gave up as an
+    interface.
 
     Filled by :func:`finalize_pieces`. This is the piece's contribution to the
     junction graph (:mod:`latticegen2.connect`), and by construction every entry
@@ -224,12 +243,18 @@ def resolve_interfaces(
     }
     cap_faces_at: dict[tuple[NodeKey, int], list] = {}
     for piece in pieces:
-        for h, faces in piece.cap_faces.items():
-            cap_faces_at.setdefault((piece.node, h), []).extend(faces)
+        for key, faces in piece.cap_faces.items():
+            cap_faces_at.setdefault(key, []).extend(faces)
 
     # Nodes that produced any material at all. A neighbour that produced nothing
-    # cannot be missing a cap, so it is not evidence of anything going wrong.
-    occupied: set[NodeKey] = interior_set | {p.node for p in pieces}
+    # cannot be missing a cap, so it is not evidence of anything going wrong. A
+    # piece's own `node` covers the ordinary case; the `cap_faces` keys cover a
+    # fused piece's other node too (docs/algorithm.md §7.1 "Fuse junction pairs").
+    occupied: set[NodeKey] = (
+        interior_set
+        | {p.node for p in pieces}
+        | {key[0] for p in pieces for key in p.cap_faces}
+    )
 
     whole_cap = lp.t * lp.t
     area_cache: dict[tuple[NodeKey, int], float] = {}
@@ -280,14 +305,177 @@ def finalize_pieces(pieces: list[BoundaryPiece], interfaces: set[tuple[NodeKey, 
     hole each weld has to recognise (:mod:`latticegen2.weld`).
     """
     for piece in pieces:
-        given_up: set[int] = set()
-        for h, cap in list(piece.cap_faces.items()):
-            if (piece.node, h) in interfaces:
-                given_up.add(h)
+        given_up: set[tuple[NodeKey, int]] = set()
+        for key, cap in list(piece.cap_faces.items()):
+            if key in interfaces:
+                given_up.add(key)
             else:
                 piece.faces.extend(cap)
-                del piece.cap_faces[h]
+                del piece.cap_faces[key]
         piece.caps = frozenset(given_up)
+
+
+# --- Fusing pieces the two booleans disagreed about --------------------------
+#
+# resolve_interfaces declines a cap whose two sides present regions that
+# disagree, and declining is not by itself a safe degradation: where the two
+# regions are only *partially* the same, keeping both caps leaves the overlap
+# as non-manifold material and the remainder as an unfilled hole
+# (docs/algorithm.md §7.1, specification.md §10 "Fuse junction pairs whose two
+# booleans disagree"). The repair is to fall back to the kernel's own general
+# boolean: fuse the two disagreeing pieces into one solid, which is sound
+# wherever instancing's exactness argument has broken down because the kernel
+# contradicted itself about a face the two share.
+
+
+def _rebuild_solid(piece: BoundaryPiece) -> TopoDS_Shape:
+    """Reconstruct a piece's original trimmed solid from its faces.
+
+    Only valid *before* :func:`finalize_pieces` has run: up to that point
+    ``faces`` plus every entry of ``cap_faces`` together are exactly the faces
+    :func:`trim_junction` produced, nothing yet dropped or reassigned, so their
+    union is the same closed boundary the boolean returned — safe to mark
+    ``Closed`` without re-proving it.
+    """
+    all_faces = list(piece.faces)
+    for group in piece.cap_faces.values():
+        all_faces.extend(group)
+    shell = _open_shell(all_faces)
+    shell.Closed(True)
+    return occ.make_solid(shell)
+
+
+def _owning_cap(
+    lp: LatticeParams, face, node_positions: list[tuple[NodeKey, np.ndarray]]
+) -> tuple[NodeKey, int] | None:
+    """Which ``(node, half-strut)`` cap ``face`` belongs to, or ``None``.
+
+    :func:`is_cap_plane_face` tests only the one axis its half-strut id names,
+    so it can pass for more than one node in the group: two nodes that share a
+    coordinate along an axis orthogonal to the one separating them look
+    identical to that test — every node in the same lattice "row" along ``e1``
+    does, when the group is separated along ``e0``. Proximity of the face's
+    centroid to each matching candidate's own ideal cap centre disambiguates,
+    and is decisive: candidate centres are separated by at least ``a`` along
+    some axis, while a genuine (if trimmed) cap face's centroid never strays
+    from its own ideal centre by more than the profile's own extent.
+    """
+    best = None
+    best_d = None
+    centre = occ.centroid(face)
+    for node, pos in node_positions:
+        h = is_cap_plane_face(lp, face, pos)
+        if h is None:
+            continue
+        ideal = pos + half_strut_offset(lp, h)
+        d = float(np.linalg.norm(centre - ideal))
+        if best is None or d < best_d:
+            best, best_d = (node, h), d
+    return best
+
+
+def _fuse_group(lp: LatticeParams, group: list[BoundaryPiece]) -> BoundaryPiece:
+    """Fuse one cluster of mutually disagreeing pieces into a single solid.
+
+    Rebuilds each piece as a solid, fuses them with one ``BRepAlgoAPI_Fuse``
+    call, and re-tags the result's faces with :func:`_owning_cap` against every
+    node in the group — so a cap belonging to a node's *other*, non-disagreeing
+    neighbours survives the fuse correctly tagged, while the disagreeing cap
+    itself simply stops existing as a boundary face: it is now interior
+    material shared by construction, needing no interface at all.
+    """
+    solids = [_rebuild_solid(p) for p in group]
+    fuse = BRepAlgoAPI_Fuse()
+    args = TopTools_ListOfShape()
+    args.Append(solids[0])
+    tools = TopTools_ListOfShape()
+    for s in solids[1:]:
+        tools.Append(s)
+    fuse.SetArguments(args)
+    fuse.SetTools(tools)
+    fuse.Build()
+    involved = [p.node for p in group]
+    if not fuse.IsDone():
+        raise ProcessingError(
+            f"Could not fuse the disagreeing boundary pieces at {involved}: the "
+            f"local repair boolean did not complete."
+        )
+    result_solids = occ.solids(fuse.Shape())
+    if len(result_solids) != 1:
+        raise ProcessingError(
+            f"Fusing the disagreeing boundary pieces at {involved} produced "
+            f"{len(result_solids)} solid(s) instead of 1. The two pieces do not "
+            f"even overlap consistently, which is beyond what this repair can fix."
+        )
+    solid = result_solids[0]
+
+    group_nodes = np.array([p.node for p in group], dtype=np.int64)
+    node_positions = list(zip((p.node for p in group), nodes(lp, group_nodes)))
+    merged = BoundaryPiece(node=group[0].node, volume=occ.volume(solid))
+    for face in occ.faces(solid):
+        tag = _owning_cap(lp, face, node_positions)
+        if tag is None:
+            merged.faces.append(face)
+        else:
+            merged.cap_faces.setdefault(tag, []).append(face)
+    return merged
+
+
+def fuse_disagreeing_pairs(
+    lp: LatticeParams,
+    pieces: list[BoundaryPiece],
+    mismatched: list[tuple[NodeKey, int, float, float]],
+) -> tuple[list[BoundaryPiece], int]:
+    """Fuse the pieces on either side of every cap the two booleans disagreed
+    about, replacing them with their fused union.
+
+    Must run *before* :func:`finalize_pieces`, while every piece's ``faces``
+    plus ``cap_faces`` still form its complete closed boundary — once a cap
+    face has been sorted into "given up" or "kept" there is nothing left to
+    rebuild a solid from.
+
+    A piece can be party to more than one disagreement (docs/algorithm.md
+    §7.1's rehearsal example: one node's caps disagreed with two different
+    neighbours at once), so pieces are grouped by shared membership across all
+    of ``mismatched`` and each connected cluster is fused in a single
+    ``BRepAlgoAPI_Fuse`` call, rather than fusing pairs one at a time and
+    risking the same piece being consumed twice.
+
+    Returns the new piece list (every fused cluster's operands replaced by
+    their fused result; every other piece untouched) and the number of local
+    fuses performed.
+    """
+    if not mismatched:
+        return pieces, 0
+
+    holders: dict[tuple[NodeKey, int], list[int]] = {}
+    for i, p in enumerate(pieces):
+        for key in p.cap_faces:
+            holders.setdefault(key, []).append(i)
+
+    steps = [tuple(int(x) for x in neighbor_step(h)) for h in range(6)]
+    uf = UnionFind(len(pieces))
+    touched: set[int] = set()
+    for node, h, _, _ in mismatched:
+        other = _neighbour(node, steps[h])
+        idxs = holders.get((node, h), []) + holders.get((other, OPPOSITE_HALF[h]), [])
+        if not idxs:
+            raise ProcessingError(
+                f"resolve_interfaces reported a mismatched cap at {node} h{h} with "
+                f"no piece holding it on either side; the two disagree about "
+                f"whether it is even internally consistent."
+            )
+        touched.update(idxs)
+        for i in idxs[1:]:
+            uf.union(idxs[0], i)
+
+    groups: dict[int, list[int]] = {}
+    for i in touched:
+        groups.setdefault(uf.find(i), []).append(i)
+
+    kept = [p for i, p in enumerate(pieces) if i not in touched]
+    fused = [_fuse_group(lp, [pieces[i] for i in idxs]) for idxs in groups.values()]
+    return kept + fused, len(groups)
 
 
 # --- Worker-process plumbing ------------------------------------------------
@@ -345,7 +533,7 @@ def _piece_from(node: NodeKey, faces: list, tags: list[int], volume: float) -> B
         if h < 0:
             piece.faces.append(face)
         else:
-            piece.cap_faces.setdefault(int(h), []).append(face)
+            piece.cap_faces.setdefault((node, int(h)), []).append(face)
     return piece
 
 

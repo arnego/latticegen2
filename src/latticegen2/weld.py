@@ -216,8 +216,8 @@ def unweldable(
     """
     caps_at: dict[tuple[NodeKey, int], list] = {}
     for piece in pieces:
-        for h, faces in piece.cap_faces.items():
-            caps_at.setdefault((piece.node, h), []).extend(faces)
+        for key, faces in piece.cap_faces.items():
+            caps_at.setdefault(key, []).extend(faces)
 
     steps = [tuple(int(x) for x in neighbor_step(h)) for h in range(6)]
     rejected = []

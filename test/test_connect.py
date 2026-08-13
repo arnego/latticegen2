@@ -15,11 +15,18 @@ from latticegen2.lattice import OPPOSITE_HALF, neighbor_step
 
 
 class FakePiece:
-    """Stands in for a trimmed boundary junction piece."""
+    """Stands in for a trimmed boundary junction piece.
+
+    ``caps`` is given as bare half-strut ids, relative to ``node`` — the
+    ordinary case, and all these tests need — but stored the same way
+    production ``BoundaryPiece.caps`` now is, as ``(node, h)`` pairs, since a
+    piece :func:`latticegen2.boundary.fuse_disagreeing_pairs` has merged can
+    hold caps belonging to more than one node (docs/algorithm.md §7.1).
+    """
 
     def __init__(self, node, caps, volume):
         self.node = node
-        self.caps = frozenset(caps)
+        self.caps = frozenset((node, h) for h in caps)
         self.volume = volume
 
 
@@ -40,7 +47,7 @@ def interfaces_for(interior, pieces):
     symmetric rule, expressed without the geometry kernel.
     """
     present = {(tuple(int(x) for x in n), h) for n in interior for h in range(6)}
-    present |= {(p.node, int(h)) for p in pieces for h in p.caps}
+    present |= {key for p in pieces for key in p.caps}
     out = set()
     for node, h in present:
         partner = (across(node, h), OPPOSITE_HALF[h])

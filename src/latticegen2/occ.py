@@ -98,6 +98,22 @@ def area(shape: TopoDS_Shape) -> float:
     return props.Mass()
 
 
+def centroid(shape: TopoDS_Shape) -> np.ndarray:
+    """Area-weighted centroid of a face (or any shape ``GProp`` can measure).
+
+    Used to disambiguate which of several candidate nodes a re-tagged face
+    belongs to after :func:`latticegen2.boundary.fuse_disagreeing_pairs` fuses
+    two junctions: :func:`latticegen2.junction.is_cap_plane_face` tests only the
+    one axis a cap's half-strut id names, so it can pass for more than one node
+    in a group that share a coordinate along an orthogonal axis. Proximity to
+    each candidate's own ideal cap centre resolves it.
+    """
+    props = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(shape, props)
+    p = props.CentreOfMass()
+    return np.array([p.X(), p.Y(), p.Z()])
+
+
 def bounding_box(shape: TopoDS_Shape, tol: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """Axis-aligned ``(lo, hi)`` bounds.
 

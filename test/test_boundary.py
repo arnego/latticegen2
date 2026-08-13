@@ -10,12 +10,17 @@ agree, and anything else stays as exterior surface rather than becoming a hole.
 
 import numpy as np
 import pytest
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCP.TopTools import TopTools_ListOfShape
 
-from latticegen2 import occ
+from latticegen2 import occ, weld
 from latticegen2.boundary import (
     BoundaryPiece,
     CAP_AREA_REL_TOL,
+    _open_shell,
+    _piece_from,
     finalize_pieces,
+    fuse_disagreeing_pairs,
     resolve_interfaces,
     trim_junction,
 )
@@ -29,6 +34,7 @@ from latticegen2.lattice import (
     lattice_params,
     neighbor_step,
     node as lattice_node,
+    nodes as lattice_nodes,
     profile_vertices,
 )
 
@@ -61,7 +67,7 @@ def piece(lp, node, caps, volume=1.0, scale=1.0):
     """A boundary piece presenting ``caps``, with no other faces."""
     p = BoundaryPiece(node=node, volume=volume)
     for h in caps:
-        p.cap_faces[h] = [cap_face(lp, node, h, scale)]
+        p.cap_faces[(node, h)] = [cap_face(lp, node, h, scale)]
     return p
 
 
@@ -176,7 +182,7 @@ def test_fragments_of_one_cap_split_across_pieces_are_summed(lp):
     assert got.n_pairs == 1
     assert got.mismatched == []
     finalize_pieces(halves + [whole], got.interfaces)
-    assert all(p.caps == frozenset({0}) for p in halves)
+    assert all(p.caps == frozenset({(node, 0)}) for p in halves)
 
 
 # --- finalize_pieces --------------------------------------------------------
@@ -188,12 +194,13 @@ def test_an_interface_cap_is_dropped_and_any_other_cap_is_kept(lp):
     got = resolve_interfaces(lp, nodes(), [a, b])
     finalize_pieces([a, b], got.interfaces)
 
-    assert a.caps == frozenset({0})
+    assert a.caps == frozenset({((0, 0, 0), 0)})
     # Cap 0 is stitched across so it goes; cap 1 faces nothing, so it stays and
     # closes the piece there rather than leaving a hole.
     assert len(a.faces) == 1
     assert is_cap_plane_face(lp, a.faces[0], lattice_node(lp, a.node)) == 1
-    assert set(a.cap_faces) == {0}, "only interface caps are held back, for their rings"
+    assert set(a.cap_faces) == {((0, 0, 0), 0)}, \
+        "only interface caps are held back, for their rings"
 
 
 def test_a_piece_whose_caps_all_stay_gives_up_nothing(lp):
@@ -229,7 +236,7 @@ def test_resolved_interfaces_never_trip_the_connectivity_invariant(lp):
 def test_an_unresolved_cap_still_fails_loudly(lp):
     """The invariant is a real check, not a formality that resolution defeats."""
     a = piece(lp, (0, 0, 0), [0])
-    a.caps = frozenset({0})
+    a.caps = frozenset({((0, 0, 0), 0)})
     with pytest.raises(ProcessingError, match="hole with no matching hole"):
         build_components(nodes(), 0.0, [a], interfaces={((0, 0, 0), 0)})
 
@@ -244,3 +251,131 @@ def test_the_agreement_bar_sits_where_the_constant_says(lp, excess, stitched):
     got = resolve_interfaces(lp, nodes(), [a, b])
     assert (got.n_pairs == 1) is stitched
     assert (got.mismatched == []) is stitched
+
+
+# --- fuse_disagreeing_pairs (specification.md §10 "Fuse junction pairs whose
+# two booleans disagree", docs/algorithm.md §7.1) ----------------------------
+
+
+def _notched_junction(lp, tpl, node_pos, oh):
+    """A whole junction with a real corner clipped off cap ``oh``.
+
+    A genuine boolean cut, not the synthetic uniform ``scale`` the other tests
+    in this file use — the regression this repair exists for needs a real
+    *mismatched partial* cap, not two proportionally-shrunk copies of the same
+    region, which would still agree in shape.
+    """
+    k, _ = HALF_STRUTS[oh]
+    cap_c = node_pos + half_strut_offset(lp, oh)
+    u, v, e = lp.u[k], lp.v[k], lp.e[k]
+    r = lp.r
+    lo, hi, depth = 0.2 * r, 3.0 * r, 1.5 * r
+    corners = np.array([
+        cap_c - depth * e + lo * u + lo * v,
+        cap_c - depth * e + hi * u + lo * v,
+        cap_c - depth * e + hi * u + hi * v,
+        cap_c - depth * e + lo * u + hi * v,
+    ])
+    notch = occ.prism(occ.polygon_face(corners), 2 * depth * e)
+
+    instance = tpl.solid.Moved(occ.translation(node_pos))
+    cut = BRepAlgoAPI_Cut()
+    args = TopTools_ListOfShape()
+    args.Append(instance)
+    tools = TopTools_ListOfShape()
+    tools.Append(notch)
+    cut.SetArguments(args)
+    cut.SetTools(tools)
+    cut.Build()
+    assert cut.IsDone()
+    solids = occ.solids(cut.Shape())
+    assert len(solids) == 1, "the notch must not sever the junction"
+    return solids[0]
+
+
+def _tag(lp, node_pos, solid):
+    faces = occ.faces(solid)
+    tags = [is_cap_plane_face(lp, f, node_pos) for f in faces]
+    return faces, [-1 if h is None else h for h in tags]
+
+
+@pytest.fixture(scope="module")
+def disagreeing_pieces(lp):
+    """Two real trimmed junctions whose shared cap genuinely disagrees.
+
+    ``a`` is a whole, untouched junction (full ``t x t`` cap 0). ``b`` has a
+    real corner cut off its matching cap 3, so the two sides present different
+    *partial* regions of the same nominal cap — not the "whole vs sliver"
+    scale mismatch the synthetic tests use, but the kind two independent
+    ``BRepAlgoAPI_Common`` calls actually produce when they disagree
+    (docs/algorithm.md §7.1).
+    """
+    tpl = build_template(lp)
+    a, b = (0, 0, 0), across((0, 0, 0), 0)
+    pos_a, pos_b = lattice_nodes(lp, np.array([a, b], dtype=np.int64))
+
+    a_solid = tpl.solid.Moved(occ.translation(pos_a))
+    faces_a, tags_a = _tag(lp, pos_a, a_solid)
+    piece_a = _piece_from(a, faces_a, tags_a, occ.volume(a_solid))
+
+    b_solid = _notched_junction(lp, tpl, pos_b, OPPOSITE_HALF[0])
+    faces_b, tags_b = _tag(lp, pos_b, b_solid)
+    piece_b = _piece_from(b, faces_b, tags_b, occ.volume(b_solid))
+
+    return a, b, piece_a, piece_b
+
+
+def test_a_notched_cap_is_reported_as_a_genuine_mismatch(lp, disagreeing_pieces):
+    a, b, piece_a, piece_b = disagreeing_pieces
+    got = resolve_interfaces(lp, nodes(), [piece_a, piece_b])
+    assert got.mismatched == [(a, 0, pytest.approx(T * T), pytest.approx(T * T, abs=0.3))]
+    assert got.mismatched[0][2] != pytest.approx(got.mismatched[0][3])
+    assert got.n_pairs == 0
+
+
+def test_fuse_disagreeing_pairs_produces_one_agreed_solid(lp, disagreeing_pieces):
+    """The regression this repair exists for: two pieces whose shared cap
+    disagrees must assemble into a closed orientable shell, edge-use tally
+    clean, rather than declining and leaving non-manifold overlap plus a hole.
+    """
+    a, b, piece_a, piece_b = disagreeing_pieces
+    mismatched = resolve_interfaces(lp, nodes(), [piece_a, piece_b]).mismatched
+
+    fused, n_groups = fuse_disagreeing_pairs(lp, [piece_a, piece_b], mismatched)
+    assert n_groups == 1
+    assert len(fused) == 1
+    merged = fused[0]
+    assert merged.volume == pytest.approx(piece_a.volume + piece_b.volume, rel=1e-9)
+
+    # Resolved a second time, the disagreement is simply gone: the two nodes
+    # are already one solid, so neither presents that cap as a boundary face
+    # any more, and there is nothing left to decline.
+    iface2 = resolve_interfaces(lp, nodes(), fused)
+    assert iface2.mismatched == []
+    assert (a, 0) not in iface2.interfaces
+    assert (b, OPPOSITE_HALF[0]) not in iface2.interfaces
+
+    # Every other cap of both nodes survived the fuse correctly attributed —
+    # the proximity disambiguation in `_owning_cap` earning its keep, since a
+    # plain one-axis `is_cap_plane_face` test alone cannot tell node a's caps
+    # from node b's for any half-strut whose axis is orthogonal to the one
+    # separating them.
+    remaining = set(merged.cap_faces)
+    assert remaining == {(a, h) for h in range(6)} | {
+        (b, h) for h in range(6) if h != OPPOSITE_HALF[0]
+    }
+
+    finalize_pieces(fused, iface2.interfaces)
+    shell = _open_shell(merged.faces)
+    open_edges, misoriented = weld.shell_defects(shell)[:2]
+    assert (open_edges, misoriented) == (0, 0)
+    shell.Closed(True)
+    assert occ.is_valid(occ.make_solid(shell))
+
+
+def test_fuse_disagreeing_pairs_is_a_no_op_without_mismatches(lp):
+    a = piece(lp, (0, 0, 0), [0])
+    b = piece(lp, across((0, 0, 0), 0), [OPPOSITE_HALF[0]])
+    fused, n_groups = fuse_disagreeing_pairs(lp, [a, b], [])
+    assert n_groups == 0
+    assert fused == [a, b]

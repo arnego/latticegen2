@@ -141,8 +141,10 @@ translation — so it is built exactly once per run:
 
 1. Build the six half-strut prisms at the origin (profile polygon → planar face →
    prism along `s·(a/2)·e_k`).
-2. Fuse them with **one** boolean call. This is the only general fuse in the
-   entire program. It takes about 40 ms.
+2. Fuse them with **one** boolean call. This is the only general fuse the
+   pipeline runs unconditionally, once per run; it takes about 40 ms. §7.1's
+   local repair fuse is the sole exception, and runs only for the rare boundary
+   cap pair the kernel itself disagreed about.
 
 **The key consequence of mutual orthogonality (§2.3 identity 6):** at every node
 the six half-struts run along ±3 mutually perpendicular axes, so all strut-strut
@@ -546,9 +548,30 @@ Where they present *mismatched partial* regions — 1.000000 mm² against
 0.014613 mm² above — keeping both leaves the overlap as non-manifold material and
 the remainder as an unfilled hole, which §8's edge-use tally reports as 12 edges
 on one face and 12 on three. A cap the two booleans genuinely disagree about has
-to be repaired rather than sidestepped: the two junctions are fused with a local
-boolean, which is sound and costs nothing at three occurrences out of 122,180.
-See specification.md §10.
+to be repaired rather than sidestepped: `fuse_disagreeing_pairs`
+(`src/latticegen2/boundary.py`) rebuilds each side of every mismatched cap as a
+solid — from its own share of the trim's faces, before either has been sorted
+into "kept" or "given up" — and fuses them with one local `BRepAlgoAPI_Fuse`
+call, the second and only other general boolean in the pipeline besides §3.2's
+template fuse. Pieces touching more than one disagreement (a node's caps can
+disagree with two different neighbours at once, as `(633,-97,-61)` does above)
+are grouped by shared membership and fused together, so no piece is consumed
+twice. The result's faces are re-tagged against **every** node in the group —
+`is_cap_plane_face` alone tests only one axis, so it passes for more than one
+node when two share a coordinate along an axis orthogonal to the one separating
+them, and proximity of the face's centroid to each candidate's own ideal cap
+centre resolves that. Interfaces are then resolved a second time: the merged
+piece presents one agreed region, so nothing is declined at that cap, and it
+typically ceases to exist as a boundary face at all — the disagreement is now
+interior material, shared by construction, needing no interface. A fuse that
+returns anything other than one solid is a hard failure naming the junctions:
+sound and costs nothing at the three occurrences this rehearsal produced out of
+122,180 caps. `BoundaryPiece.caps` and `.cap_faces` are keyed by `(node,
+half-strut)` throughout boundary, connect, pipeline and weld to make this
+possible, since a fused piece can hold faces belonging to either node it spans.
+See specification.md §10 for status and `test/test_boundary.py` for the
+regression, reproduced with a real `BRepAlgoAPI_Cut` notch rather than a
+synthetic scale mismatch.
 
 A trim can legitimately split one junction into several disconnected pieces when
 the input surface cuts between its arms. Each piece becomes its own vertex in the
@@ -807,10 +830,12 @@ Because priority #1 is precision, every optimization is designed so that its
 * Classification degrades ambiguous cases to BOUNDARY (§5.2) — worst case is an
   unnecessary boolean, never a missed trim or a phantom strut.
 * Interfaces are resolved from both sides at once (§7.1), so a cap is only ever
-  opened when there is proven material behind it. The worst case is an extra
-  solid in the output; a hole is unreachable, and an inconsistency between the
-  two sides fails immediately and by name (§8) instead of surfacing much later
-  as an unclosed shell.
+  opened when there is proven material behind it. A cap the two sides only
+  partially agree on is repaired with a local fuse rather than left half-open
+  (§7.1); the worst case remaining is an extra solid in the output, from a cap
+  declined because its two holes do not correspond edge for edge (§8), never a
+  hole, and an inconsistency between the two sides fails immediately and by
+  name (§8) instead of surfacing much later as an unclosed shell.
 * The classification margin uses a **measured** upper bound on mesh error (§5.1),
   so the guarantee above does not rest on the mesher honouring its parameters.
 * Instancing is not an approximation of fusing: by §3.2 the union of translated
@@ -857,7 +882,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Lever | Effect |
 |---|---|
 | Classify before intersecting | Booleans only for the `O(S)` boundary junctions |
-| One junction template, instanced everywhere | The only general fuse is 6 operands, once per run |
+| One junction template, instanced everywhere | The only *unconditional* general fuse is 6 operands, once per run — §7.1's repair fuse runs only for a disagreeing cap pair, `O(1)` occurrences in practice |
 | Indexed shared-topology interior shell | `O(N)` and exactly watertight; replaces a sewing step measured at 14.9 s per 1,000 junctions and growing superlinearly |
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |

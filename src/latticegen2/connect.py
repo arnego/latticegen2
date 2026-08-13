@@ -61,7 +61,15 @@ class Vertex:
     """Index into the boundary piece list, or ``-1`` for an interior node."""
 
 
-class _UnionFind:
+class UnionFind:
+    """Standard union-find, shared with :func:`latticegen2.boundary.fuse_disagreeing_pairs`.
+
+    That module reuses this rather than the kernel-free connectivity graph it
+    powers here, because it faces the same problem at the piece level: grouping
+    everything one connected cluster of disagreements touches before acting on
+    any of it.
+    """
+
     def __init__(self, n: int):
         self.parent = list(range(n))
 
@@ -120,10 +128,13 @@ def build_components(
         vertices.append(
             Vertex(node=piece.node, volume=piece.volume, is_interior=False, piece_index=pi)
         )
-        for h in piece.caps:
-            cap_owner.setdefault((piece.node, int(h)), []).append(vid)
+        # `piece.caps` already carries its own node per entry — not necessarily
+        # `piece.node` — because a piece `boundary.fuse_disagreeing_pairs` has
+        # merged spans more than one node (docs/algorithm.md §7.1).
+        for key in piece.caps:
+            cap_owner.setdefault(key, []).append(vid)
 
-    uf = _UnionFind(len(vertices))
+    uf = UnionFind(len(vertices))
     steps = [neighbor_step(h) for h in range(6)]
     for (node, h), owners in cap_owner.items():
         step = steps[h]

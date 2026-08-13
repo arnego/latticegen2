@@ -380,11 +380,13 @@ def shell_defects(shell: TopoDS_Shell) -> tuple[int, int, list]:
 
     open_edges = miso = 0
     samples: list[np.ndarray] = []
+    by_use: dict[int, int] = {}
     for i in range(1, n + 1):
         if uses[i] == 2 and net[i] == 0:
             continue
         if uses[i] != 2:
             open_edges += 1
+            by_use[uses[i]] = by_use.get(uses[i], 0) + 1
         else:
             miso += 1
         if len(samples) < 10:
@@ -392,7 +394,10 @@ def shell_defects(shell: TopoDS_Shell) -> tuple[int, int, list]:
                                                  TopAbs_ShapeEnum.TopAbs_VERTEX)]
             if pts:
                 samples.append(np.round(sum(pts) / len(pts), 3))
-    return open_edges, miso, samples
+    # How many faces an edge has says *which* failure it is, and they need
+    # opposite fixes: one face is a hole nothing filled, three or more is
+    # material meeting where it should have been joined into one boundary.
+    return open_edges, miso, samples, by_use
 
 
 def close_shells(shells: dict[int, TopoDS_Shell]) -> tuple[list, dict]:
@@ -400,22 +405,27 @@ def close_shells(shells: dict[int, TopoDS_Shell]) -> tuple[list, dict]:
     solids = []
     open_edges = miso = 0
     samples: list[np.ndarray] = []
+    by_use: dict[int, int] = {}
     for group in sorted(shells):
         shell = shells[group]
-        bad_open, bad_orient, where = shell_defects(shell)
+        bad_open, bad_orient, where, uses = shell_defects(shell)
         if bad_open or bad_orient:
             open_edges += bad_open
             miso += bad_orient
+            for k, v in uses.items():
+                by_use[k] = by_use.get(k, 0) + v
             samples.extend(where[: max(0, 10 - len(samples))])
             continue
         shell.Closed(True)
         solids.append(occ.make_solid(shell))
 
     if open_edges or miso:
+        breakdown = ", ".join(f"{v} edge(s) on {k} face(s)" for k, v in sorted(by_use.items()))
         raise ProcessingError(
             f"The assembled lattice is not a closed orientable surface: "
-            f"{open_edges} edge(s) are not used by exactly two faces and {miso} "
-            f"are used twice the same way round. Sample positions: "
-            f"{[p.tolist() for p in samples]}"
+            f"{open_edges} edge(s) are not used by exactly two faces ({breakdown}) "
+            f"and {miso} are used twice the same way round. An edge on one face is "
+            f"a hole nothing filled; on three or more, material met where it should "
+            f"have been joined. Sample positions: {[p.tolist() for p in samples]}"
         )
     return solids, {"assembled_shells": len(shells)}

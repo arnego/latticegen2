@@ -94,7 +94,7 @@ def shell_of(faces):
 def test_a_closed_shell_has_no_defects(template):
     lp, tpl, _ = template
     faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
-    assert weld.shell_defects(shell_of(faces)) [:2] == (0, 0)
+    assert weld.shell_defects(shell_of(faces))[:2] == (0, 0)
 
 
 def test_a_face_joined_back_to_front_is_caught(template):
@@ -107,7 +107,7 @@ def test_a_face_joined_back_to_front_is_caught(template):
     lp, tpl, _ = template
     faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
     flipped = [faces[0].Reversed()] + list(faces[1:])
-    open_edges, misoriented, _ = weld.shell_defects(shell_of(flipped))
+    open_edges, misoriented, _, _ = weld.shell_defects(shell_of(flipped))
     assert open_edges == 0, "the flip does not open the shell — that is the point"
     assert misoriented > 0
 
@@ -115,7 +115,8 @@ def test_a_face_joined_back_to_front_is_caught(template):
 def test_a_missing_face_is_caught(template):
     lp, tpl, _ = template
     faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
-    open_edges, _, samples = weld.shell_defects(shell_of(faces[1:]))
+    open_edges, _, samples, by_use = weld.shell_defects(shell_of(faces[1:]))
+    assert set(by_use) == {1}, "a missing face leaves edges on one face, not three"
     assert open_edges > 0
     assert samples, "an open edge must be located, not just counted"
 

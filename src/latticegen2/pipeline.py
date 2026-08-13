@@ -4,12 +4,16 @@
           -> trim boundary -> connect -> instance interior -> weld
           -> validate -> write STEP -> round-trip -> summary
 
-The shape of this is deliberately flat. In the fuse-free architecture there is
-no tiling stage, no hierarchical assembly, no distributed merge rounds and no
-fuse-based cleanup, because there is nothing left for them to do: the interior is
-instanced rather than fused, connectivity is a graph property rather than a
-boolean experiment, and assembly is an index lookup rather than a geometric
-search.
+The shape of this is deliberately flat: no hierarchical assembly, no distributed
+merge rounds, no fuse-based cleanup, because there is nothing left for them to
+do — the interior is instanced rather than fused, connectivity is a graph
+property rather than a boolean experiment, and assembly is an index lookup
+rather than a geometric search. The one exception is inside "weld": the
+boundary-layer sew tiles a large component's pieces before sewing them
+(docs/specification.md §10), because sewing itself is the one remaining
+operation that genuinely scales worse than linearly (docs/algorithm.md §8). That
+stays an internal detail of one stage, not a pipeline-level tiling stage of its
+own — the flow above is still accurate at the granularity it describes.
 """
 
 from __future__ import annotations
@@ -219,14 +223,33 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     # whose pairing is genuinely unknown, and because the interior is then built
     # onto whatever topology it ends up with (docs/algorithm.md §8).
     with Timer(rl, "stitch"):
-        boundary_faces = weld.sew_boundary(kept.pieces, kept.piece_groups)
+        boundary_faces, sew_stats = weld.sew_boundary(
+            kept.pieces, kept.piece_groups,
+            workers=args.workers, tmpdir=tmpdir, background=args.background,
+        )
         rings = weld.interface_rings(lp, tmesh, boundary_faces, want_rings)
+    if sew_stats.max_worker_rss:
+        # Same fold-plus-report pattern as the boundary-trim stage above: folded
+        # into the run's high-water mark, and also reported per-stage so a peak
+        # can be attributed to trimming or to tiled sewing rather than only to
+        # "somewhere in this run" (specification.md §3).
+        rl.note_worker_rss(sew_stats.max_worker_rss)
+        rl.line(f"peak stitch worker memory: {format_bytes(sew_stats.max_worker_rss)}")
+        stats["peak_stitch_worker_memory"] = format_bytes(sew_stats.max_worker_rss)
     rl.line(
         f"boundary layer: {len(kept.pieces)} piece(s) sewn into "
         f"{sum(len(f) for f in boundary_faces.values())} faces across "
-        f"{len(boundary_faces)} component(s); {len(rings)} interface ring(s) located"
+        f"{len(boundary_faces)} component(s)"
+        + (
+            f", tiled into {sew_stats.tiles} tile(s) across "
+            f"{sew_stats.tiled_components} component(s)"
+            if sew_stats.tiles else ""
+        )
+        + f"; {len(rings)} interface ring(s) located"
     )
     stats["interior_interfaces"] = len(rings)
+    stats["stitch_tiles"] = sew_stats.tiles
+    stats["stitch_tiled_components"] = sew_stats.tiled_components
 
     with Timer(rl, "instance"):
         interior = build_interior_shell(

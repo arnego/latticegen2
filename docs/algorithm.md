@@ -660,6 +660,41 @@ So the assembly runs the other way round, in three steps:
    instead of creating its own, so the two sides are the same objects from the
    start and nothing has to be reconciled afterwards.
 
+**Step 1 is itself tiled**, once a component is large enough for it to matter.
+G5a's `n^1.8` scaling means the boundary sew is still the one term in the
+pipeline that grows faster than the part: 195.8 s at 8,000 pieces, extrapolating
+to roughly 20 minutes at the rehearsal's 21,955. A component above
+`MIN_PIECES_TO_TILE` (1,500 pieces — three tiles' worth, below which a second
+sewing round could not possibly pay for itself) is first split into spatial
+tiles by lattice-index block, sized to average `TILE_TARGET_PIECES` (500) pieces
+each; each tile is sewn on its own — in parallel across the run's worker
+processes when there are enough of them, via the same small-IPC `.brep`
+round-trip §7 uses — and only then are the tiles' results sewn together.
+Tiling only changes the *route* to the component's sewn shell, never the shell
+itself: every piece still passes through exactly one final sewing call's input
+either way, so which partition produced it is invisible in the result — a
+wall-clock lever, not a geometry decision, per §11.
+
+The saving is real but bounded, and it was measured rather than assumed
+(`tools/prototypes/RESULTS.md` G6), on the same real trimmed pieces G5 used, at
+two scales. Round 1 shrinks roughly as the `n^1.8` model predicts — an 8×
+tile-count increase drops round 1 by 8–10× at both 4,000 and 8,000 pieces — but
+round 2 does not shrink to match: it still sews shells whose combined face count
+equals the untiled input's, and G5b already found that `BRepBuilderAPI_Sewing`
+pays a face-count cost even where there is nothing to merge, so round 2 *grows*
+slightly as tiles get smaller rather than shrinking. Best measured: 1.45× at
+4,000 pieces / 8 tiles of 500 (11.0 s + 51.8 s = 62.8 s against a 91.3 s
+baseline), 1.43× at 8,000 pieces / 8 tiles of 1,000 (27.8 s + 131.8 s = 159.6 s
+against 228.3 s) — real, but round 2 alone is more than half the baseline at
+both scales, so there is a shallow optimum around a few hundred to ~1,000 pieces
+per tile rather than a runaway win from finer tiling, and `TILE_TARGET_PIECES`
+(500) is chosen inside that plateau rather than pushed as small as possible.
+Round 1 alone parallelises across workers in the real pipeline, which this
+measurement's serial sum does not credit, so the production saving should exceed
+what is measured here — how much more is the rehearsal re-run's to confirm
+(specification.md §10), since G6 only reached 8,000 pieces per component and the
+rehearsal's components run to tens of thousands.
+
 Assembly is then `BRep_Builder.Add` into one shell per component, and
 watertightness is proved rather than assumed: **every edge used exactly twice,
 once in each direction**. Both halves of that test are load-bearing. Counting
@@ -875,7 +910,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Unification | `O(faces)`, ~0.24 ms/face |
 | Boundary | `O(S/W)` single-operand intersections |
 | Connectivity | `O(N + S)` union-find |
-| Stitching | `O(S^1.8)` over the boundary layer only — the interior no longer enters it (§8) |
+| Stitching | `O(S^1.8)` over the boundary layer only, tiled into `O(S/k)` calls of size `k` plus one merge of the results (§8) |
 | Assembly | `O(N + S)` index operations, **no booleans and no search** |
 | Export | `O(faces)` — irreducible |
 
@@ -888,6 +923,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
+| Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; measured 1.45× at 4,000 pieces / 8 tiles, bounded by round 2's own face-count cost rather than growing without limit (§8, G6) |
 | Same-domain unification before export (§9) | Recovers the face merging the removed boolean used to do for free: 47% fewer faces and half the file size, and it makes the run *faster* by shrinking export and the round-trip check |
 | Process-parallel boundary junctions | Constant-size independent jobs |
 | Coarse occupancy pre-filter before exact distance tests | Only near-surface nodes pay for segment-triangle maths |

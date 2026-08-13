@@ -375,7 +375,11 @@ partial caps.
 
 ### Tile the boundary sew
 
-**Status: the interior is out of sewing; the boundary layer is not yet tiled.**
+**Status: built and unit-tested; not yet re-verified at the scale that found
+it.** Implemented in [`weld.sew_boundary`](../src/latticegen2/weld.py) and its
+helpers (`_tile_pieces`, `_tile_edge_length`, `_sew_tiles`,
+`_worker_sew_tile`), called from the pipeline's `stitch` stage exactly as
+designed below.
 
 `BRepBuilderAPI_Sewing` used to receive the whole interior shell along with the
 trimmed boundary pieces, on the assumption that an already-shared shell costs it
@@ -386,15 +390,45 @@ sewn to itself first, and the interior is then *built onto* the topology that
 comes out (docs/algorithm.md §8). The volume-scaling shell no longer enters a
 geometric search at all.
 
-What remains is the boundary sew itself, which G5a measures at about `n^1.8` in
-piece count: 195.8 s at 8,000 pieces, extrapolating to roughly **20 minutes** at
-the rehearsal's 21,955. That is the next lever and it is now a contained one,
-because the sew is already per-component and every component is independent:
+What remained was the boundary sew itself, which G5a measured at about `n^1.8`
+in piece count: 195.8 s at 8,000 pieces, extrapolating to roughly **20 minutes**
+at the rehearsal's 21,955. The sew is already per-component and every component
+is independent, so each component whose piece count clears a threshold (1,500
+pieces — three tiles' worth) is now split into spatial tiles by lattice-index
+block (sized to average 500 pieces each, the largest size G5a measured cheap);
+each tile is sewn on its own, in parallel across the run's worker processes via
+the same `.brep` round-trip `boundary.py` already uses for the trim stage; and
+only then are the tiles' results sewn together. A component below the threshold,
+or too compact to produce more than one tile, sews exactly as it did before this
+existed — confirmed by the two committed e2e scenarios, whose piece counts (a
+few hundred to ~1,100) never clear it, so their output is byte-for-byte
+unaffected and both still match their golden samples exactly (0 mm³ symmetric
+difference).
 
-* split each component's pieces into spatial tiles by lattice-index block, sew
-  the tiles in the existing worker pool, then sew the tile results;
-* only cross-tile interfaces survive to the second round, so the superlinear term
-  applies to a much smaller `n` each time.
+**Measured, not assumed (`tools/prototypes/RESULTS.md` G6), on the same real
+trimmed pieces G5 used, at two scales.** The saving is real but bounded: round 1
+shrinks with tile count roughly as the `n^1.8` model predicts, but round 2 sews
+shells whose *combined* face count equals the untiled input's, and G5b already
+found that sewing pays a face-count cost even where there is nothing to merge —
+so round 2 does not shrink to match round 1, and in fact grows slightly as
+tiles get smaller. Best measured: **1.45×** at 4,000 pieces / 8 tiles of 500
+(round 1 11.0 s + round 2 51.8 s = 62.8 s against a 91.3 s baseline) and
+**1.43×** at 8,000 pieces / 8 tiles of 1,000 (27.8 s + 131.8 s = 159.6 s against
+228.3 s) — real at both scales, but round 2 alone is more than half the
+baseline either way, so there is a shallow optimum around a few hundred to
+~1,000 pieces per tile rather than a runaway win from finer tiling, which is
+why the tile target is pinned inside that plateau rather than pushed as small
+as possible. Production round 1 also runs in parallel across workers, which
+this serial measurement does not credit, so the real saving should exceed what
+is measured here — by how much is exactly what the rehearsal re-run below would
+confirm.
+
+**Not yet done:** re-running the `TD_HX_Indre_Volum` rehearsal, both to see the
+tiled boundary sew's wall time at the scale that motivated it (tens of thousands
+of pieces per component, where G6 only measured up to 8,000) and to confirm the
+three real disagreeing caps at `(633,-97,-61)`/`(633,-97,-62)` get repaired by
+`fuse_disagreeing_pairs` rather than declined — see the item above, which was
+blocked on this one landing first.
 
 Note that the obvious-looking alternative — welding boundary pieces to each other
 by index, the way the interior is joined — **does not work**, and the reason is

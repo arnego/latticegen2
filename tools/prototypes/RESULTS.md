@@ -219,3 +219,86 @@ of the 5 h 04 m run went.
 Note that the shell counts in G5a are an artefact of sewing a *prefix* of the
 boundary layer — an arbitrary subset has many genuinely unmatched free edges.
 Only the timings and edge counts are meaningful as scale indicators.
+
+---
+
+## G6 — does tiling the boundary sew actually save wall time?
+
+docs/specification.md §10 "Tile the boundary sew" proposes splitting a
+component's pieces into spatial tiles, sewing each on its own, then sewing the
+tile results together. G5b is a reason to be suspicious of that plan rather than
+to trust it on faith: it already found that sewing pays a face-count cost even
+where there is *nothing* to merge, and round 2 of tiling feeds sewing several
+tile shells whose *combined* face count equals the untiled input's — only the
+tile-boundary edges are genuinely free. If G5b's finding generalises, round 2
+could cost close to what one monolithic sew costs, and tiling would only add
+round 1's cost on top for nothing.
+
+Measured directly, on the same real trimmed boundary pieces G5 used:
+
+```
+python tools/prototypes/g6_tile_stitch.py --pieces path/to/temp/<stamp>
+```
+
+Tiling here is by contiguous chunks of the loaded piece order, not by lattice
+index — the saved `.brep` files carry geometry only, not the node each piece
+belongs to. `boundary._split_batches`'s own docstring records that a worker's
+batch already has spatial locality ("a worker's junctions share input-body
+regions"), and pieces load in that same batch order, so contiguous chunks stand
+in reasonably for real spatial tiles for the purpose of this measurement, which
+is about the sewing call's cost model rather than the exact partition.
+
+### 4,000 pieces
+
+| | round 1 | round 2 | total | vs. baseline |
+|---|---|---|---|---|
+| baseline (1 call) | — | — | **91.3 s** | — |
+| 4 tiles (1,000 each) | 21.5 s | 48.0 s | 69.4 s | **1.31×** |
+| 8 tiles (500 each) | 11.0 s | 51.8 s | 62.8 s | **1.45×** |
+| 16 tiles (250 each) | 6.3 s | 59.2 s | 65.5 s | **1.39×** |
+
+### 8,000 pieces
+
+| | round 1 | round 2 | total | vs. baseline |
+|---|---|---|---|---|
+| baseline (1 call) | — | — | **228.3 s** | — |
+| 8 tiles (1,000 each) | 27.8 s | 131.8 s | 159.6 s | **1.43×** |
+| 16 tiles (500 each) | 17.2 s | 148.3 s | 165.5 s | **1.38×** |
+| 32 tiles (250 each) | 10.9 s | 159.3 s | 170.3 s | **1.34×** |
+
+Same shape at twice the scale: round 1 keeps shrinking with tile count, round 2
+keeps *growing* slightly instead, and the best total is again around a few
+hundred to ~1,000 pieces per tile rather than at the finest split tried.
+
+Round 1 shrinks with tile count roughly as G5a's `n^1.8` model predicts. Round 2
+does **not** shrink to match — it *grows* slightly as tiles get smaller — which
+confirms the G5b-based suspicion above rather than refuting it: sewing several
+already-mostly-closed shells still pays close to a monolithic sew's face-count
+cost, so round 2 puts a floor under how much tiling alone can save. The result is
+a real but bounded win with a shallow optimum around a few hundred to ~1,000
+pieces per tile, not a runaway improvement from finer tiling — which is why
+`latticegen2.weld.TILE_TARGET_PIECES` is set at 500, inside that plateau at both
+scales measured, rather than pushed smaller.
+
+This measurement sums round 1 serially; the real pipeline runs it across worker
+processes, so production's wall-clock saving should exceed the 1.3–1.45× measured
+here by roughly the parallel speedup on round 1's share of the total —
+confirming by how much is what the `TD_HX_Indre_Volum` rehearsal re-run is for
+(docs/specification.md §10), since this gate only reached 8,000 pieces per
+component and the rehearsal runs at 21,955.
+
+### What this decides
+
+* **Tiling the boundary sew is worth doing, but it is not the whole answer.**
+  1.3–1.45× measured at 4,000 and 8,000 pieces, likely more in production once
+  round 1's parallelism is credited — real money on a multi-hour stage, but
+  nowhere near cancelling the `n^1.8` term outright, because round 2 does not
+  scale down with tile count.
+* **The tile target is a measured choice, not a guess.** 500 pieces per tile
+  matches G5a's cheapest-measured single-tile size and sits inside G6's observed
+  optimum plateau at both scales measured; smaller tiles trade a shrinking
+  round 1 for a growing round 2 for no net gain.
+* **The next lever, if one is needed, is round 2 itself** — recursive tiling, or
+  finding a way to make the second sew pay only for the tile-boundary free edges
+  rather than for every face it is handed — but that is future work, not
+  something this gate's data justifies building yet.

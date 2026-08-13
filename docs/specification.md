@@ -60,7 +60,7 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | -t | float | required  | mm | 0.4 - 20 | NA | Side length of the diamond rod profile. Must be smaller than the cell edge `a = cc/√2`; that is the only cross-constraint. |
 | -bg --background | flag | optional | NA | NA | disabled | Run at below-normal priority to reduce desktop impact |
 | -v --verbose | flag | optional | NA | NA | disabled | Enable verbose console diagnostics while always writing a full `.log` file. |
-| --cores | int | optional | count | 1 - 128 | detected | Physical CPU cores available; `--workers` is derived from it as `min(cores-1, 8)`. |
+| --cores | int | optional | count | 1 - 128 | detected | Physical CPU cores available; `--workers` is derived from it as `min(cores, 8)` — one worker per core, since the master is blocked waiting on results for effectively the whole boundary stage. |
 | --ram | float | optional | GB | 1 - 1024 | NA | Memory budget. Advisory: recorded in the run log. |
 | --workers | int | optional | count | 1 - 128 | from `--cores`, else from the machine | Parallel worker processes for the boundary-junction stage. Overrides `--cores`. |
 
@@ -224,26 +224,57 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### Scale rehearsal at the stated future size has not been run
+### Scale rehearsal: attempted, failed in `sew`, needs re-running
 
-**What's missing:** the stated future workload is parts ~8× larger in volume at
-`cc=5, t=1` — roughly 64× more lattice cells than `dense-lattice`. Nothing at that
-size has actually been generated. The architecture was chosen partly on projections
-for it, and the interior path was measured standalone at that scale (64,000
-junctions, 1.55 M faces, 199 s — `tools/prototypes/g2_instancing_join.py`), but a
-full end-to-end run with classification, boundary trimming and STEP export at that
-size has not happened.
+**What happened.** `TD_HX_Indre_Volum.stp` at `cc=5, t=1` was run end to end on
+2026-08-12. It reached the stitcher and failed there after **5 h 04 m**:
 
-**Why it matters:** STEP *writing* is expected to become the dominant cost at
-that scale, producing a multi-GB file with ~3 M faces. If that
-holds, the bottleneck moves outside this tool — into whether SolidWorks/Catia can
-usefully import such a file — and that is a user-level decision about the output
-contract, not something to change unilaterally.
+| Stage | Time | |
+|---|---|---|
+| tessellate | 2.4 s | 28,654 triangles, measured deviation 0.409 mm |
+| classify | 2 m 00 s | 527,425 candidates → 29,375 interior, 19,552 boundary, 478,498 outside |
+| boundary | 12 m 36 s | 5 workers; 21,955 pieces, **2,969 junctions produced no geometry** |
+| connect | 0.5 s | 183 floating bodies dropped, down to 5.08e-06 mm³ |
+| instance | 1 m 07 s | 705,000 faces, 624,492 vertices |
+| **sew** | **4 h 45 m** | 21,697 shells in; `1 of 14 stitched shells are not closed` |
 
-**How to do it:** scale `test/test-cylinder.STEP` 2× linearly, run at `cc=5, t=1`,
-and record the per-stage table, peak RSS, output file size and write time. Compare
-against the proposal's projections. Report the file-size finding to the user rather
-than acting on it.
+So two findings, and the second hid behind the first for five hours:
+
+* **`sew` is 94 % of the run** and single-threaded (~16 % of a 6-core CPU, 2–3 GB
+  RSS — algorithmic, not memory-bound). See the stitching item below.
+* **The cap-drop decision was one-sided**, so a junction could punch an interface
+  hole with nothing behind it. Fixed by resolving interfaces symmetrically
+  (docs/algorithm.md §7.1) with a hard check in `connect` (§8), which moves this
+  class of failure from hour 5 to minute 15 and names the junction.
+
+**Re-run 2026-08-13 with the interface fix, confirming the second finding.** It
+reached `assembly input` in **16 m 27 s** and was stopped there, since `sew` is
+unchanged. `connect` reported 122,180 interfaces and exactly three caps the two
+sides disagreed about, all in one cluster at nodes `(633,-97,-61)` and
+`(633,-97,-62)` — the three unmatched holes the old rule would have opened, which
+is `1 of 14 stitched shells are not closed`. Detail in docs/algorithm.md §7.1.
+
+Per-stage cost of the fix, against the first run:
+
+| Stage | Before | After | |
+|---|---|---|---|
+| classify | 2 m 00.2 s | 2 m 03.6 s | noise |
+| boundary | 12 m 35.6 s | 13 m 08.9 s | +4.4 %: every cap-plane face is now tagged and shipped, not only the masked ones |
+| connect | 0.51 s | 3.94 s | the cap-area quadrature that decides agreement |
+| instance | 1 m 07.4 s | 1 m 08.3 s | noise |
+
+3.4 s to make an entire class of watertightness failure unreachable, and to name
+it in minute 15 instead of hour 5.
+
+**Still to do:** re-run end to end once stitching is fixed, and record the full
+per-stage table, peak RSS, output file size and write time. Everything before
+`sew` now totals 16 m 27 s, so that is the floor the fixed run should approach.
+
+**Why the file size still matters:** STEP *writing* is expected to become the
+dominant cost once `sew` no longer is, producing a multi-GB file with ~3 M faces.
+If that holds, the bottleneck moves outside this tool — into whether
+SolidWorks/Catia can usefully import such a file — and that is a user-level
+decision about the output contract, not something to change unilaterally.
 
 **Watch the `simplify` stage there specifically.** Same-domain unification
 (docs/algorithm.md §9) runs at roughly 0.24 ms/face, so ~3 M faces implies on the
@@ -252,20 +283,160 @@ halving the file that export and the round-trip check then have to handle, but
 that trade has only been measured at ~30 k faces. It unifies each solid
 independently, so it parallelises across solids if it needs to.
 
-### Boundary stitching is the remaining superlinear step
+### Fuse junction pairs whose two booleans disagree
 
-**What it is:** the interior is built by indexed instancing and is linear, but
-trimmed boundary junctions are joined with `BRepBuilderAPI_Sewing`, which was
-measured at 14.9 s per 1,000 shells and growing worse than linearly
-(docs/algorithm.md §6). Boundary count grows with surface area rather than volume,
-so this is not currently a bottleneck — `dense-lattice` spends 12.5 s there — but it
-is the term that will bite first at the 64× size above.
+**Status: built and unit-tested; not yet re-verified at the scale that found
+it.** Implemented in [`boundary.fuse_disagreeing_pairs`](../src/latticegen2/boundary.py)
+and wired into the pipeline's `connect` stage, between `resolve_interfaces` and
+`finalize_pieces`, exactly as designed below. `BoundaryPiece.caps` and
+`.cap_faces` are now keyed by `(node, half-strut)` throughout boundary, connect,
+pipeline and weld, as the structural change required.
 
-**How to fix it if needed:** the pairing is not arbitrary. Each trimmed junction
-knows which cap interfaces it kept, so the stitching could be done per-interface
-against known partners instead of by global geometric search, or the interior
-shell's own index could be extended to absorb boundary pieces whose caps came
-through the trim intact (which is the common case — see docs/algorithm.md §5.3).
-Measure before building either: this only matters once the boundary count is in the
-tens of thousands.
+`test/test_boundary.py` reproduces the failure with a real boolean (a genuine
+corner cut off one side's cap via `BRepAlgoAPI_Cut`, not a synthetic uniform
+scale — the earlier tests in that file already covered the "declined, kept as
+exterior" path, so the new ones target specifically the fuse repair):
+`resolve_interfaces` reports the notched cap as mismatched; `fuse_disagreeing_pairs`
+fuses the pair into one solid whose volume is the exact sum, re-tagged so every
+*other* cap of both nodes survives correctly attributed to its own node (the
+`_owning_cap` proximity check earns its keep here — a plane-only
+`is_cap_plane_face` test alone cannot tell node A's caps from node B's along an
+axis orthogonal to the one separating them); resolved a second time the
+disagreement is simply gone, with neither side presenting that cap as a
+boundary face any more; and the merged piece assembles into a closed,
+orientable shell — `weld.shell_defects` reports zero open and zero misoriented
+edges, and `BRepCheck_Analyzer` passes it. `python -m pytest test -q` (160
+passed) and `python tools/e2e.py` (all four scenarios, matching golden samples
+exactly) both stay green — expected, since none of the committed scenarios
+contain a disagreeing pair, so this path is exercised only by the new tests.
+
+**Not yet done:** re-running the `TD_HX_Indre_Volum` rehearsal that found this
+bug in the first place, to confirm the three real disagreeing caps at
+`(633,-97,-61)`/`(633,-97,-62)` get repaired rather than declined. That re-run
+is still blocked on the boundary-sew tiling item below — the rehearsal reaches
+`sew` at minute ~35 today and `sew` itself is unchanged — so it cannot happen
+until that lands too.
+
+Original diagnosis, kept for reference:
+
+**What happens.** `resolve_interfaces` (docs/algorithm.md §7.1) declines a cap
+when the two sides present regions that disagree. On `TD_HX_Indre_Volum` at
+`cc=5, t=1` that is 3 caps out of 122,180, all in one cluster around
+`[2055.4, -90.0, 969.6]`:
+
+| Cap | Side A | Side B |
+|---|---|---|
+| `(633,-97,-61)` h3 | present | absent |
+| `(633,-97,-61)` h0 | 1.000000 mm² | 0.014613 mm² |
+| `(633,-97,-62)` h2 | 0.736809 mm² | 1.000000 mm² |
+
+Declining means both sides keep their cap face. **That degradation is unsound,
+and the claim that it "leaves an extra solid rather than a hole" was wrong.**
+Where the two caps are the same region it is harmless, but these are *mismatched
+partial* caps, so keeping both leaves the overlap as non-manifold material and
+the remainder as an unfilled hole. `assemble` reports exactly that: **12 edges on
+1 face and 12 edges on 3 faces** — 3 caps × 4 ring edges, twice over.
+
+**The fix: fuse the disagreeing pair with a local boolean.** Where instancing's
+exactness argument has broken down because the kernel contradicted itself, fall
+back to the kernel's own general operation. It is sound, it produces correct
+geometry rather than trading a hole for a sliver, and at three occurrences its
+cost is irrelevant — this is nowhere near the volume-scaling path §12 keeps
+booleans off.
+
+The alternatives were considered and rejected: failing the run refuses sound
+input over a kernel defect, which is the one failure mode docs/algorithm.md §11
+rules out; dropping the offending pieces removes material, which §5 reserves for
+*floating* sub-`t³` bodies only.
+
+**What it needs.** The work is small except for one structural change:
+
+* `BoundaryPiece` assumes **one node per piece**. Its caps are keyed by
+  half-strut id alone and `connect.py` reads them as `(piece.node, h)`. A fused
+  pair spans two nodes, so `caps` and `cap_faces` must be keyed by `(node, h)`
+  throughout — boundary, connect, pipeline, weld and their tests. Nothing else
+  about the piece changes.
+* The fuse itself runs *before* `finalize_pieces`, while `faces` plus every entry
+  of `cap_faces` still form the piece's complete closed boundary, so each side
+  can be rebuilt as a solid, fused with `BRepAlgoAPI_Fuse`, and re-tagged with
+  `is_cap_plane_face` against **both** nodes.
+* Interfaces are then resolved as usual. The merged piece presents one agreed
+  region at the cap that disagreed, so nothing is declined there and the rest of
+  the pipeline is unchanged.
+* A fuse that returns more than one solid, or that throws, is a hard failure
+  naming the junctions — it means the two pieces did not even overlap
+  consistently, which is beyond what this repair can honestly fix.
+
+Regression to keep: two pieces whose shared cap disagrees must assemble into a
+closed orientable shell, with the edge-use tally clean. The synthetic case that
+does *not* reproduce it is two pristine template instances — their caps are
+identical, so nothing disagrees. The reproduction needs genuinely mismatched
+partial caps.
+
+### Tile the boundary sew
+
+**Status: built and unit-tested; not yet re-verified at the scale that found
+it.** Implemented in [`weld.sew_boundary`](../src/latticegen2/weld.py) and its
+helpers (`_tile_pieces`, `_tile_edge_length`, `_sew_tiles`,
+`_worker_sew_tile`), called from the pipeline's `stitch` stage exactly as
+designed below.
+
+`BRepBuilderAPI_Sewing` used to receive the whole interior shell along with the
+trimmed boundary pieces, on the assumption that an already-shared shell costs it
+nothing. `tools/prototypes/RESULTS.md` G5 disproved that — face count dominates,
+and adding one closed 194,400-face shell with zero free edges took a 4,000-piece
+sew from 76.5 s to 716.6 s — so the assembly was inverted: the boundary layer is
+sewn to itself first, and the interior is then *built onto* the topology that
+comes out (docs/algorithm.md §8). The volume-scaling shell no longer enters a
+geometric search at all.
+
+What remained was the boundary sew itself, which G5a measured at about `n^1.8`
+in piece count: 195.8 s at 8,000 pieces, extrapolating to roughly **20 minutes**
+at the rehearsal's 21,955. The sew is already per-component and every component
+is independent, so each component whose piece count clears a threshold (1,500
+pieces — three tiles' worth) is now split into spatial tiles by lattice-index
+block (sized to average 500 pieces each, the largest size G5a measured cheap);
+each tile is sewn on its own, in parallel across the run's worker processes via
+the same `.brep` round-trip `boundary.py` already uses for the trim stage; and
+only then are the tiles' results sewn together. A component below the threshold,
+or too compact to produce more than one tile, sews exactly as it did before this
+existed — confirmed by the two committed e2e scenarios, whose piece counts (a
+few hundred to ~1,100) never clear it, so their output is byte-for-byte
+unaffected and both still match their golden samples exactly (0 mm³ symmetric
+difference).
+
+**Measured, not assumed (`tools/prototypes/RESULTS.md` G6), on the same real
+trimmed pieces G5 used, at two scales.** The saving is real but bounded: round 1
+shrinks with tile count roughly as the `n^1.8` model predicts, but round 2 sews
+shells whose *combined* face count equals the untiled input's, and G5b already
+found that sewing pays a face-count cost even where there is nothing to merge —
+so round 2 does not shrink to match round 1, and in fact grows slightly as
+tiles get smaller. Best measured: **1.45×** at 4,000 pieces / 8 tiles of 500
+(round 1 11.0 s + round 2 51.8 s = 62.8 s against a 91.3 s baseline) and
+**1.43×** at 8,000 pieces / 8 tiles of 1,000 (27.8 s + 131.8 s = 159.6 s against
+228.3 s) — real at both scales, but round 2 alone is more than half the
+baseline either way, so there is a shallow optimum around a few hundred to
+~1,000 pieces per tile rather than a runaway win from finer tiling, which is
+why the tile target is pinned inside that plateau rather than pushed as small
+as possible. Production round 1 also runs in parallel across workers, which
+this serial measurement does not credit, so the real saving should exceed what
+is measured here — by how much is exactly what the rehearsal re-run below would
+confirm.
+
+**Not yet done:** re-running the `TD_HX_Indre_Volum` rehearsal, both to see the
+tiled boundary sew's wall time at the scale that motivated it (tens of thousands
+of pieces per component, where G6 only measured up to 8,000) and to confirm the
+three real disagreeing caps at `(633,-97,-61)`/`(633,-97,-62)` get repaired by
+`fuse_disagreeing_pairs` rather than declined — see the item above, which was
+blocked on this one landing first.
+
+Note that the obvious-looking alternative — welding boundary pieces to each other
+by index, the way the interior is joined — **does not work**, and the reason is
+worth keeping. `BRepTools_ReShape` will swap an edge inside a face, but replacing
+that edge's *vertices* leaves the neighbouring edges pointing at the old ones and
+the wire comes apart (`BRepCheck_NotConnected`, volume wrong, every edge still
+used exactly twice). Keeping the vertices makes the same swap exact. Two boolean
+pieces cannot each keep their own vertices, so one side must be geometry the
+program builds itself — which is true of the interior and false of the boundary.
+
 

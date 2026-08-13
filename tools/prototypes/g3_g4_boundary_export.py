@@ -22,7 +22,16 @@ import numpy as np
 from latticegen2 import occ
 from latticegen2.boundary import trim_junction
 from latticegen2.classify import Klass, classify_nodes, tessellate_surface
+from latticegen2.connect import lattice_interfaces
 from latticegen2.interior import build_interior_shell, extract_template_mesh
+
+def _one_shell(built):
+    """The single shell a synthetic all-interior grid produces."""
+    shells = list(built.shells.values())
+    assert len(shells) == 1, shells
+    shells[0].Closed(built.stats["interior_open_edges"] == 0)
+    return shells[0]
+
 from latticegen2.junction import build_template
 from latticegen2.lattice import candidate_nodes, lattice_params, nodes
 
@@ -44,7 +53,7 @@ def gate_g3() -> bool:
     timings = []
     for i in range(len(sample)):
         t0 = time.perf_counter()
-        trim_junction(lp, tpl, positions[i], body, 0b111111)
+        trim_junction(lp, tpl, positions[i], body)
         timings.append((time.perf_counter() - t0) * 1e3)
 
     timings.sort()
@@ -66,7 +75,8 @@ def gate_g4() -> bool:
     g = np.meshgrid(a, a, a, indexing="ij")
     ns = np.stack([x.ravel() for x in g], axis=1)
     kept = {(int(x), int(y), int(z)) for x, y, z in ns}
-    shell, stats = build_interior_shell(lp, tpl, tmesh, ns, kept)
+    built = build_interior_shell(lp, tpl, tmesh, ns, lattice_interfaces(kept))
+    shell, stats = _one_shell(built), built.stats
     solid = occ.make_solid(shell)
     n_faces = stats["interior_faces"]
     volume = occ.volume(solid)

@@ -34,6 +34,8 @@ header rewrite.
 | `test_connect.py` | The junction graph and the floating-body rule's three outcomes | no |
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
+| `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call | yes |
+| `test_boundary.py` | The symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant | yes |
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6 | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
 | `test_pipeline.py` | Same-domain unification's fallback ladder — a kernel that refuses to merge must yield a larger file, never a failed run | yes |
@@ -135,7 +137,15 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 | Scenario | Total | Dominant stages |
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~7 s | boundary trim, export |
-| test cylinder, `cc=10 t=1.5` | ~61 s | sewing, classify, verify, simplify |
+| test cylinder, `cc=10 t=1.5` | ~55 s | classify, verify, simplify, boundary sew |
+| `TD_HX_Indre_Volum`, `cc=5 t=1` | 16 m 27 s up to assembly; the boundary sew is the remaining unknown | classify, boundary trim, boundary sew |
+
+The third row is the scale rehearsal. It has not been run end to end since the
+assembly was inverted (docs/algorithm.md §8); everything up to assembly took
+16 m 27 s, and G5a extrapolates the boundary sew to roughly 20 minutes on top,
+against 4 h 45 m for the sew it replaces. Its per-stage table is in
+[specification.md](specification.md) §10 and the sewing measurements are in
+[`../tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md) G5.
 
 Note that the `simplify` stage (same-domain unification, docs/algorithm.md §9)
 has a *negative* net cost: it takes ~8 s but halves the face count, which takes
@@ -144,7 +154,7 @@ make the run slower as well as the output twice as large.
 
 The measurements behind the architecture's load-bearing choices (junction cap
 integrity, join-mechanism throughput, per-junction intersection latency, STEP
-writer throughput) are in
+writer throughput, boundary-stitching scaling) are in
 [`../tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md), with the
 scripts that produced them alongside. Re-run one with, e.g.:
 

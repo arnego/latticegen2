@@ -26,7 +26,16 @@ from OCP.BOPAlgo import BOPAlgo_Builder, BOPAlgo_GlueEnum
 from OCP.TopTools import TopTools_ListOfShape
 
 from latticegen2 import occ
+from latticegen2.connect import lattice_interfaces
 from latticegen2.interior import build_interior_shell, extract_template_mesh
+
+def _one_shell(built):
+    """The single shell a synthetic all-interior grid produces."""
+    shells = list(built.shells.values())
+    assert len(shells) == 1, shells
+    shells[0].Closed(built.stats["interior_open_edges"] == 0)
+    return shells[0]
+
 from latticegen2.junction import build_template
 from latticegen2.lattice import lattice_params, neighbor_step, nodes
 
@@ -54,7 +63,8 @@ def grid(m: int) -> np.ndarray:
 def run_indexed(lp, tpl, tmesh, ns):
     kept = {(int(a), int(b), int(c)) for a, b, c in ns}
     t0 = time.perf_counter()
-    shell, stats = build_interior_shell(lp, tpl, tmesh, ns, kept)
+    built = build_interior_shell(lp, tpl, tmesh, ns, lattice_interfaces(kept))
+    shell, stats = _one_shell(built), built.stats
     t_build = time.perf_counter() - t0
     if not shell.Closed():
         # A grid built this way is closed only if every outward cap was capped

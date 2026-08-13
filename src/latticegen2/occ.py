@@ -98,6 +98,22 @@ def area(shape: TopoDS_Shape) -> float:
     return props.Mass()
 
 
+def centroid(shape: TopoDS_Shape) -> np.ndarray:
+    """Area-weighted centroid of a face (or any shape ``GProp`` can measure).
+
+    Used to disambiguate which of several candidate nodes a re-tagged face
+    belongs to after :func:`latticegen2.boundary.fuse_disagreeing_pairs` fuses
+    two junctions: :func:`latticegen2.junction.is_cap_plane_face` tests only the
+    one axis a cap's half-strut id names, so it can pass for more than one node
+    in a group that share a coordinate along an orthogonal axis. Proximity to
+    each candidate's own ideal cap centre resolves it.
+    """
+    props = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(shape, props)
+    p = props.CentreOfMass()
+    return np.array([p.X(), p.Y(), p.Z()])
+
+
 def bounding_box(shape: TopoDS_Shape, tol: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """Axis-aligned ``(lo, hi)`` bounds.
 
@@ -161,15 +177,46 @@ def translation(offset: np.ndarray) -> TopLoc_Location:
     return TopLoc_Location(trsf)
 
 
-def sew(shapes: Iterable[TopoDS_Shape], tolerance: float) -> TopoDS_Shape:
+def faces_shell(faces: Iterable[TopoDS_Face]) -> TopoDS_Shell:
+    """Bag ``faces`` into a shell, with no geometric work and no closure claim."""
+    shell = TopoDS_Shell()
+    builder = BRep_Builder()
+    builder.MakeShell(shell)
+    for f in faces:
+        builder.Add(shell, f)
+    return shell
+
+
+def sew(shapes: Iterable[TopoDS_Shape], tolerance: float,
+        cutting: bool = True) -> TopoDS_Shape:
     """Stitch shapes into shells along coincident free edges.
 
-    Feeding already-built shells (rather than loose faces) matters: sewing only
-    works on *free* edges, so a shell whose interior edges are already shared
-    contributes only its holes to the workload. That is what keeps the cost
-    proportional to the boundary region instead of to the whole lattice.
+    Feeding already-built shells rather than loose faces is still worth doing —
+    an edge already shared inside a shell is not a free edge and is never a
+    candidate for merging.
+
+    **But it does not make an already-sewn shell free to pass in, and the
+    architecture was designed as though it did.** Measured (G5 in
+    ``tools/prototypes/RESULTS.md``): adding one *closed* instanced shell — zero
+    free edges, nothing for sewing to pair up — to a 4,000-piece sew multiplies
+    its cost by more than an order of magnitude, purely on face count. The whole
+    call also scales at about ``n^1.8`` in piece count, and OCCT's optional
+    phases (``Cutting``, ``Analysis``, ``SameParameter``) account for under 2 %
+    of it, so there is no configuration that rescues this.
+
+    The consequence for callers: **never hand this the interior shell.** Its size
+    scales with the volume of the part, which puts a superlinear term on the one
+    path docs/algorithm.md §6 exists to keep linear. At ``cc=5, t=1`` on
+    ``TD_HX_Indre_Volum`` that cost 4 h 45 m of a 5 h 04 m run. Sewing is now
+    confined to the boundary layer (:mod:`latticegen2.weld`).
+
+    ``cutting`` is OCCT's phase that splits free edges so they match. Where the
+    two sides already match by construction it is pure waste, and G5a measures
+    the whole optional-phase group at under 2 % either way, so switching it off
+    costs nothing and removes a chance to re-partition an edge we intend to
+    identify afterwards.
     """
-    sewing = BRepBuilderAPI_Sewing(tolerance, True, True, True, False)
+    sewing = BRepBuilderAPI_Sewing(tolerance, True, True, cutting, False)
     for s in shapes:
         sewing.Add(s)
     sewing.Perform()

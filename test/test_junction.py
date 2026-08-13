@@ -15,7 +15,16 @@ import numpy as np
 import pytest
 
 from latticegen2 import occ
+from latticegen2.connect import lattice_interfaces
 from latticegen2.interior import build_interior_shell, extract_template_mesh
+
+def _one_shell(built):
+    """The single shell a synthetic all-interior grid produces."""
+    shells = list(built.shells.values())
+    assert len(shells) == 1, shells
+    shells[0].Closed(built.stats["interior_open_edges"] == 0)
+    return shells[0]
+
 from latticegen2.junction import build_template, is_cap_plane_face
 from latticegen2.lattice import HALF_STRUTS, half_strut_offset, lattice_params
 
@@ -125,7 +134,8 @@ def test_instanced_grid_is_watertight_with_exact_volume(template, m):
     lp, tpl, tmesh = template
     ns = grid(m)
     kept = {(int(a), int(b), int(c)) for a, b, c in ns}
-    shell, stats = build_interior_shell(lp, tpl, tmesh, ns, kept)
+    built = build_interior_shell(lp, tpl, tmesh, ns, lattice_interfaces(kept))
+    shell, stats = _one_shell(built), built.stats
     assert stats["interior_open_edges"] == 0
     assert shell.Closed()
     solid = occ.make_solid(shell)
@@ -153,7 +163,7 @@ def test_unification_halves_an_instanced_grid_without_moving_it(template):
     lp, tpl, tmesh = template
     ns = grid(3)
     kept = {(int(a), int(b), int(c)) for a, b, c in ns}
-    shell, _ = build_interior_shell(lp, tpl, tmesh, ns, kept)
+    shell = _one_shell(build_interior_shell(lp, tpl, tmesh, ns, lattice_interfaces(kept)))
     solid = occ.make_solid(shell)
 
     before_faces, before_edges = occ.count_subshapes(solid)
@@ -172,9 +182,9 @@ def test_unification_halves_an_instanced_grid_without_moving_it(template):
 def test_adjacent_instances_share_topology(template):
     """Neighbours must reference one shared vertex set, not two coincident ones."""
     lp, tpl, tmesh = template
-    single, s1 = build_interior_shell(lp, tpl, tmesh, grid(1), {(0, 0, 0)})
+    s1 = build_interior_shell(lp, tpl, tmesh, grid(1), lattice_interfaces({(0, 0, 0)})).stats
     pair_nodes = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.int64)
-    _, s2 = build_interior_shell(lp, tpl, tmesh, pair_nodes, {(0, 0, 0), (1, 0, 0)})
+    s2 = build_interior_shell(lp, tpl, tmesh, pair_nodes, lattice_interfaces({(0, 0, 0), (1, 0, 0)})).stats
     # Two independent junctions would have 2x the vertices; sharing one cap's
     # four corners must leave strictly fewer.
     assert s2["interior_vertices"] == 2 * s1["interior_vertices"] - 4
@@ -183,7 +193,8 @@ def test_adjacent_instances_share_topology(template):
 def test_unpaired_caps_are_kept_as_exterior_surface(template):
     """A junction with no neighbours must still close, using all six caps."""
     lp, tpl, tmesh = template
-    shell, stats = build_interior_shell(lp, tpl, tmesh, grid(1), {(0, 0, 0)})
+    built = build_interior_shell(lp, tpl, tmesh, grid(1), lattice_interfaces({(0, 0, 0)}))
+    shell, stats = _one_shell(built), built.stats
     assert shell.Closed()
     assert stats["interior_faces"] == tpl.n_faces
     assert occ.volume(occ.make_solid(shell)) == pytest.approx(tpl.volume, rel=1e-9)
@@ -195,6 +206,6 @@ def test_interior_shell_opens_exactly_where_a_neighbour_is_absent(template):
     ns = np.array([[0, 0, 0]], dtype=np.int64)
     # Claim a neighbour exists along +e0 without instancing it: the cap toward it
     # is dropped, leaving that quad's four edges free.
-    _, stats = build_interior_shell(lp, tpl, tmesh, ns, {(0, 0, 0), (1, 0, 0)})
+    stats = build_interior_shell(lp, tpl, tmesh, ns, lattice_interfaces({(0, 0, 0), (1, 0, 0)})).stats
     assert stats["interior_open_edges"] == 4
     assert stats["interior_faces"] == tpl.n_faces - 1

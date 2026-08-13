@@ -33,7 +33,8 @@ Optional:
   -o, --output <path>   Output .step path (default: <input_stem>-cc<cc>t<t>.step)
   --workers <n>         Worker processes for the boundary stage (1-128).
                         Default: derived from --cores, else from this machine.
-  --cores <n>           Physical cores available, used to derive --workers (1-128)
+  --cores <n>           Physical cores available (1-128); --workers defaults to
+                        one per core, capped at 8
   --ram <GB>            Memory budget (1-1024). Advisory: recorded in the run
                         log next to the run's measured peak memory.
   -bg, --background     Run at below-normal process priority
@@ -111,13 +112,27 @@ def _in_range(flag: str, v: float, lo: float, hi: float) -> float:
 def default_workers(cores: int | None) -> int:
     """Worker count from an explicit core count, else from this machine.
 
-    One core is left to the master process and the desktop. The cap at 8 is
-    empirical: boundary jobs are short, so past that the pool's own start-up and
-    result-marshalling cost starts to dominate the work being distributed.
+    **One worker per core.** The master does not need one reserved for it: for
+    all but a percent or so of the boundary stage it is blocked in ``Pool.imap``
+    waiting on results, and the work it does between batches — deserialising each
+    batch's ``.brep`` — is serial whether or not a core is held back for it.
+    Measured on the scale rehearsal's own output: reading all 151 MB of its
+    boundary ``.brep`` files takes 7.0 s against a 12 m 36 s boundary stage.
+
+    Reserving a core cost a fifth of the throughput of this stage on a 6-core
+    machine to protect an idle process. Desktop impact is what ``-bg`` is for,
+    and it drops the master as well as the workers to below-normal priority.
+
+    Memory scales linearly with this number — 260 MB peak per worker at rehearsal
+    scale — so it stays a small fraction of the master's own footprint.
+
+    The cap at 8 is empirical: boundary jobs are short, so past that the pool's
+    own start-up and result-marshalling cost starts to dominate the work being
+    distributed.
     """
     if cores is None:
         cores = os.cpu_count() or 2
-    return max(1, min(cores - 1, 8))
+    return max(1, min(cores, 8))
 
 
 def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: float):

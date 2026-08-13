@@ -141,8 +141,10 @@ translation — so it is built exactly once per run:
 
 1. Build the six half-strut prisms at the origin (profile polygon → planar face →
    prism along `s·(a/2)·e_k`).
-2. Fuse them with **one** boolean call. This is the only general fuse in the
-   entire program. It takes about 40 ms.
+2. Fuse them with **one** boolean call. This is the only general fuse the
+   pipeline runs unconditionally, once per run; it takes about 40 ms. §7.1's
+   local repair fuse is the sole exception, and runs only for the rare boundary
+   cap pair the kernel itself disagreed about.
 
 **The key consequence of mutual orthogonality (§2.3 identity 6):** at every node
 the six half-struts run along ±3 mutually perpendicular axes, so all strut-strut
@@ -215,10 +217,13 @@ flowchart TD
     keep temp for analysis]
     I --> J[Build junction graph, find components,
     drop floating bodies under t cubed]
-    J --> K[INTERIOR nodes: build one shared-topology
-    shell by indexed instancing - no booleans]
-    K --> L[Sew: interior shell + trimmed boundary pieces,
-    free edges only at the interfaces]
+    J --> K[Sew the boundary layer to itself,
+    read the interface rings off the result]
+    K --> L[INTERIOR nodes: instance one shared-topology
+    shell, adopting those rings - no booleans]
+    L --> M0[Assemble per component, prove every edge
+    is used twice, once each way]
+    M0 -->|not closed or not orientable| E3
     L -->|a shell fails to close| E3
     L --> M[BRepCheck_Analyzer validity gate]
     M -->|invalid| E3
@@ -388,6 +393,14 @@ node's neighbour *is* OUTSIDE, the shared cap lies entirely outside the solid an
 the trim removes it completely. So an intact cap always has material on both
 sides.
 
+All three are statements about the *true* geometry, and the pipeline is careful
+not to treat them as statements about what a boolean returns. Property (b) says
+the junction across an INTERIOR node's cap must keep that cap whole; on grazing
+input, OCCT has been observed not to. So the implementation verifies presence
+from both sides rather than inferring it from classification — see §7.1, and
+§11's rule that a correctness argument is only as good as the quantity actually
+compared.
+
 ### 5.4 Staging, and complexity
 
 The sweep is ordered cheapest-first:
@@ -468,12 +481,97 @@ must never mistake for debris. A single already-fused junction cannot trigger th
 fragmentation at all, by construction — which is why this design needs no
 machinery to keep operands disjoint.
 
-After trimming, every face lying in an **interface cap plane** is dropped, exactly
-as the interior path drops caps, so the trimmed junction presents the same square
-hole to its neighbour. Which caps are interfaces is decided by classification —
-a cap is an interface iff the node across it is itself kept — not by inspecting
-geometry. Identifying a cap-plane face is unambiguous: lateral faces of any
-half-strut lie at `t/2` from the node (§3.3), caps at `a/2`, and `t < a`.
+After trimming, every face lying in a cap plane is **tagged, not dropped**.
+Identifying one is unambiguous: lateral faces of any half-strut lie at `t/2` from
+the node (§3.3), caps at `a/2`, and `t < a`. Whether a tagged cap is actually an
+**interface** — a hole this junction punches for its neighbour to fill — is
+decided later, on the master, once both sides are known (§7.1).
+
+### 7.1 Interfaces are resolved symmetrically, from both sides
+
+A cap is an interface iff **both sides present material there and the two
+regions agree**:
+
+* an INTERIOR node presents all six of its caps whole, by §5.3(b);
+* a trimmed boundary piece presents whichever cap-plane faces its own boolean
+  left, summed over the pieces one junction split into;
+* the two areas must agree to `CAP_AREA_REL_TOL` (1e-6 relative to `t²`) —
+  they are the same nominal region computed twice, so only quadrature noise is
+  expected.
+
+Anything else keeps its cap face and stays closed there.
+
+**Why this cannot be decided in the worker.** The obvious rule is the one this
+implementation used first: a cap is an interface iff the node across it is kept,
+which classification already knows, so the worker can drop it on the spot. That
+rule is wrong, and its failure mode is the worst kind. The two sides of a cap are
+produced by two *independent* `BRepAlgoAPI_Common` calls, in different processes,
+against the same nominal quad — and OCCT does not guarantee a shared face comes
+back the same from both. Wherever they disagreed, one junction punched a hole
+with nothing behind it.
+
+**Confirmed, on the part that failed.** `TD_HX_Indre_Volum` at `cc=5, t=1` re-run
+with this rule reports 122,180 interfaces and exactly **three** caps the two sides
+disagreed about — all of them in one tight cluster, at nodes `(633,-97,-61)` and
+`(633,-97,-62)`, around `[2055.4, -90.0, 969.6]`:
+
+| Cap | Side A | Side B | |
+|---|---|---|---|
+| `(633,-97,-61)` h3 | present | **absent** | the neighbour produced geometry but no cap at all |
+| `(633,-97,-61)` h0 | 1.000000 mm² | **0.014613 mm²** | a whole cap against a 1.5 % sliver |
+| `(633,-97,-62)` h2 | 0.736809 mm² | **1.000000 mm²** | 26 % apart |
+
+The one-sided rule would have dropped all three from both sides, opening one hole
+with nothing behind it and two pairs of holes that cannot be stitched to each
+other. Three unmatched holes in one connected region is exactly
+`1 of 14 stitched shells are not closed`.
+
+All four nodes involved classify **BOUNDARY**, so §5.3(b) was never violated: the
+proven property — an INTERIOR node's caps face whole caps — held at all 29,375
+interior nodes. The failure was entirely in the boundary↔boundary region, where
+nothing is proven and the old rule assumed anyway. That is the general shape of
+it: this part is dense in grazing intersections (2,969 of 19,552 junctions
+produced no geometry at all, 21,955 pieces from the 16,583 that did, dropped
+bodies down to 5×10⁻⁶ mm³), and that is exactly where two independent booleans
+stop agreeing about a face they share.
+
+Three caps out of 122,180 is also why the two committed scenarios never showed
+it: both report zero disagreements, and a rate of 2.5×10⁻⁵ needs a part of this
+size before it appears at all.
+
+Resolving it symmetrically makes "every hole has a partner" true by construction,
+and both counts are logged.
+
+**Declining is not by itself a safe degradation, and this was got wrong once.**
+Where the two sides present the *same* region, keeping both caps is harmless.
+Where they present *mismatched partial* regions — 1.000000 mm² against
+0.014613 mm² above — keeping both leaves the overlap as non-manifold material and
+the remainder as an unfilled hole, which §8's edge-use tally reports as 12 edges
+on one face and 12 on three. A cap the two booleans genuinely disagree about has
+to be repaired rather than sidestepped: `fuse_disagreeing_pairs`
+(`src/latticegen2/boundary.py`) rebuilds each side of every mismatched cap as a
+solid — from its own share of the trim's faces, before either has been sorted
+into "kept" or "given up" — and fuses them with one local `BRepAlgoAPI_Fuse`
+call, the second and only other general boolean in the pipeline besides §3.2's
+template fuse. Pieces touching more than one disagreement (a node's caps can
+disagree with two different neighbours at once, as `(633,-97,-61)` does above)
+are grouped by shared membership and fused together, so no piece is consumed
+twice. The result's faces are re-tagged against **every** node in the group —
+`is_cap_plane_face` alone tests only one axis, so it passes for more than one
+node when two share a coordinate along an axis orthogonal to the one separating
+them, and proximity of the face's centroid to each candidate's own ideal cap
+centre resolves that. Interfaces are then resolved a second time: the merged
+piece presents one agreed region, so nothing is declined at that cap, and it
+typically ceases to exist as a boundary face at all — the disagreement is now
+interior material, shared by construction, needing no interface. A fuse that
+returns anything other than one solid is a hard failure naming the junctions:
+sound and costs nothing at the three occurrences this rehearsal produced out of
+122,180 caps. `BoundaryPiece.caps` and `.cap_faces` are keyed by `(node,
+half-strut)` throughout boundary, connect, pipeline and weld to make this
+possible, since a fused piece can hold faces belonging to either node it spans.
+See specification.md §10 for status and `test/test_boundary.py` for the
+regression, reproduced with a real `BRepAlgoAPI_Cut` notch rather than a
+synthetic scale mismatch.
 
 A trim can legitimately split one junction into several disconnected pieces when
 the input surface cuts between its arms. Each piece becomes its own vertex in the
@@ -497,8 +595,13 @@ they share a surviving cap interface, and which caps survived is recorded while
 the geometry is built. So:
 
 1. Build the **junction graph**: vertices are instantiated junctions (interior
-   nodes, plus one per piece of each trimmed boundary junction), edges are caps
-   present on both sides.
+   nodes, plus one per piece of each trimmed boundary junction), edges are the
+   interfaces §7.1 resolved. Both sides of an interface register it, so a cap
+   registered from one side with no partner on the other is a hole with nothing
+   behind it, and is a **hard failure naming the junction** (exit 4) rather than
+   something to skip. §7.1 makes it unreachable; it is checked because a
+   watertightness invariant discovered in seconds beats the same invariant
+   discovered hours later as an unclosed shell, with no indication of where.
 2. Find connected components by union-find. A component's volume is the sum of its
    members'.
 3. Drop a component iff its total volume `< t³`. It is a floating body by
@@ -516,9 +619,7 @@ drops many of them into a multi-thousand-line tail that buries the rest of the
 log, for no information the aggregate does not already carry.
 
 **Stitching.** The interior shell and the surviving trimmed boundary pieces are
-then sewn together. Because both are fed as *shells* whose interior edges are
-already shared, sewing only sees the free edges at the interfaces, so its cost
-scales with surface area rather than with volume. Two cross-checks follow:
+then sewn together. Two cross-checks follow:
 
 * If sewing yields **more** solids than the junction graph has components, some
   interface failed to close and the output would not be watertight — hard failure
@@ -531,6 +632,86 @@ re-indexed. That tolerance only has to absorb the last-ulp difference between
 computing a shared cap from one side of a strut or the other (~1e-14 mm at
 realistic coordinates), and stays far below the smallest real feature
 (`t ≥ 0.4` mm), so it can never weld two genuinely distinct vertices.
+
+**The interior shell must never enter sewing.** The design originally assumed
+sewing's cost tracks the *free* edges it has to pair up, so feeding it
+already-shared shells would keep stitching proportional to surface area.
+Measurement says otherwise (`tools/prototypes/RESULTS.md` G5): the cost grows at
+about `n^1.8` in piece count, no combination of OCCT's optional phases changes it
+by more than 2 %, and — decisively — adding one **closed** 194,400-face shell
+with *zero* free edges to a 4,000-piece sew takes it from 76.5 s to 716.6 s. Face
+count alone dominates, and the interior shell's face count scales with the
+*volume* of the part. That is what cost the `cc=5, t=1` rehearsal 4 h 45 m of its
+5 h 04 m.
+
+So the assembly runs the other way round, in three steps:
+
+1. **Sew the boundary pieces to each other**, per junction-graph component. This
+   is the only place a pairing is genuinely unknown — both sides of a
+   boundary↔boundary cap come out of independent booleans with no shared topology
+   to exploit — and it is the surface-area-scaling part, which is what the lever
+   in §12 always intended.
+2. **Read the interface rings off the sewn result.** Its free edges are exactly
+   the holes facing the interior, and each is provably the whole template cap
+   quad (§5.3(b)), so its four corners are known from the lattice expressions and
+   the lookup is a dictionary hit rather than a search.
+3. **Build the interior shell onto those rings.** The instancing index *adopts*
+   the boundary's `TopoDS_Vertex` and `TopoDS_Edge` objects at every interface
+   instead of creating its own, so the two sides are the same objects from the
+   start and nothing has to be reconciled afterwards.
+
+**Step 1 is itself tiled**, once a component is large enough for it to matter.
+G5a's `n^1.8` scaling means the boundary sew is still the one term in the
+pipeline that grows faster than the part: 195.8 s at 8,000 pieces, extrapolating
+to roughly 20 minutes at the rehearsal's 21,955. A component above
+`MIN_PIECES_TO_TILE` (1,500 pieces — three tiles' worth, below which a second
+sewing round could not possibly pay for itself) is first split into spatial
+tiles by lattice-index block, sized to average `TILE_TARGET_PIECES` (500) pieces
+each; each tile is sewn on its own — in parallel across the run's worker
+processes when there are enough of them, via the same small-IPC `.brep`
+round-trip §7 uses — and only then are the tiles' results sewn together.
+Tiling only changes the *route* to the component's sewn shell, never the shell
+itself: every piece still passes through exactly one final sewing call's input
+either way, so which partition produced it is invisible in the result — a
+wall-clock lever, not a geometry decision, per §11.
+
+The saving is real but bounded, and it was measured rather than assumed
+(`tools/prototypes/RESULTS.md` G6), on the same real trimmed pieces G5 used, at
+two scales. Round 1 shrinks roughly as the `n^1.8` model predicts — an 8×
+tile-count increase drops round 1 by 8–10× at both 4,000 and 8,000 pieces — but
+round 2 does not shrink to match: it still sews shells whose combined face count
+equals the untiled input's, and G5b already found that `BRepBuilderAPI_Sewing`
+pays a face-count cost even where there is nothing to merge, so round 2 *grows*
+slightly as tiles get smaller rather than shrinking. Best measured: 1.45× at
+4,000 pieces / 8 tiles of 500 (11.0 s + 51.8 s = 62.8 s against a 91.3 s
+baseline), 1.43× at 8,000 pieces / 8 tiles of 1,000 (27.8 s + 131.8 s = 159.6 s
+against 228.3 s) — real, but round 2 alone is more than half the baseline at
+both scales, so there is a shallow optimum around a few hundred to ~1,000 pieces
+per tile rather than a runaway win from finer tiling, and `TILE_TARGET_PIECES`
+(500) is chosen inside that plateau rather than pushed as small as possible.
+Round 1 alone parallelises across workers in the real pipeline, which this
+measurement's serial sum does not credit, so the production saving should exceed
+what is measured here — how much more is the rehearsal re-run's to confirm
+(specification.md §10), since G6 only reached 8,000 pieces per component and the
+rehearsal's components run to tens of thousands.
+
+Assembly is then `BRep_Builder.Add` into one shell per component, and
+watertightness is proved rather than assumed: **every edge used exactly twice,
+once in each direction**. Both halves of that test are load-bearing. Counting
+uses alone passes a shell whose faces are joined back-to-front — measured during
+development: 0 open edges, 954 edges traversed the same way twice, volume
+29,111 mm³ against a true 51,393 mm³.
+
+**Why the interior is the side that adapts, and not the other way round.** The
+obvious alternative is to rewrite the boundary pieces onto the interior's
+topology with `BRepTools_ReShape`. It does not work, and it fails quietly.
+`ReShape` will swap an edge inside a face happily, but replacing that edge's
+**vertices** leaves the neighbouring edges still pointing at the old ones and the
+wire comes apart: `BRepCheck_NotConnected`, the solid invalid, the volume wrong —
+while every edge still has exactly two faces and the shell still "closes". The
+same swap *keeping* the vertices is exact. A cap's two sides cannot both keep
+their own vertices, so the side that gives way has to be the one whose faces the
+program builds itself.
 
 ---
 
@@ -625,8 +806,10 @@ realistic coordinates), and stays far below the smallest real feature
   *console* verbosity.
 * Content: run header (all parameters, start timestamp), one line per stage with
   its wall-clock duration, template/mesh/classification statistics, boundary-trim
-  progress, the aggregate floating-body line, and the mandatory end-of-run summary
-  (spec §3's list) printed to both console and log on success.
+  progress, the interface tally (stitched caps, plus counts and sample world
+  positions for any the two sides disagreed about — §7.1), the interior shell's
+  open-edge count, the aggregate floating-body line, and the mandatory end-of-run
+  summary (spec §3's list) printed to both console and log on success.
 * Exit codes:
 
   | Code | Meaning |
@@ -681,6 +864,13 @@ Because priority #1 is precision, every optimization is designed so that its
 
 * Classification degrades ambiguous cases to BOUNDARY (§5.2) — worst case is an
   unnecessary boolean, never a missed trim or a phantom strut.
+* Interfaces are resolved from both sides at once (§7.1), so a cap is only ever
+  opened when there is proven material behind it. A cap the two sides only
+  partially agree on is repaired with a local fuse rather than left half-open
+  (§7.1); the worst case remaining is an extra solid in the output, from a cap
+  declined because its two holes do not correspond edge for edge (§8), never a
+  hole, and an inconsistency between the two sides fails immediately and by
+  name (§8) instead of surfacing much later as an unclosed shell.
 * The classification margin uses a **measured** upper bound on mesh error (§5.1),
   so the guarantee above does not rest on the mesher honouring its parameters.
 * Instancing is not an approximation of fusing: by §3.2 the union of translated
@@ -720,18 +910,20 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Unification | `O(faces)`, ~0.24 ms/face |
 | Boundary | `O(S/W)` single-operand intersections |
 | Connectivity | `O(N + S)` union-find |
-| Stitching | `O(S)` free edges |
+| Stitching | `O(S^1.8)` over the boundary layer only, tiled into `O(S/k)` calls of size `k` plus one merge of the results (§8) |
+| Assembly | `O(N + S)` index operations, **no booleans and no search** |
 | Export | `O(faces)` — irreducible |
 
 | Lever | Effect |
 |---|---|
 | Classify before intersecting | Booleans only for the `O(S)` boundary junctions |
-| One junction template, instanced everywhere | The only general fuse is 6 operands, once per run |
+| One junction template, instanced everywhere | The only *unconditional* general fuse is 6 operands, once per run — §7.1's repair fuse runs only for a disagreeing cap pair, `O(1)` occurrences in practice |
 | Indexed shared-topology interior shell | `O(N)` and exactly watertight; replaces a sewing step measured at 14.9 s per 1,000 junctions and growing superlinearly |
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
-| Sewing confined to boundary interfaces | Stitching scales with surface area, not volume |
+| Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
+| Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; measured 1.45× at 4,000 pieces / 8 tiles, bounded by round 2's own face-count cost rather than growing without limit (§8, G6) |
 | Same-domain unification before export (§9) | Recovers the face merging the removed boolean used to do for free: 47% fewer faces and half the file size, and it makes the run *faster* by shrinking export and the round-trip check |
 | Process-parallel boundary junctions | Constant-size independent jobs |
 | Coarse occupancy pre-filter before exact distance tests | Only near-surface nodes pay for segment-triangle maths |
@@ -766,8 +958,9 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |
-| [`src/latticegen2/boundary.py`](../src/latticegen2/boundary.py) | §7 (single-operand trim, cap dropping, worker processes) |
-| [`src/latticegen2/connect.py`](../src/latticegen2/connect.py) | §8 (junction graph, components, floating-body rule) |
+| [`src/latticegen2/boundary.py`](../src/latticegen2/boundary.py) | §7 (single-operand trim, cap tagging, worker processes), §7.1 (interface resolution) |
+| [`src/latticegen2/connect.py`](../src/latticegen2/connect.py) | §8 (junction graph, components, floating-body rule) — kernel-free |
+| [`src/latticegen2/weld.py`](../src/latticegen2/weld.py) | §8 (boundary sew, interface-ring lookup, assembly and its watertightness proof) |
 | [`src/latticegen2/stepout.py`](../src/latticegen2/stepout.py) | §9 (header rewrite, round-trip check) |
 | [`src/latticegen2/runlog.py`](../src/latticegen2/runlog.py) | §10 (logging, stage timings, summary) |
 | [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration) |

@@ -112,7 +112,13 @@ def test_worker_count_can_be_given_explicitly():
 
 
 def test_worker_count_is_derived_from_cores_when_not_given():
-    assert parse_args(BASE + ["--cores", "6"]).workers == 5
+    """One worker per core: the master is blocked on ``Pool.imap`` throughout.
+
+    It used to reserve a core for the master, which cost a fifth of the boundary
+    stage's throughput on a 6-core machine to protect a process that spends over
+    99 % of that stage waiting.
+    """
+    assert parse_args(BASE + ["--cores", "6"]).workers == 6
     assert parse_args(BASE + ["--cores", "1"]).workers == 1
 
 

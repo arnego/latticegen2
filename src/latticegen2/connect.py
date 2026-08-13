@@ -7,11 +7,16 @@ attempting a boolean and seeing what merges, is both slow and inconclusive when
 the boolean itself fails on degenerate input.
 
 Here connectivity is known by construction. Two junctions are joined exactly
-when they share a mid-strut cap interface, and which caps survived is recorded
-while the geometry is built. So the question reduces to connected components of a
-small graph: vertices are instanced junctions (a trimmed boundary junction
-contributes one vertex per connected piece it split into), edges are surviving
-interfaces. No boolean is involved and there is no unresolvable case.
+when they share a mid-strut cap interface, and which caps are interfaces is
+decided once, symmetrically, by :func:`latticegen2.boundary.resolve_interfaces`.
+So the question reduces to connected components of a small graph: vertices are
+instanced junctions (a trimmed boundary junction contributes one vertex per
+connected piece it split into), edges are interfaces. No boolean is involved and
+there is no unresolvable case.
+
+This module deliberately stays free of the geometry kernel — it is pure graph
+work over the interface set it is handed, which is what keeps
+``test/test_connect.py`` runnable without OCCT.
 """
 
 from __future__ import annotations
@@ -20,9 +25,29 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .errors import ProcessingError
 from .lattice import OPPOSITE_HALF, neighbor_step
 
 NodeKey = tuple[int, int, int]
+
+
+def lattice_interfaces(node_set) -> set[tuple[NodeKey, int]]:
+    """Interfaces of a set of nodes that all present their six caps whole.
+
+    The synthetic all-interior case: two nodes are joined exactly when they are
+    neighbours and both are present. The real pipeline uses
+    :func:`latticegen2.boundary.resolve_interfaces` instead, which also accounts
+    for caps a boundary trim cut down or removed.
+    """
+    steps = [tuple(int(x) for x in neighbor_step(h)) for h in range(6)]
+    out: set[tuple[NodeKey, int]] = set()
+    for node in node_set:
+        for h in range(6):
+            step = steps[h]
+            other = (node[0] + step[0], node[1] + step[1], node[2] + step[2])
+            if other in node_set:
+                out.add((node, h))
+    return out
 
 
 @dataclass
@@ -36,7 +61,15 @@ class Vertex:
     """Index into the boundary piece list, or ``-1`` for an interior node."""
 
 
-class _UnionFind:
+class UnionFind:
+    """Standard union-find, shared with :func:`latticegen2.boundary.fuse_disagreeing_pairs`.
+
+    That module reuses this rather than the kernel-free connectivity graph it
+    powers here, because it faces the same problem at the piece level: grouping
+    everything one connected cluster of disagreements touches before acting on
+    any of it.
+    """
+
     def __init__(self, n: int):
         self.parent = list(range(n))
 
@@ -69,13 +102,15 @@ def build_components(
     interior_nodes: np.ndarray,
     interior_volume: float,
     boundary_pieces,
+    interfaces: set[tuple[NodeKey, int]],
 ) -> Components:
     """Connected components of the junction graph.
 
-    Every INTERIOR node carries all six of its caps as interfaces (its
-    neighbours are always kept — see :mod:`latticegen2.classify`). A boundary
-    piece carries whichever caps its own trim left behind, which is recorded per
-    piece when it is built.
+    ``interfaces`` holds both sides of every cap that is stitched across, so a
+    node registers cap ``h`` exactly when ``(node, h)`` is in it. For a boundary
+    piece that is the same thing as its own ``caps`` — the caps it gave up — which
+    is how a junction split into several pieces attributes each interface to the
+    piece that actually carries it.
     """
     vertices: list[Vertex] = []
     cap_owner: dict[tuple[NodeKey, int], list[int]] = {}
@@ -85,26 +120,41 @@ def build_components(
         vid = len(vertices)
         vertices.append(Vertex(node=node, volume=interior_volume, is_interior=True))
         for h in range(6):
-            cap_owner.setdefault((node, h), []).append(vid)
+            if (node, h) in interfaces:
+                cap_owner.setdefault((node, h), []).append(vid)
 
     for pi, piece in enumerate(boundary_pieces):
         vid = len(vertices)
         vertices.append(
             Vertex(node=piece.node, volume=piece.volume, is_interior=False, piece_index=pi)
         )
-        for h in piece.caps:
-            cap_owner.setdefault((piece.node, int(h)), []).append(vid)
+        # `piece.caps` already carries its own node per entry — not necessarily
+        # `piece.node` — because a piece `boundary.fuse_disagreeing_pairs` has
+        # merged spans more than one node (docs/algorithm.md §7.1).
+        for key in piece.caps:
+            cap_owner.setdefault(key, []).append(vid)
 
-    uf = _UnionFind(len(vertices))
+    uf = UnionFind(len(vertices))
     steps = [neighbor_step(h) for h in range(6)]
     for (node, h), owners in cap_owner.items():
-        if h >= 3:
-            continue  # each interface is visited once, from its outgoing side
         step = steps[h]
         other = (node[0] + int(step[0]), node[1] + int(step[1]), node[2] + int(step[2]))
         partners = cap_owner.get((other, OPPOSITE_HALF[h]))
         if not partners:
-            continue
+            # Both sides of an interface give up their cap, so both sides are
+            # always registered here. A missing partner means this junction has
+            # punched a hole with nothing behind it, and the output would not be
+            # watertight — the failure `resolve_interfaces` exists to prevent.
+            # Reported here, in seconds, rather than discovered hours later as an
+            # unclosed shell coming out of the stitcher.
+            raise ProcessingError(
+                f"Junction {node} gives up cap {h} as an interface, but the "
+                f"junction across it at {other} does not give up cap "
+                f"{OPPOSITE_HALF[h]}. That is a hole with no matching hole to "
+                f"stitch to, so the output could not be watertight."
+            )
+        if h >= 3:
+            continue  # each interface is unioned once, from its outgoing side
         # When a trim splits a cap region across several pieces, joining every
         # pair over-connects rather than under-connects. That is the safe
         # direction: it can only keep a body that might have been droppable,

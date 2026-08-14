@@ -9,6 +9,10 @@ can be re-run:
 python tools/prototypes/g1_cap_integrity.py
 python tools/prototypes/g2_instancing_join.py
 python tools/prototypes/g3_g4_boundary_export.py
+python tools/prototypes/g5_stitch_scaling.py
+python tools/prototypes/g6_tile_stitch.py
+python tools/prototypes/g7_thread_scaling.py
+python tools/prototypes/g8_seam_only_sew.py
 ```
 
 Machine: Windows 11, 6-core CPU, 32 GB RAM, Python 3.11.13, OCP 7.9.3.1.1
@@ -302,3 +306,92 @@ component and the rehearsal runs at 21,955.
   finding a way to make the second sew pay only for the tile-boundary free edges
   rather than for every face it is handed — but that is future work, not
   something this gate's data justifies building yet.
+
+---
+
+## G7 — threads or processes for `simplify` / `validate`? ❌ THREADS REJECTED
+
+specification.md §10 ranks parallelising `simplify` (same-domain unification)
+and `validate` (`BRepCheck_Analyzer`) as optimization paths 1 and 4 — together
+16.5 min of the `cc=5, t=1` rehearsal's 73.1. Every other parallel stage in
+this codebase pays a `multiprocessing` spawn-context pool's IPC cost (a `.brep`
+file round-trip); for these two stages the payload is the run's entire output,
+up to 2 GB, so that round-trip adds a serial master-side read-back that did not
+exist before. A `ThreadPoolExecutor` would avoid that entirely — worth checking
+before building the heavier path, per docs/algorithm.md §11 ("measured, not
+assumed").
+
+Method: 8 unequal solids (702–8,526 faces, echoing the rehearsal's 14
+very-unequal ones), built from real instanced-lattice grids of increasing size,
+`occ.unify_same_domain` and `occ.is_valid` run over them serially versus
+through a 6-worker `ThreadPoolExecutor`.
+
+    python tools/prototypes/g7_thread_scaling.py
+
+| | Serial | Threaded (6 workers) | Ratio |
+|---|---|---|---|
+| `unify_same_domain` | 5.138 s | 4.697 s | 0.91 |
+| `is_valid` | 5.510 s | 5.539 s | 1.01 |
+
+**OCP holds the GIL around both calls.** `is_valid` shows no speedup at all
+(ratio 1.01); `unify_same_domain`'s 9 % is well short of anything six real
+cores would produce and is consistent with ordinary scheduling noise, not
+released-GIL parallelism. Neither clears the 0.6 bar this gate set in advance
+for "threads win outright".
+
+### What this decides
+
+Both stages are parallelised with the established process-pool-plus-`.brep`
+pattern (:class:`latticegen2.parallel.WorkerPool`), the same mechanism boundary
+trimming and the boundary sew already use, not `ThreadPoolExecutor`. The
+master-side read-back this implies (each unified solid is read back once, to
+run `validate` and `export` against a live shape) is new serial cost that did
+not exist before; docs/specification.md §10's re-measurement of the rehearsal
+reports what it actually costs.
+
+---
+
+## G8 — can boundary-sew round 2 skip faces that are already fully sewn? ✅ PASS
+
+specification.md §10 ranks a cheaper round 2 (optimization path 3) after
+rejecting a hierarchical tree reduction on paper (docs/algorithm.md §8: round
+2's cost tracks total face count almost flatly, not shape count, so a tree
+would pay that flat cost once per level for nothing). The lever that survives
+that argument: only faces bearing a free edge after round 1 can possibly be
+affected by round 2 — everything else is already fully joined within its own
+tile and can be carried into the final shell unchanged, by reference.
+
+    python tools/prototypes/g8_seam_only_sew.py
+
+Method: a chain of trimmed junctions closed at both ends (so a correct result
+is fully watertight either way), tiled, round 1 run, then round 2 computed two
+ways — a full sew of every tile's result, and sewing only the free-edge-bearing
+subset while carrying the rest through unsewn — and compared for exact
+identity, not just plausibility.
+
+| Scale | Seam fraction | Full round 2 | Seam-only round 2 | Face count | Volume diff |
+|---|---|---|---|---|---|
+| 40 pieces / 20 tiles | 13.5 % | 0.065–0.071 s | 0.015–0.017 s | identical | 2.3e-12 |
+| 150 pieces / 75 tiles | 14.1 % | 0.361 s | 0.061 s | identical | 2.5e-11 |
+
+**PASS at both scales**: same total face count, both fully closed (0 free
+edges), volume identical to machine precision. Adopted into
+`latticegen2.weld._split_seam_interior` / `_sew_round_two`.
+
+**A production-scale bug was found and fixed after this gate passed, and is
+recorded here because the gate itself did not catch it.** The first
+implementation of the split (committed, then caught before merge) computed
+free edges as a plain Python list and tested every face's every edge against
+it with `.IsSame()` — `O(faces × edges_per_face × free_edges)`, fine at this
+gate's scale (hundreds to low thousands of faces) but not at the rehearsal's:
+run against the real `cc=5, t=1` part, the `stitch` stage went from **8 m 57 s
+to 51 m 07 s** — a 5.7× *regression*, not the intended improvement. The fix
+uses `TopTools_IndexedMapOfShape`, OCCT's own shape-identity map, so every
+membership test is the map's own near-`O(1)` lookup instead of a Python-level
+scan; re-measured on a synthetic 600-piece / 200-tile chain (16,802 faces),
+the split itself costs 0.159 s. The lesson this leaves for future gates at
+this project's scale: **a correctness gate on a few hundred faces is not a
+performance gate**, and a design meant to run at hundred-thousand-face scale
+needs at least one measurement taken there before being trusted, exactly as
+docs/algorithm.md §11 already says about correctness bars — the same applies
+to complexity, not only to tolerances.

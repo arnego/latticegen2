@@ -59,22 +59,23 @@ mode must be "do more work", never "produce a different result".
 
 from __future__ import annotations
 
-import multiprocessing as mp
 import os
 from dataclasses import dataclass, field
 
 import numpy as np
 from OCP.BRep import BRep_Builder, BRep_Tool
-from OCP.BRepTools import BRepTools
 from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
 from OCP.TopExp import TopExp
 from OCP.TopoDS import TopoDS, TopoDS_Shell
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape, TopTools_IndexedMapOfShape
 
 from . import occ
-from .boundary import _compound_children, _read_brep, _set_background_priority
 from .errors import ProcessingError
 from .lattice import OPPOSITE_HALF, LatticeParams, neighbor_step
+from .parallel import WorkerPool
+from .parallel import compound_children as _compound_children
+from .parallel import read_brep as _read_brep
+from .parallel import write_brep as _write_brep
 
 NodeKey = tuple[int, int, int]
 
@@ -345,20 +346,24 @@ def _sew_faces(face_lists, tolerance: float) -> list:
 
 
 def _worker_sew_tile(job):
-    """Sew one boundary-sew tile in a worker process.
+    """Sew one bundle of already-computed face lists in a worker process.
 
-    Mirrors :func:`latticegen2.boundary._worker_trim`'s small-IPC discipline:
-    only a file path and a peak-RSS number cross the process boundary, never
-    geometry. The input ``.brep`` is a compound of per-piece compounds, matching
-    what :func:`latticegen2.boundary._worker_trim` itself writes.
+    Shared by both sewing rounds: round 1's tiles and round 2's per-component
+    merges are both "sew a handful of face-list bundles together", so one
+    worker body does both. Mirrors
+    :func:`latticegen2.boundary._worker_trim`'s small-IPC discipline: only a
+    file path and a peak-RSS number cross the process boundary, never
+    geometry. The input ``.brep`` is a compound of per-bundle compounds.
+
+    ``background`` priority is not part of this job tuple: it is set once per
+    worker process by :class:`latticegen2.parallel.WorkerPool`'s own
+    initializer rather than once per job.
     """
-    in_path, out_path, tolerance, background = job
-    if background:
-        _set_background_priority()
+    in_path, out_path, tolerance = job
     shape = _read_brep(in_path)
-    piece_faces = [occ.faces(pc) for pc in _compound_children(shape)]
-    result_faces = _sew_faces(piece_faces, tolerance)
-    BRepTools.Write_s(occ.compound(result_faces), out_path)
+    bundle_faces = [occ.faces(pc) for pc in _compound_children(shape)]
+    result_faces = _sew_faces(bundle_faces, tolerance)
+    _write_brep(occ.compound(result_faces), out_path)
 
     from .runlog import peak_rss_bytes
 
@@ -371,6 +376,7 @@ def _sew_all_tiles(
     workers: int,
     tmpdir: str | None,
     background: bool,
+    pool: WorkerPool | None = None,
 ) -> tuple[dict[int, list[list]], int]:
     """Round 1 for every tiled component in ``plan``, in **one** worker pool.
 
@@ -383,14 +389,19 @@ def _sew_all_tiles(
     otherwise pay `spawn`'s process-creation cost once per component instead of
     once for the whole stitch stage.
 
+    ``pool``, if given, is the run's shared :class:`latticegen2.parallel.WorkerPool`
+    (docs/algorithm.md §8) rather than one built and torn down for this call
+    alone. When ``pool`` is ``None`` a transient one is still built, so a caller
+    with its own worker count and no run-wide pool to share needs no change.
+
     Sequential, in-process when there is no worker pool to use, or too few jobs
     to justify one — still a real saving over one monolithic sew per component,
     since it is smaller sews that are cheap, not parallel ones.
 
-    ``imap``, not ``imap_unordered``: jobs still sew in parallel, but results are
-    consumed in job order, so which order round 2 receives each component's tile
-    results in is identical run to run (:func:`latticegen2.boundary.trim_boundary`
-    relies on the same property for the same reason).
+    Jobs are consumed in job order, not completion order: which order round 2
+    receives each component's tile results in is identical run to run
+    (:func:`latticegen2.boundary.trim_boundary` relies on the same property for
+    the same reason).
 
     Filenames carry the component id as well as the tile index — reused index-only
     names across components would never collide at runtime (`sew_boundary`
@@ -409,7 +420,7 @@ def _sew_all_tiles(
     if not jobs_meta:
         return results, 0
 
-    if workers <= 1 or tmpdir is None or len(jobs_meta) < 2:
+    if (pool is None and workers <= 1) or tmpdir is None or len(jobs_meta) < 2:
         for group, i, tile in jobs_meta:
             results[group][i] = _sew_faces([p.faces for p in tile], tolerance)
         return results, 0
@@ -418,16 +429,165 @@ def _sew_all_tiles(
     for group, i, tile in jobs_meta:
         in_path = os.path.join(tmpdir, f"sew_tile_{group}_{i}.brep")
         out_path = os.path.join(tmpdir, f"sew_tile_{group}_{i}_out.brep")
-        BRepTools.Write_s(occ.compound(occ.compound(p.faces) for p in tile), in_path)
-        jobs.append((in_path, out_path, tolerance, background))
+        _write_brep(occ.compound(occ.compound(p.faces) for p in tile), in_path)
+        jobs.append((in_path, out_path, tolerance))
 
-    ctx = mp.get_context("spawn")
-    max_rss = 0
-    with ctx.Pool(processes=min(workers, len(jobs))) as pool:
-        for (group, i, _tile), (out_path, rss) in zip(jobs_meta, pool.imap(_worker_sew_tile, jobs)):
-            max_rss = max(max_rss, rss)
+    def _run(p: WorkerPool):
+        raw, max_rss = p.run(_worker_sew_tile, jobs)
+        for (group, i, _tile), (out_path, _rss) in zip(jobs_meta, raw):
             results[group][i] = occ.faces(_read_brep(out_path))
-    return results, max_rss
+        return results, max_rss
+
+    if pool is not None and pool.active:
+        return _run(pool)
+    with WorkerPool(min(workers, len(jobs)), background) as owned:
+        return _run(owned)
+
+
+def _split_seam_interior(face_lists: list[list]) -> tuple[list[list], list]:
+    """Split each tile's round-1 result into faces round 2 can still affect.
+
+    After round 1, every tile's own result is itself a sewn shell: each of its
+    edges is either used **twice** already (joined to a neighbour within the
+    same tile — nothing left for round 2 to do with the face that owns it) or
+    used **once** — a genuine free edge, which is either a tile-to-tile seam
+    round 2 exists to close, or an interface hole meant to stay open for the
+    interior shell, and round 2 cannot (and does not need to) tell those two
+    apart in advance any more than a full round 2 call does. So the only faces
+    round 2 can possibly affect are the ones bearing at least one free edge;
+    everything else — the ``interior`` return value — is carried into the
+    final shell unchanged, by direct reference, with no sewing call ever
+    touching it.
+
+    G8 (`tools/prototypes/RESULTS.md`) confirmed this by identity, not just by
+    argument: sewing only the free-edge-bearing subset and concatenating the
+    rest by reference reproduces a full round 2 exactly (same face count, same
+    free-edge count, same volume to machine precision) at two scales tried,
+    and the seam fraction measured there — 13–14 % of a tile's faces — is what
+    makes this worth doing: round 2 stops paying its flat per-face cost
+    (docs/algorithm.md §8) for the 86–87 % of faces it could never touch anyway.
+
+    The split itself must stay `O(faces)`, not `O(faces²)`: an earlier version
+    called :func:`free_edges` for a plain Python list and then tested every
+    face's every edge against it with `.IsSame()` — each test `O(len(fe))` and
+    ``TopoDS_Shape`` not being cheaply hashable in plain Python — which cost
+    51 min on the `cc=5, t=1` rehearsal's dominant component, against 8 m 57 s
+    *before* this optimization existed. Rejected on that measurement.
+    `TopTools_IndexedMapOfShape` is OCCT's own shape-identity map (same
+    underlying TShape and location, ignoring orientation — what "the same
+    edge" or "the same face" means here), so every membership test below is
+    the map's own near-`O(1)` lookup, not a Python-level scan.
+    """
+    seam_lists: list[list] = []
+    interior: list = []
+    for faces in face_lists:
+        shell = occ.faces_shell(faces)
+        edge_faces = TopTools_IndexedDataMapOfShapeListOfShape()
+        TopExp.MapShapesAndAncestors_s(
+            shell, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, edge_faces
+        )
+        # The single owning face of every free (used-once) edge in this tile —
+        # exactly the faces round 2 can still affect. Collected once, up front,
+        # from the map's own ancestor lists rather than re-derived per face.
+        seam_faces = TopTools_IndexedMapOfShape()
+        for i in range(1, edge_faces.Extent() + 1):
+            owners = edge_faces.FindFromIndex(i)
+            if owners.Extent() == 1:
+                seam_faces.Add(owners.First())
+        if seam_faces.Extent() == 0:
+            interior.extend(faces)
+            continue
+        seam, rest = [], []
+        for f in faces:
+            (seam if seam_faces.Contains(f) else rest).append(f)
+        seam_lists.append(seam)
+        interior.extend(rest)
+    return seam_lists, interior
+
+
+def _sew_round_two(
+    by_group: dict[int, list],
+    plan: dict[int, list[list] | None],
+    tile_results: dict[int, list[list]],
+    tolerance: float,
+    workers: int,
+    tmpdir: str | None,
+    background: bool,
+    pool: WorkerPool | None,
+) -> tuple[dict[int, list], int]:
+    """Sew each component's round-1 result (or its own pieces, if untiled)
+    into that component's final boundary-layer shell.
+
+    Dispatched per component across the shared worker pool rather than run
+    serially on the master, the same lever round 1 already uses — components
+    share no interface, so this is exact, embarrassingly parallel, and free
+    generality. It is generality rather than *the* win on a part like the
+    docs/specification.md §10 rehearsal, whose 21,955 pieces sit almost
+    entirely in one dominant component: with one job there is nothing to
+    parallelise across, and the gain is close to zero there specifically. The
+    real win for that shape of part is :func:`_split_seam_interior`, applied
+    below regardless of whether there is a pool to dispatch across — it is a
+    genuine reduction in the work round 2 does, not merely a parallelism lever.
+
+    **A hierarchical tree reduction was considered for round 2 itself — sewing
+    tile results together pairwise across levels instead of in one call — and
+    rejected without being built.** G6 (`tools/prototypes/RESULTS.md`) found
+    round 2's cost tracks total face count almost flatly in shape count: going
+    from 8 tiles to 8,000 pieces' worth of unified shells barely moves it,
+    which is the signature of a cost dominated by a flat `a·F` term rather than
+    G5a's `n^1.8` shape-count term (`n^1.8` at `n` in the tens is negligible
+    next to `F` in the hundred-thousands). A tree cannot beat a floor every
+    level pays in full: `L = ceil(log2(T))` levels of pairwise merges each pass
+    all `F` faces through a sew, so a tree costs `L * a*F` against one call's
+    `a*F` — and the final, root-level merge alone, over both halves of the
+    tree, already costs the entirety of what one call costs today, before any
+    of the other `L-1` levels are counted. Parallelism across workers hides the
+    early levels but never the root. So a tree is strictly worse than what is
+    built here, at every tile count that has been measured.
+    """
+    groups = list(by_group.keys())
+    face_lists = {
+        group: (tile_results[group] if plan[group] is not None else [p.faces for p in by_group[group]])
+        for group in groups
+    }
+
+    # Seam-only round 2 (G8): only where round 1 actually tiled the component —
+    # an untiled component's "tile result" is just its own pieces' raw, never-
+    # yet-sewn faces, which have no round-1 free-edge structure to exploit, so
+    # it is sewn exactly as before this existed.
+    seam_face_lists: dict[int, list[list]] = {}
+    interior_faces: dict[int, list] = {}
+    for group in groups:
+        if plan[group] is not None:
+            seam_face_lists[group], interior_faces[group] = _split_seam_interior(face_lists[group])
+        else:
+            seam_face_lists[group] = face_lists[group]
+            interior_faces[group] = []
+
+    def _finish(sewn: dict[int, list]) -> dict[int, list]:
+        return {g: sewn[g] + interior_faces[g] for g in groups}
+
+    if tmpdir is None or len(groups) < 2:
+        return _finish({g: _sew_faces(seam_face_lists[g], tolerance) for g in groups}), 0
+
+    jobs = []
+    for group in groups:
+        in_path = os.path.join(tmpdir, f"sew_round2_{group}.brep")
+        out_path = os.path.join(tmpdir, f"sew_round2_{group}_out.brep")
+        _write_brep(occ.compound(occ.compound(fl) for fl in seam_face_lists[group]), in_path)
+        jobs.append((in_path, out_path, tolerance))
+
+    def _run(p: WorkerPool):
+        raw, max_rss = p.run(_worker_sew_tile, jobs)
+        out = {group: occ.faces(_read_brep(out_path)) for group, (out_path, _rss) in zip(groups, raw)}
+        return _finish(out), max_rss
+
+    if pool is not None and pool.active:
+        return _run(pool)
+    if workers <= 1:
+        return _finish({g: _sew_faces(seam_face_lists[g], tolerance) for g in groups}), 0
+    with WorkerPool(min(workers, len(jobs)), background) as owned:
+        return _run(owned)
 
 
 @dataclass
@@ -448,6 +608,7 @@ def sew_boundary(
     background: bool = False,
     tile_target: int = TILE_TARGET_PIECES,
     min_to_tile: int = MIN_PIECES_TO_TILE,
+    pool: WorkerPool | None = None,
 ) -> tuple[dict[int, list], SewStats]:
     """Sew each component's boundary pieces to each other, returning their faces.
 
@@ -459,16 +620,21 @@ def sew_boundary(
     tiles by lattice-index block first (docs/algorithm.md §8): each tile is sewn
     on its own — every tiled component's round 1
     shares one worker pool for the whole call, not one pool per component — then
-    each component's tile results are sewn together. Round 1 shrinks roughly as
-    G5a's measured `n^1.8` scaling predicts — a component of size `N` split into
-    `T` tiles of about `N/T` each costs roughly `T * (N/T)^1.8` there, against
-    `N^1.8` for one call. Round 2 is a real but smaller saving, not a free one: it
-    sews shells whose *combined* face count still equals `N`, and G6
+    each component's tile results are sewn together, itself dispatched per
+    component across the same pool (:func:`_sew_round_two`). Round 1 shrinks
+    roughly as G5a's measured `n^1.8` scaling predicts — a component of size `N`
+    split into `T` tiles of about `N/T` each costs roughly `T * (N/T)^1.8` there,
+    against `N^1.8` for one call. Round 2 is a real but smaller saving, not a
+    free one: it sews shells whose *combined* face count still equals `N`, and G6
     (`tools/prototypes/RESULTS.md`) measured that cost staying close to a
     monolithic sew's rather than shrinking with `T` — 1.3–1.45× overall, not the
     order-of-magnitude round 1 alone would suggest. A component below the
     threshold, or whose whole footprint lands in one tile anyway, is sewn exactly
     as before this existed.
+
+    ``pool``, if given, is the run's shared :class:`latticegen2.parallel.WorkerPool`,
+    used for both rounds rather than each stage building and tearing down its own
+    (docs/algorithm.md §8, §12).
 
     ``Cutting`` is switched off throughout — splitting free edges so they match is
     wasted work when they already match by construction, and G5a measures the
@@ -488,16 +654,11 @@ def sew_boundary(
             stats.tiled_components += 1
             stats.tiles += len(tiles)
 
-    tile_results, max_rss = _sew_all_tiles(plan, SEW_TOLERANCE, workers, tmpdir, background)
-    stats.max_worker_rss = max_rss
-
-    out: dict[int, list] = {}
-    for group, group_pieces in by_group.items():
-        tiles = plan[group]
-        if tiles is None:
-            out[group] = _sew_faces([p.faces for p in group_pieces], SEW_TOLERANCE)
-        else:
-            out[group] = _sew_faces(tile_results[group], SEW_TOLERANCE)
+    tile_results, max_rss1 = _sew_all_tiles(plan, SEW_TOLERANCE, workers, tmpdir, background, pool=pool)
+    out, max_rss2 = _sew_round_two(
+        by_group, plan, tile_results, SEW_TOLERANCE, workers, tmpdir, background, pool
+    )
+    stats.max_worker_rss = max(max_rss1, max_rss2)
     return out, stats
 
 

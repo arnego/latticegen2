@@ -188,7 +188,7 @@ def test_a_ring_the_boundary_does_not_present_is_a_named_failure(template):
         weld.interface_rings(lp, tmesh, {0: faces}, {((7, 7, 7), 0): 0})
 
 
-# --- tiling the boundary sew (docs/specification.md §10) --------------------
+# --- tiling the boundary sew (docs/algorithm.md §8) -------------------------
 
 
 def _long_box():

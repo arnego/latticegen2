@@ -10,7 +10,7 @@ do — the interior is instanced rather than fused, connectivity is a graph
 property rather than a boolean experiment, and assembly is an index lookup
 rather than a geometric search. The one exception is inside "weld": the
 boundary-layer sew tiles a large component's pieces before sewing them
-(docs/specification.md §10), because sewing itself is the one remaining
+(docs/algorithm.md §8), because sewing itself is the one remaining
 operation that genuinely scales worse than linearly (docs/algorithm.md §8). That
 stays an internal detail of one stage, not a pipeline-level tiling stage of its
 own — the flow above is still accurate at the granularity it describes.

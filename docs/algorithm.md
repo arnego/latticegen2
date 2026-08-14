@@ -569,9 +569,16 @@ sound and costs nothing at the three occurrences this rehearsal produced out of
 122,180 caps. `BoundaryPiece.caps` and `.cap_faces` are keyed by `(node,
 half-strut)` throughout boundary, connect, pipeline and weld to make this
 possible, since a fused piece can hold faces belonging to either node it spans.
-See specification.md §10 for status and `test/test_boundary.py` for the
-regression, reproduced with a real `BRepAlgoAPI_Cut` notch rather than a
-synthetic scale mismatch.
+`test/test_boundary.py` carries the regression, reproduced with a real
+`BRepAlgoAPI_Cut` notch rather than a synthetic scale mismatch.
+
+**Confirmed on the part that motivated it.** The 2026-08-14 rehearsal of
+`TD_HX_Indre_Volum` at `cc=5, t=1` reports `1 disagreeing cap cluster(s)
+repaired with a local boolean fuse`, and the second `resolve_interfaces` pass
+finds nothing left to decline there. The 3 caps that remain declined are the
+separate "one side produced no cap at all" case above, which is closed on both
+sides and stays watertight. The fuse cost is not measurable against `connect`'s
+11 s.
 
 A trim can legitimately split one junction into several disconnected pieces when
 the input surface cuts between its arms. Each piece becomes its own vertex in the
@@ -662,8 +669,9 @@ So the assembly runs the other way round, in three steps:
 
 **Step 1 is itself tiled**, once a component is large enough for it to matter.
 G5a's `n^1.8` scaling means the boundary sew is still the one term in the
-pipeline that grows faster than the part: 195.8 s at 8,000 pieces, extrapolating
-to roughly 20 minutes at the rehearsal's 21,955. A component above
+pipeline that grows faster than the part: 195.8 s at 8,000 pieces, which the
+rehearsal confirmed at full scale — sewing its 21,955 pieces in one call takes
+**20 m 27 s**. A component above
 `MIN_PIECES_TO_TILE` (1,500 pieces — three tiles' worth, below which a second
 sewing round could not possibly pay for itself) is first split into spatial
 tiles by lattice-index block, sized to average `TILE_TARGET_PIECES` (500) pieces
@@ -691,9 +699,18 @@ per tile rather than a runaway win from finer tiling, and `TILE_TARGET_PIECES`
 (500) is chosen inside that plateau rather than pushed as small as possible.
 Round 1 alone parallelises across workers in the real pipeline, which this
 measurement's serial sum does not credit, so the production saving should exceed
-what is measured here — how much more is the rehearsal re-run's to confirm
-(specification.md §10), since G6 only reached 8,000 pieces per component and the
-rehearsal's components run to tens of thousands.
+what is measured here.
+
+**It does, and both claims were checked against a control at full scale.** The
+2026-08-14 rehearsal was run twice on `TD_HX_Indre_Volum` at `cc=5, t=1`,
+identical but for tiling being disabled: **8 m 57 s tiled against 20 m 27 s
+untiled, a 2.25× saving** on a component of 21,955 pieces split into 35 tiles —
+better than G6's 1.43–1.45×, exactly because production round 1 runs across
+worker processes. And the two runs produce the *same shell*: 21,694 pieces,
+301,505 faces, 14 components and 18,496 interface rings either way, so the
+"route, not result" property above is measured rather than argued. What remains
+is round 2's serial merge, which holds the stage's mean CPU at 1.16 cores while
+round 1 peaks at 5.96 (specification.md §10).
 
 Assembly is then `BRep_Builder.Add` into one shell per component, and
 watertightness is proved rather than assumed: **every edge used exactly twice,
@@ -912,7 +929,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Connectivity | `O(N + S)` union-find |
 | Stitching | `O(S^1.8)` over the boundary layer only, tiled into `O(S/k)` calls of size `k` plus one merge of the results (§8) |
 | Assembly | `O(N + S)` index operations, **no booleans and no search** |
-| Export | `O(faces)` — irreducible |
+| Export | `O(faces)` — irreducible. Measured **CPU-bound**, not I/O-bound: 99 % CPU writing 2.00 GB in 6 m 42 s (specification.md §10), so the cost is serialization and a faster disk does not help |
 
 | Lever | Effect |
 |---|---|
@@ -923,7 +940,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
-| Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; measured 1.45× at 4,000 pieces / 8 tiles, bounded by round 2's own face-count cost rather than growing without limit (§8, G6) |
+| Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell, bounded by round 2's own serial face-count cost rather than growing without limit (§8, G6) |
 | Same-domain unification before export (§9) | Recovers the face merging the removed boolean used to do for free: 47% fewer faces and half the file size, and it makes the run *faster* by shrinking export and the round-trip check |
 | Process-parallel boundary junctions | Constant-size independent jobs |
 | Coarse occupancy pre-filter before exact distance tests | Only near-surface nodes pay for segment-triangle maths |

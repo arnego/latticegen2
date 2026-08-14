@@ -138,19 +138,59 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~7 s | boundary trim, export |
 | test cylinder, `cc=10 t=1.5` | ~55 s | classify, verify, simplify, boundary sew |
-| `TD_HX_Indre_Volum`, `cc=5 t=1` | 16 m 27 s up to assembly; the boundary sew is the remaining unknown | classify, boundary trim, boundary sew |
+| `TD_HX_Indre_Volum`, `cc=5 t=1` | 73.1 min, 18.5 GB peak, 2.00 GB output | verify, simplify, boundary trim, boundary sew |
 
-The third row is the scale rehearsal. It has not been run end to end since the
-assembly was inverted (docs/algorithm.md §8); everything up to assembly took
-16 m 27 s, and G5a extrapolates the boundary sew to roughly 20 minutes on top,
-against 4 h 45 m for the sew it replaces. Its per-stage table is in
-[specification.md](specification.md) §10 and the sewing measurements are in
-[`../tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md) G5.
+The third row is the scale rehearsal, run end to end on 2026-08-14 (its full
+per-stage table, resource profile and the ranked optimization analysis drawn from
+it are in [specification.md](specification.md) §10). Two things there are worth
+knowing before doing performance work on this project at all:
+
+* **68 % of that run is after `assemble`** — `simplify`, `validate`, `export` and
+  `verify` total 49.4 of the 73.1 minutes. The old bottleneck (`sew`, 94 % of a
+  5 h run) is gone.
+* **`boundary` is the only stage that uses more than one core**, at 5.55 of 6.
+  Every other stage is single-threaded.
+
+That run does not yet pass its own watertightness gate — 2 edges out of ~1.4 M,
+diagnosed in specification.md §10 — so its timings come from a diagnostic run
+allowed past that gate deliberately. The work done per stage is the same either
+way.
 
 Note that the `simplify` stage (same-domain unification, docs/algorithm.md §9)
 has a *negative* net cost: it takes ~8 s but halves the face count, which takes
 more than that back out of export and the round-trip check. Removing it would
-make the run slower as well as the output twice as large.
+make the run slower as well as the output twice as large. That trade still holds
+at rehearsal scale but is much closer there — 17 m 17 s to remove 42 % of
+1,006,505 faces — which is why parallelising it across solids is the top-ranked
+optimization in specification.md §10.
+
+### Profiling a run
+
+Wall-clock per stage comes from the `.log`. For CPU, memory and I/O over time,
+wrap the run:
+
+```
+python tools/profile_run.py --out run-profile.csv -- python src/main.py -i part.step -cc 5 -t 1 -o out.step -v
+```
+
+It samples the whole process tree — master plus every boundary and sew worker —
+every 2 s and propagates the child's exit code, so it is a transparent prefix.
+Then join the samples to the stage boundaries:
+
+```
+python tools/profile_report.py run-profile.csv out.log --cores 6
+```
+
+That prints a per-stage table of duration, mean and peak CPU, **core-equivalents**
+(1.00 is one core fully busy), RSS, process count and I/O, and ranks the stages
+where parallelism would recover the most wall time. Core-equivalents is the
+number to look at: it is what shows that `boundary` uses the machine and nothing
+else does.
+
+`profile_run.py` needs `psutil`, which is a **development-only** dependency — it
+is not required by the tool, by `pytest` or by `e2e.py`, and `tools/` is
+`export-ignore`d so it never reaches a release bundle. The script says so plainly
+if it is missing.
 
 The measurements behind the architecture's load-bearing choices (junction cap
 integrity, join-mechanism throughput, per-junction intersection latency, STEP

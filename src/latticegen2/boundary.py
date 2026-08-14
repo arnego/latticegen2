@@ -321,8 +321,7 @@ def finalize_pieces(pieces: list[BoundaryPiece], interfaces: set[tuple[NodeKey, 
 # disagree, and declining is not by itself a safe degradation: where the two
 # regions are only *partially* the same, keeping both caps leaves the overlap
 # as non-manifold material and the remainder as an unfilled hole
-# (docs/algorithm.md §7.1, specification.md §10 "Fuse junction pairs whose two
-# booleans disagree"). The repair is to fall back to the kernel's own general
+# (docs/algorithm.md §7.1). The repair is to fall back to the kernel's own general
 # boolean: fuse the two disagreeing pieces into one solid, which is sound
 # wherever instancing's exactness argument has broken down because the kernel
 # contradicted itself about a face the two share.

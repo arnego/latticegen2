@@ -38,7 +38,7 @@ cannot each keep their own vertices, the side that gives way has to be the one
 whose faces we build ourselves.
 
 **Step 1 is itself tiled**, per component, once a component is large enough for
-it to matter (docs/specification.md §10 "Tile the boundary sew"). G5a
+it to matter (docs/algorithm.md §8). G5a
 (`tools/prototypes/RESULTS.md`) measured sewing at about `n^1.8` in piece count
 with no configuration that changes that by more than 2 % — the cost is a search,
 and the pairing it searches for is already known exactly from the junction graph
@@ -92,7 +92,14 @@ genuinely distinct corners."""
 SEW_TOLERANCE = 1e-6
 """Millimetres, for the boundary-to-boundary sew. Both sides of such a cap are
 the same nominal region computed by two independent booleans, so this only has to
-absorb their disagreement, which is far below it."""
+absorb their disagreement, which is far below it.
+
+Raising this does **not** fix the micron-scale slivers a grazing trim leaves
+(specification.md §10). Tried at 1e-5 on the `TD_HX_Indre_Volum` rehearsal, which
+carries two such edges of 3.171690e-06 mm and 5.808982e-06 mm: both survived
+unchanged. The tolerance governs whether two *different* faces' free edges are
+paired up, so it cannot remove an edge that has no partner to be paired with —
+which is what a sliver on one side of a near-tangential trim is."""
 
 
 # --- rings ------------------------------------------------------------------
@@ -370,8 +377,8 @@ def _sew_all_tiles(
     ``plan`` maps each component to its tiles (from :func:`_tile_pieces`) or to
     ``None`` for a component that is not being tiled — those are skipped here,
     ``sew_boundary`` sews them directly. One pool for the whole call, not one per
-    component, is the literal reading of docs/specification.md §10 ("sew the
-    tiles in the existing worker pool") and matters in practice: a part with
+    component, is the literal reading of docs/algorithm.md §8 ("in parallel
+    across the run's worker processes") and matters in practice: a part with
     several large tiled components — the `TD_HX` rehearsal has 14 — would
     otherwise pay `spawn`'s process-creation cost once per component instead of
     once for the whole stitch stage.
@@ -449,8 +456,8 @@ def sew_boundary(
     without a second search.
 
     A component whose piece count clears ``min_to_tile`` is split into spatial
-    tiles by lattice-index block first (docs/specification.md §10 "Tile the
-    boundary sew"): each tile is sewn on its own — every tiled component's round 1
+    tiles by lattice-index block first (docs/algorithm.md §8): each tile is sewn
+    on its own — every tiled component's round 1
     shares one worker pool for the whole call, not one pool per component — then
     each component's tile results are sewn together. Round 1 shrinks roughly as
     G5a's measured `n^1.8` scaling predicts — a component of size `N` split into
@@ -619,6 +626,18 @@ def shell_defects(shell: TopoDS_Shell) -> tuple[int, int, list]:
     by_use: dict[int, int] = {}
     for i in range(1, n + 1):
         if uses[i] == 2 and net[i] == 0:
+            continue
+        # A degenerate edge is a parametric artefact, not geometry: it has no
+        # length, and the face that owns it uses it exactly once by
+        # construction. Requiring two uses of it reports sound geometry as
+        # broken. Measured on `TD_HX_Indre_Volum` at cc=5, t=1, where the trim
+        # against a grazing surface leaves them: 10 of the 12 edges this test
+        # rejected were degenerate, 3.0e-9 to 8.3e-8 mm long, and the shell was
+        # closed everywhere they appeared. Skipping them is not a relaxation of
+        # the proof — an edge with no extent cannot be a hole — and the check is
+        # only as trustworthy as the quantity it compares (docs/algorithm.md
+        # §11), which is exactly what issue #6 was about.
+        if BRep_Tool.Degenerated_s(TopoDS.Edge_s(edges.FindKey(i))):
             continue
         if uses[i] != 2:
             open_edges += 1

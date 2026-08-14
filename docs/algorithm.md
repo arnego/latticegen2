@@ -224,13 +224,14 @@ flowchart TD
     L --> M0[Assemble per component, prove every edge
     is used twice, once each way]
     M0 -->|not closed or not orientable| E3
-    L -->|a shell fails to close| E3
-    L --> M[BRepCheck_Analyzer validity gate]
+    M0 --> S[Same-domain unification per solid,
+    across the shared worker pool]
+    S --> M[BRepCheck_Analyzer validity gate,
+    across the shared worker pool]
     M -->|invalid| E3
     M --> N[Write STEP AP214, rewrite header metadata]
     N -->|write failure| E4[Exit 6: output write error]
-    N --> O[Round-trip re-import, confirm solid count]
-    O --> P[Delete temp folder]
+    N --> P[Delete temp folder]
     P --> Q[Print and log end-of-run summary, exit 0]
 ```
 
@@ -708,9 +709,54 @@ untiled, a 2.25× saving** on a component of 21,955 pieces split into 35 tiles �
 better than G6's 1.43–1.45×, exactly because production round 1 runs across
 worker processes. And the two runs produce the *same shell*: 21,694 pieces,
 301,505 faces, 14 components and 18,496 interface rings either way, so the
-"route, not result" property above is measured rather than argued. What remains
-is round 2's serial merge, which holds the stage's mean CPU at 1.16 cores while
-round 1 peaks at 5.96 (specification.md §10).
+"route, not result" property above is measured rather than argued. What remained
+at that point was round 2's serial merge, which held the stage's mean CPU at
+1.16 cores while round 1 peaked at 5.96 (specification.md §10) — the two levers
+below are what closed that gap.
+
+**Round 2 is now dispatched per component across the same shared worker pool
+round 1 uses**, rather than run in one serial loop on the master. Components
+share no interface, so splitting by component is exact and embarrassingly
+parallel — the same argument round 1's tiling already rests on. It is
+generality rather than the win on a part shaped like the `cc=5, t=1` rehearsal,
+whose 21,955 pieces sit almost entirely in one dominant component: with
+essentially one job there is nothing to parallelise across, and the gain there
+is close to zero. The real lever for that shape of part is the second one:
+
+**Round 2 only sews the faces a full round 2 could ever actually touch.**
+After round 1, every tile's own result is itself a sewn shell: each of its
+edges is used **twice** already (joined to a neighbour within the same tile —
+nothing left for round 2 to do with the face that owns it) or used **once** — a
+genuine free edge, either a tile-to-tile seam round 2 exists to close, or an
+interface hole meant to stay open for the interior shell, and round 2 cannot
+(and does not need to) tell those two apart in advance any more than a full
+round 2 call already does. So only the free-edge-bearing subset of each tile's
+faces is sewn together; the rest is carried into the final shell unchanged, by
+direct reference, with no sewing call ever touching it. Gate G8
+(`tools/prototypes/RESULTS.md`) confirmed this by identity rather than by
+argument alone — sewing only the seam subset and concatenating the rest by
+reference reproduced a full round 2 exactly (same face count, same free-edge
+count, same volume to machine precision) at two scales tried, with the
+free-edge subset only 13–14 % of a tile's faces at both. `weld._split_seam_interior`
+implements the split; `test_weld.py` pins the identity as a permanent
+regression, not just a one-off measurement.
+
+**A hierarchical tree reduction was considered for round 2 itself — sewing
+tile results together pairwise across levels instead of in one call — and
+rejected on paper, without being built.** G6 already showed round 2's cost
+tracks total face count almost flatly in shape count: going from 8 tiles to
+8,000 pieces' worth of unified shells barely moves it, the signature of a cost
+dominated by a flat `a·F` term rather than G5a's `n^1.8` shape-count term
+(`n^1.8` at `n` in the tens is negligible next to `F` in the
+hundred-thousands). A tree cannot beat a floor every level pays in full:
+`L = ⌈log₂ T⌉` levels of pairwise merges each pass all `F` faces through a
+sew, so a tree costs `L · a·F` against one call's `a·F` — and the final,
+root-level merge alone, over both halves of the tree, already costs the
+entirety of what one call costs today, before any of the other `L−1` levels
+are counted. Parallelism across workers hides the early levels but never the
+root, so a tree is strictly worse than what is built here at every tile count
+measured. The seam-only reduction above is the lever that survives this
+argument: it reduces `F` itself, which a tree over the same `F` never could.
 
 Assembly is then `BRep_Builder.Add` into one shell per component, and
 watertightness is proved rather than assumed: **every edge used exactly twice,
@@ -753,9 +799,10 @@ program builds itself.
   98.9 MB → 52.6 MB, with the exact symmetric-difference volume against the
   un-unified solid confirming no geometry moved. It costs ~8 s and *pays for
   itself*: export drops from 9.3 s
-  to 5.7 s and the round-trip check from 23.5 s to 13.5 s, so the whole run gets
-  faster. Re-tessellation also drops from 85,832 to 62,152 triangles, so
-  downstream meshing and display get cheaper too.
+  to 5.7 s and the (since-removed, see below) round-trip check dropped from
+  23.5 s to 13.5 s, so the whole run got faster. Re-tessellation also drops
+  from 85,832 to 62,152 triangles, so downstream meshing and display get
+  cheaper too.
 
   It is a **representation** change and must never become a geometry change, so
   two guards bracket it, both hard failures: the solid count must be unchanged
@@ -770,9 +817,22 @@ program builds itself.
   surface moves the boundary, which shows up as an invalid solid long before it
   shows up as a changed volume.
 
-  Each solid is unified independently rather than as one compound, which keeps the
-  count guard exact and leaves the step straightforward to parallelise if it ever
-  becomes the bottleneck at scale (~0.24 ms/face).
+  Each solid is unified independently rather than as one compound, which keeps
+  the count guard exact and is what let this stage become the first item on
+  specification.md §10's ranked optimization list once it did become the
+  bottleneck at scale (17 m 17 s of a 73.1-minute rehearsal, ~0.24 ms/face
+  before parallelising). It now dispatches across
+  :class:`latticegen2.parallel.WorkerPool` — the same process pool boundary
+  trimming and the boundary sew already share — largest-solid-first, since the
+  14 solids a real part like the rehearsal produces are very unequal and the
+  largest one alone sets the floor. G7 (`tools/prototypes/RESULTS.md`) measured
+  that OCP holds the GIL around `ShapeUpgrade_UnifySameDomain`, so this is a
+  process pool with a `.brep` round-trip rather than threads, which showed no
+  real speedup (0.91–1.01× on 6 threads). A solid still travels this round-trip
+  once more than before — read back on the master after unification, to run
+  `validate` and `export` against a live shape — which is new serial cost that
+  did not exist when this ran on the master alone; it is measured, not assumed
+  away, in specification.md §10.
 
   **A kernel that declines to unify must not end the run.** Unification makes the
   output smaller, not more correct, so failing on it would refuse sound geometry
@@ -795,6 +855,9 @@ program builds itself.
   mesh-based approximation of one, which matters because mesh-based
   self-intersection tests have well-known false-positive modes on this kind of
   geometry (see the plane-straddle pre-check in `tools/verify_geometry.py`).
+  Dispatched per solid across the same shared `WorkerPool` as unification
+  (specification.md §10 path 4) — G7 found no thread speedup here either, so
+  this reuses the process-pool mechanism rather than a second one.
 * **Units.** STEP I/O is pinned to millimetres defensively, even though that is
   the default: a mismatched unit would silently corrupt every dimension rather
   than fail.
@@ -807,12 +870,22 @@ program builds itself.
   parameter string to `FILE_DESCRIPTION`. **`FILE_SCHEMA`'s value is only ever
   filled in when blank, never overwritten** — that is what keeps the file a clean
   standard document rather than a hand-patched hybrid.
-* **Round-trip self-check.** Before declaring success the written file is re-read
-  and its solid count compared against what the run believes it wrote. A mismatch
-  is a failure (exit 6), not a warning: a run whose own accounting disagrees with
-  the file it produced has not established that it wrote what it thinks it did,
-  and a summary claiming success over a file nobody checked is worse than a
-  visible error.
+* **No round-trip self-check (removed by deliberate decision).** Earlier
+  revisions re-read the just-written file and compared its solid count against
+  what the run believed it wrote, failing (exit 6) on a mismatch. That gate is
+  gone: `round_trip_check` re-parsed the file to full B-rep purely to count
+  solids, and on the `cc=5, t=1` rehearsal that cost **22 m 29 s** — the single
+  most expensive stage in a 73.1-minute run — for a guarantee `tools/e2e.py`
+  already establishes independently, on every committed scenario, in dev/CI
+  (`vg.brepcheck`, a real `STEPControl_Reader` round trip, per docs/testing.md).
+  specification.md §10 originally ranked cheapening this gate (a text scan for
+  `MANIFOLD_SOLID_BREP` entities rather than full reconstruction) as its own
+  optimization path and called dropping the gate outright a decision that
+  "should be taken deliberately rather than silently" — it was taken, by the
+  user, deliberately: production runs no longer pay to re-establish in-process
+  what dev/CI already checks at a scale where the cost is affordable. What
+  remains from this gate is the file-written-and-non-empty check just above,
+  which is what this tool can itself cause and correct for (exit 6).
 
 ---
 
@@ -837,7 +910,7 @@ program builds itself.
   | 3 | Input geometry read/parse failure, or a mesh too unfaithful to classify against |
   | 4 | Geometry processing failure (boundary trim, an interface that failed to close, an invalid output solid) |
   | 5 | Resource limits — retained for compatibility, currently unreachable |
-  | 6 | Output write failure, or a failed round-trip check |
+  | 6 | Output write failure |
   | 130 | Cancelled by the user with Ctrl+C (`128 + SIGINT`) |
 
 * Every non-zero exit prints exactly one human-readable reason line. Exit 130
@@ -897,8 +970,11 @@ Because priority #1 is precision, every optimization is designed so that its
   additionally verified by the edge-use tally before the shell is accepted.
 * Connectivity is proven, not guessed (§8), so no body is ever deleted without
   proof that it is disconnected.
-* The output is checked with an exact B-rep validity test, and the file is re-read
-  and compared before success is reported (§9).
+* The output is checked with an exact B-rep validity test before success is
+  reported (§9). It is no longer re-read from disk afterward — that gate was
+  removed deliberately (§9) once its cost (22 m 29 s of a 73.1-minute run) was
+  measured against what it bought over what `tools/e2e.py` already establishes
+  in dev/CI on every committed scenario.
 * `check_surface_mesh_coverage` fails loudly rather than classifying against an
   incomplete mesh — while being careful that the gate is only as trustworthy as
   the tightness of the quantity it compares (§5.1). A gate that rejects valid
@@ -924,11 +1000,12 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Tessellation | `O(input faces)`, independent of lattice density |
 | Classification | `O(N)` cheap tests + `O(S)` exact ones |
 | Interior | `O(N)` index operations and face constructions, **no booleans** |
-| Unification | `O(faces)`, ~0.24 ms/face |
+| Assembly | `O(N + S)` index operations, **no booleans and no search** |
+| Unification | `O(faces/W)`, ~0.24 ms/face before dispatch, across the shared pool (§9, specification.md §10 path 1) |
+| Validity | `O(faces/W)`, across the same shared pool (§9, specification.md §10 path 4) |
 | Boundary | `O(S/W)` single-operand intersections |
 | Connectivity | `O(N + S)` union-find |
-| Stitching | `O(S^1.8)` over the boundary layer only, tiled into `O(S/k)` calls of size `k` plus one merge of the results (§8) |
-| Assembly | `O(N + S)` index operations, **no booleans and no search** |
+| Stitching | Round 1: `O(S^1.8)` over the boundary layer only, tiled into `O(S/k)` calls of size `k`, across the shared pool. Round 2: `O(F_seam/W)`, where `F_seam` is only the tile-boundary faces still bearing a free edge after round 1 (§8, G8) — not the full tiled face count `F` a monolithic round 2 would pay for |
 | Export | `O(faces)` — irreducible. Measured **CPU-bound**, not I/O-bound: 99 % CPU writing 2.00 GB in 6 m 42 s (specification.md §10), so the cost is serialization and a faster disk does not help |
 
 | Lever | Effect |
@@ -940,8 +1017,12 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
-| Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell, bounded by round 2's own serial face-count cost rather than growing without limit (§8, G6) |
-| Same-domain unification before export (§9) | Recovers the face merging the removed boolean used to do for free: 47% fewer faces and half the file size, and it makes the run *faster* by shrinking export and the round-trip check |
+| Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
+| Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; measured identical to a full round 2 face-for-face and to machine-precision volume (§8, G8) |
+| One shared `WorkerPool` for the whole run | `spawn`'s process-creation cost is paid once per run rather than once per stage; boundary trim, boundary-sew round 1, boundary-sew round 2, unification and validation all dispatch through it (§8, §9, `latticegen2.parallel`) |
+| Same-domain unification and validity across the shared pool | Both were measured single-threaded at 24 % (17 m 17 s) and 4 % (2 m 59 s) of the `cc=5, t=1` rehearsal; G7 measured OCP holding the GIL around both calls, so this is the same process-pool-plus-`.brep` mechanism the rest of the pipeline uses, not threads (§9, specification.md §10 paths 1 and 4) |
+| Same-domain unification before export (§9) | Recovers the face merging the removed boolean used to do for free: 47% fewer faces and half the file size, and it makes the run *faster* by shrinking export |
+| Round-trip re-import removed after export (§9) | Was the single most expensive stage measured (22 m 29 s of 73.1 min) for a guarantee `tools/e2e.py` already establishes in dev/CI; a deliberate, user-approved trade rather than a speed lever discovered by measurement alone |
 | Process-parallel boundary junctions | Constant-size independent jobs |
 | Coarse occupancy pre-filter before exact distance tests | Only near-surface nodes pay for segment-triangle maths |
 | Vectorised ragged cell assignment in the spatial index | Building the index over a 200 k-triangle *output* mesh stays interactive |
@@ -962,6 +1043,13 @@ Alternatives evaluated and rejected:
 * **`BOPAlgo_GlueFull`:** measured, does not merge (§6).
 * **CGAL Nef polyhedra:** correct and robust, but redundant once no large boolean
   exists to perform.
+* **Hierarchical tree reduction for boundary-sew round 2:** rejected on paper
+  before being built (§8) — G6 already showed round 2's cost tracks total face
+  count almost flatly in shape count, so it is dominated by a flat per-face
+  term rather than a shape-count term a tree could usefully attack, and a tree
+  pays that flat term once per level instead of once. Threads instead of
+  processes for same-domain unification and validity (specification.md §10
+  paths 1, 4): rejected by measurement, G7 — OCP holds the GIL around both.
 
 ---
 
@@ -977,8 +1065,9 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |
 | [`src/latticegen2/boundary.py`](../src/latticegen2/boundary.py) | §7 (single-operand trim, cap tagging, worker processes), §7.1 (interface resolution) |
 | [`src/latticegen2/connect.py`](../src/latticegen2/connect.py) | §8 (junction graph, components, floating-body rule) — kernel-free |
-| [`src/latticegen2/weld.py`](../src/latticegen2/weld.py) | §8 (boundary sew, interface-ring lookup, assembly and its watertightness proof) |
-| [`src/latticegen2/stepout.py`](../src/latticegen2/stepout.py) | §9 (header rewrite, round-trip check) |
+| [`src/latticegen2/weld.py`](../src/latticegen2/weld.py) | §8 (boundary sew — tiled round 1, seam-only round 2 — interface-ring lookup, assembly and its watertightness proof) |
+| [`src/latticegen2/parallel.py`](../src/latticegen2/parallel.py) | §8, §9, §12 (the shared `WorkerPool`, `.brep` IPC helpers) — used by `boundary.py`, `weld.py` and `pipeline.py` |
+| [`src/latticegen2/stepout.py`](../src/latticegen2/stepout.py) | §9 (header rewrite) |
 | [`src/latticegen2/runlog.py`](../src/latticegen2/runlog.py) | §10 (logging, stage timings, summary) |
-| [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration) |
+| [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration), §9 (parallel unification and validation) |
 | [`src/latticegen2/__main__.py`](../src/latticegen2/__main__.py) | Entry point, failure reporting, exit codes |

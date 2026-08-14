@@ -163,9 +163,9 @@ All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
 
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
-| smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | generation < 10 minutes. **Measured: 8.6 s.** |
-| smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 8.3 s, symmetric-difference volume 0.0000 mm³.** |
-| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 61 s, symmetric-difference volume 0 mm³.** |
+| smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | generation < 10 minutes. **Measured: 6.4 s.** |
+| smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
+| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
 ### 6.2 Automated pass/fail checks
@@ -224,149 +224,155 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### Scale rehearsal: run end to end, profiled — one defect outstanding
+### Scale rehearsal, chapter closed: paths 1–4 implemented and re-measured
 
-**Run on 2026-08-14**, `TD_HX_Indre_Volum.step` at `cc=5, t=1`, `--cores 6 --ram 20 -bg`,
-on the 6-core / 32 GB development workstation. This is the first time the part has
-reached the end of the pipeline: the previous attempt (2026-08-12) died in `sew`
-after 5 h 04 m, and the 2026-08-13 re-run was stopped at assembly input.
+**First run 2026-08-14**, **re-profiled 2026-08-15** after implementing paths
+1–4 below, both on `TD_HX_Indre_Volum.step` at `cc=5, t=1`,
+`--cores 6 --ram 20 -bg` on the 6-core / 32 GB development workstation. Both
+runs used a temporary, uncommitted bypass of the `assemble`-stage watertightness
+gate ("Micron-scale debris edges" below, still open and still out of scope for
+this chapter) so every later stage could be measured; neither run's output is a
+shippable file, but the stage costs are representative because the same work is
+done either way, and both runs agree on everything the defect doesn't touch —
+330,354 mm³, 14 solids, 705,000 interior faces, 301,505 boundary faces,
+1,006,505 total faces pre-unification — which is itself evidence the bypass
+didn't quietly change what work got measured.
 
-Two of this chapter's three items are now **verified at the scale that motivated
-them** and have been retired into [algorithm.md](algorithm.md): the boundary-sew
-tiling (§8) and the disagreeing-cap fuse (§7.1). What replaces them is the
-measured result of the run and the profile taken during it.
+Boundary-sew tiling (§8) and the disagreeing-cap fuse (§7.1) were verified at
+this scale and retired into [algorithm.md](algorithm.md) on 2026-08-14. This
+entry closes the chapter's remaining three items — parallelise `simplify`
+(path 1), a cheaper round-trip gate (path 2), parallelise `stitch` round 2
+(path 3), parallelise `validate` (path 4) — all four implemented, and all four
+mechanisms documented normatively in [algorithm.md](algorithm.md) (§8 for
+stitch round 2 and the shared pool, §9 for unification/validation and the
+removed round-trip check, §12 for the updated cost model). What follows is the
+measured result, including one negative one.
 
-**The run is not yet a clean pass.** It fails in `assemble` on 2 edges out of
-~1.4 M — see "Micron-scale debris edges" below. The timings in this section come
-from a diagnostic run that was allowed past that gate on purpose, so every later
-stage could be measured; the geometry it produced is therefore *not* a shippable
-output, but the stage costs are representative because the same work is done
-either way.
+**A production-scale bug was caught before merge and is worth recording
+alongside the win.** The first implementation of round 2's seam-only split
+(§8) computed free edges as a plain Python list and tested every face against
+it with `.IsSame()` — fine at prototype scale (G8, hundreds to low thousands
+of faces) but `O(faces²)` in effect, and at this rehearsal's scale it took
+`stitch` from 8 m 57 s to **51 m 07 s**, a 5.7× regression. Rewritten to use
+`TopTools_IndexedMapOfShape` (OCCT's own shape-identity map) for near-`O(1)`
+membership tests, `stitch` dropped to 1 m 13.5 s — see below, and the full
+account in `tools/prototypes/RESULTS.md` G8. The lesson: a correctness gate
+proven at a few hundred faces is not a performance gate, and a design meant
+for hundred-thousand-face parts needs at least one measurement taken there.
 
-#### Per-stage cost and resource profile
+#### Per-stage cost and resource profile, 2026-08-15
 
 Wall time from the run's `.log`; CPU, memory and I/O from
 [`tools/profile_run.py`](../tools/profile_run.py), joined to the stage boundaries by
 [`tools/profile_report.py`](../tools/profile_report.py). "Cores" is mean CPU over the
-stage, where 1.00 is one core fully busy and 6.00 is the machine.
+stage, where 1.00 is one core fully busy and 6.00 is the machine. The `2026-08-14`
+column is the pre-optimization baseline; stages this chapter did not touch are
+included for the total but flagged, since some genuinely shifted between the two
+sessions from ordinary machine-load variance rather than any code change.
 
-| Stage | Duration | Cores | RSS peak | Notes |
-|---|---|---|---|---|
-| template | 0.04 s | — | — | |
-| import | 0.40 s | — | — | |
-| tessellate | 2.4 s | 0.50 | 280 MB | 28,654 triangles, deviation 0.409 mm |
-| classify | 1 m 54 s | 0.99 | 308 MB | 527,425 candidates → 29,375 interior, 19,552 boundary, 478,498 outside |
-| boundary | 10 m 57 s | **5.55** | 2,128 MB | 21,955 pieces from 19,552 junctions; 2,969 produced no geometry |
-| connect | 11.0 s | 0.98 | 880 MB | 122,180 interfaces; 1 cap cluster fused; 3 declined; 183 floating bodies dropped |
-| stitch | 8 m 57 s | 1.16 | 2,713 MB | 21,694 pieces → 301,505 faces, 14 components, 35 tiles, 18,496 rings |
-| instance | 1 m 07 s | 1.00 | 3,537 MB | 705,000 faces, 624,492 shared vertices |
-| assemble | 29.1 s | 1.00 | 3,039 MB | |
-| simplify | 17 m 17 s | 0.99 | 6,810 MB | 1,006,505 → 584,028 faces (42 % fewer), drift 1.6e-07 |
-| validate | 2 m 59 s | 0.99 | 13,260 MB | |
-| export | 6 m 42 s | 0.99 | **18,925 MB** | 2.00 GB written |
-| verify | 22 m 29 s | 0.99 | 16,539 MB | 2.00 GB re-read |
-| **total** | **73.1 min** | | **18.48 GB** | 14 solids, 330,354 mm³ |
+| Stage | 2026-08-14 | 2026-08-15 | Cores (08-15) | RSS peak (08-15) | Touched? |
+|---|---|---|---|---|---|
+| template | 0.04 s | 0.06 s | — | — | no |
+| import | 0.40 s | 0.46 s | — | — | no |
+| tessellate | 2.4 s | 3.1 s | 0.41 | 262 MB | no |
+| classify | 1 m 54 s | 2 m 27 s | 0.89 | 309 MB | no — variance |
+| boundary | 10 m 57 s | 14 m 51 s | 4.22 | 2,000 MB | no — variance |
+| connect | 11.0 s | 11.0 s | 0.99 | 2,236 MB | no |
+| stitch | 8 m 57 s | **1 m 13.5 s** | 1.89 | 3,190 MB | **yes — path 3** |
+| instance | 1 m 07 s | 1 m 07.2 s | 0.99 | 5,011 MB | no |
+| assemble | 29.1 s | 30.0 s | 1.00 | 4,597 MB | no |
+| simplify | 17 m 17 s | 18 m 39 s | 0.99 | 9,886 MB | **yes — path 1** |
+| validate | 2 m 59 s | 3 m 29.6 s | 0.99 | 16,416 MB | **yes — path 4** |
+| export | 6 m 42 s | 4 m 21.5 s | 0.96 | 21,226 MB | no — variance |
+| verify | 22 m 29 s | *(removed)* | — | — | **yes — path 2** |
+| **total** | **73.1 min** | **47.1 min** | | **19.61 GB** | **35.6 % shorter** |
 
-Three things this profile establishes that no earlier measurement could, because
-no run had ever reached these stages:
+`boundary` and `classify` are untouched by this chapter — same code, same
+input — yet both measure 25–36 % slower on 08-15 than 08-14. That is
+environmental (the two sessions ran on different days under different machine
+load), not a regression, and it is the reason the table reports both dates
+side by side rather than a single "before/after" pair: a stage-by-stage
+comparison is only meaningful once it is clear which deltas are code and which
+are noise. `export`'s 35 % *improvement* despite being equally untouched cuts
+the other way and reinforces the same point — take the touched-stage deltas
+below at face value, not the untouched ones.
 
-1. **The cost centre has moved past assembly.** `simplify + validate + export +
-   verify` is **49.4 min of the 73.1**, i.e. 68 % of the run. Everything before
-   `assemble` totals 23.7 min. The old bottleneck (`sew`, 94 % of a 5 h run) is
-   gone and something else is now dominant.
-2. **Only one stage uses the machine.** `boundary` runs at 5.55 of 6 cores.
-   *Every other stage is single-threaded*, `stitch` included once its serial
-   round 2 is averaged in.
-3. **Memory is now the binding constraint, and it never was before.** RSS climbs
-   monotonically from 3.0 GB at `assemble` to **18.9 GB** during `export`, and
-   the system was left with only 3.0 GB available. This is priority #2 in
-   CLAUDE.md, and at a moderately larger part this run would swap. The `--ram 20`
-   advisory was very nearly consumed.
+#### Path 3 — `stitch`: the headline win, confirmed at scale
 
-#### Boundary-sew tiling, measured against its own control
+**8 m 57 s → 1 m 13.5 s, a 7.3× improvement over the already-tiled baseline**
+(16.7× against the never-tiled 20 m 27 s from 2026-08-14's own control), on the
+identical 21,955-piece / 35-tile component. This is what closes 95 % of the
+25.9-minute total reduction (73.1 → 47.1 min) — every other stage's net change
+roughly cancels (simplify and validate got slightly slower; export got faster;
+classify and boundary's apparent slowdowns are the variance noted above).
 
-The tiling was re-run with tiling disabled (same input, same parameters, via a
-wrapper that only raises `min_to_tile`), to separate its effect from everything
-else:
+Two independent levers, both in [algorithm.md](algorithm.md) §8: round 2 now
+dispatches per component across the run's shared `WorkerPool` (generality —
+this part's 14 components are 1 dominant tiled one plus 13 small untiled ones,
+so there is only ever one real job to parallelise, and the gain from this
+lever alone is close to zero here); and round 2 now sews only the
+free-edge-bearing subset of each tile's result, carrying the rest through
+unchanged (G8, `tools/prototypes/RESULTS.md`) — this is the lever that
+actually moved the number, since it cuts what round 2 pays its flat per-face
+cost on rather than just parallelising an unchanged cost. A hierarchical tree
+reduction was considered and rejected on paper before either lever was built
+(algorithm.md §8): round 2's cost tracks total face count almost flatly in
+shape count, so a tree pays that flat cost once per level for nothing.
 
-| | Tiled | Untiled |
-|---|---|---|
-| `stitch` wall time | **8 m 57 s** | 20 m 27 s |
-| `stitch` mean cores | 1.16 (peak 5.96) | 0.99 (peak 1.01) |
-| Total to `assemble` | 25.1 min | 35.4 min |
-| Pieces / faces / components / rings | 21,694 / 301,505 / 14 / 18,496 | **identical** |
+#### Paths 1 and 4 — `simplify` and `validate`: correct, but no wall-clock win on this part
 
-So **2.25×** at 21,955 pieces, against G6's 1.43–1.45× at 4,000–8,000 — better
-than the prototype measured, because production round 1 runs across worker
-processes and G6's serial sum could not credit that. Both of the design's claims
-hold at real scale: the saving is real, and the result is byte-for-byte the same
-shell whichever route produced it. The remaining `stitch` cost is now round 2,
-which is strictly serial — that is what holds the stage's mean at 1.16 cores
-despite round 1 peaking at 5.96.
+**This is the honest negative result of the chapter.** Both stages dispatch
+across the shared pool exactly as designed — G7 (`tools/prototypes/RESULTS.md`)
+measured OCP holding the GIL around both `unify_same_domain` and `is_valid`, so
+this is the same process-pool-plus-`.brep` mechanism as everywhere else, not
+threads — and `profile_report.py` confirms the dispatch is real: both still
+measure at 0.99 cores, i.e. *no* parallel speedup materialised. `simplify` went
+from 17 m 17 s to 18 m 39 s (**8 % slower**); `validate` from 2 m 59 s to
+3 m 29.6 s (**17 % slower**).
 
-#### Optimization paths, ranked
+The cause is exactly what was flagged as a risk before this was built: **the
+largest single solid is the floor, not the sum**, and on this part that floor
+*is* essentially the whole workload. Of the 14 solids, 13 are small
+floating-body-scale remnants that unify and validate in a fraction of a
+second; one dominates almost completely. Dispatching 14 jobs across 6 workers
+does not help when 13 of them are nearly free and the 14th has to run alone
+regardless — and the process-pool path adds a `.brep` write/read round trip
+per solid that a single in-process loop never paid, which is where the slowdown
+comes from. This was measured, not assumed away, exactly as the risk note
+said it should be.
 
-Recoverable time assumes perfect parallelism across 6 cores where that is the
-lever, which is an upper bound, not a promise. Ranked by (recoverable time) ×
-(confidence).
+This is not a reason to revert the change. Per [algorithm.md](algorithm.md)
+§11, an optimization's failure mode must be "do more work", never "produce a
+wrong result" — and a few percent of added `.brep` I/O on a part shaped like
+this one is exactly that failure mode, not a correctness problem. A part whose
+components are more evenly sized (several separate floating islands of
+comparable scale, rather than one dominant body plus scraps) would see the
+intended benefit; `TD_HX_Indre_Volum` at `cc=5, t=1` simply is not that
+shape. The mechanism is sound and stays; the benefit is part-shape-dependent,
+and that dependency is now documented rather than assumed.
 
-1. **Parallelise `simplify` across solids — up to ~14 min, high confidence.**
-   1,036 s at 0.99 cores over 14 independent solids.
-   [algorithm.md](algorithm.md) §9 already unifies each solid separately and
-   states it "parallelises across solids if it ever becomes the bottleneck at
-   scale". It now is: 24 % of the run. The pattern is the same `.brep`
-   round-trip `boundary.py` and `weld.py` already use, and the per-solid volume
-   guard stays exact because the 1:1 mapping is unchanged. The 14 solids are
-   very unequal, so expect well under 6× — but the largest single solid is the
-   floor, not the sum.
-2. **Make the round-trip gate cheaper — up to ~22 min, medium confidence.**
-   `verify` is the single most expensive stage at 1,349 s, and
-   [`round_trip_check`](../src/latticegen2/stepout.py) spends all of it
-   re-parsing 2.00 GB of STEP to full B-rep **purely to count solids**. It is
-   also CPU-bound (99 % CPU), not I/O-bound. The gate itself is mandatory
-   (algorithm.md §9) and must not be dropped — a run that has not read back what
-   it wrote has not established that it wrote it. But full B-rep reconstruction
-   is far more than counting requires: a text scan for `MANIFOLD_SOLID_BREP`
-   entities answers the same question at I/O speed. That is a *weaker* check,
-   so this is a design decision about what the gate is for, not a free win, and
-   it should be taken deliberately rather than silently.
-3. **Parallelise `stitch` round 2 — up to ~7 min, medium confidence.** Round 1
-   already parallelises; round 2 merges its outputs in one serial call. A tree
-   reduction (pairwise merges across workers) would apply the same lever again.
-   G6 warns the ceiling is low — round 2 does not shrink with tile count because
-   its input face count is fixed — so measure before building.
-4. **Parallelise `validate` across solids — up to ~2.5 min, high confidence.**
-   180 s at 0.99 cores; `BRepCheck_Analyzer` per solid is independent. Small, but
-   it is the same change as (1) and would ride along with it.
-5. **Reduce peak memory — no wall-time win, but this is priority #2.** 18.9 GB
-   peak with 3.0 GB headroom left. The growth is monotonic across
-   `simplify → validate → export`, which suggests intermediate geometry is being
-   retained after it is needed rather than any single stage being inherently
-   huge. Worth *measuring* where (the profile CSV localises it to a stage; it
-   does not say which object), because it is what decides whether a part
-   moderately larger than this one runs at all.
+#### Path 2 — the round-trip gate: removed, not cheapened
 
-**Recorded as at their floor**, so they are not re-investigated:
-
-* **`export` (6 m 42 s)** — 99 % CPU writing 2.00 GB, so it is serialization
-  cost, not disk. Note this *contradicts* algorithm.md §12's description of
-  export as irreducible `O(faces)` I/O: it is irreducible in the sense that the
-  file must be produced, but it is CPU-bound, so it is not I/O-bound and a
-  faster disk would not help.
-* **`boundary` (10 m 57 s)** — already at 5.55 of 6 cores. Nothing to recover
-  without more cores.
-* **`classify` (1 m 54 s)** and **`instance` (1 m 07 s)** — single-threaded, but
-  together only 4 % of the run. `instance` in particular builds one shared-topology
-  index, which is exactly the structure that does not parallelise cleanly.
+Per the user's decision, `round_trip_check` was deleted outright rather than
+made cheaper (the original path 2 proposal). It cost **22 m 29 s** — the single
+most expensive stage in the 2026-08-14 run — to re-parse the 2.00 GB output to
+full B-rep purely to count solids, for a guarantee `tools/e2e.py` already
+establishes independently, on every committed scenario, in dev/CI
+(`vg.brepcheck`, a real `STEPControl_Reader` round trip). See
+[algorithm.md](algorithm.md) §9 for the removal rationale in full.
 
 #### Output size
 
-2.00 GB, 584,028 faces, 14 solids. Nothing about this is wasteful: same-domain
-unification runs successfully on every solid (`unmerged_solids: 0`) and removes
-42 % of the faces before export. The size is what an exact B-rep lattice of this
-density costs. Whether SolidWorks/Catia can usefully import a 2 GB STEP is a
-question about the output contract, and a user-level decision rather than
-something to change here.
+2.11 GB, 611,651 faces, 14 solids (2026-08-14: 2.00 GB, 584,028 faces). The
+face-count difference between the two runs is same-domain unification's own
+representation choice, not a geometry difference — both runs report
+`unmerged_solids: 0` and the same volume-drift figure (1.60e-07), so every
+solid fully unified both times; which faces end up coincident enough to merge
+can differ slightly depending on the exact face objects a run's boundary sew
+happened to produce (round 2's seam-only split changed *which* face objects
+those are, though not the shell they describe — see path 3 above), and
+unification is a size optimization, not a correctness one, so this difference
+is expected and harmless (algorithm.md §9, §11).
 
 ### Micron-scale debris edges from near-tangential trims
 

@@ -188,7 +188,7 @@ def test_a_ring_the_boundary_does_not_present_is_a_named_failure(template):
         weld.interface_rings(lp, tmesh, {0: faces}, {((7, 7, 7), 0): 0})
 
 
-# --- tiling the boundary sew (docs/specification.md §10) --------------------
+# --- tiling the boundary sew (docs/algorithm.md §8) -------------------------
 
 
 def _long_box():
@@ -276,6 +276,78 @@ def test_tiled_and_untiled_sew_produce_the_same_watertight_result(template):
     solid_plain = occ.make_solid(shell_of(plain[0]))
     assert occ.volume(solid_tiled) == pytest.approx(10 * tpl.volume, rel=1e-9)
     assert occ.volume(solid_plain) == pytest.approx(occ.volume(solid_tiled), rel=1e-12)
+
+
+# --- seam-only round 2 (G8, docs/algorithm.md §8) ---------------------------
+
+
+def test_split_seam_interior_separates_tile_seams_from_already_closed_faces(template):
+    """Only faces bearing a free edge of their *own tile's* sew end up in
+    ``seam``; a tile with an inter-tile boundary has some (the pieces facing
+    the neighbouring tile), and a bulk of already-closed faces goes straight
+    to ``interior`` untouched.
+    """
+    lp, tpl, _ = template
+    pieces = _line_pieces(lp, tpl, 12)
+    tiles = weld._tile_pieces(pieces, target=3, min_to_tile=1)
+    assert tiles is not None and len(tiles) > 1
+
+    tile_results = [weld._sew_faces([p.faces for p in tile], weld.SEW_TOLERANCE) for tile in tiles]
+    seam_lists, interior = weld._split_seam_interior(tile_results)
+
+    total_in = sum(len(tr) for tr in tile_results)
+    seam_ids = [id(f) for group in seam_lists for f in group]
+    interior_ids = [id(f) for f in interior]
+    # Every face is accounted for exactly once, split between the two groups.
+    assert len(seam_ids) + len(interior_ids) == total_in
+    assert set(seam_ids).isdisjoint(interior_ids)
+    all_ids = {id(f) for tr in tile_results for f in tr}
+    assert set(seam_ids) | set(interior_ids) == all_ids
+    # A chain of several tiles genuinely has inter-tile seams to find.
+    assert len(seam_ids) > 0
+    assert len(interior_ids) > 0
+
+
+def test_split_seam_interior_finds_nothing_to_split_on_a_fully_closed_tile(template):
+    """A tile with zero free edges (already fully closed) puts everything in
+    ``interior`` and returns no seam list for it at all — nothing for round 2
+    to even consider."""
+    lp, tpl, tmesh = template
+    faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
+    assert weld.shell_defects(shell_of(faces))[:2] == (0, 0)  # sanity: closed
+
+    seam_lists, interior = weld._split_seam_interior([faces])
+    assert seam_lists == []
+    assert sorted(id(f) for f in interior) == sorted(id(f) for f in faces)
+
+
+def test_seam_only_round_two_matches_a_full_round_two(template):
+    """The identity check G8 (`tools/prototypes/RESULTS.md`) ran ad hoc, pinned
+    as a permanent regression: sewing only the seam subset and carrying the
+    rest through unsewn must reproduce a full round-2 sew exactly — same face
+    count, still fully closed, same volume.
+    """
+    lp, tpl, _ = template
+    pieces = _line_pieces(lp, tpl, 16)
+    plan = {0: weld._tile_pieces(pieces, target=3, min_to_tile=1)}
+    assert plan[0] is not None and len(plan[0]) > 1
+
+    tile_results = {0: [weld._sew_faces([p.faces for p in tile], weld.SEW_TOLERANCE) for tile in plan[0]]}
+    by_group = {0: pieces}
+
+    baseline = weld._sew_faces(tile_results[0], weld.SEW_TOLERANCE)
+    seam_only, _max_rss = weld._sew_round_two(
+        by_group, plan, tile_results, weld.SEW_TOLERANCE, workers=1, tmpdir=None,
+        background=False, pool=None,
+    )
+
+    assert len(seam_only[0]) == len(baseline)
+    assert weld.free_edges(baseline) == []
+    assert weld.free_edges(seam_only[0]) == []
+    baseline_volume = occ.volume(occ.make_solid(shell_of(baseline)))
+    seam_only_volume = occ.volume(occ.make_solid(shell_of(seam_only[0])))
+    assert seam_only_volume == pytest.approx(baseline_volume, rel=1e-9)
+    assert seam_only_volume == pytest.approx(16 * tpl.volume, rel=1e-9)
 
 
 def test_tiled_sew_across_worker_processes_matches_the_sequential_path(template, tmp_path):

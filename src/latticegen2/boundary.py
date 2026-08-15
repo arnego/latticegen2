@@ -36,7 +36,6 @@ and small metadata cross the process boundary, never geometry.
 
 from __future__ import annotations
 
-import multiprocessing as mp
 import os
 from dataclasses import dataclass, field
 
@@ -59,6 +58,9 @@ from .lattice import (
     neighbor_step,
     nodes,
 )
+from .parallel import WorkerPool
+from .parallel import compound_children as _compound_children
+from .parallel import read_brep as _read_brep
 
 NodeKey = tuple[int, int, int]
 
@@ -321,8 +323,7 @@ def finalize_pieces(pieces: list[BoundaryPiece], interfaces: set[tuple[NodeKey, 
 # disagree, and declining is not by itself a safe degradation: where the two
 # regions are only *partially* the same, keeping both caps leaves the overlap
 # as non-manifold material and the remainder as an unfilled hole
-# (docs/algorithm.md §7.1, specification.md §10 "Fuse junction pairs whose two
-# booleans disagree"). The repair is to fall back to the kernel's own general
+# (docs/algorithm.md §7.1). The repair is to fall back to the kernel's own general
 # boolean: fuse the two disagreeing pieces into one solid, which is sound
 # wherever instancing's exactness argument has broken down because the kernel
 # contradicted itself about a face the two share.
@@ -488,10 +489,12 @@ def _worker_trim(job):
     metadata lists, so nothing but paths and small plain data crosses the
     process boundary. The ``.brep`` is a compound of per-piece compounds, each
     holding that piece's faces in the same order as the piece's cap tags.
+
+    ``background`` priority is no longer part of this job tuple: it is set
+    once per worker process by :class:`latticegen2.parallel.WorkerPool`'s own
+    initializer rather than once per job.
     """
-    (body_path, cc, t, node_batch, out_path, background) = job
-    if background:
-        _set_background_priority()
+    (body_path, cc, t, node_batch, out_path) = job
     lp = lattice_params(cc, t)
     tpl = build_template(lp)
     body = _read_brep(body_path)
@@ -537,30 +540,6 @@ def _piece_from(node: NodeKey, faces: list, tags: list[int], volume: float) -> B
     return piece
 
 
-def _read_brep(path: str) -> TopoDS_Shape:
-    shape = TopoDS_Shape()
-    builder = BRep_Builder()
-    if not BRepTools.Read_s(shape, path, builder):
-        raise ProcessingError(f"Could not read intermediate BREP file: {path}")
-    return shape
-
-
-def _set_background_priority() -> None:
-    """Drop this process to below-normal scheduling priority (``-bg``)."""
-    try:
-        if os.name == "nt":
-            import ctypes
-
-            BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
-            ctypes.windll.kernel32.SetPriorityClass(
-                ctypes.windll.kernel32.GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS
-            )
-        else:
-            os.nice(5)
-    except Exception:
-        pass  # priority is a courtesy, never a reason to fail a run
-
-
 def trim_boundary(
     lp: LatticeParams,
     tpl: JunctionTemplate,
@@ -571,8 +550,18 @@ def trim_boundary(
     workers: int,
     background: bool = False,
     progress=None,
+    pool: WorkerPool | None = None,
 ) -> BoundaryResult:
-    """Trim every boundary junction, sequentially or across worker processes."""
+    """Trim every boundary junction, sequentially or across worker processes.
+
+    ``pool``, if given, is used instead of building a transient one — this is
+    what lets a single :class:`latticegen2.parallel.WorkerPool` serve every
+    parallel stage of one run rather than each stage paying `spawn`'s
+    process-creation cost on its own. When ``pool`` is ``None`` a transient
+    pool is still built exactly as before, so a caller with its own worker
+    count and no run-wide pool to share (a unit test, for instance) needs no
+    change.
+    """
     result = BoundaryResult()
     if len(boundary_nodes) == 0:
         return result
@@ -595,33 +584,22 @@ def trim_boundary(
 
     batches = _split_batches(boundary_nodes, workers)
     jobs = [
-        (
-            body_path,
-            lp.cc,
-            lp.t,
-            nb.tolist(),
-            os.path.join(tmpdir, f"boundary_{bi}.brep"),
-            background,
-        )
+        (body_path, lp.cc, lp.t, nb.tolist(), os.path.join(tmpdir, f"boundary_{bi}.brep"))
         for bi, nb in enumerate(batches)
     ]
 
-    ctx = mp.get_context("spawn")
-    with ctx.Pool(processes=workers) as pool:
+    def _consume(results) -> None:
         done = 0
-        # Ordered `imap`, not `imap_unordered`: batches still run in parallel, but
-        # results are consumed in job order, so `result.pieces` — and therefore the
-        # shape list handed to sewing — is identical run to run. Sewing resolves
-        # near-coincident vertices in the order it receives them, so an arbitrary
-        # completion order would let two runs of the same command produce
-        # byte-different output.
-        for batch_index, (path, meta, n_empty, rss) in enumerate(
-            pool.imap(_worker_trim, jobs)
-        ):
+        # Ordered results, not completion order: `result.pieces` — and therefore
+        # the shape list handed to sewing — is identical run to run. Sewing
+        # resolves near-coincident vertices in the order it receives them, so an
+        # arbitrary completion order would let two runs of the same command
+        # produce byte-different output.
+        for batch_index, (path, meta, n_empty, rss) in enumerate(results):
             result.n_empty += n_empty
             result.max_worker_rss = max(result.max_worker_rss, rss)
             # Report junctions, the same unit the sequential path reports, rather
-            # than batches — `imap` is ordered, so batch i is the i'th job.
+            # than batches — results are ordered, so batch i is the i'th job.
             done += len(batches[batch_index])
             if progress is not None:
                 progress(done, len(boundary_nodes))
@@ -638,19 +616,15 @@ def trim_boundary(
                 result.pieces.append(
                     _piece_from(tuple(node), _compound_children(bundle), tags, vol)
                 )
+
+    if pool is not None:
+        results, _ = pool.run(_worker_trim, jobs)
+        _consume(results)
+    else:
+        with WorkerPool(workers, background) as owned:
+            results, _ = owned.run(_worker_trim, jobs)
+        _consume(results)
     return result
-
-
-def _compound_children(shape: TopoDS_Shape) -> list[TopoDS_Shape]:
-    """Direct children of a compound, in the order they were added."""
-    from OCP.TopoDS import TopoDS_Iterator
-
-    out = []
-    it = TopoDS_Iterator(shape)
-    while it.More():
-        out.append(it.Value())
-        it.Next()
-    return out
 
 
 def _split_batches(node_index: np.ndarray, workers: int):

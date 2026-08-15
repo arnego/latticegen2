@@ -11,7 +11,15 @@ from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
 from OCP.Standard import Standard_Failure
 
 from latticegen2 import occ
-from latticegen2.pipeline import UNIFY_VOLUME_TOL, _unify, _unify_one
+from latticegen2.errors import ProcessingError
+from latticegen2.parallel import WorkerPool
+from latticegen2.pipeline import (
+    UNIFY_VOLUME_TOL,
+    _check_unify_result,
+    _unify,
+    _unify_one,
+    _validate,
+)
 
 
 def two_boxes_sharing_a_face():
@@ -91,3 +99,137 @@ def test_unification_that_cannot_run_at_all_returns_the_solid_unchanged(monkeypa
     assert stats["output_faces"] == stats["faces_before"]
     assert stats["volume_drift"] == pytest.approx(0.0, abs=UNIFY_VOLUME_TOL)
     assert occ.volume(out[0]) == pytest.approx(2000.0)
+
+
+# --- the shared guard, decoupled from where unification ran ------------------
+#
+# `_check_unify_result` is the one place both the serial and the parallel path
+# (docs/specification.md §10 paths 1 and 4) decide pass/fail, so pinning it on
+# its own — no geometry, no worker process — is what keeps the two paths from
+# silently drifting apart in what they consider a pass.
+
+
+def test_check_unify_result_accepts_an_exact_merge():
+    assert _check_unify_result(100.0, 100.0, 1) == pytest.approx(0.0)
+
+
+def test_check_unify_result_accepts_drift_within_tolerance():
+    post = 100.0 * (1 + 0.5 * UNIFY_VOLUME_TOL)
+    drift = _check_unify_result(100.0, post, 1)
+    assert 0.0 < drift < UNIFY_VOLUME_TOL
+
+
+def test_check_unify_result_rejects_drift_beyond_tolerance():
+    post = 100.0 * (1 + 2 * UNIFY_VOLUME_TOL)
+    with pytest.raises(ProcessingError, match="changed a solid's volume"):
+        _check_unify_result(100.0, post, 1)
+
+
+def test_check_unify_result_rejects_a_solid_count_change():
+    with pytest.raises(ProcessingError, match="turned one solid into 2"):
+        _check_unify_result(100.0, 100.0, 2)
+
+
+def test_check_unify_result_rejects_zero_solids_produced():
+    with pytest.raises(ProcessingError, match="turned one solid into 0"):
+        _check_unify_result(100.0, float("nan"), 0)
+
+
+# --- parallel dispatch: same result as the master, via a real worker ---------
+#
+# `_unify_one`'s own ladder (the fallback tests above) never changes between
+# the two paths — only *where* it runs does — so what these need to prove is
+# dispatch, not the ladder a second time. Note this cannot exercise the
+# "kernel refuses inside a worker" branch specifically: the `monkeypatch`
+# fallback tests above patch `occ.unify_same_domain` in this process, and a
+# `spawn` worker re-imports the module fresh, so that patch does not cross the
+# process boundary. `_unify_one` itself is identical code on both paths, so
+# the ladder's correctness is not in question — only IPC is, and that is what
+# these test.
+
+
+def two_solids_that_can_unify():
+    return [two_boxes_sharing_a_face(), two_boxes_sharing_a_face()]
+
+
+def test_unify_parallel_matches_serial_on_the_same_solids(tmp_path):
+    serial_out, serial_stats = _unify(two_solids_that_can_unify())
+    with WorkerPool(2) as pool:
+        parallel_out, parallel_stats = _unify(
+            two_solids_that_can_unify(), pool=pool, tmpdir=str(tmp_path)
+        )
+
+    assert parallel_stats["faces_before"] == serial_stats["faces_before"]
+    assert parallel_stats["output_faces"] == serial_stats["output_faces"]
+    assert parallel_stats["output_edges"] == serial_stats["output_edges"]
+    assert parallel_stats["unmerged_solids"] == serial_stats["unmerged_solids"]
+    assert [occ.volume(s) for s in parallel_out] == pytest.approx(
+        [occ.volume(s) for s in serial_out]
+    )
+
+
+def test_unify_only_dispatches_to_the_pool_when_eligible(tmp_path):
+    solids = two_solids_that_can_unify()
+
+    # No pool given at all: the serial path, same as every existing test above.
+    _, no_pool_stats = _unify(solids)
+    assert no_pool_stats["max_worker_rss"] == 0
+
+    # A pool is given and there is more than one solid: dispatched for real —
+    # `max_worker_rss` is only ever nonzero if a worker process actually ran
+    # and reported its own peak (the same proof test_weld.py's tiling test
+    # uses for the same reason).
+    with WorkerPool(2) as pool:
+        _, pool_stats = _unify(solids, pool=pool, tmpdir=str(tmp_path))
+    assert pool_stats["max_worker_rss"] > 0
+
+    # A single solid: not worth a process round-trip regardless of the pool.
+    with WorkerPool(2) as pool:
+        _, single_stats = _unify([two_boxes_sharing_a_face()], pool=pool, tmpdir=str(tmp_path))
+    assert single_stats["max_worker_rss"] == 0
+
+
+def test_validate_parallel_matches_serial(tmp_path):
+    solids = two_solids_that_can_unify()
+    serial_invalid, serial_volume, serial_rss = _validate(solids)
+    with WorkerPool(2) as pool:
+        parallel_invalid, parallel_volume, parallel_rss = _validate(
+            solids, pool=pool, tmpdir=str(tmp_path)
+        )
+
+    assert parallel_invalid == serial_invalid == []
+    assert parallel_volume == pytest.approx(serial_volume)
+    assert serial_rss == 0
+    assert parallel_rss > 0
+
+
+def _open_shell_solid():
+    """A ``TopoDS_Solid`` wrapping an open shell — one face short of a box.
+
+    Deliberately invalid: ``BRepCheck_Analyzer`` flags a non-closed shell,
+    which is what this needs to prove the gate fires from a worker and not
+    only on the master.
+    """
+    from OCP.BRep import BRep_Builder
+    from OCP.TopoDS import TopoDS_Shell
+
+    box = BRepPrimAPI_MakeBox(5.0, 5.0, 5.0).Shape()
+    faces = occ.faces(box)
+    shell = TopoDS_Shell()
+    builder = BRep_Builder()
+    builder.MakeShell(shell)
+    for f in faces[:-1]:
+        builder.Add(shell, f)
+    return occ.make_solid(shell)
+
+
+def test_validate_catches_an_invalid_solid_through_the_pool(tmp_path):
+    """The gate must still fire when it runs in a worker, not just on the master."""
+    bad_solid = _open_shell_solid()
+    assert not occ.is_valid(bad_solid)  # sanity: this really is invalid
+
+    with WorkerPool(2) as pool:
+        invalid, _volume, _rss = _validate(
+            [two_boxes_sharing_a_face(), bad_solid], pool=pool, tmpdir=str(tmp_path)
+        )
+    assert invalid == [1]

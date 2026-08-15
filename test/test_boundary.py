@@ -253,8 +253,7 @@ def test_the_agreement_bar_sits_where_the_constant_says(lp, excess, stitched):
     assert (got.mismatched == []) is stitched
 
 
-# --- fuse_disagreeing_pairs (specification.md §10 "Fuse junction pairs whose
-# two booleans disagree", docs/algorithm.md §7.1) ----------------------------
+# --- fuse_disagreeing_pairs (docs/algorithm.md §7.1) -------------------------
 
 
 def _notched_junction(lp, tpl, node_pos, oh):

@@ -134,7 +134,7 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `-cc` | float | yes | mm | 0.4 – 50 | — | XY distance between the bottom nodes of adjacent cells |
 | `-t` | float | yes | mm | 0.4 – 20 | — | Side length of the diamond strut profile |
 | `-o`, `--output` | path | no | — | — | `<input_stem>-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing |
-| `--workers` | int | no | count | 1 – 128 | from `--cores`, else from the machine | Worker processes for the boundary stage |
+| `--workers` | int | no | count | 1 – 128 | from `--cores`, else from the machine | Worker processes in the shared pool used across the run's parallel stages (boundary trim, boundary sew, same-domain unification, validation) |
 | `--cores` | int | no | count | 1 – 128 | detected | Physical cores available; `--workers` is derived as `min(cores, 8)` — one worker per core |
 | `--ram` | float | no | GB | 1 – 1024 | — | Memory budget; recorded in the log |
 | `-bg`, `--background` | flag | no | — | — | off | Run at below-normal process priority |
@@ -163,7 +163,7 @@ inside one cell. That is the only cross-constraint.
 | 3 | Input geometry could not be read, parsed, or faithfully meshed |
 | 4 | Geometry processing failure |
 | 5 | Resource limit |
-| 6 | Output write failure or failed round-trip check |
+| 6 | Output write failure |
 | 130 | Cancelled by the user with Ctrl+C |
 
 Every non-zero exit prints one human-readable reason line.
@@ -178,7 +178,7 @@ the design choices are in
 
 ```
 import → tessellate → classify → instance interior → trim boundary
-       → connect → stitch → simplify → validate → write STEP → round-trip verify
+       → connect → stitch → simplify → validate → write STEP
 ```
 
 The load-bearing idea is that **the lattice needs almost no boolean operations at
@@ -219,7 +219,8 @@ halving the face count and the file size.
 | Connectivity by graph, not by boolean | The floating-body rule is a BFS over surviving interfaces |
 | Sewing confined to the boundary | The boundary layer is sewn first and the interior is then built *onto* its topology, so the volume-scaling shell never enters a geometric search. Sewing's cost is dominated by total face count, so handing it the interior made stitching the bottleneck on large parts — see [docs/algorithm.md](docs/algorithm.md) §8 |
 | Process-parallel boundary junctions | Constant-size independent jobs |
-| Same-domain unification before export | Instancing merges nothing, so coplanar faces meet unmerged at every strut interface; unifying them halves the face count and file size — and makes the run *faster*, since export and verification then handle half as much |
+| One shared worker pool for the whole run | Boundary trim, boundary sew, same-domain unification and validation all dispatch through it, so process-creation cost is paid once per run rather than once per stage |
+| Same-domain unification before export | Instancing merges nothing, so coplanar faces meet unmerged at every strut interface; unifying them halves the face count and file size — and makes the run *faster*, since export then handles half as much. Unification and validation both dispatch across the shared worker pool, not threads: OCP holds the GIL around both calls (measured, `tools/prototypes/RESULTS.md` G7) |
 | Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |
 
 ### Memory

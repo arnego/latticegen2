@@ -136,21 +136,71 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 
 | Scenario | Total | Dominant stages |
 |---|---|---|
-| 80 mm ball, `cc=20 t=4` | ~7 s | boundary trim, export |
-| test cylinder, `cc=10 t=1.5` | ~55 s | classify, verify, simplify, boundary sew |
-| `TD_HX_Indre_Volum`, `cc=5 t=1` | 16 m 27 s up to assembly; the boundary sew is the remaining unknown | classify, boundary trim, boundary sew |
+| 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
+| test cylinder, `cc=10 t=1.5` | ~48 s | classify, simplify, boundary sew |
+| `TD_HX_Indre_Volum`, `cc=5 t=1` | 47.1 min, 19.6 GB peak, 2.11 GB output | boundary trim, simplify, validate, export |
 
-The third row is the scale rehearsal. It has not been run end to end since the
-assembly was inverted (docs/algorithm.md §8); everything up to assembly took
-16 m 27 s, and G5a extrapolates the boundary sew to roughly 20 minutes on top,
-against 4 h 45 m for the sew it replaces. Its per-stage table is in
-[specification.md](specification.md) §10 and the sewing measurements are in
-[`../tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md) G5.
+The third row is the scale rehearsal, run end to end on 2026-08-14 and
+re-profiled on 2026-08-15 after implementing specification.md §10's paths 1–4
+(its full per-stage table, both dates side by side, and the honest result for
+each path are in [specification.md](specification.md) §10). What is worth
+knowing before doing performance work on this project at all, now that
+chapter is closed:
+
+* **The `stitch` stage is no longer a top-3 cost.** Round 2's seam-only split
+  (only sew the faces round 1 left with a free edge, carry the rest through
+  unchanged) plus dispatching it across the shared pool took it from 8 m 57 s
+  to **1 m 13.5 s** — this single change is 95 % of the run's total
+  improvement (73.1 → 47.1 min).
+* **Parallelising `simplify` and `validate` is correct but was not a
+  wall-clock win on this part.** Both still measure at 0.99 cores in
+  `profile_report.py` — this part's 14 solids are one dominant body plus 13
+  small scraps, so there is nothing to spread across workers, and the added
+  `.brep` round trip cost a few percent (`simplify` +8 %, `validate` +17 %)
+  rather than saving anything. Correct behaviour on a part with more evenly
+  sized components; not this one. See specification.md §10 for the full
+  account of why this was kept anyway.
+* **`boundary` remains the only stage that uses more than one core** —
+  parallel by construction, not by this chapter's changes.
+* **The round-trip re-import stage is gone.** It cost 22 m 29 s on
+  2026-08-14 — the single most expensive stage in that run — to re-establish
+  in-process what `tools/e2e.py` already checks in dev/CI on every committed
+  scenario (see the check table above). Removed by deliberate decision, not
+  cheapened; docs/algorithm.md §9 has the reasoning in full.
 
 Note that the `simplify` stage (same-domain unification, docs/algorithm.md §9)
-has a *negative* net cost: it takes ~8 s but halves the face count, which takes
-more than that back out of export and the round-trip check. Removing it would
-make the run slower as well as the output twice as large.
+has a *negative* net cost even setting parallelisation aside: it takes ~8 s at
+`dense-lattice` scale but halves the face count, which takes more than that
+back out of `export`. Removing it would make the run slower as well as the
+output twice as large.
+
+### Profiling a run
+
+Wall-clock per stage comes from the `.log`. For CPU, memory and I/O over time,
+wrap the run:
+
+```
+python tools/profile_run.py --out run-profile.csv -- python src/main.py -i part.step -cc 5 -t 1 -o out.step -v
+```
+
+It samples the whole process tree — master plus every boundary and sew worker —
+every 2 s and propagates the child's exit code, so it is a transparent prefix.
+Then join the samples to the stage boundaries:
+
+```
+python tools/profile_report.py run-profile.csv out.log --cores 6
+```
+
+That prints a per-stage table of duration, mean and peak CPU, **core-equivalents**
+(1.00 is one core fully busy), RSS, process count and I/O, and ranks the stages
+where parallelism would recover the most wall time. Core-equivalents is the
+number to look at: it is what shows that `boundary` uses the machine and nothing
+else does.
+
+`profile_run.py` needs `psutil`, which is a **development-only** dependency — it
+is not required by the tool, by `pytest` or by `e2e.py`, and `tools/` is
+`export-ignore`d so it never reaches a release bundle. The script says so plainly
+if it is missing.
 
 The measurements behind the architecture's load-bearing choices (junction cap
 integrity, join-mechanism throughput, per-junction intersection latency, STEP

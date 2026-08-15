@@ -1,4 +1,4 @@
-"""STEP export: header metadata rewrite and the round-trip success gate.
+"""STEP export: header metadata rewrite.
 
 See docs/algorithm.md §9. STEP (ISO-10303-21) headers are plain ASCII entities of the form
 ``NAME(arg, ...);`` where arguments nest and quoted strings escape a literal
@@ -9,13 +9,20 @@ entities this module touches without disturbing anything else.
 ``FILE_SCHEMA``'s value is only ever filled in when blank, never overwritten:
 that is what keeps the output a clean standard AP214 document rather than a
 hand-patched hybrid.
+
+This module no longer holds a round-trip re-import check. It used to
+(``round_trip_check``, removed): re-reading the just-written STEP file to full
+B-rep purely to count solids, on every production run. Measured at 22 m 29 s on
+the docs/specification.md §10 rehearsal — the single most expensive stage in a
+73-minute run — for a guarantee `tools/e2e.py` already establishes on every
+committed scenario in dev/CI, at a scale where that cost is affordable. See
+docs/algorithm.md §9 for the fuller reasoning.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 
-from . import occ
 from .errors import OutputError
 from .lattice import format_param
 
@@ -164,16 +171,3 @@ def rewrite_step_header(path: str, part_name: str, params_text: str) -> None:
 
     with open(path, "w", encoding="utf-8", errors="surrogateescape") as fh:
         fh.write(text)
-
-
-def round_trip_check(path: str) -> int:
-    """Re-read the written file and confirm it still contains solids.
-
-    The mandatory success gate: a run only exits 0 after the file it just wrote
-    has been parsed back independently (docs/algorithm.md §9).
-    """
-    shape = occ.read_step(path)
-    found = occ.solids(shape)
-    if not found:
-        raise OutputError(f"Round-trip re-import of {path} found no solids.")
-    return len(found)

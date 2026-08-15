@@ -35,9 +35,9 @@ def main(argv: list[str] | None = None) -> int:
         return exc.exit_code
 
     if args.background:
-        from .boundary import _set_background_priority
+        from .parallel import set_background_priority
 
-        _set_background_priority()
+        set_background_priority()
 
     from .pipeline import run_pipeline
 

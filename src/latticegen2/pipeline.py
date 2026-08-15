@@ -2,7 +2,7 @@
 
     parse -> template -> import -> tessellate -> classify
           -> trim boundary -> connect -> instance interior -> weld
-          -> validate -> write STEP -> round-trip -> summary
+          -> simplify -> validate -> write STEP -> summary
 
 The shape of this is deliberately flat: no hierarchical assembly, no distributed
 merge rounds, no fuse-based cleanup, because there is nothing left for them to
@@ -10,7 +10,7 @@ do — the interior is instanced rather than fused, connectivity is a graph
 property rather than a boolean experiment, and assembly is an index lookup
 rather than a geometric search. The one exception is inside "weld": the
 boundary-layer sew tiles a large component's pieces before sewing them
-(docs/specification.md §10), because sewing itself is the one remaining
+(docs/algorithm.md §8), because sewing itself is the one remaining
 operation that genuinely scales worse than linearly (docs/algorithm.md §8). That
 stays an internal detail of one stage, not a pipeline-level tiling stage of its
 own — the flow above is still accurate at the granularity it describes.
@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 
 import numpy as np
@@ -44,8 +45,11 @@ from .interior import build_interior_shell, extract_template_mesh
 from .junction import build_template
 from .lattice import candidate_nodes, lattice_params, neighbor_step, part_name
 from .lattice import node as lattice_node
+from .parallel import WorkerPool
+from .parallel import read_brep as _read_brep
+from .parallel import write_brep as _write_brep
 from .runlog import RunLog, Timer, format_bytes
-from .stepout import generation_params_text, rewrite_step_header, round_trip_check
+from .stepout import generation_params_text, rewrite_step_header
 
 def _make_tmpdir(output_path: str) -> str:
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -125,6 +129,50 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
             "smaller than one lattice cell at these parameters — try a smaller -cc."
         )
 
+    # One worker pool for the whole rest of the run (docs/algorithm.md §8, §12),
+    # shared by every parallel stage from here on — boundary trim, boundary-sew,
+    # same-domain unification and validation — instead of each stage building and
+    # tearing down its own. Built even when `args.workers <= 1`: `WorkerPool` is
+    # then inert (`.active` is False) and every stage below takes its own
+    # sequential path exactly as if no pool existed, so this costs nothing when
+    # there is nothing to parallelise. Entered and exited explicitly rather than
+    # as a `with` block wrapping the rest of this function, purely to avoid
+    # re-indenting the whole boundary-through-validate span; the effect is
+    # identical, and a Ctrl+C here is still caught at the top level as
+    # `CancelledError` after the pool tears its workers down (docs/algorithm.md
+    # §10) — `Pool.__exit__` terminates unconditionally, so it does not matter
+    # that no real exception info is threaded through this `finally`.
+    pool = WorkerPool(args.workers, args.background)
+    pool.__enter__()
+    try:
+        return _run_with_pool(
+            args, rl, tmpdir, lp, tpl, tmesh, body, body_path, stats,
+            interior_nodes, boundary_nodes, pool,
+        )
+    finally:
+        pool.__exit__(*sys.exc_info())
+
+
+def _run_with_pool(
+    args: Args,
+    rl: RunLog,
+    tmpdir: str,
+    lp,
+    tpl,
+    tmesh,
+    body,
+    body_path: str,
+    stats: dict,
+    interior_nodes,
+    boundary_nodes,
+    pool: WorkerPool,
+) -> dict:
+    """The boundary-through-export span of :func:`_run`, run under one shared pool.
+
+    Split out only so that span can be wrapped in a plain function call inside
+    :func:`_run`'s ``try``/``finally`` rather than a deeply re-indented ``with``
+    block — the pool's lifetime is what matters, not where this split falls.
+    """
     with Timer(rl, "boundary"):
         # Reported per decile crossed rather than on an exact modulo: the parallel
         # path advances in whole batches, so a `done % step == 0` test lands on a
@@ -140,6 +188,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         boundary = trim_boundary(
             lp, tpl, boundary_nodes, body, body_path, tmpdir,
             workers=args.workers, background=args.background, progress=progress,
+            pool=pool,
         )
     rl.line(
         f"boundary trim: {len(boundary.pieces)} pieces from {len(boundary_nodes)} "
@@ -226,6 +275,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         boundary_faces, sew_stats = weld.sew_boundary(
             kept.pieces, kept.piece_groups,
             workers=args.workers, tmpdir=tmpdir, background=args.background,
+            pool=pool,
         )
         rings = weld.interface_rings(lp, tmesh, boundary_faces, want_rings)
     if sew_stats.max_worker_rss:
@@ -277,7 +327,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         )
 
     with Timer(rl, "simplify"):
-        result_solids, simplify_stats = _unify(result_solids)
+        result_solids, simplify_stats = _unify(result_solids, pool=pool, tmpdir=tmpdir)
     rl.line(
         f"same-domain unification: {simplify_stats['faces_before']} -> "
         f"{simplify_stats['output_faces']} faces, {simplify_stats['edges_before']} -> "
@@ -292,13 +342,20 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
             f"{simplify_stats['unmerged_solids']} of {len(result_solids)} solid(s); "
             f"they are exported as built. The output is larger, not different."
         )
+    if simplify_stats["max_worker_rss"]:
+        rl.note_worker_rss(simplify_stats["max_worker_rss"])
+        rl.line(f"peak simplify worker memory: {format_bytes(simplify_stats['max_worker_rss'])}")
+        stats["peak_simplify_worker_memory"] = format_bytes(simplify_stats["max_worker_rss"])
     stats["output_faces"] = simplify_stats["output_faces"]
     stats["output_edges"] = simplify_stats["output_edges"]
     stats["unmerged_solids"] = simplify_stats["unmerged_solids"]
 
     with Timer(rl, "validate"):
-        invalid = [i for i, s in enumerate(result_solids) if not occ.is_valid(s)]
-        total_volume = sum(occ.volume(s) for s in result_solids)
+        invalid, total_volume, validate_rss = _validate(result_solids, pool=pool, tmpdir=tmpdir)
+    if validate_rss:
+        rl.note_worker_rss(validate_rss)
+        rl.line(f"peak validate worker memory: {format_bytes(validate_rss)}")
+        stats["peak_validate_worker_memory"] = format_bytes(validate_rss)
     if invalid:
         raise ProcessingError(
             f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
@@ -319,14 +376,16 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         raise OutputError(f"Output STEP file was not written or is empty: {args.output}")
     stats["output_size"] = format_bytes(os.path.getsize(args.output))
 
-    with Timer(rl, "verify"):
-        n_solids = round_trip_check(args.output)
-    rl.line(f"round-trip re-import found {n_solids} solid(s)")
-    if n_solids != len(result_solids):
-        raise OutputError(
-            f"Round-trip check disagrees with what this run believes it wrote: "
-            f"{n_solids} solids in the file vs {len(result_solids)} expected."
-        )
+    # No round-trip re-import here (removed: docs/algorithm.md §9). It cost
+    # 22 m 29 s of CPU re-parsing 2.00 GB of STEP to full B-rep purely to count
+    # solids on the docs/specification.md §10 rehearsal — the single most
+    # expensive stage in the run — to check something `tools/e2e.py` already
+    # checks on every committed scenario in dev/CI (`vg.brepcheck`, a real
+    # `STEPControl_Reader` round trip). Paying that cost again on every
+    # production run of a part this size bought back only the reassurance that
+    # export and the filesystem did not silently corrupt the file, which the
+    # "written and non-empty" check just above already covers for the write
+    # failure this tool can actually cause and correct for (exit 6).
 
     stats["output"] = args.output
     shutil.rmtree(tmpdir, ignore_errors=True)
@@ -388,12 +447,37 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
         return solid, False
 
 
-def _unify(solids: list[TopoDS_Shape]):
-    """Compact each solid's B-rep, verifying the geometry is unchanged.
+def _check_unify_result(pre_volume: float, post_volume: float, n_produced: int) -> float:
+    """The two guards every unified solid must clear, wherever it ran.
 
-    Each solid is unified on its own rather than as one compound: it keeps a 1:1
-    mapping so the count guard below is exact, and leaves the step
-    straightforward to parallelise if it ever becomes the bottleneck at scale.
+    Both guards are load-bearing regardless of which stage produced the
+    numbers (docs/algorithm.md §9): the solid-count check also protects the
+    junction-graph cross-check that precedes assembly, and the volume-drift
+    bar is what actually catches a merge across faces that were not genuinely
+    the same surface. Shared by the serial and parallel paths so the bars —
+    and their error text — cannot drift apart between them.
+    """
+    if n_produced != 1:
+        raise ProcessingError(
+            f"Same-domain unification turned one solid into {n_produced}. "
+            f"It must only re-describe the boundary, never re-partition the body."
+        )
+    drift = abs(post_volume - pre_volume) / max(abs(pre_volume), 1.0)
+    if drift > UNIFY_VOLUME_TOL:
+        raise ProcessingError(
+            f"Same-domain unification changed a solid's volume from "
+            f"{pre_volume:.6f} to {post_volume:.6f} mm^3 ({drift:.2e} relative, "
+            f"tolerance {UNIFY_VOLUME_TOL:g}). Faces that are not genuinely the "
+            f"same surface were merged, so the boundary moved."
+        )
+    return drift
+
+
+def _unify_serial(solids: list[TopoDS_Shape]):
+    """Compact each solid's B-rep on the master, one at a time.
+
+    Each solid is unified on its own rather than as one compound: it keeps a
+    1:1 mapping so :func:`_check_unify_result`'s count guard is exact.
     """
     faces_before = edges_before = 0
     faces_after = edges_after = 0
@@ -410,21 +494,8 @@ def _unify(solids: list[TopoDS_Shape]):
         if not ran:
             skipped += 1
         produced = occ.solids(merged)
-        if len(produced) != 1:
-            raise ProcessingError(
-                f"Same-domain unification turned one solid into {len(produced)}. "
-                f"It must only re-describe the boundary, never re-partition the body."
-            )
-        post_volume = occ.volume(produced[0])
-        drift = abs(post_volume - pre_volume) / max(abs(pre_volume), 1.0)
-        worst_drift = max(worst_drift, drift)
-        if drift > UNIFY_VOLUME_TOL:
-            raise ProcessingError(
-                f"Same-domain unification changed a solid's volume from "
-                f"{pre_volume:.6f} to {post_volume:.6f} mm^3 ({drift:.2e} relative, "
-                f"tolerance {UNIFY_VOLUME_TOL:g}). Faces that are not genuinely the "
-                f"same surface were merged, so the boundary moved."
-            )
+        post_volume = occ.volume(produced[0]) if len(produced) == 1 else float("nan")
+        worst_drift = max(worst_drift, _check_unify_result(pre_volume, post_volume, len(produced)))
 
         f, e = occ.count_subshapes(produced[0])
         faces_after += f
@@ -438,7 +509,150 @@ def _unify(solids: list[TopoDS_Shape]):
         "output_edges": edges_after,
         "volume_drift": worst_drift,
         "unmerged_solids": skipped,
+        "max_worker_rss": 0,
     }
+
+
+def _worker_unify(job):
+    """Unify one solid in a worker process — the same ladder as :func:`_unify_one`.
+
+    Only paths and small plain data cross the process boundary: the produced
+    solid is written back to ``out_path`` and everything :func:`_check_unify_result`
+    needs is returned as scalars, so the master never has to guess at what
+    happened inside the worker.
+    """
+    in_path, out_path = job
+    solid = _read_brep(in_path)
+    faces_before, edges_before = occ.count_subshapes(solid)
+    pre_volume = occ.volume(solid)
+
+    merged, ran = _unify_one(solid)
+    produced = occ.solids(merged)
+    n_produced = len(produced)
+    if n_produced == 1:
+        post_volume = occ.volume(produced[0])
+        faces_after, edges_after = occ.count_subshapes(produced[0])
+        _write_brep(produced[0], out_path)
+    else:
+        # The master raises on this before touching out_path, so nothing else
+        # here needs to be meaningful — just present, so the tuple shape holds.
+        post_volume = float("nan")
+        faces_after = edges_after = 0
+
+    from .runlog import peak_rss_bytes
+
+    return (
+        out_path, faces_before, edges_before, faces_after, edges_after,
+        pre_volume, post_volume, n_produced, ran, peak_rss_bytes(),
+    )
+
+
+def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str):
+    """Compact each solid's B-rep across the shared worker pool.
+
+    Dispatch, guards and the log-facing stats are identical to
+    :func:`_unify_serial`'s — only *where* :func:`_unify_one` runs differs — so
+    the two paths cannot silently diverge in what they consider a pass.
+    """
+    jobs = []
+    sizes: dict[str, int] = {}
+    for i, solid in enumerate(solids):
+        in_path = os.path.join(tmpdir, f"unify_{i}.brep")
+        _write_brep(solid, in_path)
+        jobs.append((in_path, os.path.join(tmpdir, f"unify_{i}_out.brep")))
+        # Cheap: this shape is already in memory. Used only to dispatch the
+        # biggest job first — the rehearsal's 14 solids are very unequal
+        # (specification.md §10), and `imap` assigns queued jobs to workers
+        # as they idle, so a large job left late in submission order can only
+        # start once an unrelated small job frees a worker (WorkerPool.run).
+        sizes[in_path] = occ.count_subshapes(solid)[0]
+
+    results, max_rss = pool.run(_worker_unify, jobs, sort_by=lambda job: sizes[job[0]])
+
+    faces_before = edges_before = 0
+    faces_after = edges_after = 0
+    worst_drift = 0.0
+    skipped = 0
+    out: list[TopoDS_Shape] = []
+    for (out_path, fb, eb, fa, ea, pre_volume, post_volume, n_produced, ran, _rss) in results:
+        faces_before += fb
+        edges_before += eb
+        if not ran:
+            skipped += 1
+        worst_drift = max(worst_drift, _check_unify_result(pre_volume, post_volume, n_produced))
+        faces_after += fa
+        edges_after += ea
+        out.append(_read_brep(out_path))
+
+    return out, {
+        "faces_before": faces_before,
+        "edges_before": edges_before,
+        "output_faces": faces_after,
+        "output_edges": edges_after,
+        "volume_drift": worst_drift,
+        "unmerged_solids": skipped,
+        "max_worker_rss": max_rss,
+    }
+
+
+def _unify(solids: list[TopoDS_Shape], *, pool: WorkerPool | None = None, tmpdir: str | None = None):
+    """Compact every result solid's B-rep, verifying the geometry is unchanged.
+
+    Dispatched across ``pool`` when one is active and there is more than one
+    solid to spread across it; a single solid, or no pool, runs on the master
+    exactly as before this existed (docs/specification.md §10 path 1). G7
+    (`tools/prototypes/RESULTS.md`) measured that OCP holds the GIL around
+    ``ShapeUpgrade_UnifySameDomain``, so this is a process pool with a `.brep`
+    round-trip, the same mechanism boundary trimming and the boundary sew use
+    — not threads, which showed no real speedup.
+    """
+    if pool is not None and pool.active and tmpdir is not None and len(solids) >= 2:
+        return _unify_parallel(solids, pool, tmpdir)
+    return _unify_serial(solids)
+
+
+def _worker_validate(path: str):
+    """Validate one solid in a worker process."""
+    solid = _read_brep(path)
+    valid = occ.is_valid(solid)
+    volume = occ.volume(solid)
+
+    from .runlog import peak_rss_bytes
+
+    return valid, volume, peak_rss_bytes()
+
+
+def _validate(
+    solids: list[TopoDS_Shape], *, pool: WorkerPool | None = None, tmpdir: str | None = None
+) -> tuple[list[int], float, int]:
+    """Run ``BRepCheck_Analyzer`` and sum the volume of every result solid.
+
+    Same dispatch rule as :func:`_unify`: a shared, active pool with more than
+    one solid to spread across it and somewhere to stage ``.brep`` files, or
+    the master, unchanged from before this existed. G7 found no thread
+    speedup here either (`tools/prototypes/RESULTS.md`), so this reuses the
+    same process-pool mechanism rather than introducing a second one.
+
+    Returns the indices of any invalid solids, the total volume, and the
+    highest peak worker RSS observed (0 on the serial path, folded into the
+    run's high-water mark by the caller exactly like every other stage's
+    worker RSS).
+    """
+    if pool is not None and pool.active and tmpdir is not None and len(solids) >= 2:
+        paths = []
+        sizes: dict[str, int] = {}
+        for i, solid in enumerate(solids):
+            path = os.path.join(tmpdir, f"validate_{i}.brep")
+            _write_brep(solid, path)
+            paths.append(path)
+            sizes[path] = occ.count_subshapes(solid)[0]  # dispatch order only; see _unify_parallel
+        results, max_rss = pool.run(_worker_validate, paths, sort_by=lambda p: sizes[p])
+        invalid = [i for i, (valid, _v, _rss) in enumerate(results) if not valid]
+        total_volume = sum(v for _valid, v, _rss in results)
+        return invalid, total_volume, max_rss
+    invalid = [i for i, s in enumerate(solids) if not occ.is_valid(s)]
+    total_volume = sum(occ.volume(s) for s in solids)
+    return invalid, total_volume, 0
 
 
 @dataclass

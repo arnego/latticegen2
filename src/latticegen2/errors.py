@@ -45,7 +45,7 @@ class ResourceError(LatticeGenError):
 
 
 class OutputError(LatticeGenError):
-    """The output file could not be written or failed its round-trip check (exit 6)."""
+    """The output file could not be written (exit 6)."""
 
     exit_code = 6
 

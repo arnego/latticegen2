@@ -842,6 +842,28 @@ root, so a tree is strictly worse than what is built here at every tile count
 measured. The seam-only reduction above is the lever that survives this
 argument: it reduces `F` itself, which a tree over the same `F` never could.
 
+**Vertex tolerances are corrected on the sewn result, before the rings are
+read.** Sewing can leave an edge whose vertex is *recorded* as sitting off the
+edge's own 3D curve, with that vertex's tolerance inflated to exactly the
+distance — so `BRepCheck_Analyzer` rejects both faces sharing the edge while
+the shell is perfectly closed. Measured on `TD_HX_rehearsal_test` at `cc=5,
+t=1`: 17 such edges, 34 faces, deviations of 2.474044e-05 and 3.316370e-04 mm
+(`tools/prototypes/RESULTS.md` G11). The trimmed pieces going into the sew are
+clean, which is why this is repaired here rather than in the worker beside §7's
+pinhole removal.
+
+`occ.fix_vertex_tolerances` uses `ShapeFix_Edge.FixVertexTolerance`, which
+adjusts the recorded tolerance and moves no geometry — the bound it is held to,
+as a hard failure, is that a repaired face's surface area comes back
+**bit-identical**. That is exact rather than approximate because a tolerance is
+metadata; there is no quadrature noise to allow for. It runs before
+`interface_rings` so the interior adopts corrected vertices rather than a copy
+needing the same fix again, and it examines only faces the analyzer already
+rejects, so a sound boundary layer pays one validity check per face. Faces it
+does not account for are counted and logged rather than failed on: §9's
+validity gate is already the gate for that, and failing twice for one cause
+only obscures which check found it.
+
 Assembly is then `BRep_Builder.Add` into one shell per component, and
 watertightness is proved rather than assumed: **every edge used exactly twice,
 once in each direction**. Both halves of that test are load-bearing. Counting

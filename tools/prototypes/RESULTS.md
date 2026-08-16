@@ -548,3 +548,65 @@ before any of it was built.
 **A gate must reproduce the defect's mechanism, not its symptom at the right
 order of magnitude.** Where the failing geometry is committed to the repo, as
 it is here, test against it directly; `test/test_boundary.py`'s pinhole tests do.
+
+---
+
+## G11 — vertices recorded off their edge's curve after sewing ✅ PARTIAL (30 of 34)
+
+With G10's pinhole repair in place the rehearsal assembles 14 watertight solids
+and then fails `validate`: 1 of 14 solids carries **34 individually invalid
+faces**. This gate establishes what they are and what fixes them.
+
+Method: dump the faces out of the failed run's staged `unify_0.brep` and
+inspect them alone — no synthetic stand-in, per G10's lesson.
+
+### It is 17 bad edges, not 34 bad faces
+
+Each invalid face has exactly **one** individually invalid edge, and the faces
+come in pairs because the two faces of a pair **share** that edge (verified by
+identical endpoints). 17 edges x 2 owning faces = 34.
+
+The edges are ordinary — spans of 0.183 and 0.356 mm, real `Geom_Ellipse` and
+`Geom_BSplineCurve` curves, pcurves present, not degenerate — and every
+face-level check passes on planar, cylindrical and B-spline faces alike.
+
+**The fault is a vertex sitting off its edge's 3D curve**, by 2.474044e-05 mm
+(ellipse) and 3.316370e-04 mm (B-spline), with that vertex's tolerance inflated
+to *exactly* that distance. The validity test therefore sits on the knife edge.
+
+**Not created by the trim.** Every trimmed junction around both sample
+locations comes out of `trim_junction` with zero invalid faces and zero invalid
+edges, so sewing introduces it — which is why the repair runs on the sewn
+boundary rather than in the worker beside the pinhole repair.
+
+### Repairs measured, on the four dumped faces
+
+| repair | fixes | area drift |
+|---|---|---|
+| `BRepLib.UpdateTolerances_s(shape, True)` | 3 of 4 — fails the B-spline face | 0.000e+00 |
+| **`ShapeFix_Edge.FixVertexTolerance(edge, face)`** | **4 of 4** | **0.000e+00** |
+| widening the offending vertex by 1 % | 4 of 4 | 0.000e+00 |
+
+`FixVertexTolerance` is adopted: it is OCCT's own repair for this fault, fixes
+every case, and adjusts a recorded tolerance rather than geometry — the area
+comes back bit-identical, which is the bound `occ.fix_vertex_tolerances`
+enforces as a hard failure. `UpdateTolerances` is the obvious alternative and
+is rejected on the B-spline case; both fixtures are committed to `test/`
+precisely because they discriminate between the two.
+
+### At production scale: 34 -> 4, and the remainder is a different fault
+
+The full rehearsal reports **15 faces retoleranced** (a shared edge's fix
+validates its partner face too, so 15 repairs cover ~30 of the 34) and **4
+faces remaining**. Those 4 have **no** individually invalid edge or vertex and
+pass every face-level check, so their fault is *contextual* — an edge invalid
+only in the context of its face, i.e. pcurve against 3D curve. Measured
+against them: `FixVertexTolerance` and `FixSameParameter` fix none,
+`BRepLib.SameParameter` fixes 3 of 4 at <= 1.7e-09 drift, and
+`ShapeFix_Shape.Perform` fixes all 4 but moves geometry by up to **6.4e-04**
+relative area and rebuilds faces — which on an already-proven-watertight shell
+is the very mechanism behind G9's regression. Not adopted. See
+docs/specification.md §10 for the open item.
+
+**PARTIAL**: the fault this gate names is fixed and bounded; the rehearsal
+still fails `validate` on the 4 faces carrying the contextual variant.

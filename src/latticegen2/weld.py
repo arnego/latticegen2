@@ -645,6 +645,16 @@ class SewStats:
     redone with a full, unsplit sew (:func:`_sew_round_two`'s ``expected_rings``
     check). Zero on every committed scenario; the check exists for real, heavily
     trimmed geometry where it has measured nonzero (docs/specification.md §10)."""
+    retoleranced_faces: int = 0
+    """Faces made valid again by correcting a vertex recorded off its edge's
+    curve (:func:`latticegen2.occ.fix_vertex_tolerances`, docs/algorithm.md §8)."""
+    still_invalid_faces: int = 0
+    """Faces the analyzer rejects that this repair did **not** account for.
+
+    Not a hard failure here: ``validate`` is already the gate for output
+    validity (docs/algorithm.md §9), and failing twice for one cause would only
+    obscure which check found it. Reported so a nonzero count is visible in the
+    log *before* validate spends minutes rediscovering it."""
 
 
 def sew_boundary(
@@ -726,6 +736,17 @@ def sew_boundary(
     )
     stats.max_worker_rss = max(max_rss1, max_rss2)
     stats.repaired_components = repaired
+
+    # Sewing can leave an edge whose vertex is recorded as sitting off the
+    # edge's own curve, which fails BRepCheck on both faces sharing it. Repair
+    # it here, on the sewn result, because that is where it is created — the
+    # trimmed pieces going in are clean (docs/algorithm.md §8, G11). Doing it
+    # before the interface rings are read means the interior adopts the
+    # corrected vertices rather than a copy that would have to be fixed twice.
+    for group_faces in out.values():
+        fixed, residual = occ.fix_vertex_tolerances(group_faces)
+        stats.retoleranced_faces += fixed
+        stats.still_invalid_faces += residual
     return out, stats
 
 

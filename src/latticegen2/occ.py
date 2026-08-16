@@ -36,6 +36,7 @@ from OCP.GeomAbs import GeomAbs_SurfaceType
 from OCP.IFSelect import IFSelect_ReturnStatus
 from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_Reader, STEPControl_StepModelType, STEPControl_Writer
+from OCP.ShapeFix import ShapeFix_Edge
 from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.TopAbs import TopAbs_ShapeEnum
 from OCP.TopExp import TopExp, TopExp_Explorer
@@ -44,7 +45,7 @@ from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS, TopoDS_Compound, TopoDS_Face, TopoDS_Shape, TopoDS_Shell
 from OCP.gp import gp_Pnt, gp_Trsf, gp_Vec
 
-from .errors import InputGeometryError, OutputError
+from .errors import InputGeometryError, OutputError, ProcessingError
 
 # --- Shape traversal --------------------------------------------------------
 
@@ -252,6 +253,61 @@ def unify_same_domain(shape: TopoDS_Shape, unify_edges: bool = True) -> TopoDS_S
     upgrade = ShapeUpgrade_UnifySameDomain(shape, unify_edges, True, False)
     upgrade.Build()
     return upgrade.Shape()
+
+
+def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
+    """Correct vertices recorded as sitting off their edge's curve.
+
+    Returns ``(repaired, still_invalid)`` counted in faces.
+
+    Sewing can leave an edge whose vertex lies off the edge's own 3D curve, with
+    that vertex's tolerance inflated to *exactly* the distance — so the validity
+    test sits on the knife edge and falls the wrong way, and
+    ``BRepCheck_Analyzer`` rejects both faces sharing the edge. Measured on
+    `TD_HX_rehearsal_test` at ``cc=5, t=1``: 17 such edges, 34 faces, deviations
+    of 2.474044e-05 and 3.316370e-04 mm. See docs/algorithm.md §8 and
+    ``tools/prototypes/RESULTS.md`` G11.
+
+    ``ShapeFix_Edge.FixVertexTolerance`` is OCCT's own repair for it and adjusts
+    the *recorded tolerance* in place — it moves no geometry, which is why this
+    is safe to run on a shell that is already proven watertight. That is checked
+    rather than assumed: a repaired face's surface area must come back
+    bit-identical, and anything else is a hard failure.
+
+    Only faces the analyzer already rejects are examined, so a sound boundary
+    layer pays one validity check per face and nothing more.
+    ``BRepLib.UpdateTolerances`` was measured as the obvious alternative and
+    rejected: it repairs the planar and cylindrical cases but not the B-spline
+    one (G11).
+    """
+    fixer = ShapeFix_Edge()
+    repaired = still_invalid = 0
+    for face in faces:
+        if BRepCheck_Analyzer(face).IsValid():
+            continue
+        before = area(face)
+        touched = False
+        for e in _explore(face, TopAbs_ShapeEnum.TopAbs_EDGE):
+            edge = TopoDS.Edge_s(e)
+            if BRepCheck_Analyzer(edge).IsValid():
+                continue
+            fixer.FixVertexTolerance(edge, face)
+            touched = True
+        if not touched:
+            still_invalid += 1
+            continue
+        after = area(face)
+        if after != before:
+            raise ProcessingError(
+                f"Correcting a vertex tolerance changed a boundary face's area "
+                f"from {before:.12g} to {after:.12g} mm^2. This repair adjusts "
+                f"only recorded tolerances and must move no geometry at all."
+            )
+        if BRepCheck_Analyzer(face).IsValid():
+            repaired += 1
+        else:
+            still_invalid += 1
+    return repaired, still_invalid
 
 
 def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape, int]:

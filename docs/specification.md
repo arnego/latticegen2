@@ -381,7 +381,48 @@ those are, though not the shell they describe — see path 3 above), and
 unification is a size optimization, not a correctness one, so this difference
 is expected and harmless (algorithm.md §9, §11).
 
-### Individually invalid boundary faces from grazing trims
+### Residual 4 invalid boundary faces (34 -> 4, contextual pcurve fault)
+
+**Status 2026-08-17.** The vertex-off-curve fault below is fixed
+(`occ.fix_vertex_tolerances`, docs/algorithm.md §8): the rehearsal's invalid
+faces drop from **34 to 4** and the run still fails `validate` on 1 of 14
+solids because of those 4. They are a *different* fault again.
+
+**What the 4 are.** Measured on the 2026-08-17 rehearsal's own `unify_0.brep`:
+areas 0.44-2.05 mm^2, one wire each, 5-9 edges, on curved surfaces (3
+`GeomAbs_Cylinder`, 1 `GeomAbs_BSplineSurface`), at
+`[1941.2, 93.0, 984.3]`, `[2041.5, -89.0, 983.1]`, `[2015.7, 88.1, 982.8]`,
+`[2024.1, 89.2, 983.3]`. Every one has **0 individually invalid edges and 0
+invalid vertices**, and every face-level check passes (`IntersectWires`,
+`ClassifyWires`, `OrientationOfWires`). That signature means the fault is
+**contextual** — an edge is faulty only *in the context of this face*, i.e. its
+pcurve and 3D curve disagree — which `BRepCheck_Analyzer(edge).IsValid()`
+cannot see, since that checks the edge standalone.
+
+**Repairs measured on all four, and none is yet acceptable:**
+
+| repair | fixes | area drift |
+|---|---|---|
+| `ShapeFix_Edge.FixVertexTolerance` on every edge | 0 of 4 | 0 |
+| `ShapeFix_Edge.FixSameParameter` on every edge | 0 of 4 | 0 |
+| `BRepLib.SameParameter_s(face, 1e-7, True)` | **3 of 4** | <= 1.7e-09 |
+| `ShapeFix_Face.Perform` | 0 of 4 | ~0 |
+| `ShapeFix_Shape.Perform` | **4 of 4** | **up to 6.4e-04** |
+
+`ShapeFix_Shape` is the only one that fixes all four and is **not safe as it
+stands**: 6.4e-04 relative area change is a real geometry change, and it
+rebuilds faces, which mints new edge objects on a shell `assemble` has already
+proven watertight — the exact mechanism behind the seam-split regression (G9).
+Using it would need the watertightness proof re-run afterwards, and a bound on
+what it is allowed to move.
+
+`BRepLib.SameParameter` is nearly free and nearly sufficient; the open question
+is what is different about the one face it does not fix
+(`residual_2`, the 0.435 mm^2 cylinder at `[2015.7, 88.1, 982.8]`). Establish
+that before choosing, rather than reaching for the bigger hammer — the same
+caution the three defects before this one each needed.
+
+### Individually invalid boundary faces from grazing trims — FIXED for 30 of 34
 
 **What's broken.** With the boundary-sew seam-split regression fixed (#13) and
 the pinhole wires fixed (see "Closed" below), the `cc=5, t=1` rehearsal of
@@ -423,20 +464,64 @@ stages each solid before and after `simplify` (`unify_i.brep`,
 unification**, so `simplify` is not implicated; the other 13 solids are valid at
 every stage.
 
-**What is not yet known.** *Which* OCCT check each face fails. Per-subshape
-fault codes could not be read out through OCP: `BRepCheck_Analyzer.Result(sub)`
-followed by either `StatusOnShape(sub)` or `Status()` reports nothing even on
-deliberately broken control solids, so that route is a dead end as written and
-whoever picks this up should not spend time re-deriving it. `IsValid()` on a
-single face *does* work and is what produced the numbers above. Reaching the
-fault code likely means the context iterator
-(`InitContextIterator`/`MoreShapeInContext`/`StatusOnShape`), or dumping one
-offending face to `.brep` and inspecting it in isolation — 34 faces is few
-enough to look at individually, and two of them are staged in the failed run's
-temp folder coordinates above.
+**Root cause — measured 2026-08-17 by dumping the faces and inspecting them
+alone.** Four of the 34 were written out of `unify_0.brep` and examined:
+
+* **It is 17 bad *edges*, not 34 bad faces.** Each invalid face has exactly one
+  individually invalid edge, and the faces come in pairs because the two faces
+  of a pair *share that edge* — verified by identical endpoints. 17 edges x 2
+  owning faces = the 34.
+* **The edges are ordinary**, not debris: spans of 0.183 mm and 0.356 mm, real
+  3D curves (`Geom_Ellipse`, `Geom_BSplineCurve`), pcurves present, not
+  degenerate. Every face-level check passes — `IntersectWires`,
+  `ClassifyWires`, `OrientationOfWires`, wire closure and orientation are all
+  `BRepCheck_NoError`, on planar, cylindrical and B-spline faces alike.
+* **The fault is a vertex sitting off its edge's curve.** For each bad edge,
+  one vertex is off the 3D curve by 2.474044e-05 mm (the ellipse) and
+  3.316370e-04 mm (the B-spline) — and that vertex's tolerance has been
+  inflated to *exactly* that distance. The validity test therefore sits on the
+  knife edge and falls the wrong way.
+* **It is not created by the trim.** Every trimmed junction around both sample
+  locations comes out of `trim_junction` with zero invalid faces and zero
+  invalid edges. The fault appears later, so the boundary **sew** is what
+  introduces it — consistent with `BRepBuilderAPI_Sewing` rebuilding edges.
+  **The repair therefore belongs after sewing, not in the worker** beside the
+  pinhole repair.
+
+**Candidate fix, measured on all four dumped faces.** Correcting the recorded
+tolerance is the mildest possible repair — it moves no geometry, and surface
+area is unchanged to 0.000e+00 in every case:
+
+| repair | result |
+|---|---|
+| `BRepLib.UpdateTolerances_s(shape, True)` | fixes 3 of 4 — **fails on the B-spline face**, so not reliable |
+| **`ShapeFix_Edge().FixVertexTolerance(edge, face)`** | **fixes all 4**, zero area drift |
+| widening the offending vertex by 1 % | fixes all 4, zero area drift |
+
+`FixVertexTolerance` is OCCT's own tool for exactly this fault and is the
+recommended starting point. What still needs deciding is **where** it runs (on
+each component's sewn boundary, before `assemble`, is the natural place) and
+what guards it: per docs/algorithm.md §11 a repair must be bounded, and the
+bound here is that no geometry moves — surface area and volume unchanged, which
+the measurements above show is achievable exactly rather than approximately.
+
+Note also that a downstream consumer may care: the fix leaves a vertex whose
+tolerance is ~3e-04 mm, which is large next to `WELD_TOL` (1e-6) though still
+far below the 0.4 mm minimum feature. Worth confirming the exported STEP still
+satisfies `tools/e2e.py`'s checks and opens cleanly.
+
+**Diagnostic notes, so they are not re-derived.** Per-subshape fault codes are
+**not** reachable through OCP: `BRepCheck_Analyzer.Result(sub)` followed by
+either `StatusOnShape(sub)` or `Status()` reports nothing *even on deliberately
+broken control solids*, and `BRepCheck_Edge`/`BRepCheck_Vertex` status lists
+stay empty after `Minimum()` and `InContext()` too. What does work:
+`BRepCheck_Analyzer(sub).IsValid()` on a lone face, edge or vertex (a plain
+boolean), `BRepCheck_Face`'s named checks, and measuring the vertex-to-curve
+distance directly. Always run a probe against a known-bad control before
+trusting a negative result — a blind scan reporting "no faults" cost time here.
 
 **How to verify a fix.** Run the rehearsal
-(`-i test/TD_HX_Indre_Volum.step -cc 5 -t 1 --cores 6 --ram 20 -v`, ~50 min);
+(`-i test/TD_HX_rehearsal_test.step -cc 5 -t 1 --cores 6 --ram 20 -v`, ~50 min);
 `validate` must pass all 14 solids and the run must write its STEP. `python -m
 pytest test -q` and `python tools/e2e.py` must stay green (0 mm³ against both
 golden samples) — the committed scenarios contain no grazing trims this severe,

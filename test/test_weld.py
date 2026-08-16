@@ -259,11 +259,21 @@ def test_tiled_and_untiled_sew_produce_the_same_watertight_result(template):
     pieces = _line_pieces(lp, tpl, 10)
     groups = [0] * len(pieces)
 
-    tiled, tiled_stats = weld.sew_boundary(pieces, groups, tile_target=2, min_to_tile=1)
-    plain, plain_stats = weld.sew_boundary(pieces, groups, tile_target=10**9, min_to_tile=10**9)
+    # A closed chain adopts no interior interfaces of its own, so the correctly
+    # sewn result has zero free edges either way — an empty ``want_rings`` states
+    # that expectation and lets the round-2 verification run without spuriously
+    # triggering the repair path on a sound split.
+    tiled, tiled_stats = weld.sew_boundary(
+        pieces, groups, tile_target=2, min_to_tile=1, want_rings={}
+    )
+    plain, plain_stats = weld.sew_boundary(
+        pieces, groups, tile_target=10**9, min_to_tile=10**9, want_rings={}
+    )
 
     assert tiled_stats.tiles > 1 and tiled_stats.tiled_components == 1
     assert plain_stats.tiles == 0 and plain_stats.tiled_components == 0
+    assert tiled_stats.repaired_components == 0, "a correct split must not be redone"
+    assert plain_stats.repaired_components == 0, "an untiled component is never checked"
 
     assert len(tiled[0]) == len(plain[0]), "sewing merges topology, never faces"
     for faces, stats in ((tiled[0], tiled_stats), (plain[0], plain_stats)):
@@ -336,7 +346,7 @@ def test_seam_only_round_two_matches_a_full_round_two(template):
     by_group = {0: pieces}
 
     baseline = weld._sew_faces(tile_results[0], weld.SEW_TOLERANCE)
-    seam_only, _max_rss = weld._sew_round_two(
+    seam_only, _max_rss, _repaired = weld._sew_round_two(
         by_group, plan, tile_results, weld.SEW_TOLERANCE, workers=1, tmpdir=None,
         pool=None,
     )
@@ -348,6 +358,60 @@ def test_seam_only_round_two_matches_a_full_round_two(template):
     seam_only_volume = occ.volume(occ.make_solid(shell_of(seam_only[0])))
     assert seam_only_volume == pytest.approx(baseline_volume, rel=1e-9)
     assert seam_only_volume == pytest.approx(16 * tpl.volume, rel=1e-9)
+
+
+def test_round_two_repairs_a_component_the_seam_split_got_wrong(template, monkeypatch):
+    """The safety net a production regression showed the split needed.
+
+    `_split_seam_interior`'s argument — that sewing the seam-only subset in
+    isolation reproduces exactly what a full round 2 would have done — held at
+    every prototype scale tried (G8), all of them on lightly trimmed junctions,
+    but not on the real, heavily trimmed geometry of the `cc=5, t=1` production
+    rehearsal (docs/specification.md §10): there, `BRepBuilderAPI_Sewing` could
+    rebuild a "straddling" edge shared with a carried-through face onto a new
+    `TopoDS_Edge`, leaving 118,760 open edges at `assemble` where 10 were
+    expected. A setup this small cannot reproduce that OCCT behaviour directly
+    (no prototype scale has) — so the split is monkeypatched to drop one seam
+    face, standing in for "the split silently produced a wrong result", and the
+    fix is verified by its symptom: a wrong free-edge count is caught against
+    ``want_rings`` and that component is redone on the unsplit tile results,
+    ending up fully closed regardless.
+    """
+    lp, tpl, _ = template
+    pieces = _line_pieces(lp, tpl, 12)
+    groups = [0] * len(pieces)
+
+    real_split = weld._split_seam_interior
+    called = []
+
+    def broken_split(face_lists):
+        seam, interior = real_split(face_lists)
+        called.append(1)
+        if len(called) == 1:
+            # Drop one seam face from its tile's list -- an incomplete split,
+            # standing in for the real defect's edge substitution. The dropped
+            # face is neither sewn nor carried, so the seam-only result alone
+            # would come back with extra free edges where it used to border.
+            for i, group_faces in enumerate(seam):
+                if group_faces:
+                    seam = list(seam)
+                    seam[i] = group_faces[1:]
+                    break
+        return seam, interior
+
+    monkeypatch.setattr(weld, "_split_seam_interior", broken_split)
+
+    # A closed chain (both ends capped) adopts no interior interfaces, so the
+    # correct free-edge count for this component is zero.
+    out, stats = weld.sew_boundary(
+        pieces, groups, tile_target=3, min_to_tile=1, want_rings={}
+    )
+
+    assert stats.repaired_components == 1, "the broken split must be caught and redone"
+    open_edges, misoriented, *_ = weld.shell_defects(shell_of(out[0]))
+    assert (open_edges, misoriented) == (0, 0), "the repaired component must still close"
+    solid = occ.make_solid(shell_of(out[0]))
+    assert occ.volume(solid) == pytest.approx(12 * tpl.volume, rel=1e-9)
 
 
 def test_tiled_sew_across_worker_processes_matches_the_sequential_path(template, tmp_path):

@@ -275,7 +275,7 @@ def _run_with_pool(
         boundary_faces, sew_stats = weld.sew_boundary(
             kept.pieces, kept.piece_groups,
             workers=args.workers, tmpdir=tmpdir,
-            pool=pool,
+            pool=pool, want_rings=want_rings,
         )
         rings = weld.interface_rings(lp, tmesh, boundary_faces, want_rings)
     if sew_stats.max_worker_rss:
@@ -297,9 +297,18 @@ def _run_with_pool(
         )
         + f"; {len(rings)} interface ring(s) located"
     )
+    if sew_stats.repaired_components:
+        rl.always(
+            f"note: {sew_stats.repaired_components} tiled component(s)' boundary-sew "
+            f"round 2 (docs/algorithm.md §8) left a free-edge count other than its "
+            f"interior interfaces after the seam-only split and were redone with a "
+            f"full unsplit sew; the output is unaffected, only slower for those "
+            f"components."
+        )
     stats["interior_interfaces"] = len(rings)
     stats["stitch_tiles"] = sew_stats.tiles
     stats["stitch_tiled_components"] = sew_stats.tiled_components
+    stats["stitch_repaired_components"] = sew_stats.repaired_components
 
     with Timer(rl, "instance"):
         interior = build_interior_shell(

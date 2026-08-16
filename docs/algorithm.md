@@ -741,6 +741,34 @@ free-edge subset only 13–14 % of a tile's faces at both. `weld._split_seam_int
 implements the split; `test_weld.py` pins the identity as a permanent
 regression, not just a one-off measurement.
 
+**That identity held at every scale G8 tried and failed at production scale,
+and the gap is now closed by a checked fallback, not by argument.** G8's
+junctions were all lightly trimmed (a box far larger than the chain). Run on
+the `cc=5, t=1` rehearsal's real, heavily trimmed pieces, the split produced
+**118,760** open edges at `assemble` where 10 were expected — effectively
+every free edge in the part, not a handful (docs/specification.md §10,
+memory `rehearsal-assemble-failure-is-not-debris`). The mechanism: a seam
+face can share an edge with a face the split carries through unchanged (a
+"straddling" edge — free within the seam-only subset even though the full
+tile uses it twice, since 144–720 such edges were measured in every
+prototype block tried once the check for them existed), and sewing that
+subset without its carried neighbour present lets `BRepBuilderAPI_Sewing`
+rebuild the edge onto a new `TopoDS_Edge` while the carried face keeps the
+original — one shared edge becomes two, each used once. `_split_seam_interior`
+itself is unchanged by this; the guarantee needed is downstream, in
+`_sew_round_two`. Every interior interface a correctly sewn boundary layer
+presents is the whole template cap quad — four edges, by §5.3(b) — and every
+other cap a boundary piece carries stays a closed face rather than a free
+edge (§7.1), so a component's total free-edge count after round 2 must equal
+exactly `4 × its interior interfaces`, never more and never less. `weld.
+sew_boundary` now takes the same `want_rings` its caller already computes for
+`interface_rings`, turns it into that per-component count, and checks it
+after round 2; a component whose count is wrong is redone on the unsplit
+tile results (the behaviour before the split existed) rather than allowed
+into `assemble`. `SewStats.repaired_components` reports how many times this
+fires, logged in the run summary; it is 0 on every committed scenario, since
+none is large enough to tile (`MIN_PIECES_TO_TILE`) in the first place.
+
 **A hierarchical tree reduction was considered for round 2 itself — sewing
 tile results together pairwise across levels instead of in one call — and
 rejected on paper, without being built.** G6 already showed round 2's cost
@@ -1027,7 +1055,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
-| Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; measured identical to a full round 2 face-for-face and to machine-precision volume (§8, G8) |
+| Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; identical to a full round 2 at every prototype scale tried (§8, G8), but not on real, heavily trimmed production geometry (§8) — a per-component free-edge check against `want_rings` catches and repairs the mismatch there, at the cost of the saving only for the repaired components |
 | One shared `WorkerPool` for the whole run | `spawn`'s process-creation cost is paid once per run rather than once per stage; boundary trim, boundary-sew round 1, boundary-sew round 2, unification and validation all dispatch through it (§8, §9, `latticegen2.parallel`) |
 | Same-domain unification and validity across the shared pool | Both were measured single-threaded at 24 % (17 m 17 s) and 4 % (2 m 59 s) of the `cc=5, t=1` rehearsal; G7 measured OCP holding the GIL around both calls, so this is the same process-pool-plus-`.brep` mechanism the rest of the pipeline uses, not threads (§9, specification.md §10 paths 1 and 4) |
 | Same-domain unification before export (§9) | Recovers the face merging the removed boolean used to do for free: 47% fewer faces and half the file size, and it makes the run *faster* by shrinking export |

@@ -383,6 +383,22 @@ is expected and harmless (algorithm.md §9, §11).
 
 ### Micron-scale debris edges from near-tangential trims
 
+**Status, verified 2026-08-16.** A separate regression in boundary-sew round 2's
+seam-only split (`weld._split_seam_interior`, chapter 10 optimization path 3)
+briefly made this section describe stale behaviour: with the regression present,
+`assemble` failed with **118,760** open edges on this rehearsal, not the 2 this
+section documents — five orders of magnitude off, and never caught earlier
+because both chapter-10 rehearsals bypassed the `assemble` gate to measure the
+stages after it (see "Scale rehearsal, chapter closed" above). That regression
+is now fixed: `weld.sew_boundary` checks each component's post-round-2 free-edge
+count against the interior interfaces it must present (`want_rings`) and redoes
+any component the seam-only split got wrong on the unsplit tile results, logged
+as `SewStats.repaired_components`. Full account and the controlled before/after
+measurement in `tools/prototypes/RESULTS.md` G9. A fresh rehearsal on this same
+part after the fix reproduces exactly the failure this section documents below —
+2 edges, same positions, same precision — confirming it is once again the
+*only* known defect standing between this rehearsal and a watertight output.
+
 **What's broken.** The rehearsal fails in `assemble`: 2 edges are used by exactly
 one face, so the every-edge-twice proof (docs/algorithm.md §8) rejects the shell.
 Both are in component 0, at `[1874.836, 60.370, 970.121]` and

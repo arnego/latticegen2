@@ -261,7 +261,7 @@ def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape,
     an extra **inner wire** made of a single edge a few microns long whose two
     endpoints do not even meet — a pinhole. It encloses nothing, but it is a
     wire, so the edge is used once and :func:`latticegen2.weld.shell_defects`
-    rejects the shell for it. Measured on `TD_HX_Indre_Volum` at ``cc=5, t=1``:
+    rejects the shell for it. Measured on `TD_HX_rehearsal_test` at ``cc=5, t=1``:
     two of them, 3.171690e-06 and 5.808982e-06 mm, on planar faces of 1.19 and
     1.25 mm², in a solid ``BRepCheck_Analyzer`` calls valid. See
     docs/algorithm.md §7 and ``tools/prototypes/RESULTS.md`` G10.

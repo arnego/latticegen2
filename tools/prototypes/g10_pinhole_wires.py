@@ -54,7 +54,7 @@ from latticegen2.lattice import lattice_params, node as lattice_node
 
 CC, T = 5.0, 1.0
 NODE = (591, -46, -70)
-INPUT = "test/TD_HX_Indre_Volum.step"
+INPUT = "test/TD_HX_rehearsal_test.step"
 
 occ.quiet_kernel()
 lp = lattice_params(CC, T)

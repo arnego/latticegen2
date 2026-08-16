@@ -78,7 +78,7 @@ PINHOLE_WIRE_TOL = 3e-5
 """Millimetres. An inner wire whose every edge is shorter than this, and whose
 edges are already unpaired, bounds no area and is removed (docs/algorithm.md §7).
 
-The two the `TD_HX_Indre_Volum` rehearsal leaves at `cc=5, t=1` are 3.171690e-06
+The two the `TD_HX_rehearsal_test` rehearsal leaves at `cc=5, t=1` are 3.171690e-06
 and 5.808982e-06 mm, so this sits ~5x above the largest of them. It does not
 need the wide margin a length threshold usually would, because length is not
 what makes a wire removable here: :func:`latticegen2.occ.remove_pinhole_wires`

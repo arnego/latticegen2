@@ -571,8 +571,8 @@ complete parameter reference.
   and deliberately left behind after a failure, for analysis.
 * **The bundle directory itself can be read-only** once set up, including on a
   network share — output goes wherever `-o` points.
-* Use `-bg` to run at below-normal priority if you want to keep working on the
-  machine meanwhile.
+* **Every run executes at below-normal process priority**, so you can keep
+  working on the machine meanwhile. Use `--cores` to hold back further.
 * Exit codes are documented in `docs/algorithm.md` §10. Every failure prints one
   human-readable reason line.
 {'' if flavour == 'wheels' else '''

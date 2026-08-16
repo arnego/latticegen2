@@ -34,10 +34,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED: {exc}", file=sys.stderr)
         return exc.exit_code
 
-    if args.background:
-        from .parallel import set_background_priority
+    # Unconditional, and here rather than in `parse_args`, so a run rejected for
+    # a bad parameter never touches this process's scheduling at all. Each
+    # worker sets its own once, from the pool initializer.
+    from .parallel import set_background_priority
 
-        set_background_priority()
+    set_background_priority()
 
     from .pipeline import run_pipeline
 

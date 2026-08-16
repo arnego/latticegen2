@@ -40,7 +40,7 @@ Run data from the script including:
   Each release also publishes `SHA256SUMS.txt` for verification after transfer. Every asset is extracted and run end-to-end by a CI smoke gate before publication. Procedure: [release.md](release.md). Bundle contents are `git archive`-derived, so they contain committed files only, filtered by `.gitattributes`.
 - **No single-file standalone executable is produced.** PyInstaller was evaluated and rejected: `boundary.py` uses `multiprocessing` with the `spawn` start method and the codebase has no `freeze_support()` call, which on Windows makes a frozen build re-launch its own launcher; OCP/OCCT is awkward to freeze (hidden imports, DLL discovery); and freezing dissolves the LGPL-2.1 relinking argument in [licenses/libraries.md](../licenses/libraries.md), which depends on OCCT remaining a stock, replaceable shared library. The portable bundle delivers the same "extract and run" property without those costs.
 - **Target machine specs / limits:** Main development system: 32 GB RAM, 6 core CPU, Nvidia RTX 3080 GPU, disk space for intermediate files.
-RAM and CPU cores may optionally be provided as input parameters. They are *hints* rather than a mandatory pair: without them the worker count is derived from the machine, since boundary-junction jobs are constant-size and independent.
+RAM and CPU cores may optionally be provided as input parameters, as *budgets* rather than a mandatory pair. Without `--cores` the worker count is the machine's logical core count, since boundary-junction jobs are constant-size and independent; without `--ram` the budget is the memory free at startup. See §3.
 - **Allowed third-party libraries:** Must be compatible with the target OS/arch. License text must be obtained and put into /licenses folder, and @/licenses/libraries.md must be updated with the cross reference between the library used and the corresponding license text file valid for that library.
 - **License constraints:** TBD
 
@@ -58,15 +58,22 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | -o --output | path | optional | NA | NA | `<input_stem>-cc<cc>t<t>.step` | Path and name of the output .step file. Must name a **file**, not a directory: `-o .\` and friends are rejected (exit 2) rather than turned into `.\.step`. `.step` is appended if absent. |
 | -cc | float | required | mm | 0.4 - 50 | NA | Distance between the bottom nodes of two adjacent cells |
 | -t | float | required  | mm | 0.4 - 20 | NA | Side length of the diamond rod profile. Must be smaller than the cell edge `a = cc/√2`; that is the only cross-constraint. |
-| -bg --background | flag | optional | NA | NA | disabled | Run at below-normal priority to reduce desktop impact |
 | -v --verbose | flag | optional | NA | NA | disabled | Enable verbose console diagnostics while always writing a full `.log` file. |
-| --cores | int | optional | count | 1 - 128 | detected | Physical CPU cores available; `--workers` is derived from it as `min(cores, 8)` — one worker per core, since the master is blocked waiting on results for effectively the whole boundary stage. |
-| --ram | float | optional | GB | 1 - 1024 | NA | Memory budget. Advisory: recorded in the run log. |
-| --workers | int | optional | count | 1 - 128 | from `--cores`, else from the machine | Parallel worker processes for the boundary-junction stage. Overrides `--cores`. |
+| --cores | int | optional | count | 1 - 128 | logical cores on the machine | Maximum CPU cores this run may use. One worker process per core, honoured exactly — the master needs none reserved for it, being blocked waiting on results for effectively the whole boundary stage. Since workers always run at below-normal priority, this exists to further protect the response time of the system for other tasks. |
+| --ram | float | optional | GB | 1 - total physical RAM detected | free RAM at startup | Maximum memory this run may use. May be set above or below what is currently free, but never above the machine's total physical RAM. Advisory: recorded in the run log next to the measured peak. |
 
-The optimization parameters are hints, not a mandatory pair: an explicit
-`--workers` overrides everything, `--cores` derives it, and with neither given it
-follows from the machine.
+Both are optional **budgets** rather than a mandatory pair, and both resolve to a
+concrete figure either way: an explicit value is honoured exactly, and an omitted
+one is taken from the machine — logical core count for `--cores`, free memory at
+startup for `--ram`. Detection lives in
+[`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py).
+
+**Process priority is not a parameter.** Every run — master and every worker —
+executes at below-normal priority so the machine stays usable for other work.
+This was the opt-in `-bg` flag through v2.x; it is unconditional now, since a
+choice whose only alternative is "make the desktop unusable" is not worth
+offering. Implemented by `latticegen2.parallel.set_background_priority`, called
+once in `__main__` and once per worker from the pool initializer.
 
 **Exit:** 
 
@@ -163,9 +170,9 @@ All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
 
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
-| smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | generation < 10 minutes. **Measured: 6.4 s.** |
-| smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 -bg | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
-| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 -bg | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
+| smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | generation < 10 minutes. **Measured: 6.4 s.** |
+| smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
+| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
 ### 6.2 Automated pass/fail checks

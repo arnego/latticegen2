@@ -142,7 +142,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     # `CancelledError` after the pool tears its workers down (docs/algorithm.md
     # §10) — `Pool.__exit__` terminates unconditionally, so it does not matter
     # that no real exception info is threaded through this `finally`.
-    pool = WorkerPool(args.workers, args.background)
+    pool = WorkerPool(args.workers)
     pool.__enter__()
     try:
         return _run_with_pool(
@@ -187,7 +187,7 @@ def _run_with_pool(
 
         boundary = trim_boundary(
             lp, tpl, boundary_nodes, body, body_path, tmpdir,
-            workers=args.workers, background=args.background, progress=progress,
+            workers=args.workers, progress=progress,
             pool=pool,
         )
     rl.line(
@@ -274,7 +274,7 @@ def _run_with_pool(
     with Timer(rl, "stitch"):
         boundary_faces, sew_stats = weld.sew_boundary(
             kept.pieces, kept.piece_groups,
-            workers=args.workers, tmpdir=tmpdir, background=args.background,
+            workers=args.workers, tmpdir=tmpdir,
             pool=pool,
         )
         rings = weld.interface_rings(lp, tmesh, boundary_faces, want_rings)

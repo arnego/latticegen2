@@ -27,7 +27,9 @@ Before implementing features, establish:
     **OCP** bindings (`cadquery-ocp` wheels, which bundle the OCCT binaries).
     Used for STEP I/O, B-rep primitive construction, the single junction fuse,
     per-junction intersection, sewing, meshing, and `BRepCheck_Analyzer` validity
-    checking. **NumPy** is the only other dependency. License texts live in
+    checking. **NumPy** (array maths) and **psutil** (machine resource detection
+    for the `--cores`/`--ram` budgets, `src/latticegen2/sysinfo.py`) are the only
+    other dependencies. License texts live in
     `licenses/`, cross-referenced in `licenses/libraries.md`. See
     [docs/algorithm.md](docs/algorithm.md) for how the kernel is used in the
     pipeline, and note that the design deliberately keeps boolean operations off

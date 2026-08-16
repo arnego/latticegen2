@@ -124,11 +124,14 @@ def report(csv_path: str, log_path: str, cores: int) -> int:
 
         # A long stage that never used more than about one core is where
         # parallelism would actually pay. Weight by the time it could recover.
+        # `cores` directly, not `min(cores, 8)`: this used to mirror the worker
+        # count's cap at 8, and that cap is gone — one worker per core, honoured
+        # exactly (docs/specification.md §3).
         if seconds >= 60 and cores_used < 1.35:
-            recoverable = seconds * (1 - 1 / min(cores, 8))
+            recoverable = seconds * (1 - 1 / cores)
             findings.append((recoverable, (
                 f"{name}: {seconds:,.0f}s at {cores_used:.2f} cores "
-                f"(single-threaded). Perfect {min(cores, 8)}-way parallelism would "
+                f"(single-threaded). Perfect {cores}-way parallelism would "
                 f"recover up to ~{recoverable:,.0f}s.")))
         window_start = end
 

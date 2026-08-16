@@ -1,8 +1,16 @@
 """Command-line surface (specification.md §3).
 
-``--workers``, ``--cores`` and ``--ram`` are optional hints. Boundary-junction
-jobs are constant-size and independent, so a sensible worker count follows from
-the machine; an explicit ``--workers`` overrides everything.
+``--cores`` and ``--ram`` are optional *budgets* — ceilings on what a run may
+use, not hints it may exceed. Both resolve to a concrete number either way:
+``--cores`` to the worker count for every parallel stage, defaulting to this
+machine's logical cores; ``--ram`` to a memory budget, defaulting to what is
+actually free at startup and capped at what the machine physically has. The
+detection behind both defaults lives in :mod:`latticegen2.sysinfo`.
+
+Every run executes at below-normal process priority, master and workers alike.
+That used to be the opt-in ``-bg`` flag; it is unconditional now, because a run
+that leaves the machine usable is what a user wants in every case that was ever
+worth choosing between.
 
 A hand-rolled parser is used rather than ``argparse`` so that ``-cc`` and ``-t``
 can keep their single-dash spelling, which ``argparse`` would treat as clusters
@@ -14,6 +22,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from . import sysinfo
 from .errors import InputGeometryError, OutputError, ParamError
 from .lattice import format_param
 
@@ -31,15 +40,16 @@ Required:
 
 Optional:
   -o, --output <path>   Output .step path (default: <input_stem>-cc<cc>t<t>.step)
-  --workers <n>         Worker processes for the boundary stage (1-128).
-                        Default: derived from --cores, else from this machine.
-  --cores <n>           Physical cores available (1-128); --workers defaults to
-                        one per core, capped at 8
-  --ram <GB>            Memory budget (1-1024). Advisory: recorded in the run
-                        log next to the run's measured peak memory.
-  -bg, --background     Run at below-normal process priority
+  --cores <n>           Maximum cores to use (1-128), one worker process per
+                        core. Default: this machine's logical core count.
+  --ram <GB>            Memory budget, from 1 GB up to this machine's total
+                        physical RAM. Default: RAM free at startup. Advisory:
+                        recorded in the run log next to the measured peak.
   -v, --verbose         Verbose console output (a full .log is always written)
   -h, --help            Show this message and exit
+
+Every run executes at below-normal process priority so the machine stays
+usable for other work.
 """
 
 
@@ -53,16 +63,28 @@ class Args:
     cc: float
     t: float
     workers: int
-    background: bool
     verbose: bool
     cores: int | None
-    ram: float | None
-    """Memory budget in GB, or ``None``.
+    """Core budget as the user gave it, or ``None`` if they did not.
 
-    Advisory only. There is no tile-sizing calculation left for it to feed and no
-    memory watchdog — the distributed assembly stage that needed backpressure does
-    not exist in this architecture. It is recorded in the run log so a run's
-    measured peak can be read against the budget it was given.
+    Kept alongside the resolved :attr:`workers` rather than replaced by it, so
+    the log can distinguish a run that was *told* to use six cores from one that
+    happened to detect six.
+    """
+    ram: float | None
+    """Memory budget in GB as the user gave it, or ``None`` if they did not.
+
+    Same distinction as :attr:`cores`, against the resolved
+    :attr:`ram_budget_gb`.
+    """
+    ram_budget_gb: float
+    """The memory budget actually in force, in GB — never ``None``.
+
+    Advisory in the sense that nothing enforces it: there is no tile-sizing
+    calculation left for it to feed and no memory watchdog, since the
+    distributed assembly stage that needed backpressure does not exist in this
+    architecture. It is recorded in the run log so a run's measured peak can be
+    read against the budget it was given.
     """
 
     def as_dict(self) -> dict:
@@ -74,8 +96,10 @@ class Args:
             "t": f"{format_param(self.t)} mm",
             "workers": self.workers,
             "cores": self.cores if self.cores is not None else "auto",
-            "ram": f"{self.ram} GB" if self.ram is not None else "unspecified",
-            "background": self.background,
+            "ram": (
+                f"{self.ram_budget_gb:.1f} GB"
+                + ("" if self.ram is not None else " (free at startup)")
+            ),
         }
 
 
@@ -110,29 +134,35 @@ def _in_range(flag: str, v: float, lo: float, hi: float) -> float:
 
 
 def default_workers(cores: int | None) -> int:
-    """Worker count from an explicit core count, else from this machine.
+    """Worker count from the core budget, else from this machine.
 
-    **One worker per core.** The master does not need one reserved for it: for
-    all but a percent or so of the boundary stage it is blocked in ``Pool.imap``
-    waiting on results, and the work it does between batches — deserialising each
-    batch's ``.brep`` — is serial whether or not a core is held back for it.
-    Measured on the scale rehearsal's own output: reading all 151 MB of its
-    boundary ``.brep`` files takes 7.0 s against a 12 m 36 s boundary stage.
+    **One worker per core, uncapped.** ``--cores`` is a budget the user set
+    deliberately, so it is honoured exactly rather than second-guessed; with no
+    ``--cores`` the budget is the machine's own logical core count
+    (:func:`latticegen2.sysinfo.logical_core_count`).
 
-    Reserving a core cost a fifth of the throughput of this stage on a 6-core
-    machine to protect an idle process. Desktop impact is what ``-bg`` is for,
-    and it drops the master as well as the workers to below-normal priority.
+    The master does not need a core reserved for it: for all but a percent or so
+    of the boundary stage it is blocked in ``Pool.imap`` waiting on results, and
+    the work it does between batches — deserialising each batch's ``.brep`` — is
+    serial whether or not a core is held back for it. Measured on the scale
+    rehearsal's own output: reading all 151 MB of its boundary ``.brep`` files
+    takes 7.0 s against a 12 m 36 s boundary stage. Reserving one cost a fifth of
+    this stage's throughput on a 6-core machine to protect an idle process.
+    Desktop impact is handled instead by every process running at below-normal
+    priority, which is now unconditional.
 
     Memory scales linearly with this number — 260 MB peak per worker at rehearsal
     scale — so it stays a small fraction of the master's own footprint.
 
-    The cap at 8 is empirical: boundary jobs are short, so past that the pool's
-    own start-up and result-marshalling cost starts to dominate the work being
-    distributed.
+    An earlier revision capped this at 8, on the empirical ground that boundary
+    jobs are short enough for the pool's start-up and result-marshalling cost to
+    start dominating past that. The cap is gone: it silently contradicted an
+    explicit ``--cores``, and a budget the user has to guess is being ignored is
+    worse than one that costs a little throughput on a very wide machine.
     """
     if cores is None:
-        cores = os.cpu_count() or 2
-    return max(1, min(cores, 8))
+        cores = sysinfo.logical_core_count()
+    return max(1, cores)
 
 
 def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: float):
@@ -208,9 +238,8 @@ def parse_args(argv: list[str]) -> Args:
     out-of-range parameters are rejected before any computation starts.
     """
     input_path = output = None
-    cc = t = ram = None
-    workers = cores = None
-    background = verbose = False
+    cc = t = ram = cores = None
+    verbose = False
 
     i = 0
     while i < len(argv):
@@ -225,18 +254,12 @@ def parse_args(argv: list[str]) -> Args:
         elif a == "-t":
             v, i = _value(argv, i, a)
             t = _as_float(a, v)
-        elif a == "--workers":
-            v, i = _value(argv, i, a)
-            workers = _as_int(a, v)
         elif a == "--cores":
             v, i = _value(argv, i, a)
             cores = _as_int(a, v)
         elif a == "--ram":
             v, i = _value(argv, i, a)
             ram = _as_float(a, v)
-        elif a in ("-bg", "--background"):
-            background = True
-            i += 1
         elif a in ("-v", "--verbose"):
             verbose = True
             i += 1
@@ -254,12 +277,20 @@ def parse_args(argv: list[str]) -> Args:
 
     _in_range("-cc", cc, 0.4, 50.0)
     _in_range("-t", t, 0.4, 20.0)
-    if workers is not None:
-        _in_range("--workers", workers, 1, 128)
     if cores is not None:
         _in_range("--cores", cores, 1, 128)
+    # The ceiling is the machine's own RAM rather than a static literal: a budget
+    # above what physically exists is not a budget. The floor stays a plain
+    # sanity check. Reported with its own message rather than through
+    # `_in_range`, so the ceiling reads as the machine fact it is instead of as
+    # a raw float with fifteen digits of detection noise.
     if ram is not None:
-        _in_range("--ram", ram, 1.0, 1024.0)
+        total = sysinfo.total_ram_gb()
+        if ram < 1.0 or ram > total:
+            raise ParamError(
+                f"--ram = {ram} GB is out of the valid range [1.0, {total:.1f}] "
+                f"GB; the upper bound is this machine's total physical memory."
+            )
 
     a_edge = cc / (2.0 ** 0.5)
     if t >= a_edge:
@@ -279,11 +310,11 @@ def parse_args(argv: list[str]) -> Args:
         log_path=log_path,
         cc=cc,
         t=t,
-        workers=workers if workers is not None else default_workers(cores),
-        background=background,
+        workers=default_workers(cores),
         verbose=verbose,
         cores=cores,
         ram=ram,
+        ram_budget_gb=ram if ram is not None else sysinfo.free_ram_gb(),
     )
 
 

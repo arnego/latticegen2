@@ -3,7 +3,7 @@
 Required verification and testing procedures for this project. Test code and
 assets live in `test/`; the harnesses that drive whole runs live in `tools/`.
 
-All commands assume a Python 3.11+ interpreter with the two dependencies from
+All commands assume a Python 3.11+ interpreter with the dependencies from
 [../README.md](../README.md) installed. Set `LATTICEGEN2_PYTHON` if the
 interpreter you want is not the default `python`.
 
@@ -197,10 +197,13 @@ where parallelism would recover the most wall time. Core-equivalents is the
 number to look at: it is what shows that `boundary` uses the machine and nothing
 else does.
 
-`profile_run.py` needs `psutil`, which is a **development-only** dependency — it
-is not required by the tool, by `pytest` or by `e2e.py`, and `tools/` is
-`export-ignore`d so it never reaches a release bundle. The script says so plainly
-if it is missing.
+`profile_run.py` needs `psutil` for **sampling the process tree** — a different
+use from the tool's own, and worth not conflating. `psutil` is a runtime
+dependency of latticegen2 itself (`src/latticegen2/sysinfo.py` reads total and
+free physical memory for the `--ram` budget's ceiling and default), so it ships
+in every release bundle and is installed by any of README.md's routes. What is
+still development-only is `tools/` itself, which is `export-ignore`d and never
+reaches a bundle. The script says so plainly if `psutil` is missing anyway.
 
 The measurements behind the architecture's load-bearing choices (junction cap
 integrity, join-mechanism throughput, per-junction intersection latency, STEP

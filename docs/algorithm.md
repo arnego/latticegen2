@@ -921,8 +921,8 @@ program builds itself.
   `FAILED: unexpected ...` line and then re-raises, so a traceback follows and
   Python exits 1. From the launcher it means the tool never started, and it
   exists because that failure cannot be reported from inside Python at all. An
-  interpreter that cannot load `numpy` or `OCP` dies during import, before
-  `main()` runs — and when the cause is a native library it is not even an
+  interpreter that cannot load `numpy`, `psutil` or `OCP` dies during import,
+  before `main()` runs — and when the cause is a native library it is not even an
   exception: MKL prints
   `Intel oneMKL FATAL ERROR: Cannot load mkl_intel_thread.2.dll` and aborts the
   process, uncatchable by `except BaseException`. Worse, it exits **2**, which
@@ -937,11 +937,20 @@ program builds itself.
   What remains is what an interpreter that never started can produce: 1, 2, and
   the shell's own "cannot execute" codes.
 
-  If `import numpy, OCP.TopoDS` then also fails, the launcher says so, shows the
-  real error, names the interpreter it chose, and exits 1 instead of passing on a
-  code that would misattribute the failure to the pipeline. If the probe
-  succeeds, the child's own exit code goes through untouched and the launcher
-  stays silent.
+  If `import numpy, psutil, OCP.TopoDS` then also fails, the launcher says so,
+  shows the real error, names the interpreter it chose, and exits 1 instead of
+  passing on a code that would misattribute the failure to the pipeline. If the
+  probe succeeds, the child's own exit code goes through untouched and the
+  launcher stays silent.
+
+  **The probe has to name every dependency the package imports at module scope,
+  and that is a constraint on how they are imported.** `latticegen2.sysinfo`
+  imports `psutil` at the top, exactly as the geometry modules import `numpy` and
+  `OCP` — deferring it into the functions that use it would move the failure from
+  import time to use time, and the launcher's own message ("the tool never ran")
+  would then be false for the one dependency handled differently from the rest.
+  A dependency is either required to start or it is not; splitting that decision
+  per-module is what makes the diagnostic unreliable.
 * If a failure occurs after `temp/<ts>/` has been created it is left in place for
   post-mortem analysis (spec §4.4), and the message says where.
 
@@ -1057,7 +1066,8 @@ Alternatives evaluated and rejected:
 
 | Module | Implements |
 |---|---|
-| [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution |
+| [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores`/`--ram` budget resolution |
+| [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind those budgets: logical core count, total and free RAM (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
 | [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |

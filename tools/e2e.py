@@ -134,7 +134,7 @@ def scenario_smoke_fast(outdir: str) -> Report:
     print(f"=== {rep.name} ===", flush=True)
     out = os.path.join(outdir, "smoke-fast.step")
     proc, elapsed = run_generator(
-        ["-i", BALL, "-cc", "20", "-t", "4", "-o", out, "-bg", "--workers", "4"]
+        ["-i", BALL, "-cc", "20", "-t", "4", "-o", out, "--cores", "4"]
     )
     rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
     rep.check("runtime under 10 minutes", elapsed < 600, f"{elapsed:.1f}s")
@@ -148,7 +148,7 @@ def scenario_smoke_verified(outdir: str) -> Report:
     print(f"=== {rep.name} ===", flush=True)
     out = os.path.join(outdir, "smoke-verified.step")
     proc, elapsed = run_generator(
-        ["-i", BALL, "-cc", "20", "-t", "4", "-o", out, "-bg", "--workers", "4"]
+        ["-i", BALL, "-cc", "20", "-t", "4", "-o", out, "--cores", "4"]
     )
     rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
     rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
@@ -163,7 +163,7 @@ def scenario_dense_lattice(outdir: str) -> Report:
     print(f"=== {rep.name} ===", flush=True)
     out = os.path.join(outdir, "dense-lattice.step")
     proc, elapsed = run_generator(
-        ["-i", CYLINDER, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "6", "--ram", "20", "-bg"]
+        ["-i", CYLINDER, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "6", "--ram", "20"]
     )
     rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
     rep.check("runtime under 10 minutes", elapsed < 600, f"{elapsed:.1f}s")

@@ -8,7 +8,7 @@
 #   4. python3                  a plain checkout on a prepared machine
 #
 # The tool runs straight from this directory with no install step, so an offline
-# workstation needs either a release bundle or Python plus the two dependencies
+# workstation needs either a release bundle or Python plus the dependencies
 # listed in README.md.
 set -e
 DIR=$(cd "$(dirname "$0")" && pwd)
@@ -17,7 +17,7 @@ if [ -n "$LATTICEGEN2_PYTHON" ]; then
     PY="$LATTICEGEN2_PYTHON"
 elif [ -d "$DIR/runtime" ]; then
     # A portable bundle. Never fall through to a system interpreter from here:
-    # that one has no numpy or OCP, so the operator would get a confusing
+    # that one has none of the dependencies, so the operator would get a confusing
     # ModuleNotFoundError instead of the actual problem, which is almost always
     # an extraction that dropped the executable bit.
     PY="$DIR/runtime/bin/python3"
@@ -59,7 +59,7 @@ rc=$?
 case "$rc" in
     3|4|5|6|130) exit "$rc" ;;
 esac
-"$PY" -c "import numpy, OCP.TopoDS" >/dev/null 2>&1 && exit "$rc"
+"$PY" -c "import numpy, psutil, OCP.TopoDS" >/dev/null 2>&1 && exit "$rc"
 
 {
     echo
@@ -68,9 +68,10 @@ esac
     echo
     echo "  interpreter: $PY"
     echo
-    "$PY" -c "import numpy, OCP.TopoDS"
+    "$PY" -c "import numpy, psutil, OCP.TopoDS"
     echo
-    echo "  Point LATTICEGEN2_PYTHON at a Python 3.11+ that has numpy and cadquery-ocp:"
+    echo "  Point LATTICEGEN2_PYTHON at a Python 3.11+ that has numpy, psutil and"
+    echo "  cadquery-ocp:"
     echo "    export LATTICEGEN2_PYTHON=/path/to/python3"
     echo
     echo "  See README.md \"Installation\". A release bundle carries its own interpreter"

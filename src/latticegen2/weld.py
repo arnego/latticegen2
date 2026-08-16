@@ -355,9 +355,9 @@ def _worker_sew_tile(job):
     file path and a peak-RSS number cross the process boundary, never
     geometry. The input ``.brep`` is a compound of per-bundle compounds.
 
-    ``background`` priority is not part of this job tuple: it is set once per
-    worker process by :class:`latticegen2.parallel.WorkerPool`'s own
-    initializer rather than once per job.
+    Below-normal priority is not part of this job tuple: it is set once per
+    worker process by :class:`latticegen2.parallel.WorkerPool`'s own initializer
+    rather than once per job.
     """
     in_path, out_path, tolerance = job
     shape = _read_brep(in_path)
@@ -375,7 +375,6 @@ def _sew_all_tiles(
     tolerance: float,
     workers: int,
     tmpdir: str | None,
-    background: bool,
     pool: WorkerPool | None = None,
 ) -> tuple[dict[int, list[list]], int]:
     """Round 1 for every tiled component in ``plan``, in **one** worker pool.
@@ -440,7 +439,7 @@ def _sew_all_tiles(
 
     if pool is not None and pool.active:
         return _run(pool)
-    with WorkerPool(min(workers, len(jobs)), background) as owned:
+    with WorkerPool(min(workers, len(jobs))) as owned:
         return _run(owned)
 
 
@@ -512,7 +511,6 @@ def _sew_round_two(
     tolerance: float,
     workers: int,
     tmpdir: str | None,
-    background: bool,
     pool: WorkerPool | None,
 ) -> tuple[dict[int, list], int]:
     """Sew each component's round-1 result (or its own pieces, if untiled)
@@ -586,7 +584,7 @@ def _sew_round_two(
         return _run(pool)
     if workers <= 1:
         return _finish({g: _sew_faces(seam_face_lists[g], tolerance) for g in groups}), 0
-    with WorkerPool(min(workers, len(jobs)), background) as owned:
+    with WorkerPool(min(workers, len(jobs))) as owned:
         return _run(owned)
 
 
@@ -605,7 +603,6 @@ def sew_boundary(
     *,
     workers: int = 1,
     tmpdir: str | None = None,
-    background: bool = False,
     tile_target: int = TILE_TARGET_PIECES,
     min_to_tile: int = MIN_PIECES_TO_TILE,
     pool: WorkerPool | None = None,
@@ -654,9 +651,9 @@ def sew_boundary(
             stats.tiled_components += 1
             stats.tiles += len(tiles)
 
-    tile_results, max_rss1 = _sew_all_tiles(plan, SEW_TOLERANCE, workers, tmpdir, background, pool=pool)
+    tile_results, max_rss1 = _sew_all_tiles(plan, SEW_TOLERANCE, workers, tmpdir, pool=pool)
     out, max_rss2 = _sew_round_two(
-        by_group, plan, tile_results, SEW_TOLERANCE, workers, tmpdir, background, pool
+        by_group, plan, tile_results, SEW_TOLERANCE, workers, tmpdir, pool
     )
     stats.max_worker_rss = max(max_rss1, max_rss2)
     return out, stats

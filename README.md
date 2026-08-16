@@ -120,7 +120,7 @@ which on a machine with several environments is often not the prepared one:
 set LATTICEGEN2_PYTHON=C:\path\to\python.exe
 ```
 
-If that interpreter cannot load `numpy` and `OCP`, the launcher says so, shows
+If that interpreter cannot load `numpy`, `psutil` and `OCP`, the launcher says so, shows
 the underlying error and exits 1 — worth knowing because the failure happens
 during import, before the tool runs, so it is not otherwise distinguishable from
 latticegen2's own errors. A conda environment invoked without being activated is

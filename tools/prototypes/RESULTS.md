@@ -551,7 +551,7 @@ it is here, test against it directly; `test/test_boundary.py`'s pinhole tests do
 
 ---
 
-## G11 — vertices recorded off their edge's curve after sewing ✅ PARTIAL (30 of 34)
+## G11 — vertices recorded off their edge's curve after sewing ✅ 30 of 34 (rest in G12)
 
 With G10's pinhole repair in place the rehearsal assembles 14 watertight solids
 and then fails `validate`: 1 of 14 solids carries **34 individually invalid
@@ -605,8 +605,144 @@ against them: `FixVertexTolerance` and `FixSameParameter` fix none,
 `BRepLib.SameParameter` fixes 3 of 4 at <= 1.7e-09 drift, and
 `ShapeFix_Shape.Perform` fixes all 4 but moves geometry by up to **6.4e-04**
 relative area and rebuilds faces — which on an already-proven-watertight shell
-is the very mechanism behind G9's regression. Not adopted. See
-docs/specification.md §10 for the open item.
+is the very mechanism behind G9's regression. Not adopted.
 
-**PARTIAL**: the fault this gate names is fixed and bounded; the rehearsal
-still fails `validate` on the 4 faces carrying the contextual variant.
+**PARTIAL when written**: the fault this gate names is fixed and bounded, and
+the rehearsal still failed `validate` on the remaining 4.
+
+**Superseded by G12, which closes them** — and which found the "contextual
+pcurve against 3D curve" reading above to be **wrong**. The deviation it
+measures is real but is not what the analyzer rejects; the actual fault is a
+falsely self-intersecting wire. Read G12 before trusting the last paragraph of
+this section.
+
+---
+
+## G12 — the residual 4 faces are falsely self-intersecting wires ✅ FIXED
+
+G11 closed 30 of the 34 invalid faces and named the remaining 4 a *contextual*
+fault — "an edge invalid only in the context of its face, i.e. pcurve against
+3D curve". **That reading was wrong**, and it is the fourth diagnosis in this
+family to be wrong in a way that matched the symptom convincingly. The pcurve
+deviation is real, but it is not what `BRepCheck_Analyzer` is rejecting.
+
+Script: [`g12_self_intersecting_wire.py`](g12_self_intersecting_wire.py), run
+against the four faces lifted out of the failed run's `unify_0.brep`.
+
+### What the symptom looked like, and why it misled
+
+Measuring every edge's pcurve against its 3D curve does find something: on each
+of the four faces exactly one edge — always the fat-tolerance `Geom_BSplineCurve`
+the boolean fitted to the strut/input-surface intersection — deviates by
+**98–100 % of its own recorded tolerance**:
+
+| face | culprit edge tol | pcurve deviation | dev/tol |
+|---|---|---|---|
+| `residual_0` (B-spline surface) | 1.539546e-03 | 1.509950e-03 | 0.9808 |
+| `residual_1` (cylinder) | 8.741113e-04 | 8.639311e-04 | 0.9884 |
+| `residual_2` (cylinder) | 8.743809e-04 | 8.744186e-04 | **1.0000** |
+| `residual_3` (cylinder) | 8.744153e-04 | 8.744211e-04 | **1.0000** |
+
+That is the same knife-edge shape as G11's fault, on a different quantity, and
+it is exactly the sort of quantitative near-miss that reads as a root cause.
+Two measurements disprove it:
+
+* **Widening the culprit edge's tolerance fixes nothing** — not at 1.05x, and
+  not at 5x, on any of the four. A knife-edge fault would clear at 1.05x.
+* `BRepLib.SameParameter` **does** fix three of them, and on `residual_2` it
+  genuinely improves the deviation (8.744e-04 -> 8.296e-04) and lowers the
+  tolerance to match — and the face stays invalid. So the deviation is not the
+  thing being rejected.
+
+### The mechanism, established with a controlled probe
+
+`BRepCheck_Analyzer.IsValid(subshape)` — the subshape overload, which checks
+*in the context of* the analyzed shape, unlike a fresh analyzer on a lone
+subshape — points at the **wire**, on all four. The probe is controlled: it
+fires before the repair on all four and clears afterwards on the three
+`SameParameter` fixes, so a "found nothing" on `residual_2` could not have been
+the probe being blind (G10's lesson).
+
+`BRepCheck_Wire::InContext` runs three checks. `Closed` and `Orientation`
+return `BRepCheck_NoError`; the fault is **`BRepCheck_SelfIntersectingWire`**,
+reported for a pair of edges that is **adjacent in the wire** in every case —
+a short, tight-tolerance (1e-07 to 5e-06) trim edge against the fat-tolerance
+B-spline intersection edge.
+
+**It is not a real self-intersection.** The two pcurves cross at exactly one
+point, and that point lies *at the shared vertex, inside its tolerance*:
+
+| face | pair | intersections | dist to shared vertex | shared vertex tol |
+|---|---|---|---|---|
+| `residual_0` | e7 ↔ e8 | 1 point, 0 segments | 1.229058e-03 | 1.539646e-03 |
+| `residual_1` | e3 ↔ e4 | 1 point, 0 segments | 2.409343e-04 | 8.742113e-04 |
+| `residual_2` | e0 ↔ e5 | 1 point, 0 segments | 3.521887e-04 | 8.743809e-04 |
+| `residual_3` | e0 ↔ e4 | 1 point, 0 segments | 3.151464e-04 | 8.744153e-04 |
+
+The edges meet where they are supposed to. The shared vertex's recorded
+tolerance is simply left a little too tight for OCCT's check to swallow the
+crossing — the same *class* of fault as G11 (a tolerance recorded wrong, no
+geometry wrong), on a different quantity.
+
+### Which tolerance the check keys on
+
+Sweeping each candidate independently. `c` = check clean, `S` = still
+self-intersecting; `V` = face valid. No configuration moved any area.
+
+| target | x1.05 | x1.1 | x1.25 | x1.5 | x2 | x5 |
+|---|---|---|---|---|---|---|
+| `residual_0` shared vertex | cV | cV | cV | cV | cV | cV |
+| `residual_1` shared vertex | cV | cV | cV | cV | cV | cV |
+| `residual_2` shared vertex | S. | S. | **cV** | cV | cV | cV |
+| `residual_3` shared vertex | S. | **cV** | cV | cV | cV | cV |
+| *all four*, fat edge instead | S. | S. | S. | S. | S. | S. |
+
+The shared vertex is the knob; the fat edge is not, at any factor. **This also
+explains `residual_2`, which is what the whole investigation turned on:**
+`SameParameter` fixes a face only incidentally, by *raising* the culprit edge's
+tolerance to 1.05x its deviation, which propagates to the shared vertex. On
+`residual_1` and `residual_3` that raised the vertex tolerance (to 9.071e-04
+and 9.163e-04) and cleared the check as a side effect. On `residual_2` the
+re-fit *lowered* the edge tolerance instead, so the vertex was never widened
+and the check never cleared.
+
+### Repairs measured, on all four faces
+
+| repair | fixes | area drift | topology replaced |
+|---|---|---|---|
+| `ShapeFix_Wire.FixSelfIntersection` | 0 of 4 | 0.000e+00 | none — a no-op |
+| `BRepLib.SameParameter` | 3 of 4 — not `residual_2` | ≤ 1.7e-09 | none |
+| `ShapeFix_Shape.Perform` | 4 of 4 | up to **6.382e-04** | **2–3 edges/face** |
+| **widen the shared vertex** | **4 of 4** | **0.000e+00** | **none** |
+
+`ShapeFix_Wire.FixSelfIntersection` is the tool the fault's name points at and
+is a complete no-op here, at either of its modes — the fourth time in this
+family that OCCT's named repair for the named symptom does not touch the actual
+defect. `ShapeFix_Shape` works and is rejected on two independent grounds: it
+moves geometry, and it rebuilds faces, keeping only 6 of 9 and 4 of 6 edge
+objects. Minting new edges on a shell `assemble` has already proven watertight
+is precisely G9's regression mechanism.
+
+Widening the shared vertex is adopted. It is metadata-only, so surface area
+comes back **bit-identical** and every `TopoDS_Edge` and `TopoDS_Vertex` object
+survives — both asserted as permanent regressions in `test_weld.py`, the second
+being the property that makes this safe on a proven shell. It is also
+monotonically *permissive*: every check reading a vertex tolerance is a "within
+tolerance" test, so a neighbouring face sharing the vertex can only become more
+valid. Measured rather than argued — widening *every* vertex of each repaired
+face to 1e-01 mm, twenty-five times the repair's own absolute cap, leaves all
+four valid with area still bit-identical.
+
+`occ._widen_self_intersection_vertices` searches for the smallest widening that
+satisfies **OCCT's own predicate** — it asks `BRepCheck_Wire::SelfIntersect`
+rather than re-deriving the rule OCCT applies — bounded at
+`SELF_INTERSECT_TOL_GROWTH` (4x what the kernel itself recorded) and
+`SELF_INTERSECT_MAX_VERTEX_TOL` (4e-3 mm, a hundredfold below the CLI's
+smallest legal strut). Measured need is at most 1.25x / 1.093e-03 mm, so both
+bounds clear it comfortably; a face that exhausts them is left in
+`still_invalid` for `validate` to report, never widened without limit.
+
+`residual_2` and `residual_0` are committed as `test/self-intersecting-wire-
+{cylinder,bspline}.brep`. Both are kept for the same reason G11 kept two:
+they discriminate between the candidates — `SameParameter` fixes the B-spline
+one and not the cylinder one.

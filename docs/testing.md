@@ -34,7 +34,7 @@ header rewrite.
 | `test_connect.py` | The junction graph and the floating-body rule's three outcomes | no |
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
-| `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call | yes |
+| `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell | yes |
 | `test_boundary.py` | The symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7), tested against the **real** failing junction in `TD_HX_Indre_Volum.step` rather than a synthetic stand-in — see the note below | yes |
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6 | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
@@ -158,14 +158,36 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
 | test cylinder, `cc=10 t=1.5` | ~48 s | classify, simplify, boundary sew |
-| `TD_HX_rehearsal_test`, `cc=5 t=1` | 47.1 min, 19.6 GB peak, 2.11 GB output | boundary trim, simplify, validate, export |
+| `TD_HX_rehearsal_test`, `cc=5 t=1` | 58.3 min, 18.6 GB peak, 2.01 GB output | boundary trim, simplify, stitch, export |
 
-The third row is the scale rehearsal, run end to end on 2026-08-14 and
+The third row is the scale rehearsal, first run end to end on 2026-08-14,
 re-profiled on 2026-08-15 after implementing specification.md §10's paths 1–4
 (its full per-stage table, both dates side by side, and the honest result for
-each path are in [specification.md](specification.md) §10). What is worth
-knowing before doing performance work on this project at all, now that
-chapter is closed:
+each path are in [specification.md](specification.md) §10), and re-measured on
+2026-08-17 — the figures above — on the first run of this part to pass
+`validate` and write its STEP.
+
+**`stitch` grew from 1 m 13 s to 11 m 18 s between those two profiles, and
+almost all of it is the price of a correct result rather than new overhead.**
+The 08-15 figure was measured on a run whose round-2 seam-only split was
+silently producing a broken shell (118,760 open edges — docs/specification.md
+§10). With the free-edge check that catches that in place, this part's one
+tiled component fails it and is redone with a **full unsplit sew**, which the
+run reports as `stitch_repaired_components: 1` — exactly the documented
+fallback cost in docs/algorithm.md §8, "at the cost of the saving only for the
+repaired components". So the honest comparison is against the untiled round 2,
+not against 1 m 13 s. The per-face `BRepCheck_Analyzer` scan that
+`occ.fix_vertex_tolerances` (§8) added is the small remainder: measured at
+0.215 ms on real trimmed boundary faces, or **~1.1 min** across this part's
+301,505 of them.
+
+If this stage becomes the constraint, that ~1 min scan is the easy half (it is
+embarrassingly parallel and currently serial on the master); the 10-minute half
+means making the seam-only split correct on heavily trimmed geometry, which is
+a real piece of work, not a tuning knob.
+
+What is worth knowing before doing performance work on this project at all, now
+that the paths 1–4 chapter is closed:
 
 * **The `stitch` stage is no longer a top-3 cost.** Round 2's seam-only split
   (only sew the faces round 1 left with a free edge, carry the rest through

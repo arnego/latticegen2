@@ -514,3 +514,128 @@ def test_a_repair_that_moved_geometry_is_a_named_failure(monkeypatch):
     monkeypatch.setattr(occ, "area", lambda _shape: next(areas))
     with pytest.raises(ProcessingError, match="must move no geometry"):
         occ.fix_vertex_tolerances([face])
+
+
+# --- falsely self-intersecting wires (docs/algorithm.md §8) -----------------
+#
+# What the repair above leaves behind: a face whose edges and vertices are all
+# valid *standalone* and which passes every named face check, yet the analyzer
+# rejects. The fault is BRepCheck_SelfIntersectingWire, reported for two edges
+# adjacent in the wire — a tight-tolerance trim edge against the fat-tolerance
+# B-spline the boolean fitted to the strut/input-surface intersection. It is
+# not a real self-intersection: the two pcurves cross once, at the shared
+# vertex, inside its tolerance. The vertex tolerance is simply recorded a
+# little too tight to swallow the crossing.
+#
+# Both fixtures are the real faces from the cc=5, t=1 rehearsal, and both are
+# kept because they discriminate between candidate repairs: BRepLib's
+# SameParameter fixes the B-spline one and *not* the cylinder one, which is
+# why the fix widens the shared vertex instead (tools/prototypes/RESULTS.md
+# G12).
+
+SELF_INTERSECTING_FACES = ("self-intersecting-wire-cylinder.brep",
+                           "self-intersecting-wire-bspline.brep")
+
+
+@pytest.mark.parametrize("name", SELF_INTERSECTING_FACES)
+def test_the_self_intersecting_fixture_really_is_invalid(name):
+    """Guard on the guard, and on the *mechanism* rather than just the symptom:
+    a fixture that were invalid for some other reason would let the repair test
+    below pass while proving nothing about self-intersection."""
+    face = load_face(name)
+    assert not occ.is_valid(face)
+    # Invalid *only* contextually: nothing is wrong with any part on its own.
+    assert all(
+        occ.is_valid(e) for e in occ._explore(face, TopAbs_ShapeEnum.TopAbs_EDGE)
+    )
+    assert all(
+        occ.is_valid(v) for v in occ._explore(face, TopAbs_ShapeEnum.TopAbs_VERTEX)
+    )
+    pair = occ._self_intersecting_pair(face)
+    assert pair is not None, "the fault is a self-intersecting wire"
+    assert occ._shared_vertices(*pair), "the reported pair is adjacent in the wire"
+
+
+@pytest.mark.parametrize("name", SELF_INTERSECTING_FACES)
+def test_widening_the_shared_vertex_makes_the_face_valid(name):
+    face = load_face(name)
+    before = occ.area(face)
+
+    repaired, still_invalid = occ.fix_vertex_tolerances([face])
+
+    assert (repaired, still_invalid) == (1, 0)
+    assert occ.is_valid(face)
+    # Same bound as the repair above: a tolerance is metadata, so the area must
+    # be bit-identical rather than merely close.
+    assert occ.area(face) == before
+
+
+@pytest.mark.parametrize("name", SELF_INTERSECTING_FACES)
+def test_the_repair_replaces_no_topology(name):
+    """The property that makes this safe on an already-proven-watertight shell.
+    ShapeFix_Shape also fixes these faces, and is rejected precisely because it
+    mints new edge objects — the mechanism behind the seam-split regression."""
+    face = load_face(name)
+    before = {e.TShape() for e in occ._explore(face, TopAbs_ShapeEnum.TopAbs_EDGE)}
+    verts = {v.TShape() for v in occ._explore(face, TopAbs_ShapeEnum.TopAbs_VERTEX)}
+
+    occ.fix_vertex_tolerances([face])
+
+    assert {e.TShape() for e in occ._explore(face, TopAbs_ShapeEnum.TopAbs_EDGE)} == before
+    assert {
+        v.TShape() for v in occ._explore(face, TopAbs_ShapeEnum.TopAbs_VERTEX)
+    } == verts
+
+
+@pytest.mark.parametrize("name", SELF_INTERSECTING_FACES)
+def test_the_widening_is_bounded(name):
+    """Its failure mode must be "leave the face for validate to report", never
+    an unbounded tolerance (docs/algorithm.md §11)."""
+    from OCP.BRep import BRep_Tool
+
+    face = load_face(name)
+    a, b = occ._self_intersecting_pair(face)
+    shared = occ._shared_vertices(a, b)
+    start = {v.TShape(): BRep_Tool.Tolerance_s(v) for v in shared}
+
+    occ.fix_vertex_tolerances([face])
+
+    for v in shared:
+        grown = BRep_Tool.Tolerance_s(v)
+        assert grown >= start[v.TShape()], "UpdateVertex never lowers a tolerance"
+        assert grown <= start[v.TShape()] * occ.SELF_INTERSECT_TOL_GROWTH
+        assert grown <= occ.SELF_INTERSECT_MAX_VERTEX_TOL
+
+
+@pytest.mark.parametrize("name", SELF_INTERSECTING_FACES)
+def test_widening_a_vertex_is_monotonically_permissive(name):
+    """Why widening is safe on a shell where the vertex is shared with other
+    faces: every check that reads a vertex tolerance is a "within tolerance"
+    test, so a neighbour can only become more valid. Measured well past the
+    repair's own cap rather than argued."""
+    from OCP.BRep import BRep_Builder
+
+    face = load_face(name)
+    occ.fix_vertex_tolerances([face])
+    assert occ.is_valid(face)
+    before = occ.area(face)
+
+    builder = BRep_Builder()
+    for v in occ._explore(face, TopAbs_ShapeEnum.TopAbs_VERTEX):
+        builder.UpdateVertex(TopoDS.Vertex_s(v), 25 * occ.SELF_INTERSECT_MAX_VERTEX_TOL)
+
+    assert occ.is_valid(face)
+    assert occ.area(face) == before
+
+
+def test_a_capped_widening_leaves_the_face_for_validate(monkeypatch):
+    """With no headroom the repair must give up quietly and report the face as
+    residual, not raise and not loop forever."""
+    monkeypatch.setattr(occ, "SELF_INTERSECT_TOL_GROWTH", 1.0)
+
+    face = load_face(SELF_INTERSECTING_FACES[0])
+    before = occ.area(face)
+
+    assert occ.fix_vertex_tolerances([face]) == (0, 1)
+    assert not occ.is_valid(face)
+    assert occ.area(face) == before

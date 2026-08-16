@@ -443,3 +443,74 @@ def test_tiled_sew_across_worker_processes_matches_the_sequential_path(template,
     assert (open_edges, misoriented) == (0, 0)
     solid = occ.make_solid(shell_of(parallel[0]))
     assert occ.volume(solid) == pytest.approx(8 * tpl.volume, rel=1e-9)
+
+
+# --- vertex tolerances the sew leaves wrong (docs/algorithm.md §8) ----------
+#
+# Sewing can leave an edge whose vertex is recorded as sitting off the edge's
+# own 3D curve, with that vertex's tolerance inflated to *exactly* the
+# distance, so BRepCheck's test sits on the knife edge and rejects both faces
+# sharing the edge. On the cc=5, t=1 rehearsal that is 17 edges and 34 faces.
+#
+# The two fixtures are the real faces, lifted out of that run's assembled
+# solid: one on a cylinder (elliptical trim curve, deviation 2.474044e-05 mm)
+# and one on a B-spline surface (deviation 3.316370e-04 mm). Both are kept
+# because they discriminate between the candidate repairs — BRepLib's
+# UpdateTolerances fixes the first and not the second, which is why the fix
+# uses ShapeFix_Edge (tools/prototypes/RESULTS.md G11).
+
+BAD_FACES = ("invalid-vertex-tolerance-ellipse.brep",
+             "invalid-vertex-tolerance-bspline.brep")
+
+
+def load_face(name):
+    import os
+
+    from OCP.TopoDS import TopoDS as _TopoDS
+
+    from latticegen2.parallel import read_brep
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return _TopoDS.Face_s(read_brep(os.path.join(here, "test", name)))
+
+
+@pytest.mark.parametrize("name", BAD_FACES)
+def test_the_fixture_really_is_invalid(name):
+    """Guard on the guard: if these ever load as valid, the repair test below
+    would pass while proving nothing."""
+    assert not occ.is_valid(load_face(name))
+
+
+@pytest.mark.parametrize("name", BAD_FACES)
+def test_correcting_the_vertex_tolerance_makes_the_face_valid(name):
+    face = load_face(name)
+    before = occ.area(face)
+
+    repaired, still_invalid = occ.fix_vertex_tolerances([face])
+
+    assert (repaired, still_invalid) == (1, 0)
+    assert occ.is_valid(face)
+    # A tolerance is metadata, not geometry: the area must be bit-identical,
+    # not merely close.
+    assert occ.area(face) == before
+
+
+def test_a_sound_face_is_left_alone(template):
+    """Negative control — the repair only looks at faces the analyzer rejects."""
+    lp, tpl, _ = template
+    faces, _tags, _vol = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
+    assert all(occ.is_valid(f) for f in faces), "the trim itself is clean"
+    assert occ.fix_vertex_tolerances(faces) == (0, 0)
+
+
+def test_a_repair_that_moved_geometry_is_a_named_failure(monkeypatch):
+    """The bound this repair is held to: it adjusts recorded tolerances and
+    must move nothing. Silence here would let a real geometry change through
+    on the one code path that is allowed to touch a proven-watertight shell."""
+    from latticegen2.errors import ProcessingError
+
+    face = load_face(BAD_FACES[0])
+    areas = iter([1.0, 2.0])
+    monkeypatch.setattr(occ, "area", lambda _shape: next(areas))
+    with pytest.raises(ProcessingError, match="must move no geometry"):
+        occ.fix_vertex_tolerances([face])

@@ -313,10 +313,24 @@ def _run_with_pool(
             f"full unsplit sew; the output is unaffected, only slower for those "
             f"components."
         )
+    if sew_stats.retoleranced_faces or sew_stats.still_invalid_faces:
+        rl.always(
+            f"vertex tolerances corrected on {sew_stats.retoleranced_faces} sewn "
+            f"boundary face(s) (docs/algorithm.md §8); no geometry moved"
+            + (
+                f". {sew_stats.still_invalid_faces} face(s) remain invalid for "
+                f"some other reason and will be reported by the validity gate"
+                if sew_stats.still_invalid_faces else ""
+            )
+        )
     stats["interior_interfaces"] = len(rings)
     stats["stitch_tiles"] = sew_stats.tiles
     stats["stitch_tiled_components"] = sew_stats.tiled_components
     stats["stitch_repaired_components"] = sew_stats.repaired_components
+    if sew_stats.retoleranced_faces:
+        stats["retoleranced_faces"] = sew_stats.retoleranced_faces
+    if sew_stats.still_invalid_faces:
+        stats["still_invalid_faces"] = sew_stats.still_invalid_faces
 
     with Timer(rl, "instance"):
         interior = build_interior_shell(

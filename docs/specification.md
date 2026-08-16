@@ -381,7 +381,48 @@ those are, though not the shell they describe — see path 3 above), and
 unification is a size optimization, not a correctness one, so this difference
 is expected and harmless (algorithm.md §9, §11).
 
-### Individually invalid boundary faces from grazing trims
+### Residual 4 invalid boundary faces (34 -> 4, contextual pcurve fault)
+
+**Status 2026-08-17.** The vertex-off-curve fault below is fixed
+(`occ.fix_vertex_tolerances`, docs/algorithm.md §8): the rehearsal's invalid
+faces drop from **34 to 4** and the run still fails `validate` on 1 of 14
+solids because of those 4. They are a *different* fault again.
+
+**What the 4 are.** Measured on the 2026-08-17 rehearsal's own `unify_0.brep`:
+areas 0.44-2.05 mm^2, one wire each, 5-9 edges, on curved surfaces (3
+`GeomAbs_Cylinder`, 1 `GeomAbs_BSplineSurface`), at
+`[1941.2, 93.0, 984.3]`, `[2041.5, -89.0, 983.1]`, `[2015.7, 88.1, 982.8]`,
+`[2024.1, 89.2, 983.3]`. Every one has **0 individually invalid edges and 0
+invalid vertices**, and every face-level check passes (`IntersectWires`,
+`ClassifyWires`, `OrientationOfWires`). That signature means the fault is
+**contextual** — an edge is faulty only *in the context of this face*, i.e. its
+pcurve and 3D curve disagree — which `BRepCheck_Analyzer(edge).IsValid()`
+cannot see, since that checks the edge standalone.
+
+**Repairs measured on all four, and none is yet acceptable:**
+
+| repair | fixes | area drift |
+|---|---|---|
+| `ShapeFix_Edge.FixVertexTolerance` on every edge | 0 of 4 | 0 |
+| `ShapeFix_Edge.FixSameParameter` on every edge | 0 of 4 | 0 |
+| `BRepLib.SameParameter_s(face, 1e-7, True)` | **3 of 4** | <= 1.7e-09 |
+| `ShapeFix_Face.Perform` | 0 of 4 | ~0 |
+| `ShapeFix_Shape.Perform` | **4 of 4** | **up to 6.4e-04** |
+
+`ShapeFix_Shape` is the only one that fixes all four and is **not safe as it
+stands**: 6.4e-04 relative area change is a real geometry change, and it
+rebuilds faces, which mints new edge objects on a shell `assemble` has already
+proven watertight — the exact mechanism behind the seam-split regression (G9).
+Using it would need the watertightness proof re-run afterwards, and a bound on
+what it is allowed to move.
+
+`BRepLib.SameParameter` is nearly free and nearly sufficient; the open question
+is what is different about the one face it does not fix
+(`residual_2`, the 0.435 mm^2 cylinder at `[2015.7, 88.1, 982.8]`). Establish
+that before choosing, rather than reaching for the bigger hammer — the same
+caution the three defects before this one each needed.
+
+### Individually invalid boundary faces from grazing trims — FIXED for 30 of 34
 
 **What's broken.** With the boundary-sew seam-split regression fixed (#13) and
 the pinhole wires fixed (see "Closed" below), the `cc=5, t=1` rehearsal of

@@ -207,7 +207,7 @@ def sew(shapes: Iterable[TopoDS_Shape], tolerance: float,
     The consequence for callers: **never hand this the interior shell.** Its size
     scales with the volume of the part, which puts a superlinear term on the one
     path docs/algorithm.md §6 exists to keep linear. At ``cc=5, t=1`` on
-    ``TD_HX_Indre_Volum`` that cost 4 h 45 m of a 5 h 04 m run. Sewing is now
+    ``TD_HX_rehearsal_test`` that cost 4 h 45 m of a 5 h 04 m run. Sewing is now
     confined to the boundary layer (:mod:`latticegen2.weld`).
 
     ``cutting`` is OCCT's phase that splits free edges so they match. Where the

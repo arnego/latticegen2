@@ -30,7 +30,7 @@ Before implementing features, establish:
     checking. **NumPy** (array maths) and **psutil** (machine resource detection
     for the `--cores`/`--ram` budgets, `src/latticegen2/sysinfo.py`) are the only
     other dependencies. License texts live in
-    `licenses/`, cross-referenced in `licenses/libraries.md`. See
+    `licenses/`, cross-referenced in `licenses/LICENSES.md`. See
     [docs/algorithm.md](docs/algorithm.md) for how the kernel is used in the
     pipeline, and note that the design deliberately keeps boolean operations off
     the hot path.
@@ -53,7 +53,7 @@ Offline release bundles and the tag-driven GitHub Actions workflow that
 publishes them are documented in @docs/release.md. The version is single-sourced
 from `src/latticegen2/__init__.py`; `pyproject.toml` derives it. Dependency pins
 live in `requirements-bundle.txt` and must stay in sync with
-`licenses/libraries.md`.
+`licenses/LICENSES.md`.
 
 ### Documentation
 

@@ -8,7 +8,7 @@ parsing so the parser stays free of platform-specific calls, and apart from
 
 Core count comes from the stdlib. Memory does not — there is no stdlib call for
 physical RAM — so ``psutil`` is a runtime dependency for exactly this, and only
-this (see licenses/libraries.md).
+this (see licenses/LICENSES.md).
 
 It is imported at module scope, exactly like ``numpy`` and ``OCP`` elsewhere in
 the package, and that is a decision rather than a default. Deferring it into the

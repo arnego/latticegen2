@@ -342,7 +342,7 @@ left in place rather than copied here, so each text stays next to what it
 covers.
 
 The dependencies installed into the runtime — OCCT, OCP, VTK and NumPy — are
-covered by the texts in the parent directory. See `../libraries.md`.
+covered by the texts in the parent directory. See `../LICENSES.md`.
 """
 
 
@@ -350,7 +350,7 @@ def collect_runtime_licenses(runtime: Path, stage: Path, asset: str):
     """Copy the interpreter distribution's own license files into licenses/runtime.
 
     Redistributing an interpreter means redistributing its licence documents.
-    See licenses/libraries.md, "Bundled Python runtime".
+    See licenses/LICENSES.md, "Bundled Python runtime".
     """
     dest = stage / "licenses" / "runtime"
     dest.mkdir(parents=True, exist_ok=True)
@@ -581,7 +581,7 @@ complete parameter reference.
 OCCT is LGPL-2.1 and ships as stock, unmodified shared libraries inside the
 `cadquery-ocp` wheel, under `runtime/`. You can replace them with a different
 build of that wheel using the bundled pip, which is what preserves your rights
-under that licence. See `licenses/libraries.md`.
+under that licence. See `licenses/LICENSES.md`.
 '''}"""
     write_text(stage / "README-OFFLINE.md", text)
 

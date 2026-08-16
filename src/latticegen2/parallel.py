@@ -14,7 +14,7 @@ That pattern used to be duplicated once per stage, with a fresh pool built and
 torn down each time. :class:`WorkerPool` centralises it: one pool is built in
 :func:`latticegen2.pipeline._run` for the whole run and handed to whichever
 stage wants it, so ``spawn``'s process-creation cost — non-trivial on a part
-with many independent tiled components, as `TD_HX_Indre_Volum`'s 14 is
+with many independent tiled components, as `TD_HX_rehearsal_test`'s 14 is
 (specification.md §10) — is paid once per run, not once per stage.
 
 A caller whose own job count is too small to be worth parallelising (``workers

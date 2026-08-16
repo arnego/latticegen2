@@ -138,7 +138,7 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
 | test cylinder, `cc=10 t=1.5` | ~48 s | classify, simplify, boundary sew |
-| `TD_HX_Indre_Volum`, `cc=5 t=1` | 47.1 min, 19.6 GB peak, 2.11 GB output | boundary trim, simplify, validate, export |
+| `TD_HX_rehearsal_test`, `cc=5 t=1` | 47.1 min, 19.6 GB peak, 2.11 GB output | boundary trim, simplify, validate, export |
 
 The third row is the scale rehearsal, run end to end on 2026-08-14 and
 re-profiled on 2026-08-15 after implementing specification.md §10's paths 1–4

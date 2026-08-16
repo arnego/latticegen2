@@ -38,10 +38,10 @@ Run data from the script including:
   - *wheels* — source plus the dependency wheels and an `install` script, for a target that already has Python 3.11.
 
   Each release also publishes `SHA256SUMS.txt` for verification after transfer. Every asset is extracted and run end-to-end by a CI smoke gate before publication. Procedure: [release.md](release.md). Bundle contents are `git archive`-derived, so they contain committed files only, filtered by `.gitattributes`.
-- **No single-file standalone executable is produced.** PyInstaller was evaluated and rejected: `boundary.py` uses `multiprocessing` with the `spawn` start method and the codebase has no `freeze_support()` call, which on Windows makes a frozen build re-launch its own launcher; OCP/OCCT is awkward to freeze (hidden imports, DLL discovery); and freezing dissolves the LGPL-2.1 relinking argument in [licenses/libraries.md](../licenses/libraries.md), which depends on OCCT remaining a stock, replaceable shared library. The portable bundle delivers the same "extract and run" property without those costs.
+- **No single-file standalone executable is produced.** PyInstaller was evaluated and rejected: `boundary.py` uses `multiprocessing` with the `spawn` start method and the codebase has no `freeze_support()` call, which on Windows makes a frozen build re-launch its own launcher; OCP/OCCT is awkward to freeze (hidden imports, DLL discovery); and freezing dissolves the LGPL-2.1 relinking argument in [licenses/LICENSES.md](../licenses/LICENSES.md), which depends on OCCT remaining a stock, replaceable shared library. The portable bundle delivers the same "extract and run" property without those costs.
 - **Target machine specs / limits:** Main development system: 32 GB RAM, 6 core CPU, Nvidia RTX 3080 GPU, disk space for intermediate files.
 RAM and CPU cores may optionally be provided as input parameters, as *budgets* rather than a mandatory pair. Without `--cores` the worker count is the machine's logical core count, since boundary-junction jobs are constant-size and independent; without `--ram` the budget is the memory free at startup. See §3.
-- **Allowed third-party libraries:** Must be compatible with the target OS/arch. License text must be obtained and put into /licenses folder, and @/licenses/libraries.md must be updated with the cross reference between the library used and the corresponding license text file valid for that library.
+- **Allowed third-party libraries:** Must be compatible with the target OS/arch. License text must be obtained and put into /licenses folder, and @/licenses/LICENSES.md must be updated with the cross reference between the library used and the corresponding license text file valid for that library.
 - **License constraints:** TBD
 
 ---
@@ -234,7 +234,7 @@ diagnosis. Remove an item once it's fixed and verified.*
 ### Scale rehearsal, chapter closed: paths 1–4 implemented and re-measured
 
 **First run 2026-08-14**, **re-profiled 2026-08-15** after implementing paths
-1–4 below, both on `TD_HX_Indre_Volum.step` at `cc=5, t=1`,
+1–4 below, both on `TD_HX_rehearsal_test.step` at `cc=5, t=1`,
 `--cores 6 --ram 20 -bg` on the 6-core / 32 GB development workstation. Both
 runs used a temporary, uncommitted bypass of the `assemble`-stage watertightness
 gate ("Micron-scale debris edges" below, still open and still out of scope for
@@ -354,7 +354,7 @@ wrong result" — and a few percent of added `.brep` I/O on a part shaped like
 this one is exactly that failure mode, not a correctness problem. A part whose
 components are more evenly sized (several separate floating islands of
 comparable scale, rather than one dominant body plus scraps) would see the
-intended benefit; `TD_HX_Indre_Volum` at `cc=5, t=1` simply is not that
+intended benefit; `TD_HX_rehearsal_test` at `cc=5, t=1` simply is not that
 shape. The mechanism is sound and stays; the benefit is part-shape-dependent,
 and that dependency is now documented rather than assumed.
 

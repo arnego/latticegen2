@@ -301,7 +301,7 @@ triangle, and each sample's distance to the **nearest** triangle of the welded
 mesh is taken. `d` is then `max(requested deflection, worst measured deviation)`.
 
 Measuring is necessary because OCCT does not reliably deliver the deflection it
-is asked for: on `TD_HX_Indre_Volum.step`, asked for 0.15 mm, the real worst
+is asked for: on `TD_HX_rehearsal_test.step`, asked for 0.15 mm, the real worst
 sagitta is 0.49 mm. A margin built on the requested figure would have been over
 three times too small there.
 
@@ -511,7 +511,7 @@ against the same nominal quad — and OCCT does not guarantee a shared face come
 back the same from both. Wherever they disagreed, one junction punched a hole
 with nothing behind it.
 
-**Confirmed, on the part that failed.** `TD_HX_Indre_Volum` at `cc=5, t=1` re-run
+**Confirmed, on the part that failed.** `TD_HX_rehearsal_test` at `cc=5, t=1` re-run
 with this rule reports 122,180 interfaces and exactly **three** caps the two sides
 disagreed about — all of them in one tight cluster, at nodes `(633,-97,-61)` and
 `(633,-97,-62)`, around `[2055.4, -90.0, 969.6]`:
@@ -574,7 +574,7 @@ possible, since a fused piece can hold faces belonging to either node it spans.
 `BRepAlgoAPI_Cut` notch rather than a synthetic scale mismatch.
 
 **Confirmed on the part that motivated it.** The 2026-08-14 rehearsal of
-`TD_HX_Indre_Volum` at `cc=5, t=1` reports `1 disagreeing cap cluster(s)
+`TD_HX_rehearsal_test` at `cc=5, t=1` reports `1 disagreeing cap cluster(s)
 repaired with a local boolean fuse`, and the second `resolve_interfaces` pass
 finds nothing left to decline there. The 3 caps that remain declined are the
 separate "one side produced no cap at all" case above, which is closed on both
@@ -703,7 +703,7 @@ measurement's serial sum does not credit, so the production saving should exceed
 what is measured here.
 
 **It does, and both claims were checked against a control at full scale.** The
-2026-08-14 rehearsal was run twice on `TD_HX_Indre_Volum` at `cc=5, t=1`,
+2026-08-14 rehearsal was run twice on `TD_HX_rehearsal_test` at `cc=5, t=1`,
 identical but for tiling being disabled: **8 m 57 s tiled against 20 m 27 s
 untiled, a 2.25× saving** on a component of 21,955 pieces split into 35 tiles —
 better than G6's 1.43–1.45×, exactly because production round 1 runs across

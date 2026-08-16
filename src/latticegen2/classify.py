@@ -208,7 +208,7 @@ search wants — but the cost of *binning* runs the other way, and it is the sid
 that bites. Triangle AABBs are inflated and expanded into cells, so a triangle
 far larger than the median occupies cells in proportion to its volume in them:
 halving the cell size costs 8x the rows. Real CAD makes that spread enormous.
-`TD_HX_Indre_Volum.step` meshes to a 341,000:1 edge-length ratio — 188 mm planar
+`TD_HX_rehearsal_test.step` meshes to a 341,000:1 edge-length ratio — 188 mm planar
 triangles beside a 1.26 mm median — where one triangle alone reaches 15,360
 cells at half this size, 4.1 M rows in total and a 570 MB peak, against 178 MB
 here for the same answer to six decimals. Matching :class:`SpatialHash`'s cell
@@ -359,7 +359,7 @@ def measure_mesh_deviation(shape: TopoDS_Shape, mesh: TriMesh) -> float:
 
     Measuring rather than trusting the mesher is still necessary, and the
     evidence for it is unaffected: asked for 0.15 mm on
-    ``TD_HX_Indre_Volum.step``, OCCT delivers 0.49 mm. A margin built on the
+    ``TD_HX_rehearsal_test.step``, OCCT delivers 0.49 mm. A margin built on the
     requested figure would have been over three times too small there.
     """
     samples = [s for s in (surface_samples(f) for f in occ.faces(shape)) if s is not None]
@@ -382,7 +382,7 @@ def tessellate_surface(shape: TopoDS_Shape, lp: LatticeParams) -> TriMesh:
     actually delivered, measured against the welded mesh by
     :func:`measure_mesh_deviation`.
 
-    That distinction is not pedantic. Measured on ``TD_HX_Indre_Volum.step``,
+    That distinction is not pedantic. Measured on ``TD_HX_rehearsal_test.step``,
     asking for 0.15 mm produced a mesh whose real worst-case sagitta was 0.49 mm
     — comfortably enough to make a margin of ``r + 0.15`` too small, and enough
     to misclassify a node that a ten-times finer mesh puts on the boundary.

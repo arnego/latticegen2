@@ -177,21 +177,21 @@ All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
 
 ### 6.2 Automated pass/fail checks
 For every scenario the harness must verify, without human intervention:
-- [x] Process exits with expected console output
-- [x] STEP file is written and non-empty
-- [x] STEP file parses back successfully (round-trip read)
-- [x] Geometry is a valid closed manifold solid (no open edges / non-manifold edges)
-- [x] **Geometry passes OCCT's exact B-rep validity check** (`BRepCheck_Analyzer`) —
-      an exact test on the B-rep itself, not an inference from a tessellation
-- [x] No self-intersections
-- [x] **No generated material lies outside the input body** (boolean cut of output
-      against input leaves ~zero volume) — a direct check of §1's "fits exactly
-      within the user's boundary geometry", independent of any golden sample
-- [x] Bounding box of output matches requested `--input` within tolerance
-- [x] Runtime stays under an agreed performance budget: `smoke-fast` and
-      `dense-lattice` < 10 minutes, `smoke-verified` < 20 minutes
-- [x] If a golden sample is defined, check similarity of geometries by subtracting
-      candidate and golden both ways; the larger remainder must be near zero
+- Process exits with expected console output.
+- STEP file is written and non-empty.
+- STEP file parses back successfully (round-trip read).
+- Geometry is a valid closed manifold solid (no open edges / non-manifold edges).
+- **Geometry passes OCCT's exact B-rep validity check** (`BRepCheck_Analyzer`) —
+  an exact test on the B-rep itself, not an inference from a tessellation.
+- No self-intersections.
+- **No generated material lies outside the input body** (boolean cut of output
+  against input leaves ~zero volume) — a direct check of §1's "fits exactly
+  within the user's boundary geometry", independent of any golden sample.
+- Bounding box of output matches requested `--input` within tolerance.
+- Runtime stays under an agreed performance budget: `smoke-fast` and
+  `dense-lattice` < 10 minutes, `smoke-verified` < 20 minutes.
+- If a golden sample is defined, check similarity of geometries by subtracting
+  candidate and golden both ways; the larger remainder must be near zero.
 
 
 ### 6.3 How verification runs offline

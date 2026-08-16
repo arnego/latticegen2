@@ -384,7 +384,7 @@ def _sew_all_tiles(
     ``sew_boundary`` sews them directly. One pool for the whole call, not one per
     component, is the literal reading of docs/algorithm.md §8 ("in parallel
     across the run's worker processes") and matters in practice: a part with
-    several large tiled components — the `TD_HX` rehearsal has 14 — would
+    several large tiled components — the `TD_HX_rehearsal_test` rehearsal has 14 — would
     otherwise pay `spawn`'s process-creation cost once per component instead of
     once for the whole stitch stage.
 

@@ -26,7 +26,7 @@ adjacent cells and `-t` the strut profile's side length.
 | psutil | 5.9+ | Total and free physical memory, for the `--ram` budget's ceiling and default. The stdlib has no call for it | BSD-3-Clause |
 
 Nothing else. License texts are in [`licenses/`](licenses/), cross-referenced in
-[`licenses/libraries.md`](licenses/libraries.md).
+[`licenses/LICENSES.md`](licenses/LICENSES.md).
 
 **Nothing contacts the network at runtime.** Installation does, once — unless
 you use a release bundle, which never does.

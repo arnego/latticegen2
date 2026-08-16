@@ -65,7 +65,7 @@ is identical. None of the six wrappers is used by latticegen2.
 They are deliberately **not** stripped: deleting them would leave `RECORD`
 describing files that are not there, and a clean pip install tree is exactly
 what the LGPL replaceability argument in
-[`licenses/libraries.md`](../licenses/libraries.md) depends on. Trading that for
+[`licenses/LICENSES.md`](../licenses/LICENSES.md) depends on. Trading that for
 a reproducible hash would be a bad bargain.
 
 So treat `SHA256SUMS.txt` as what it primarily is: **an integrity check for the
@@ -94,7 +94,7 @@ them to the pull request, per [testing.md](testing.md).
 Then check the two things a release can get wrong that testing will not catch:
 
 - **Pins versus licences.** [`requirements-bundle.txt`](../requirements-bundle.txt)
-  and [`licenses/libraries.md`](../licenses/libraries.md) name the same
+  and [`licenses/LICENSES.md`](../licenses/LICENSES.md) name the same
   versions. If a dependency moved, both change together and the licence texts in
   `licenses/` are re-checked. A mismatch is a release blocker, not a tidiness
   issue: the licence texts are only meaningful if they describe the bytes
@@ -276,7 +276,7 @@ in the notes of the replacement.
 | To change | Edit |
 |---|---|
 | Which files ship | [`.gitattributes`](../.gitattributes) `export-ignore` list |
-| Dependency versions | [`requirements-bundle.txt`](../requirements-bundle.txt) **and** [`licenses/libraries.md`](../licenses/libraries.md) |
+| Dependency versions | [`requirements-bundle.txt`](../requirements-bundle.txt) **and** [`licenses/LICENSES.md`](../licenses/LICENSES.md) |
 | Bundled interpreter | `PBS_RELEASE` / `DEFAULT_TARGET_PYTHON` in [`tools/build_release.py`](../tools/build_release.py) |
 | Operator instructions | `write_offline_readme` in the same file |
 | What the gate checks | [`tools/smoke_bundle.py`](../tools/smoke_bundle.py) |

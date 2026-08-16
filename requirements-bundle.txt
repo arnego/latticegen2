@@ -1,7 +1,7 @@
 # Exact dependency pins for the offline release bundles.
 #
 # These are the versions the releases are built and tested against. Keep them in
-# sync with licenses/libraries.md, which records the same versions alongside the
+# sync with licenses/LICENSES.md, which records the same versions alongside the
 # license texts they correspond to; a mismatch between the two is a release
 # blocker, not a formatting detail. See docs/release.md.
 #

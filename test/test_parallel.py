@@ -48,8 +48,9 @@ def test_workers_le_1_builds_no_real_pool():
 
 
 def test_zero_or_negative_workers_also_builds_no_real_pool():
-    # `cli.py` already floors `--workers` at 1, but this class should not rely
-    # on that — a caller passing 0 must degrade the same way, not crash.
+    # `cli.py` already floors the derived worker count at 1, but this class
+    # should not rely on that — a caller passing 0 must degrade the same way,
+    # not crash.
     with WorkerPool(0) as pool:
         assert not pool.active
 

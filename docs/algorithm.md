@@ -1057,7 +1057,8 @@ Alternatives evaluated and rejected:
 
 | Module | Implements |
 |---|---|
-| [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution |
+| [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores`/`--ram` budget resolution |
+| [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind those budgets: logical core count, total and free RAM (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
 | [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |

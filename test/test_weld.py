@@ -338,7 +338,7 @@ def test_seam_only_round_two_matches_a_full_round_two(template):
     baseline = weld._sew_faces(tile_results[0], weld.SEW_TOLERANCE)
     seam_only, _max_rss = weld._sew_round_two(
         by_group, plan, tile_results, weld.SEW_TOLERANCE, workers=1, tmpdir=None,
-        background=False, pool=None,
+        pool=None,
     )
 
     assert len(seam_only[0]) == len(baseline)
@@ -369,7 +369,7 @@ def test_tiled_sew_across_worker_processes_matches_the_sequential_path(template,
     groups = [0] * len(pieces)
 
     parallel, stats = weld.sew_boundary(
-        pieces, groups, workers=4, tmpdir=str(tmp_path), background=False,
+        pieces, groups, workers=4, tmpdir=str(tmp_path),
         tile_target=2, min_to_tile=1,
     )
     assert stats.tiles > 1

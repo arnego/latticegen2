@@ -150,7 +150,7 @@ def run_generation(bundle: Path, outdir: Path) -> tuple[int, Path | None]:
     output = outdir / "smoke.step"
     cmd = ([str(launcher)] if os.name != "nt" else ["cmd", "/c", str(launcher)]) + [
         "-i", str(INPUT_STEP), "-cc", str(CC), "-t", str(T),
-        "-o", str(output), "-bg",
+        "-o", str(output),
     ]
     print(f"  running {launcher.name} -i 80mm-test-ball.step -cc {CC} -t {T}")
 

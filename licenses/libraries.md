@@ -16,6 +16,7 @@ meaningful if they describe the bytes actually shipped. See
 | **OCP proxy** (`cadquery-ocp-proxy`) | 7.9.3.1.1 | A 3 kB shim package `cadquery-ocp` requires; carries no binaries of its own. | Apache-2.0 | [ocp-LICENSE_Apache_20.txt](ocp-LICENSE_Apache_20.txt) |
 | **VTK** | 9.6.2 | **Not used by latticegen2.** Present only because `cadquery-ocp` requires it and the OCP extension module links against its shared libraries — see the note below. | BSD-3-Clause | [vtk-LICENSE.txt](vtk-LICENSE.txt) |
 | **NumPy** | 2.4.6 | Vectorised array maths for classification, spatial indexing and the lattice basis. | BSD-3-Clause | [numpy-LICENSE.txt](numpy-LICENSE.txt) |
+| **psutil** | 7.1.0 | Machine resource detection for the CLI's `--cores`/`--ram` budgets (`src/latticegen2/sysinfo.py`). Core count comes from the stdlib; physical memory does not, and `--ram` needs it as both its upper bound and its default. Not on the geometry path. | BSD-3-Clause | [psutil-LICENSE.txt](psutil-LICENSE.txt) |
 
 ## Why VTK is redistributed despite being unused
 
@@ -76,3 +77,9 @@ replacing it.
 
 No dependency carries a GPL copyleft obligation: the set is LGPL-2.1,
 Apache-2.0 and BSD-3-Clause.
+
+Note that psutil is *also* used by `tools/profile_run.py`, which is a
+development-only tool and is `export-ignore`d out of every bundle. That is a
+separate use from the runtime one above and does not affect this table: psutil
+is listed here because `src/latticegen2/sysinfo.py` imports it at run time, so
+it ships whether or not `tools/` does.

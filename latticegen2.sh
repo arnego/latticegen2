@@ -8,7 +8,7 @@
 #   4. python3                  a plain checkout on a prepared machine
 #
 # The tool runs straight from this directory with no install step, so an offline
-# workstation needs either a release bundle or Python plus the two dependencies
+# workstation needs either a release bundle or Python plus the dependencies
 # listed in README.md.
 set -e
 DIR=$(cd "$(dirname "$0")" && pwd)

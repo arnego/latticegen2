@@ -8,6 +8,7 @@ import os
 
 import pytest
 
+from latticegen2 import sysinfo
 from latticegen2.cli import (
     HelpRequested,
     default_workers,
@@ -103,12 +104,20 @@ def test_help_is_signalled_not_an_error():
 
 
 def test_flags_are_recognised():
-    args = parse_args(BASE + ["-bg", "-v"])
-    assert args.background and args.verbose
+    assert parse_args(BASE + ["-v"]).verbose
 
 
-def test_worker_count_can_be_given_explicitly():
-    assert parse_args(BASE + ["--workers", "3"]).workers == 3
+@pytest.mark.parametrize("argv", [["-bg"], ["--background"], ["--workers", "4"]])
+def test_removed_flags_are_rejected(argv):
+    """``-bg`` and ``--workers`` are gone, and silence would be the wrong answer.
+
+    Every run is below-normal priority now, so ``-bg`` has nothing left to
+    request; ``--cores`` is the only worker-count control. A removed flag has to
+    fail loudly rather than be ignored — a script still passing ``--workers 4``
+    would otherwise look like it was being honoured.
+    """
+    with pytest.raises(ParamError, match="Unknown argument"):
+        parse_args(BASE + argv)
 
 
 def test_worker_count_is_derived_from_cores_when_not_given():
@@ -122,17 +131,47 @@ def test_worker_count_is_derived_from_cores_when_not_given():
     assert parse_args(BASE + ["--cores", "1"]).workers == 1
 
 
-def test_worker_count_is_capped():
-    assert parse_args(BASE + ["--cores", "128"]).workers == 8
-    assert default_workers(None) >= 1
+def test_worker_count_is_not_capped():
+    """``--cores`` is a budget the user set, so it is honoured exactly.
+
+    An earlier revision capped the derived worker count at 8, which silently
+    contradicted an explicit ``--cores`` above that.
+    """
+    assert parse_args(BASE + ["--cores", "128"]).workers == 128
 
 
-def test_ram_hint_is_recorded():
-    assert parse_args(BASE + ["--ram", "20"]).ram == 20.0
+def test_worker_count_defaults_to_the_machines_logical_cores(monkeypatch):
+    monkeypatch.setattr(sysinfo, "logical_core_count", lambda: 12)
+    assert parse_args(BASE).workers == 12
+    assert default_workers(None) == 12
 
 
-@pytest.mark.parametrize("flag,value", [("--workers", "0"), ("--cores", "0"), ("--ram", "0.5")])
-def test_hint_ranges_are_validated(flag, value):
+def test_ram_budget_is_recorded(monkeypatch):
+    monkeypatch.setattr(sysinfo, "total_ram_gb", lambda: 32.0)
+    args = parse_args(BASE + ["--ram", "20"])
+    assert args.ram == 20.0
+    assert args.ram_budget_gb == 20.0
+
+
+def test_ram_budget_defaults_to_free_ram(monkeypatch):
+    monkeypatch.setattr(sysinfo, "free_ram_gb", lambda: 18.5)
+    args = parse_args(BASE)
+    assert args.ram is None          # what the user gave: nothing
+    assert args.ram_budget_gb == 18.5  # what is actually in force
+    assert "free at startup" in args.as_dict()["ram"]
+
+
+def test_ram_budget_cannot_exceed_the_machines_physical_ram(monkeypatch):
+    """The ceiling is a machine fact, not a literal: a budget above what exists
+    is not a budget."""
+    monkeypatch.setattr(sysinfo, "total_ram_gb", lambda: 32.0)
+    parse_args(BASE + ["--ram", "32"])  # exactly at the ceiling is fine
+    with pytest.raises(ParamError, match="total physical memory"):
+        parse_args(BASE + ["--ram", "33"])
+
+
+@pytest.mark.parametrize("flag,value", [("--cores", "0"), ("--ram", "0.5")])
+def test_budget_ranges_are_validated(flag, value):
     with pytest.raises(ParamError, match=flag):
         parse_args(BASE + [flag, value])
 

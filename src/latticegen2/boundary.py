@@ -490,9 +490,9 @@ def _worker_trim(job):
     process boundary. The ``.brep`` is a compound of per-piece compounds, each
     holding that piece's faces in the same order as the piece's cap tags.
 
-    ``background`` priority is no longer part of this job tuple: it is set
-    once per worker process by :class:`latticegen2.parallel.WorkerPool`'s own
-    initializer rather than once per job.
+    Below-normal priority is not part of this job tuple: it is set once per
+    worker process by :class:`latticegen2.parallel.WorkerPool`'s own initializer
+    rather than once per job.
     """
     (body_path, cc, t, node_batch, out_path) = job
     lp = lattice_params(cc, t)
@@ -548,7 +548,6 @@ def trim_boundary(
     body_path: str,
     tmpdir: str,
     workers: int,
-    background: bool = False,
     progress=None,
     pool: WorkerPool | None = None,
 ) -> BoundaryResult:
@@ -621,7 +620,7 @@ def trim_boundary(
         results, _ = pool.run(_worker_trim, jobs)
         _consume(results)
     else:
-        with WorkerPool(workers, background) as owned:
+        with WorkerPool(workers) as owned:
             results, _ = owned.run(_worker_trim, jobs)
         _consume(results)
     return result

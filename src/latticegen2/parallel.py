@@ -38,7 +38,14 @@ from .errors import ProcessingError
 
 
 def set_background_priority() -> None:
-    """Drop this process to below-normal scheduling priority (``-bg``)."""
+    """Drop this process to below-normal scheduling priority.
+
+    Unconditional for every process in a run, master and workers alike. It used
+    to be the opt-in ``-bg`` flag (specification.md §3); making it the only
+    behaviour removed a choice with no interesting second option — the cost is a
+    scheduling hint on a machine with nothing else to run, and the benefit is
+    that a long run never makes the desktop unusable.
+    """
     try:
         if os.name == "nt":
             import ctypes
@@ -77,16 +84,15 @@ def compound_children(shape: TopoDS_Shape) -> list[TopoDS_Shape]:
     return out
 
 
-def _pool_initializer(background: bool) -> None:
+def _pool_initializer() -> None:
     """Run once per worker process, before it takes any jobs.
 
-    Moves ``background`` out of every individual job tuple and into one-time
-    setup: it is a process-lifetime setting, not a per-job one, so paying for
-    :func:`set_background_priority` on every job (as each stage used to, when
-    it built its own transient pool) was only ever wasted work.
+    Priority is a process-lifetime setting, not a per-job one, so it belongs in
+    one-time setup: paying for :func:`set_background_priority` on every job (as
+    each stage used to, when it built its own transient pool) was only ever
+    wasted work.
     """
-    if background:
-        set_background_priority()
+    set_background_priority()
 
 
 class WorkerPool:
@@ -98,9 +104,8 @@ class WorkerPool:
     class for a pool it does not need.
     """
 
-    def __init__(self, workers: int, background: bool = False):
+    def __init__(self, workers: int):
         self.workers = workers
-        self.background = background
         self._pool = None
 
     @property
@@ -113,7 +118,6 @@ class WorkerPool:
             self._pool = ctx.Pool(
                 processes=self.workers,
                 initializer=_pool_initializer,
-                initargs=(self.background,),
             )
         return self
 

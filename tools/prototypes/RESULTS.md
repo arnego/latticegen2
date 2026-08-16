@@ -458,3 +458,93 @@ unaffected either way. `test_weld.py`'s
 `test_round_two_repairs_a_component_the_seam_split_got_wrong` pins the repair
 mechanism itself as a permanent regression, since no scale short of a full
 rehearsal reproduces the real defect it stands in for.
+
+---
+
+## G10 — the rehearsal's last 2 open edges: pinhole wires, not debris edges ✅ PASS
+
+With G9's seam-split repair in place, `assemble` on `TD_HX_Indre_Volum` at
+`cc=5, t=1` was left with exactly 2 open edges, which
+docs/specification.md §10 had tracked since 2026-08-14 as "micron-scale debris
+edges" and proposed to fix with `ShapeFix` small-edge removal — the last of its
+three candidates, and the only one not yet disproved.
+
+    python tools/prototypes/g10_pinhole_wires.py
+
+Run against the real part at the real node (`(591,-46,-70)`), deliberately with
+no synthetic stand-in. Both the diagnosis and the proposed fix were wrong.
+
+### What they actually are
+
+| property | recorded in §10 | measured |
+|---|---|---|
+| length | 3.171690e-06 / 5.808982e-06 mm | same |
+| non-degenerate | yes | yes |
+| owning faces | (not recorded) | **1** |
+| endpoints | (not recorded) | **do not meet** — 3.17e-06 / 5.81e-06 mm apart |
+| position in face | "a planar face carrying 8 edges where 7 would do" | a **1-edge INNER wire** |
+
+Each is an inner wire of a planar face (1.19 and 1.25 mm²) consisting of one
+edge whose two endpoints do not meet. It bounds **no area**. It is a pinhole,
+not a sliver — which is exactly why it is used by one face, and why
+`BRepCheck_Analyzer` calls the solid **valid** while `weld.shell_defects`
+rejects it. The defect is visible on the trimmed piece alone, before any
+sewing: `shell_defects` on the raw boolean output reports `(2, 0)`.
+
+### Why OCCT's own repairs cannot help, measured
+
+| tool | result |
+|---|---|
+| `ShapeFix_Wireframe` (small **edges**), prec 1e-5 … 1e-2 | `CheckSmallEdges` finds **0** candidates; 134 edges in, 134 out |
+| `ShapeFix_Face.FixSmallAreaWire` (small **wires**), prec 1e-4, 1e-2 | **0** wires removed |
+
+Both want a well-formed closed wire — one to merge an edge into its neighbours,
+the other to integrate an area. A single non-closing edge is neither.
+
+### The fix, and what it costs
+
+`occ.remove_pinhole_wires` drops a non-outer wire when every edge in it is
+below `PINHOLE_WIRE_TOL` (3e-5 mm) **and** every edge is already used exactly
+once. Measured on the piece above:
+
+| quantity | result |
+|---|---|
+| pinhole wires removed | 2 |
+| faces | 32 → 32 (none lost) |
+| edges | 134 → 132 |
+| surface area drift | **0.000e+00** — bit-identical |
+| volume drift | 2.684e-15 |
+| cap areas (`resolve_interfaces`' quantity) | unchanged, drift **0.000e+00** |
+| `BRepCheck_Analyzer` | still valid |
+| `shell_defects` | **(2, 0) → (0, 0)** |
+
+The area result is the load-bearing one and is why `PINHOLE_AREA_TOL` is 1e-12
+rather than a comfortable margin: a wire bounding no area *cannot* change the
+area of the face carrying it, so unlike same-domain unification (§9) there is no
+re-integration and no quadrature noise to allow for. Anything but zero means a
+wire that bounded something was removed.
+
+### The safety property, and why the length bar is not load-bearing
+
+Run against the **template solid** — a closed solid, every edge paired — at a
+bar of 35.36 mm, larger than every edge in it, so length alone would condemn
+all of them: **0 wires removed.** The "already used exactly once" condition is
+what does the work. A real feature is paired and is therefore out of reach of
+this repair at any threshold, which is a stronger guarantee than a tolerance
+gap.
+
+### The lesson, which is the same one G8's postscript records
+
+The pre-fix diagnosis was not vague — it was specific, quantitative, and wrong
+in the one property that mattered. An earlier attempt built a synthetic
+near-tangential graze reproducing the symptom's scale to four significant
+figures (a genuine, non-degenerate ~3e-06 mm edge from a real boolean), swept a
+threshold, measured cap-area drift across 25 configurations, and passed. It was
+repairing ordinary **two-owner small edges**, which `ShapeFix` removes happily
+and which were never the problem. Checking `owners` and endpoint coincidence on
+the real part — one inspection, minutes — would have ruled that approach out
+before any of it was built.
+
+**A gate must reproduce the defect's mechanism, not its symptom at the right
+order of magnitude.** Where the failing geometry is committed to the repo, as
+it is here, test against it directly; `test/test_boundary.py`'s pinhole tests do.

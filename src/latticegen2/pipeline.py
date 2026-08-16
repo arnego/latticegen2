@@ -196,6 +196,14 @@ def _run_with_pool(
     )
     stats["boundary_pieces"] = len(boundary.pieces)
     stats["boundary_empty"] = boundary.n_empty
+    if boundary.n_pinhole_wires:
+        # One aggregate line, never one per junction (docs/algorithm.md §7).
+        rl.line(
+            f"pinhole wires removed: {boundary.n_pinhole_wires} zero-area wire(s) "
+            f"from {boundary.n_pinhole_junctions} junction(s) grazing the input surface"
+        )
+        stats["pinhole_wires_removed"] = boundary.n_pinhole_wires
+        stats["pinhole_junctions_repaired"] = boundary.n_pinhole_junctions
     stats["workers"] = args.workers
     if boundary.max_worker_rss:
         # Folded into the run's high-water mark as well as reported separately:

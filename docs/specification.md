@@ -381,59 +381,100 @@ those are, though not the shell they describe — see path 3 above), and
 unification is a size optimization, not a correctness one, so this difference
 is expected and harmless (algorithm.md §9, §11).
 
-### Micron-scale debris edges from near-tangential trims
+### Individually invalid boundary faces from grazing trims
 
-**Status, verified 2026-08-16.** A separate regression in boundary-sew round 2's
-seam-only split (`weld._split_seam_interior`, chapter 10 optimization path 3)
-briefly made this section describe stale behaviour: with the regression present,
-`assemble` failed with **118,760** open edges on this rehearsal, not the 2 this
-section documents — five orders of magnitude off, and never caught earlier
-because both chapter-10 rehearsals bypassed the `assemble` gate to measure the
-stages after it (see "Scale rehearsal, chapter closed" above). That regression
-is now fixed: `weld.sew_boundary` checks each component's post-round-2 free-edge
-count against the interior interfaces it must present (`want_rings`) and redoes
-any component the seam-only split got wrong on the unsplit tile results, logged
-as `SewStats.repaired_components`. Full account and the controlled before/after
-measurement in `tools/prototypes/RESULTS.md` G9. A fresh rehearsal on this same
-part after the fix reproduces exactly the failure this section documents below —
-2 edges, same positions, same precision — confirming it is once again the
-*only* known defect standing between this rehearsal and a watertight output.
+**What's broken.** With the boundary-sew seam-split regression fixed (#13) and
+the pinhole wires fixed (see "Closed" below), the `cc=5, t=1` rehearsal of
+`TD_HX_Indre_Volum.step` now assembles **14 watertight solids** — the
+every-edge-twice proof passes for the first time — and then fails at `validate`:
+1 of those 14 solids fails OCCT's `BRepCheck_Analyzer` (exit 4, no output
+written).
 
-**What's broken.** The rehearsal fails in `assemble`: 2 edges are used by exactly
-one face, so the every-edge-twice proof (docs/algorithm.md §8) rejects the shell.
-Both are in component 0, at `[1874.836, 60.370, 970.121]` and
-`[1874.836, 59.912, 969.775]`.
+**Where it is — measured 2026-08-16, not inferred.** The failing solid is the
+dominant one (component 0, 1,006,172 faces). A per-face
+`BRepCheck_Analyzer(face).IsValid()` sweep of it finds **34 individually
+invalid faces**:
 
-**What they are — measured, not inferred.** Each is a genuine, non-degenerate
-edge of **3.171690e-06 mm** and **5.808982e-06 mm**, on a *planar* face of
-~1.2 mm² carrying **8 edges where 7 would do**. They are boolean debris from a
-strut grazing the input surface almost tangentially — the same pathology that
-makes 2,969 of this part's 19,552 boundary junctions produce no geometry at all.
+* They are **all in the boundary layer.** The first 600,000 faces — the
+  instanced interior shell — are every one of them valid, which is what
+  docs/algorithm.md §6's shared-topology construction predicts.
+* They are **scattered across the whole part**, from `x=1874` to `x=2002`,
+  `y=-93` to `y=+82`, not clustered in one region.
+* They come in **pairs at nearly the same place**, one ordinary face and one
+  sliver — e.g. 0.092 mm² beside 0.006 mm² at `[1954.87, 79.02, 982.51]`, and
+  2.131 mm² beside 0.045 mm² at `[1874.4, 47.9, 918.7]`. 17 such pairs.
 
-**They are not unpaired halves of anything.** The nearest other edge is
-**0.070 mm** from one and **0.263 mm** from the other — four to five orders of
-magnitude further away than the slivers are long — and every neighbouring edge is
-correctly used twice. So the repair has to *remove* an edge, not match one.
+That pairing, and the boundary-only distribution, points at the same
+near-tangential grazing pathology that produced every other defect in this
+family (2,969 of 19,552 junctions produce no geometry at all on this part) —
+but a different symptom from the pinholes: whole faces that are individually
+malformed, not sound faces carrying a spurious wire.
 
-**Three approaches tried and eliminated**, so they are not retried:
+**Not caused by the pinhole repair, and that was checked rather than assumed.**
+The repair touched exactly one junction on this part, at
+`[1874.836, 60.370, 970.121]`. The **nearest** invalid face is **27.6 mm** away
+— more than fifteen cell widths, against a junction that spans `a/2` = 1.77 mm
+— and the farthest is 259 mm. The repaired piece is itself valid, with surface
+area preserved bit-identically (`tools/prototypes/RESULTS.md` G10).
 
-| Approach | Result |
-|---|---|
-| Raise `SEW_TOLERANCE` 1e-6 → 1e-5 | **No effect.** The tolerance decides whether two *different* faces' free edges are paired; it cannot remove an edge that has no partner. Reverted; the disproof is recorded in the constant's docstring. |
-| Same-domain unification of the sewn boundary, before the rings are read | **No effect on these edges.** Implemented, measured and reverted. It ran on every component (301,505 → 268,520 faces, 97,043 edges removed, area drift 5.26e-07), so the kernel does not consider these slivers same-domain with their neighbours — each is a real tiny corner at an angle, not a collinear split. |
-| `ShapeFix` small-edge removal on each trimmed piece, in the worker | **Not tried.** The remaining candidate. It cleans debris at its source and parallelises for free, but it runs before cap tagging, so it risks perturbing the cap-area agreement `resolve_interfaces` checks at `CAP_AREA_REL_TOL` (1e-6 relative). That interaction is what needs designing. |
+**Also not caused by same-domain unification.** The failed run's temp folder
+stages each solid before and after `simplify` (`unify_i.brep`,
+`unify_i_out.brep`, `validate_i.brep`). Solid 0 is **already invalid before
+unification**, so `simplify` is not implicated; the other 13 solids are valid at
+every stage.
 
-**How to verify a fix.** Run the rehearsal; `assemble` must report zero open and
-zero misoriented edges. `python -m pytest test -q` and `python tools/e2e.py` must
-stay green — the two committed scenarios do not contain grazing trims this severe,
-so they will not exercise the repair and must therefore be unchanged by it
-(0 mm³ against both golden samples).
+**What is not yet known.** *Which* OCCT check each face fails. Per-subshape
+fault codes could not be read out through OCP: `BRepCheck_Analyzer.Result(sub)`
+followed by either `StatusOnShape(sub)` or `Status()` reports nothing even on
+deliberately broken control solids, so that route is a dead end as written and
+whoever picks this up should not spend time re-deriving it. `IsValid()` on a
+single face *does* work and is what produced the numbers above. Reaching the
+fault code likely means the context iterator
+(`InitContextIterator`/`MoreShapeInContext`/`StatusOnShape`), or dumping one
+offending face to `.brep` and inspecting it in isolation — 34 faces is few
+enough to look at individually, and two of them are staged in the failed run's
+temp folder coordinates above.
 
-**One caution for whoever takes this.** A first attempt guarded the boundary
-unification with a 1e-9 relative area bar, reasoned from "this merge is more
-constrained than `simplify`'s, so it should hold tighter". That bar rejected a
-*correct* unification of the 301,172-face component at a drift of 3.08e-09 and
-silently undid the repair on the one component that needed it. Quadrature noise
-scales with the shell being integrated; the figure has to come from measurement,
-exactly as docs/algorithm.md §11 says about every gate. The same mistake in the
-same shape as issue #6.
+**How to verify a fix.** Run the rehearsal
+(`-i test/TD_HX_Indre_Volum.step -cc 5 -t 1 --cores 6 --ram 20 -v`, ~50 min);
+`validate` must pass all 14 solids and the run must write its STEP. `python -m
+pytest test -q` and `python tools/e2e.py` must stay green (0 mm³ against both
+golden samples) — the committed scenarios contain no grazing trims this severe,
+so they will not exercise the repair and must be unchanged by it.
+
+**One caution, inherited from every previous defect in this family.** Three
+successive fixes here were each aimed at a misdiagnosis that matched the
+symptom convincingly (see `tools/prototypes/RESULTS.md` G9 and G10). Before
+building anything, dump one of the 34 faces and establish what is actually
+wrong with it. A gate that reproduces the symptom's magnitude but not its
+mechanism will pass while fixing nothing.
+
+---
+
+## 11. Closed — kept for the reasoning, not as work
+
+### Micron-scale debris edges from near-tangential trims — FIXED 2026-08-16
+
+Tracked from 2026-08-14 as "2 edges used by exactly one face" at
+`[1874.836, 60.370, 970.121]` and `[1874.836, 59.912, 969.775]`, with three
+candidate repairs of which two were disproved and the third — `ShapeFix`
+small-edge removal in the worker — was recommended as the remaining one.
+
+**The diagnosis was wrong, and convincingly so.** They are not small *edges*.
+Each is an **inner wire of a single edge whose endpoints do not meet**, bounding
+no area — a pinhole. That is why each is used by exactly one face inside a solid
+`BRepCheck_Analyzer` calls valid, and why OCCT's small-edge machinery cannot see
+them: `ShapeFix_Wireframe.CheckSmallEdges` reports **0** candidates at every
+precision from 1e-5 to 1e-2, and `ShapeFix_Face.FixSmallAreaWire` removes
+nothing. **Do not retry `ShapeFix` here.**
+
+Fixed by `occ.remove_pinhole_wires`, called from `boundary.trim_junction`
+before cap tagging: it drops a non-outer wire when every edge in it is under
+`PINHOLE_WIRE_TOL` **and** every edge is already used exactly once, so it can
+only ever delete edges that are already unpaired. Surface area is preserved
+bit-identically, volume to 2.7e-15, and `shell_defects` on the affected piece
+goes from `(2, 0)` to `(0, 0)`. On the full rehearsal it removes 2 wires from 1
+junction of 19,552 and `assemble` reports 14 watertight solids. Full account,
+including why a synthetic reproduction of this defect passed a complete
+measurement gate while repairing something else entirely, in
+`tools/prototypes/RESULTS.md` G10 and docs/algorithm.md §7.

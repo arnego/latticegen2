@@ -8,15 +8,18 @@ an interface only when both sides present material there and the two regions
 agree, and anything else stays as exterior surface rather than becoming a hole.
 """
 
+import os
+
 import numpy as np
 import pytest
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut
 from OCP.TopTools import TopTools_ListOfShape
 
 from latticegen2 import occ, weld
 from latticegen2.boundary import (
     BoundaryPiece,
     CAP_AREA_REL_TOL,
+    PINHOLE_VOLUME_TOL,
     _open_shell,
     _piece_from,
     finalize_pieces,
@@ -86,8 +89,9 @@ def test_trim_tags_every_cap_plane_face_and_keeps_it(lp):
                                    [9.0, 9.0, -9.0], [-9.0, 9.0, -9.0]])),
         np.array([0.0, 0.0, 18.0]),
     )
-    trimmed = trim_junction(lp, tpl, np.zeros(3), box)
+    trimmed, n_pinholes = trim_junction(lp, tpl, np.zeros(3), box)
     assert len(trimmed) == 1
+    assert n_pinholes == 0, "a junction wholly inside a box has no grazing pinholes"
     faces, tags, volume = trimmed[0]
     assert len(faces) == len(tags)
     assert volume == pytest.approx(tpl.volume, rel=1e-9), "the box contains the junction whole"
@@ -378,3 +382,158 @@ def test_fuse_disagreeing_pairs_is_a_no_op_without_mismatches(lp):
     fused, n_groups = fuse_disagreeing_pairs(lp, [a, b], [])
     assert n_groups == 0
     assert fused == [a, b]
+
+
+# --- zero-area pinhole wires (docs/algorithm.md §7) -------------------------
+#
+# A near-tangential trim leaves a face carrying an extra inner wire of one
+# few-micron edge whose endpoints do not meet — a pinhole bounding no area. The
+# edge is used once, so the every-edge-twice proof rejects the shell for it.
+#
+# These tests use the **real** part and the real node, not a synthetic
+# reproduction. That is deliberate: an earlier attempt at this defect built a
+# synthetic near-tangential graze which reproduced the symptom's scale to four
+# significant figures (a non-degenerate ~3e-06 mm edge) and was still the wrong
+# object — the synthetic edges were ordinary two-owner small edges, which OCCT's
+# ShapeFix removes happily, while the real ones are one-owner pinhole wires it
+# cannot touch at all. See tools/prototypes/RESULTS.md G10.
+
+PINHOLE_NODE = (591, -46, -70)
+"""The junction on `TD_HX_Indre_Volum` at `cc=5, t=1` whose trim leaves the two
+pinholes docs/specification.md §10 documents, at 3.171690e-06 and 5.808982e-06
+mm."""
+
+
+@pytest.fixture(scope="module")
+def pinhole_case():
+    """`(lp, template, body, node position)` for the real failing junction."""
+    lp5 = lattice_params(5.0, 1.0)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    body = occ.read_step(os.path.join(here, "test", "TD_HX_Indre_Volum.step"))
+    pos = lattice_node(lp5, np.array(PINHOLE_NODE))
+    return lp5, build_template(lp5), body, pos
+
+
+def raw_trim(tpl, node_pos, body):
+    """The boolean alone, with no repair — what `trim_junction` starts from."""
+    algo = BRepAlgoAPI_Common()
+    args = TopTools_ListOfShape()
+    args.Append(tpl.solid.Moved(occ.translation(node_pos)))
+    tools = TopTools_ListOfShape()
+    tools.Append(body)
+    algo.SetArguments(args)
+    algo.SetTools(tools)
+    algo.Build()
+    assert algo.IsDone()
+    solids = occ.solids(algo.Shape())
+    assert len(solids) == 1
+    return solids[0]
+
+
+def test_the_raw_trim_really_does_leave_an_unpaired_pinhole(pinhole_case):
+    """Guard on the guard: if the boolean stops producing them, the repair test
+    below would pass while testing nothing."""
+    _, tpl, body, pos = pinhole_case
+    raw = raw_trim(tpl, pos, body)
+    # The defect is visible on the piece alone, before any sewing — an edge used
+    # by exactly one face inside a solid OCCT itself calls valid.
+    assert occ.is_valid(raw)
+    assert weld.shell_defects(_open_shell(occ.faces(raw)))[:2] == (2, 0)
+
+
+def test_trim_junction_removes_the_pinholes_and_closes_the_piece(pinhole_case):
+    lp5, tpl, body, pos = pinhole_case
+    raw = raw_trim(tpl, pos, body)
+
+    pieces, n_pinholes = trim_junction(lp5, tpl, pos, body)
+
+    assert n_pinholes == 2
+    assert len(pieces) == 1
+    faces, tags, _ = pieces[0]
+    assert len(faces) == len(tags), "tags stay aligned with the repaired face list"
+    assert weld.shell_defects(_open_shell(faces))[:2] == (0, 0)
+    # Exactly the two pinhole edges are gone; no face is lost with them.
+    assert occ.count_subshapes(_open_shell(faces))[1] == occ.count_subshapes(raw)[1] - 2
+    assert len(faces) == len(occ.faces(raw))
+
+
+def test_removing_a_pinhole_moves_no_geometry(pinhole_case):
+    """A wire bounding no area cannot change the area of the face carrying it,
+    so this is checked exactly rather than within a comfortable margin."""
+    lp5, tpl, body, pos = pinhole_case
+    raw = raw_trim(tpl, pos, body)
+    faces, tags, volume = trim_junction(lp5, tpl, pos, body).pieces[0]
+
+    assert sum(occ.area(f) for f in faces) == sum(occ.area(f) for f in occ.faces(raw))
+    assert volume == pytest.approx(occ.volume(raw), rel=PINHOLE_VOLUME_TOL)
+    assert occ.is_valid(occ.make_solid(_closed(_open_shell(faces))))
+
+    # And the caps resolve_interfaces compares are untouched, so a repaired
+    # piece still agrees with an unrepaired neighbour across a shared cap.
+    before = _cap_area_map(lp5, pos, occ.faces(raw))
+    after = {h: a for h, a in _cap_area_map(lp5, pos, faces).items()}
+    assert set(before) == set(after)
+    for h in before:
+        assert after[h] == pytest.approx(before[h], abs=0.0, rel=0.0)
+
+
+def _closed(shell):
+    shell.Closed(True)
+    return shell
+
+
+def _cap_area_map(lp, node_pos, faces):
+    per: dict[int, float] = {}
+    for f in faces:
+        h = is_cap_plane_face(lp, f, node_pos)
+        if h is not None:
+            per[h] = per.get(h, 0.0) + occ.area(f)
+    return per
+
+
+def test_a_paired_wire_is_never_removed_however_small_the_bar_says(lp):
+    """The safety property that makes the length threshold not load-bearing.
+
+    Run at a tolerance larger than *every* edge in the template, so length alone
+    would condemn all of them. Nothing is removed, because every edge of a
+    closed solid is used twice and the repair only ever touches already-unpaired
+    edges on a non-outer wire.
+    """
+    tpl = build_template(lp)
+    huge = 10.0 * lp.a
+    fixed, n_removed = occ.remove_pinhole_wires(tpl.solid, huge)
+    assert n_removed == 0
+    assert fixed is tpl.solid, "a no-op must not rebuild the shape either"
+
+
+def test_a_clean_trim_has_no_pinholes(lp):
+    """Negative control: a junction wholly inside a box is left alone."""
+    tpl = build_template(lp)
+    box = occ.prism(
+        occ.polygon_face(np.array([[-9.0, -9.0, -9.0], [9.0, -9.0, -9.0],
+                                   [9.0, 9.0, -9.0], [-9.0, 9.0, -9.0]])),
+        np.array([0.0, 0.0, 18.0]),
+    )
+    assert trim_junction(lp, tpl, np.zeros(3), box).n_pinholes_removed == 0
+
+
+def test_a_repair_that_moved_geometry_is_a_named_failure(lp, monkeypatch):
+    """Silence here is the failure the guard exists to prevent: a face quietly
+    reshaped in the worker surfaces much later as a wrong volume."""
+    tpl = build_template(lp)
+    box = occ.prism(
+        occ.polygon_face(np.array([[-9.0, -9.0, -9.0], [9.0, -9.0, -9.0],
+                                   [9.0, 9.0, -9.0], [-9.0, 9.0, -9.0]])),
+        np.array([0.0, 0.0, 18.0]),
+    )
+    # Stand in for a repair that claims to have removed a pinhole but returns a
+    # different solid. No synthetic pinhole reproduces the real pathology (G10),
+    # so the guard is exercised directly rather than through a fake defect.
+    smaller = occ.prism(
+        occ.polygon_face(np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                                   [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])),
+        np.array([0.0, 0.0, 1.0]),
+    )
+    monkeypatch.setattr(occ, "remove_pinhole_wires", lambda shape, tol: (smaller, 1))
+    with pytest.raises(ProcessingError, match="changed its surface area"):
+        trim_junction(lp, tpl, np.zeros(3), box)

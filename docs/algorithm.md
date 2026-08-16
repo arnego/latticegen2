@@ -482,9 +482,65 @@ must never mistake for debris. A single already-fused junction cannot trigger th
 fragmentation at all, by construction — which is why this design needs no
 machinery to keep operands disjoint.
 
-After trimming, every face lying in a cap plane is **tagged, not dropped**.
+Each piece then has its **pinhole wires removed**, before anything reads its
+faces.
+
+A strut grazing the input surface almost tangentially leaves a face carrying an
+extra *inner wire* made of a single edge a few microns long whose two endpoints
+do not meet. It bounds no area — it is a pinhole, not a sliver — but it is a
+wire, so its edge is used by exactly one face and §8's every-edge-twice proof
+rejects the shell for it. Measured on `TD_HX_Indre_Volum` at `cc=5, t=1`: two of
+them, 3.171690e-06 and 5.808982e-06 mm, on planar faces of 1.19 and 1.25 mm², in
+a solid `BRepCheck_Analyzer` itself calls valid. The defect is present in the
+raw boolean output, so it is repaired at source, in the worker, where the piece
+that produced it is still identifiable.
+
+`remove_pinhole_wires` drops a wire only when **all** of these hold, and it is
+the third that carries the argument:
+
+* it is not the face's outer wire;
+* every edge in it is shorter than `PINHOLE_WIRE_TOL` (3e-5 mm), so the region
+  it could bound is negligible against a strut of side `t`;
+* every edge in it is used exactly **once** — already unpaired, already a
+  defect. An inner wire properly shared with a neighbouring face is left alone
+  however small it is.
+
+So the repair can only ever delete edges that are already unpaired, and only
+when they bound nothing. That makes "it cannot open a hole" a property of the
+construction rather than of the threshold — verified by running it on a closed
+solid at a bar larger than every edge in it, where it removes nothing
+(`tools/prototypes/RESULTS.md` G10). The threshold is consequently not
+load-bearing, which is why it needs no wide calibrated margin.
+
+It is nonetheless checked rather than trusted, per §11. Whenever a piece loses a
+wire, its **surface area must be unchanged to `PINHOLE_AREA_TOL` (1e-12
+relative)** and its volume to `PINHOLE_VOLUME_TOL` (1e-9). The area bar sits
+near zero deliberately, and that is sound here specifically: a wire bounding no
+area cannot change the area of the face carrying it, so unlike §9's same-domain
+unification there is no larger merged region to re-integrate and no quadrature
+noise to absorb — the measured drift is 0.0, bit-identical, against 2.7e-15 for
+the volume. Anything else means a wire that bounded something was removed, and
+that is a hard failure naming the junction rather than a silent skip: this is a
+repair, not an optimization, so "carry on without it" would simply reinstate the
+defect hours later as an unclosed shell with no indication of where (§11).
+Removals are reported as one aggregate line per run.
+
+**OCCT's own repair tools do not touch these, which is why this is hand-rolled
+rather than delegated.** `ShapeFix_Wireframe` targets small *edges* between two
+faces and reports no candidates here at any precision from 1e-5 to 1e-2;
+`ShapeFix_Face.FixSmallAreaWire` targets small *wires* and removes nothing.
+Both expect a well-formed closed wire, and a single non-closing edge is not one.
+That mattered more than it sounds: this defect was tracked for two days as
+"micron-scale debris edges" with `ShapeFix` small-edge removal as the proposed
+fix, and a synthetic reproduction matching the symptom's scale to four
+significant figures passed a full measurement gate while repairing an entirely
+different defect (G10).
+
+Every face lying in a cap plane is then **tagged, not dropped**.
 Identifying one is unambiguous: lateral faces of any half-strut lie at `t/2` from
-the node (§3.3), caps at `a/2`, and `t < a`. Whether a tagged cap is actually an
+the node (§3.3), caps at `a/2`, and `t < a`. Tagging runs over the repaired face
+list, so a piece's faces and its cap tags come from one pass and are aligned by
+construction. Whether a tagged cap is actually an
 **interface** — a hole this junction punches for its neighbour to fill — is
 decided later, on the master, once both sides are known (§7.1).
 
@@ -1052,6 +1108,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Indexed shared-topology interior shell | `O(N)` and exactly watertight; replaces a sewing step measured at 14.9 s per 1,000 junctions and growing superlinearly |
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
+| Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10) |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
@@ -1097,11 +1154,11 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores`/`--ram` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind those budgets: logical core count, total and free RAM (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity, pinhole-wire removal (§7) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |
-| [`src/latticegen2/boundary.py`](../src/latticegen2/boundary.py) | §7 (single-operand trim, cap tagging, worker processes), §7.1 (interface resolution) |
+| [`src/latticegen2/boundary.py`](../src/latticegen2/boundary.py) | §7 (single-operand trim, pinhole-wire repair and its guard, cap tagging, worker processes), §7.1 (interface resolution) |
 | [`src/latticegen2/connect.py`](../src/latticegen2/connect.py) | §8 (junction graph, components, floating-body rule) — kernel-free |
 | [`src/latticegen2/weld.py`](../src/latticegen2/weld.py) | §8 (boundary sew — tiled round 1, seam-only round 2 — interface-ring lookup, assembly and its watertightness proof) |
 | [`src/latticegen2/parallel.py`](../src/latticegen2/parallel.py) | §8, §9, §12 (the shared `WorkerPool`, `.brep` IPC helpers) — used by `boundary.py`, `weld.py` and `pipeline.py` |

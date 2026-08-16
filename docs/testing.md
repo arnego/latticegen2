@@ -35,7 +35,7 @@ header rewrite.
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
 | `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call | yes |
-| `test_boundary.py` | The symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant | yes |
+| `test_boundary.py` | The symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7), tested against the **real** failing junction in `TD_HX_Indre_Volum.step` rather than a synthetic stand-in — see the note below | yes |
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6 | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
 | `test_pipeline.py` | Same-domain unification's fallback ladder — a kernel that refuses to merge must yield a larger file, never a failed run | yes |
@@ -82,6 +82,26 @@ face report hundreds of false crossings purely because their independent
 triangulations are not vertex-aligned. Measured on two boxes sharing one exact
 face with zero volume overlap: 344 false positives without the pre-check, 0 with
 it.
+
+### Testing against real geometry, not a reproduction of it
+
+`test_boundary.py`'s pinhole-wire tests load `test/TD_HX_Indre_Volum.step` and
+trim one named junction from it, rather than constructing a small synthetic
+case the way the rest of the suite does. That is deliberate, and it is worth
+knowing why before "simplifying" it.
+
+The defect those tests pin was misdiagnosed for two days as a *small edge*, and
+the fix built for that diagnosis was validated by a synthetic reproduction which
+matched the real symptom's scale to four significant figures — a genuine,
+non-degenerate ~3e-06 mm edge produced by a real boolean — swept a tolerance,
+measured drift across 25 configurations, and passed. It was repairing ordinary
+two-owner small edges. The real defect is a one-owner *pinhole wire* bounding no
+area, which OCCT's small-edge machinery cannot see at all
+(`tools/prototypes/RESULTS.md` G10).
+
+So where the geometry that actually fails is committed to the repo, test against
+it. A synthetic case proves the code does what you think; only the real one
+proves it does what the part needs. The cost here is about 2 s.
 
 ### Golden samples
 
@@ -207,7 +227,8 @@ reaches a bundle. The script says so plainly if `psutil` is missing anyway.
 
 The measurements behind the architecture's load-bearing choices (junction cap
 integrity, join-mechanism throughput, per-junction intersection latency, STEP
-writer throughput, boundary-stitching scaling) are in
+writer throughput, boundary-stitching scaling, the seam-split repair and the
+pinhole-wire repair) are in
 [`../tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md), with the
 scripts that produced them alongside. Re-run one with, e.g.:
 

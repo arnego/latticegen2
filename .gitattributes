@@ -6,6 +6,12 @@
 *.sh    text eol=lf
 *.bat   text eol=crlf
 
+# OCCT .brep test fixtures are byte-exact geometry captured from a real failed
+# run (test/invalid-vertex-tolerance-*.brep). They are ASCII, so autocrlf would
+# happily rewrite their line endings on checkout; pinning them as binary keeps
+# every platform reading the same bytes the measurements were taken on.
+*.brep  -text
+
 # Files excluded from `git archive`, and therefore from the release bundles that
 # tools/build_release.py assembles from it. Keeping the payload to tracked files
 # only is what guarantees a stray working-tree directory can never reach a

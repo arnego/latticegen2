@@ -423,20 +423,64 @@ stages each solid before and after `simplify` (`unify_i.brep`,
 unification**, so `simplify` is not implicated; the other 13 solids are valid at
 every stage.
 
-**What is not yet known.** *Which* OCCT check each face fails. Per-subshape
-fault codes could not be read out through OCP: `BRepCheck_Analyzer.Result(sub)`
-followed by either `StatusOnShape(sub)` or `Status()` reports nothing even on
-deliberately broken control solids, so that route is a dead end as written and
-whoever picks this up should not spend time re-deriving it. `IsValid()` on a
-single face *does* work and is what produced the numbers above. Reaching the
-fault code likely means the context iterator
-(`InitContextIterator`/`MoreShapeInContext`/`StatusOnShape`), or dumping one
-offending face to `.brep` and inspecting it in isolation — 34 faces is few
-enough to look at individually, and two of them are staged in the failed run's
-temp folder coordinates above.
+**Root cause — measured 2026-08-17 by dumping the faces and inspecting them
+alone.** Four of the 34 were written out of `unify_0.brep` and examined:
+
+* **It is 17 bad *edges*, not 34 bad faces.** Each invalid face has exactly one
+  individually invalid edge, and the faces come in pairs because the two faces
+  of a pair *share that edge* — verified by identical endpoints. 17 edges x 2
+  owning faces = the 34.
+* **The edges are ordinary**, not debris: spans of 0.183 mm and 0.356 mm, real
+  3D curves (`Geom_Ellipse`, `Geom_BSplineCurve`), pcurves present, not
+  degenerate. Every face-level check passes — `IntersectWires`,
+  `ClassifyWires`, `OrientationOfWires`, wire closure and orientation are all
+  `BRepCheck_NoError`, on planar, cylindrical and B-spline faces alike.
+* **The fault is a vertex sitting off its edge's curve.** For each bad edge,
+  one vertex is off the 3D curve by 2.474044e-05 mm (the ellipse) and
+  3.316370e-04 mm (the B-spline) — and that vertex's tolerance has been
+  inflated to *exactly* that distance. The validity test therefore sits on the
+  knife edge and falls the wrong way.
+* **It is not created by the trim.** Every trimmed junction around both sample
+  locations comes out of `trim_junction` with zero invalid faces and zero
+  invalid edges. The fault appears later, so the boundary **sew** is what
+  introduces it — consistent with `BRepBuilderAPI_Sewing` rebuilding edges.
+  **The repair therefore belongs after sewing, not in the worker** beside the
+  pinhole repair.
+
+**Candidate fix, measured on all four dumped faces.** Correcting the recorded
+tolerance is the mildest possible repair — it moves no geometry, and surface
+area is unchanged to 0.000e+00 in every case:
+
+| repair | result |
+|---|---|
+| `BRepLib.UpdateTolerances_s(shape, True)` | fixes 3 of 4 — **fails on the B-spline face**, so not reliable |
+| **`ShapeFix_Edge().FixVertexTolerance(edge, face)`** | **fixes all 4**, zero area drift |
+| widening the offending vertex by 1 % | fixes all 4, zero area drift |
+
+`FixVertexTolerance` is OCCT's own tool for exactly this fault and is the
+recommended starting point. What still needs deciding is **where** it runs (on
+each component's sewn boundary, before `assemble`, is the natural place) and
+what guards it: per docs/algorithm.md §11 a repair must be bounded, and the
+bound here is that no geometry moves — surface area and volume unchanged, which
+the measurements above show is achievable exactly rather than approximately.
+
+Note also that a downstream consumer may care: the fix leaves a vertex whose
+tolerance is ~3e-04 mm, which is large next to `WELD_TOL` (1e-6) though still
+far below the 0.4 mm minimum feature. Worth confirming the exported STEP still
+satisfies `tools/e2e.py`'s checks and opens cleanly.
+
+**Diagnostic notes, so they are not re-derived.** Per-subshape fault codes are
+**not** reachable through OCP: `BRepCheck_Analyzer.Result(sub)` followed by
+either `StatusOnShape(sub)` or `Status()` reports nothing *even on deliberately
+broken control solids*, and `BRepCheck_Edge`/`BRepCheck_Vertex` status lists
+stay empty after `Minimum()` and `InContext()` too. What does work:
+`BRepCheck_Analyzer(sub).IsValid()` on a lone face, edge or vertex (a plain
+boolean), `BRepCheck_Face`'s named checks, and measuring the vertex-to-curve
+distance directly. Always run a probe against a known-bad control before
+trusting a negative result — a blind scan reporting "no faults" cost time here.
 
 **How to verify a fix.** Run the rehearsal
-(`-i test/TD_HX_Indre_Volum.step -cc 5 -t 1 --cores 6 --ram 20 -v`, ~50 min);
+(`-i test/TD_HX_rehearsal_test.step -cc 5 -t 1 --cores 6 --ram 20 -v`, ~50 min);
 `validate` must pass all 14 solids and the run must write its STEP. `python -m
 pytest test -q` and `python tools/e2e.py` must stay green (0 mm³ against both
 golden samples) — the committed scenarios contain no grazing trims this severe,

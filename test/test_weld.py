@@ -54,7 +54,7 @@ def test_a_trimmed_cap_matches_the_ring_predicted_from_lattice_maths(template):
     """
     lp, tpl, tmesh = template
     node = (0, 0, 0)
-    faces, tags, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
+    faces, tags, _ = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
     cap = next(f for f, t in zip(faces, tags) if t == 0)
     predicted = weld.template_cap_ring(lp, tmesh, node, 0)
     assert weld.match_rings(predicted, weld.ring_of_face(cap)) is not None
@@ -93,7 +93,7 @@ def shell_of(faces):
 
 def test_a_closed_shell_has_no_defects(template):
     lp, tpl, _ = template
-    faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
+    faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
     assert weld.shell_defects(shell_of(faces))[:2] == (0, 0)
 
 
@@ -105,7 +105,7 @@ def test_a_face_joined_back_to_front_is_caught(template):
     51,393 mm³, with nothing else looking wrong.
     """
     lp, tpl, _ = template
-    faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
+    faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
     flipped = [faces[0].Reversed()] + list(faces[1:])
     open_edges, misoriented, _, _ = weld.shell_defects(shell_of(flipped))
     assert open_edges == 0, "the flip does not open the shell — that is the point"
@@ -114,7 +114,7 @@ def test_a_face_joined_back_to_front_is_caught(template):
 
 def test_a_missing_face_is_caught(template):
     lp, tpl, _ = template
-    faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
+    faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
     open_edges, _, samples, by_use = weld.shell_defects(shell_of(faces[1:]))
     assert set(by_use) == {1}, "a missing face leaves edges on one face, not three"
     assert open_edges > 0
@@ -139,7 +139,7 @@ def test_the_interior_joins_a_trimmed_junction_by_adopting_its_topology(template
     interfaces = {(a, h), (b, OPPOSITE_HALF[h])}
 
     pos_b = nodes(lp, np.array([b], dtype=np.int64))[0]
-    faces, tags, vol_b = trim_junction(lp, tpl, pos_b, big_box())[0]
+    faces, tags, vol_b = trim_junction(lp, tpl, pos_b, big_box()).pieces[0]
     assert vol_b == pytest.approx(tpl.volume, rel=1e-12), "the box contains it whole"
     boundary_faces = [f for f, t in zip(faces, tags) if t != OPPOSITE_HALF[h]]
 
@@ -164,7 +164,7 @@ def test_adoption_shares_the_edges_rather_than_duplicating_them(template):
     a, b = (0, 0, 0), (1, 0, 0)
     interfaces = {(a, 0), (b, OPPOSITE_HALF[0])}
     pos_b = nodes(lp, np.array([b], dtype=np.int64))[0]
-    faces, tags, _ = trim_junction(lp, tpl, pos_b, big_box())[0]
+    faces, tags, _ = trim_junction(lp, tpl, pos_b, big_box()).pieces[0]
     boundary_faces = [f for f, t in zip(faces, tags) if t != OPPOSITE_HALF[0]]
 
     rings = weld.interface_rings(lp, tmesh, {0: boundary_faces}, {(a, 0): 0})
@@ -183,7 +183,7 @@ def test_adoption_shares_the_edges_rather_than_duplicating_them(template):
 def test_a_ring_the_boundary_does_not_present_is_a_named_failure(template):
     """Silence here would become an unclosed shell much later, with no location."""
     lp, tpl, tmesh = template
-    faces, tags, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
+    faces, tags, _ = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
     with pytest.raises(Exception, match="no unique free edge"):
         weld.interface_rings(lp, tmesh, {0: faces}, {((7, 7, 7), 0): 0})
 
@@ -220,7 +220,7 @@ def _line_pieces(lp, tpl, n: int) -> list[BoundaryPiece]:
     positions = nodes(lp, np.array([(i, 0, 0) for i in range(n)], dtype=np.int64))
     pieces = []
     for i in range(n):
-        faces, tags, vol = trim_junction(lp, tpl, positions[i], _long_box())[0]
+        faces, tags, vol = trim_junction(lp, tpl, positions[i], _long_box()).pieces[0]
         keep = [
             f for f, t in zip(faces, tags)
             if not (t == 3 and i > 0) and not (t == 0 and i < n - 1)
@@ -323,7 +323,7 @@ def test_split_seam_interior_finds_nothing_to_split_on_a_fully_closed_tile(templ
     ``interior`` and returns no seam list for it at all — nothing for round 2
     to even consider."""
     lp, tpl, tmesh = template
-    faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box())[0]
+    faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
     assert weld.shell_defects(shell_of(faces))[:2] == (0, 0)  # sanity: closed
 
     seam_lists, interior = weld._split_seam_interior([faces])

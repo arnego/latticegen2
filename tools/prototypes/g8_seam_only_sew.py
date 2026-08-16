@@ -70,7 +70,7 @@ def _line_pieces(lp, tpl, n: int) -> list[BoundaryPiece]:
     positions = nodes(lp, np.array([(i, 0, 0) for i in range(n)], dtype=np.int64))
     pieces = []
     for i in range(n):
-        faces, tags, vol = trim_junction(lp, tpl, positions[i], box)[0]
+        faces, tags, vol = trim_junction(lp, tpl, positions[i], box).pieces[0]
         keep = [
             f for f, t in zip(faces, tags)
             if not (t == 3 and i > 0) and not (t == 0 and i < n - 1)

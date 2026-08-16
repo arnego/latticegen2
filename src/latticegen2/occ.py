@@ -29,6 +29,7 @@ from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
+from OCP.BRepTools import BRepTools, BRepTools_ReShape
 from OCP.Bnd import Bnd_Box
 from OCP.GProp import GProp_GProps
 from OCP.GeomAbs import GeomAbs_SurfaceType
@@ -37,7 +38,8 @@ from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_Reader, STEPControl_StepModelType, STEPControl_Writer
 from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.TopAbs import TopAbs_ShapeEnum
-from OCP.TopExp import TopExp_Explorer
+from OCP.TopExp import TopExp, TopExp_Explorer
+from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS, TopoDS_Compound, TopoDS_Face, TopoDS_Shape, TopoDS_Shell
 from OCP.gp import gp_Pnt, gp_Trsf, gp_Vec
@@ -250,6 +252,81 @@ def unify_same_domain(shape: TopoDS_Shape, unify_edges: bool = True) -> TopoDS_S
     upgrade = ShapeUpgrade_UnifySameDomain(shape, unify_edges, True, False)
     upgrade.Build()
     return upgrade.Shape()
+
+
+def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape, int]:
+    """Drop inner wires that bound no area. ``(shape, n_removed)``.
+
+    A strut grazing the input surface almost tangentially leaves a face carrying
+    an extra **inner wire** made of a single edge a few microns long whose two
+    endpoints do not even meet — a pinhole. It encloses nothing, but it is a
+    wire, so the edge is used once and :func:`latticegen2.weld.shell_defects`
+    rejects the shell for it. Measured on `TD_HX_Indre_Volum` at ``cc=5, t=1``:
+    two of them, 3.171690e-06 and 5.808982e-06 mm, on planar faces of 1.19 and
+    1.25 mm², in a solid ``BRepCheck_Analyzer`` calls valid. See
+    docs/algorithm.md §7 and ``tools/prototypes/RESULTS.md`` G10.
+
+    **OCCT's own repairs do not touch these, which is why this is hand-rolled.**
+    ``ShapeFix_Wireframe`` targets small *edges* between two faces and reports
+    no candidates here at any precision from 1e-5 to 1e-2;
+    ``ShapeFix_Face.FixSmallAreaWire`` targets small *wires* and returns false
+    without removing anything. Both expect a well-formed closed wire, and a
+    single non-closing edge is not one.
+
+    A wire is removed only when **all** of these hold, which is what makes the
+    repair unable to open a hole:
+
+    * it is not the face's outer wire;
+    * every one of its edges is shorter than ``tol``, so the region it could
+      bound is smaller than ``tol²`` — nothing, against a strut of side ``t``;
+    * every one of its edges is used exactly **once** in ``shape``, i.e. is
+      already unpaired. An inner wire properly shared with a neighbouring face
+      is left alone, however small.
+
+    So this only ever deletes edges that are already defects, and only when they
+    bound nothing. Measured on the piece above: surface area and cap areas
+    unchanged **exactly**, volume drift 2.7e-15 (machine precision, the same
+    order docs/algorithm.md §9 records for planar geometry), the solid still
+    valid, and ``shell_defects`` going from ``(2, 0)`` to ``(0, 0)``.
+    """
+    edge_faces = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(
+        shape, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, edge_faces
+    )
+
+    def is_pinhole(wire) -> bool:
+        n = 0
+        for e in _explore(wire, TopAbs_ShapeEnum.TopAbs_EDGE):
+            n += 1
+            edge = TopoDS.Edge_s(e)
+            if BRep_Tool.Degenerated_s(edge):
+                continue
+            props = GProp_GProps()
+            BRepGProp.LinearProperties_s(edge, props)
+            if props.Mass() >= tol:
+                return False
+            i = edge_faces.FindIndex(edge)
+            if i == 0 or edge_faces.FindFromIndex(i).Extent() != 1:
+                return False        # shared with another face: not ours to remove
+        return n > 0
+
+    reshape = BRepTools_ReShape()
+    n_removed = 0
+    for f in _explore(shape, TopAbs_ShapeEnum.TopAbs_FACE):
+        face = TopoDS.Face_s(f)
+        outer = BRepTools.OuterWire_s(face)
+        for wire in _explore(face, TopAbs_ShapeEnum.TopAbs_WIRE):
+            if wire.IsSame(outer):
+                continue
+            if is_pinhole(wire):
+                reshape.Remove(wire)
+                n_removed += 1
+    if not n_removed:
+        return shape, 0
+    fixed = reshape.Apply(shape)
+    if fixed is None or fixed.IsNull():
+        return shape, 0
+    return fixed, n_removed
 
 
 def count_subshapes(shape: TopoDS_Shape) -> tuple[int, int]:

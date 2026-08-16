@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 from OCP.BRep import BRep_Builder
@@ -72,6 +73,36 @@ so quadrature noise is the only difference expected and it lands far below this;
 the same bar :func:`latticegen2.junction._identify_caps` uses on the template.
 A real disagreement means one trim kept material the other did not, and stitching
 across it would weld two boundaries that are not the same curve."""
+
+PINHOLE_WIRE_TOL = 3e-5
+"""Millimetres. An inner wire whose every edge is shorter than this, and whose
+edges are already unpaired, bounds no area and is removed (docs/algorithm.md §7).
+
+The two the `TD_HX_Indre_Volum` rehearsal leaves at `cc=5, t=1` are 3.171690e-06
+and 5.808982e-06 mm, so this sits ~5x above the largest of them. It does not
+need the wide margin a length threshold usually would, because length is not
+what makes a wire removable here: :func:`latticegen2.occ.remove_pinhole_wires`
+additionally requires that every edge of the wire is used exactly once, i.e. is
+already a defect rather than a shared boundary. A real feature is paired and is
+therefore out of reach of this repair at any threshold. See
+``tools/prototypes/RESULTS.md`` G10."""
+
+PINHOLE_AREA_TOL = 1e-12
+"""Relative surface-area change allowed when pinhole wires are removed.
+
+Deliberately near zero rather than a comfortable margin, and that is sound
+*here* specifically: a wire bounding no area cannot change the area of the face
+that carried it, so unlike same-domain unification (docs/algorithm.md §9) there
+is no larger merged region to re-integrate and no quadrature noise to absorb.
+Measured on the piece this was built for, the drift is 0.0 — bit-identical, not
+merely small. This bar exists to catch a wire that turned out to bound
+something, which is the only way this repair could go wrong."""
+
+PINHOLE_VOLUME_TOL = 1e-9
+"""Relative volume change allowed when pinhole wires are removed. Measured
+2.7e-15 (machine precision, the order docs/algorithm.md §9 records as exact for
+planar geometry); this leaves six orders of headroom over that while still
+catching any real change."""
 
 
 @dataclass
@@ -111,6 +142,14 @@ class BoundaryResult:
     pieces: list[BoundaryPiece] = field(default_factory=list)
     n_empty: int = 0
     """Junctions whose intersection with the input body was empty."""
+    n_pinhole_junctions: int = 0
+    """Junctions that carried zero-area pinhole wires and were repaired."""
+    n_pinhole_wires: int = 0
+    """Pinhole wires removed in total (docs/algorithm.md §7).
+
+    Logged as one aggregate line rather than one per junction, the same way the
+    floating-body rule reports its removals: a part dense in grazing trims can
+    produce many, and a line each would bury the rest of the log."""
     max_worker_rss: int = 0
     """Highest peak RSS reported by any worker process.
 
@@ -170,16 +209,25 @@ def _open_shell(faces) -> TopoDS_Shell:
     return shell
 
 
+class TrimResult(NamedTuple):
+    """What one junction's trim produced."""
+
+    pieces: list
+    """``(faces, tags, volume)`` per connected solid the intersection left."""
+    n_pinholes_removed: int
+    """Zero-area pinhole wires dropped across all of them (docs/algorithm.md §7)."""
+
+
 def trim_junction(
     lp: LatticeParams,
     tpl: JunctionTemplate,
     node_pos: np.ndarray,
     body: TopoDS_Shape,
-):
+) -> TrimResult:
     """Intersect one instanced junction with the body and tag its cap faces.
 
-    Returns a list of ``(faces, tags, volume)`` triples, one per connected solid
-    the intersection produced. ``tags[i]`` is the half-strut id of the cap plane
+    ``pieces`` holds a ``(faces, tags, volume)`` triple per connected solid the
+    intersection produced. ``tags[i]`` is the half-strut id of the cap plane
     ``faces[i]`` lies in, or ``-1`` for every other face. A boundary junction can
     legitimately split into several pieces when the input surface cuts between
     its arms; each piece becomes its own vertex in the connectivity graph.
@@ -188,6 +236,11 @@ def trim_junction(
     not a local fact — it depends on what the junction on the other side of that
     cap produced, which is a different boolean in a different process. See the
     module docstring and :func:`resolve_interfaces`.
+
+    Each piece has its zero-area pinhole wires removed *before* it is tagged, so
+    ``faces`` and ``tags`` are built from one pass over the repaired face list
+    and stay index-aligned by construction — which is what :func:`_piece_from`
+    relies on.
     """
     instance = tpl.solid.Moved(occ.translation(node_pos))
     algo = BRepAlgoAPI_Common()
@@ -204,12 +257,70 @@ def trim_junction(
         )
 
     out = []
+    n_pinholes = 0
     for solid in occ.solids(algo.Shape()):
-        faces = occ.faces(solid)
+        cleaned, removed = _remove_pinholes(node_pos, solid)
+        n_pinholes += removed
+        faces = occ.faces(cleaned)
         tags = [is_cap_plane_face(lp, f, node_pos) for f in faces]
         tags = [-1 if h is None else h for h in tags]
-        out.append((faces, tags, occ.volume(solid)))
-    return out
+        out.append((faces, tags, occ.volume(cleaned)))
+    return TrimResult(out, n_pinholes)
+
+
+def _remove_pinholes(node_pos: np.ndarray, solid):
+    """Drop this piece's zero-area pinhole wires, proving nothing else moved.
+
+    Returns ``(solid, n_removed)``. A pinhole is an inner wire of a few microns
+    that bounds no area, left by a near-tangential trim; without this the shell
+    is rejected by :func:`latticegen2.weld.shell_defects` for an edge used once
+    (docs/algorithm.md §7). :func:`latticegen2.occ.remove_pinhole_wires` will
+    only ever delete an edge that is *already* unpaired and bounds nothing, so
+    the repair cannot open a hole — but "cannot" is checked rather than trusted,
+    the way every other gate in this pipeline is (docs/algorithm.md §11).
+
+    **Surface area is the quantity checked, and it is checked exactly.**
+    Removing a wire that bounds no area cannot change the area of the face that
+    carried it, so unlike a merge or a unification there is no quadrature noise
+    to allow for: the measured drift on the piece this repair was built for is
+    0.0, bit-identical, and anything else means a wire that did bound something
+    was removed. Volume is checked too, at machine precision, as a second
+    signal.
+
+    This is a correctness repair, not an optimization, so it does not degrade
+    silently: skipping it leaves the shell unclosed hours later with no
+    indication of where, which is exactly the failure it exists to prevent.
+    """
+    try:
+        cleaned, n_removed = occ.remove_pinhole_wires(solid, PINHOLE_WIRE_TOL)
+    except Exception as exc:                                   # noqa: BLE001
+        raise ProcessingError(
+            f"Pinhole-wire removal failed for the junction at {tuple(node_pos)}: {exc}"
+        ) from exc
+    if n_removed <= 0:
+        return solid, 0
+
+    area_before = sum(occ.area(f) for f in occ.faces(solid))
+    area_after = sum(occ.area(f) for f in occ.faces(cleaned))
+    drift = abs(area_after - area_before) / max(area_before, 1e-30)
+    if drift > PINHOLE_AREA_TOL:
+        raise ProcessingError(
+            f"Removing {n_removed} pinhole wire(s) from the junction at "
+            f"{tuple(node_pos)} changed its surface area from {area_before:.9g} "
+            f"to {area_after:.9g} mm^2 ({drift:.3e} relative, tolerance "
+            f"{PINHOLE_AREA_TOL:g}). A wire that bounds no area cannot change "
+            f"it, so one that bounded something was removed."
+        )
+
+    v0, v1 = occ.volume(solid), occ.volume(cleaned)
+    vdrift = abs(v1 - v0) / max(abs(v0), 1e-30)
+    if vdrift > PINHOLE_VOLUME_TOL:
+        raise ProcessingError(
+            f"Removing {n_removed} pinhole wire(s) from the junction at "
+            f"{tuple(node_pos)} changed its volume from {v0:.9g} to {v1:.9g} "
+            f"mm^3 ({vdrift:.3e} relative, tolerance {PINHOLE_VOLUME_TOL:g})."
+        )
+    return cleaned, n_removed
 
 
 # --- Interface resolution (master side) -------------------------------------
@@ -505,8 +616,13 @@ def _worker_trim(job):
     bundles: list[TopoDS_Shape] = []
     meta: list[tuple[NodeKey, list[int], float]] = []
     n_empty = 0
+    n_pinhole_junctions = 0
+    n_pinhole_wires = 0
     for i in range(len(node_batch)):
-        results = trim_junction(lp, tpl, positions[i], body)
+        results, n_pinholes = trim_junction(lp, tpl, positions[i], body)
+        if n_pinholes:
+            n_pinhole_junctions += 1
+            n_pinhole_wires += n_pinholes
         if not results:
             n_empty += 1
             continue
@@ -518,10 +634,13 @@ def _worker_trim(job):
     from .runlog import peak_rss_bytes
 
     rss = peak_rss_bytes()
+    pinholes = (n_pinhole_junctions, n_pinhole_wires)
+    # `rss` stays last: WorkerPool.run reads it positionally at rss_index=-1, a
+    # convention shared by every worker function in this codebase.
     if bundles:
         BRepTools.Write_s(occ.compound(bundles), out_path)
-        return out_path, meta, n_empty, rss
-    return None, meta, n_empty, rss
+        return out_path, meta, n_empty, pinholes, rss
+    return None, meta, n_empty, pinholes, rss
 
 
 def _piece_from(node: NodeKey, faces: list, tags: list[int], volume: float) -> BoundaryPiece:
@@ -568,7 +687,10 @@ def trim_boundary(
     if workers <= 1:
         positions = nodes(lp, boundary_nodes)
         for i in range(len(boundary_nodes)):
-            trimmed = trim_junction(lp, tpl, positions[i], body)
+            trimmed, n_pinholes = trim_junction(lp, tpl, positions[i], body)
+            if n_pinholes:
+                result.n_pinhole_junctions += 1
+                result.n_pinhole_wires += n_pinholes
             if not trimmed:
                 result.n_empty += 1
             else:
@@ -594,7 +716,9 @@ def trim_boundary(
         # resolves near-coincident vertices in the order it receives them, so an
         # arbitrary completion order would let two runs of the same command
         # produce byte-different output.
-        for batch_index, (path, meta, n_empty, rss) in enumerate(results):
+        for batch_index, (path, meta, n_empty, pinholes, rss) in enumerate(results):
+            result.n_pinhole_junctions += pinholes[0]
+            result.n_pinhole_wires += pinholes[1]
             result.n_empty += n_empty
             result.max_worker_rss = max(result.max_worker_rss, rss)
             # Report junctions, the same unit the sequential path reports, rather

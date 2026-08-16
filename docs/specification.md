@@ -234,7 +234,7 @@ diagnosis. Remove an item once it's fixed and verified.*
 ### Scale rehearsal, chapter closed: paths 1–4 implemented and re-measured
 
 **First run 2026-08-14**, **re-profiled 2026-08-15** after implementing paths
-1–4 below, both on `TD_HX_Indre_Volum.step` at `cc=5, t=1`,
+1–4 below, both on `TD_HX_rehearsal_test.step` at `cc=5, t=1`,
 `--cores 6 --ram 20 -bg` on the 6-core / 32 GB development workstation. Both
 runs used a temporary, uncommitted bypass of the `assemble`-stage watertightness
 gate ("Micron-scale debris edges" below, still open and still out of scope for
@@ -354,7 +354,7 @@ wrong result" — and a few percent of added `.brep` I/O on a part shaped like
 this one is exactly that failure mode, not a correctness problem. A part whose
 components are more evenly sized (several separate floating islands of
 comparable scale, rather than one dominant body plus scraps) would see the
-intended benefit; `TD_HX_Indre_Volum` at `cc=5, t=1` simply is not that
+intended benefit; `TD_HX_rehearsal_test` at `cc=5, t=1` simply is not that
 shape. The mechanism is sound and stays; the benefit is part-shape-dependent,
 and that dependency is now documented rather than assumed.
 

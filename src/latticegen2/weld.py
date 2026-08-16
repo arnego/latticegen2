@@ -96,7 +96,7 @@ the same nominal region computed by two independent booleans, so this only has t
 absorb their disagreement, which is far below it.
 
 Raising this does **not** fix the micron-scale slivers a grazing trim leaves
-(specification.md §10). Tried at 1e-5 on the `TD_HX_Indre_Volum` rehearsal, which
+(specification.md §10). Tried at 1e-5 on the `TD_HX_rehearsal_test` rehearsal, which
 carries two such edges of 3.171690e-06 mm and 5.808982e-06 mm: both survived
 unchanged. The tolerance governs whether two *different* faces' free edges are
 paired up, so it cannot remove an edge that has no partner to be paired with —
@@ -858,7 +858,7 @@ def shell_defects(shell: TopoDS_Shell) -> tuple[int, int, list]:
         # A degenerate edge is a parametric artefact, not geometry: it has no
         # length, and the face that owns it uses it exactly once by
         # construction. Requiring two uses of it reports sound geometry as
-        # broken. Measured on `TD_HX_Indre_Volum` at cc=5, t=1, where the trim
+        # broken. Measured on `TD_HX_rehearsal_test` at cc=5, t=1, where the trim
         # against a grazing surface leaves them: 10 of the 12 edges this test
         # rejected were degenerate, 3.0e-9 to 8.3e-8 mm long, and the shell was
         # closed everywhere they appeared. Skipping them is not a relaxation of

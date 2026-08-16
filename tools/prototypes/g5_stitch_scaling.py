@@ -1,6 +1,6 @@
 """Gate G5 — what makes ``BRepBuilderAPI_Sewing`` expensive at boundary scale.
 
-The scale rehearsal (``TD_HX_Indre_Volum``, ``cc=5 t=1``) spent **4 h 45 m** of a
+The scale rehearsal (``TD_HX_rehearsal_test``, ``cc=5 t=1``) spent **4 h 45 m** of a
 5 h 04 m run in the ``sew`` stage, single-threaded, stitching 21,697 shells.
 docs/specification.md §10 predicted this and sketched two ways out, but they cost
 very different amounts to build and the choice turns on *which* term dominates:
@@ -51,16 +51,6 @@ from latticegen2.junction import build_template
 from latticegen2.lattice import lattice_params
 
 SEW_TOL = 1e-6
-
-DEFAULT_PIECES = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "..", "..", "gmsh-occt-memory-write-69e632", "temp", "20260812-192100",
-)
-"""Where the 5-hour failure left its 21,955 trimmed boundary pieces.
-
-A specific run's leavings, so it will not be there forever — pass ``--pieces``
-to point at any kept ``temp/<stamp>`` folder. Nothing else in the repository
-depends on it."""
 
 VARIANTS = {
     # (cutting, analysis, same_parameter)
@@ -225,8 +215,9 @@ def face_count_delta(pieces, n, m, budget):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--pieces", default=DEFAULT_PIECES,
-                    help="kept temp/<stamp> folder holding boundary_*.brep")
+    ap.add_argument("--pieces", required=True,
+                    help="kept temp/<stamp> folder holding boundary_*.brep, "
+                         "left behind by a failed or cancelled run")
     ap.add_argument("--budget", type=float, default=600.0,
                     help="seconds; stop a ladder once one measurement exceeds it")
     ap.add_argument("--max", type=int, default=32000, help="most pieces to load")

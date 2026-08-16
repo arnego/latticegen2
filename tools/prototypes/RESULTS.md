@@ -287,7 +287,7 @@ scales measured, rather than pushed smaller.
 This measurement sums round 1 serially; the real pipeline runs it across worker
 processes, so production's wall-clock saving should exceed the 1.3–1.45× measured
 here by roughly the parallel speedup on round 1's share of the total —
-confirming by how much is what the `TD_HX_Indre_Volum` rehearsal re-run is for
+confirming by how much is what the `TD_HX_rehearsal_test` rehearsal re-run is for
 (docs/specification.md §10), since this gate only reached 8,000 pieces per
 component and the rehearsal runs at 21,955.
 
@@ -410,7 +410,7 @@ prototype, because reproducing it needs the exact pathology heavy, near-tangenti
 trimming produces, which no synthetic setup so far has recreated at any scale
 tried. Reproduction:
 
-    python src/main.py -i test/TD_HX_Indre_Volum.step -cc 5 -t 1 \
+    python src/main.py -i test/TD_HX_rehearsal_test.step -cc 5 -t 1 \
       -o <out>.step --cores 6 --ram 20 -v
 
 **FAILED, first measured 2026-08-16 on commit `f0fa0bb`.** A controlled pair,

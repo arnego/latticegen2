@@ -512,7 +512,8 @@ def _sew_round_two(
     workers: int,
     tmpdir: str | None,
     pool: WorkerPool | None,
-) -> tuple[dict[int, list], int]:
+    expected_rings: dict[int, int] | None = None,
+) -> tuple[dict[int, list], int, int]:
     """Sew each component's round-1 result (or its own pieces, if untiled)
     into that component's final boundary-layer shell.
 
@@ -542,6 +543,32 @@ def _sew_round_two(
     of the other `L-1` levels are counted. Parallelism across workers hides the
     early levels but never the root. So a tree is strictly worse than what is
     built here, at every tile count that has been measured.
+
+    **``expected_rings``, if given, is the safety net `_split_seam_interior`'s
+    argument turned out to need in production.** It maps each component to how
+    many interior-to-boundary interfaces it must present as free edges once
+    correctly sewn — four apiece, since every such interface is the whole
+    template cap quad (docs/algorithm.md §5.3(b)); every other cap a boundary
+    piece carries (declined as unpaired, mismatched or unweldable, §7.1) keeps
+    its own face, so it contributes no free edge, making this count exact
+    rather than a lower bound. `_split_seam_interior`'s own argument — that
+    sewing the seam-only subset in isolation reproduces exactly what a full
+    round 2 would have done to those faces — held at every prototype scale
+    tried (G8), all of them on lightly trimmed junctions. It does not hold on
+    the real, heavily trimmed geometry a production part is made of: a seam
+    face there can share an edge with a face the split carried through
+    unchanged (a "straddling" edge, free within the seam-only subset even
+    though the full tile uses it twice), and sewing that subset without its
+    carried neighbour present lets `BRepBuilderAPI_Sewing` rebuild the edge
+    onto a new `TopoDS_Edge` while the carried face keeps the original — one
+    shared edge becomes two, each used once. Measured on the `cc=5, t=1`
+    production rehearsal: 118,760 open edges at `assemble`, effectively all of
+    them this (see the "Micron-scale debris edges" entry's superseding note,
+    docs/specification.md §10). Verifying free-edge count against
+    ``expected_rings`` and, on a mismatch, redoing that one component's round 2
+    on the unsplit tile results (the behaviour before the split existed) makes
+    that failure mode unreachable, at the cost of the split's saving only for
+    the components where it was actually wrong.
     """
     groups = list(by_group.keys())
     face_lists = {
@@ -565,27 +592,44 @@ def _sew_round_two(
     def _finish(sewn: dict[int, list]) -> dict[int, list]:
         return {g: sewn[g] + interior_faces[g] for g in groups}
 
+    def _serial() -> tuple[dict[int, list], int]:
+        return _finish({g: _sew_faces(seam_face_lists[g], tolerance) for g in groups}), 0
+
     if tmpdir is None or len(groups) < 2:
-        return _finish({g: _sew_faces(seam_face_lists[g], tolerance) for g in groups}), 0
+        out, max_rss = _serial()
+    else:
+        jobs = []
+        for group in groups:
+            in_path = os.path.join(tmpdir, f"sew_round2_{group}.brep")
+            out_path = os.path.join(tmpdir, f"sew_round2_{group}_out.brep")
+            _write_brep(occ.compound(occ.compound(fl) for fl in seam_face_lists[group]), in_path)
+            jobs.append((in_path, out_path, tolerance))
 
-    jobs = []
-    for group in groups:
-        in_path = os.path.join(tmpdir, f"sew_round2_{group}.brep")
-        out_path = os.path.join(tmpdir, f"sew_round2_{group}_out.brep")
-        _write_brep(occ.compound(occ.compound(fl) for fl in seam_face_lists[group]), in_path)
-        jobs.append((in_path, out_path, tolerance))
+        def _run(p: WorkerPool) -> tuple[dict[int, list], int]:
+            raw, rss = p.run(_worker_sew_tile, jobs)
+            sewn = {group: occ.faces(_read_brep(out_path)) for group, (out_path, _rss) in zip(groups, raw)}
+            return _finish(sewn), rss
 
-    def _run(p: WorkerPool):
-        raw, max_rss = p.run(_worker_sew_tile, jobs)
-        out = {group: occ.faces(_read_brep(out_path)) for group, (out_path, _rss) in zip(groups, raw)}
-        return _finish(out), max_rss
+        if pool is not None and pool.active:
+            out, max_rss = _run(pool)
+        elif workers <= 1:
+            out, max_rss = _serial()
+        else:
+            with WorkerPool(min(workers, len(jobs))) as owned:
+                out, max_rss = _run(owned)
 
-    if pool is not None and pool.active:
-        return _run(pool)
-    if workers <= 1:
-        return _finish({g: _sew_faces(seam_face_lists[g], tolerance) for g in groups}), 0
-    with WorkerPool(min(workers, len(jobs))) as owned:
-        return _run(owned)
+    repaired = 0
+    if expected_rings is not None:
+        for group in groups:
+            if plan[group] is None:
+                continue  # never split, so there is nothing the split could have broken
+            want = 4 * expected_rings.get(group, 0)
+            got = len(free_edges(out[group]))
+            if got != want:
+                out[group] = _sew_faces(face_lists[group], tolerance)
+                repaired += 1
+
+    return out, max_rss, repaired
 
 
 @dataclass
@@ -595,6 +639,12 @@ class SewStats:
     tiles: int = 0
     tiled_components: int = 0
     max_worker_rss: int = 0
+    repaired_components: int = 0
+    """How many tiled components' seam-only round 2 (:func:`_split_seam_interior`)
+    left a free-edge count other than ``4 * its interior interfaces`` and were
+    redone with a full, unsplit sew (:func:`_sew_round_two`'s ``expected_rings``
+    check). Zero on every committed scenario; the check exists for real, heavily
+    trimmed geometry where it has measured nonzero (docs/specification.md §10)."""
 
 
 def sew_boundary(
@@ -606,6 +656,7 @@ def sew_boundary(
     tile_target: int = TILE_TARGET_PIECES,
     min_to_tile: int = MIN_PIECES_TO_TILE,
     pool: WorkerPool | None = None,
+    want_rings: dict[tuple[NodeKey, int], int] | None = None,
 ) -> tuple[dict[int, list], SewStats]:
     """Sew each component's boundary pieces to each other, returning their faces.
 
@@ -633,6 +684,17 @@ def sew_boundary(
     used for both rounds rather than each stage building and tearing down its own
     (docs/algorithm.md §8, §12).
 
+    ``want_rings`` is ``(node, half-strut) -> component``, the same dict the
+    caller passes to :func:`interface_rings` right after this — every interior
+    interface the finished boundary shell must present as a free-edge ring. Given,
+    it is turned into a per-component ring count and handed to
+    :func:`_sew_round_two` as ``expected_rings``, so a seam-only split that
+    silently produced the wrong result for a component is caught and repaired
+    here rather than surfacing later as an unclosed shell out of ``assemble``
+    with no indication of which component or why (docs/specification.md §10).
+    Omitted, no verification runs — the pre-fix behaviour, kept for callers (and
+    tests) that have no rings to check against.
+
     ``Cutting`` is switched off throughout — splitting free edges so they match is
     wasted work when they already match by construction, and G5a measures the
     whole optional-phase group at under 2 % either way.
@@ -651,11 +713,19 @@ def sew_boundary(
             stats.tiled_components += 1
             stats.tiles += len(tiles)
 
+    ring_counts: dict[int, int] | None = None
+    if want_rings is not None:
+        ring_counts = {}
+        for group in want_rings.values():
+            ring_counts[group] = ring_counts.get(group, 0) + 1
+
     tile_results, max_rss1 = _sew_all_tiles(plan, SEW_TOLERANCE, workers, tmpdir, pool=pool)
-    out, max_rss2 = _sew_round_two(
-        by_group, plan, tile_results, SEW_TOLERANCE, workers, tmpdir, pool
+    out, max_rss2, repaired = _sew_round_two(
+        by_group, plan, tile_results, SEW_TOLERANCE, workers, tmpdir, pool,
+        expected_rings=ring_counts,
     )
     stats.max_worker_rss = max(max_rss1, max_rss2)
+    stats.repaired_components = repaired
     return out, stats
 
 

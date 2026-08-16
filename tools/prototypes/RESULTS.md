@@ -395,3 +395,66 @@ performance gate**, and a design meant to run at hundred-thousand-face scale
 needs at least one measurement taken there before being trusted, exactly as
 docs/algorithm.md §11 already says about correctness bars — the same applies
 to complexity, not only to tolerances.
+
+---
+
+## G9 — does the seam-only split hold on real, heavily trimmed production geometry? ❌ FAILED, then repaired
+
+G8 passed on every prototype scale tried, all of them lightly trimmed junctions
+(a box far larger than the chain). None of that geometry is heavily trimmed the
+way a real part's boundary layer is, and that turned out to be load-bearing.
+
+No standalone script — this was found and fixed against the real `cc=5, t=1`
+production rehearsal (docs/specification.md §10) rather than a synthetic
+prototype, because reproducing it needs the exact pathology heavy, near-tangential
+trimming produces, which no synthetic setup so far has recreated at any scale
+tried. Reproduction:
+
+    python src/main.py -i test/TD_HX_Indre_Volum.step -cc 5 -t 1 \
+      -o <out>.step --cores 6 --ram 20 -v
+
+**FAILED, first measured 2026-08-16 on commit `f0fa0bb`.** A controlled pair,
+identical in every respect but `_split_seam_interior` forced on or off:
+
+| `_split_seam_interior` | open edges at `assemble` | `stitch` |
+|---|---|---|
+| on (chapter 10 default) | 118,760 | 1 m 20 s |
+| off | 10 | 10 m 22 s |
+
+Mechanism: after round 1, a tile's own sewn result can still have a "straddling"
+edge — shared between a face round 2's seam-only split keeps (because it also
+bears a genuine free edge) and a face the split carries through unchanged
+(because within the tile it has none) — measured at 144–720 such edges in every
+synthetic 3-D block tried once the check for them existed. Sewing the seam-only
+subset without its carried neighbour present lets `BRepBuilderAPI_Sewing`
+rebuild the straddling edge onto a new `TopoDS_Edge` object while the carried
+face keeps the original one — one shared edge becomes two, each used once, and
+`shell_defects`'s shape-identity map (correctly) counts them as two opens.
+
+**Repaired, not reverted.** `_split_seam_interior` itself is untouched — the
+guarantee needed is downstream, at `_sew_round_two`. Every interior interface a
+correctly sewn boundary layer presents is the whole template cap quad (four
+edges, docs/algorithm.md §5.3(b)); every other cap a boundary piece carries
+stays a closed face (§7.1). So a component's post-round-2 free-edge count must
+equal exactly `4 × its interior interfaces` — no more, no less — and
+`weld.sew_boundary` now checks that against `want_rings` (the same dict its
+caller already computes for `interface_rings`) and redoes any component that
+fails the check on the unsplit tile results, reporting the count as
+`SewStats.repaired_components`.
+
+**Re-run after the fix, same commit history plus the repair, 2026-08-16:**
+`assemble` reported exactly **2** open edges — at `[1874.836, 60.370, 970.121]`
+and `[1874.836, 59.912, 969.775]`, the pre-existing, separately tracked
+micro-loop defect (docs/specification.md §10's "residual defect", out of scope
+here) — not the seam-split failure. The run log confirms the mechanism fired
+exactly where needed: `1 tiled component(s)' boundary-sew round 2 ... left a
+free-edge count other than its interior interfaces ... redone with a full
+unsplit sew`. `stitch` cost 9 m 54 s — near the no-split control's 10 m 22 s,
+since the one affected component holds nearly all of this part's 21,955
+pieces, so repairing it pays close to what disabling the split everywhere
+would have, while the other 13 small, untiled components (which were never
+split in the first place, tiling requiring `MIN_PIECES_TO_TILE`) are
+unaffected either way. `test_weld.py`'s
+`test_round_two_repairs_a_component_the_seam_split_got_wrong` pins the repair
+mechanism itself as a permanent regression, since no scale short of a full
+rehearsal reproduces the real defect it stands in for.

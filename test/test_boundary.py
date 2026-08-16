@@ -399,7 +399,7 @@ def test_fuse_disagreeing_pairs_is_a_no_op_without_mismatches(lp):
 # cannot touch at all. See tools/prototypes/RESULTS.md G10.
 
 PINHOLE_NODE = (591, -46, -70)
-"""The junction on `TD_HX_Indre_Volum` at `cc=5, t=1` whose trim leaves the two
+"""The junction on `TD_HX_rehearsal_test` at `cc=5, t=1` whose trim leaves the two
 pinholes docs/specification.md §10 documents, at 3.171690e-06 and 5.808982e-06
 mm."""
 
@@ -409,7 +409,7 @@ def pinhole_case():
     """`(lp, template, body, node position)` for the real failing junction."""
     lp5 = lattice_params(5.0, 1.0)
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    body = occ.read_step(os.path.join(here, "test", "TD_HX_Indre_Volum.step"))
+    body = occ.read_step(os.path.join(here, "test", "TD_HX_rehearsal_test.step"))
     pos = lattice_node(lp5, np.array(PINHOLE_NODE))
     return lp5, build_template(lp5), body, pos
 

@@ -40,7 +40,7 @@ Run data from the script including:
   Each release also publishes `SHA256SUMS.txt` for verification after transfer. Every asset is extracted and run end-to-end by a CI smoke gate before publication. Procedure: [release.md](release.md). Bundle contents are `git archive`-derived, so they contain committed files only, filtered by `.gitattributes`.
 - **No single-file standalone executable is produced.** PyInstaller was evaluated and rejected: `boundary.py` uses `multiprocessing` with the `spawn` start method and the codebase has no `freeze_support()` call, which on Windows makes a frozen build re-launch its own launcher; OCP/OCCT is awkward to freeze (hidden imports, DLL discovery); and freezing dissolves the LGPL-2.1 relinking argument in [licenses/LICENSES.md](../licenses/LICENSES.md), which depends on OCCT remaining a stock, replaceable shared library. The portable bundle delivers the same "extract and run" property without those costs.
 - **Target machine specs / limits:** Main development system: 32 GB RAM, 6 core CPU, Nvidia RTX 3080 GPU, disk space for intermediate files.
-RAM and CPU cores may optionally be provided as input parameters, as *budgets* rather than a mandatory pair. Without `--cores` the worker count is the machine's logical core count, since boundary-junction jobs are constant-size and independent; without `--ram` the budget is the memory free at startup. See §3.
+CPU cores may optionally be provided as an input parameter, as a *budget*. Without `--cores` the worker count is the machine's logical core count, since boundary-junction jobs are constant-size and independent. See §3. (A companion `--ram` budget existed through v2.x; it was removed as accepted-but-unenforced dead weight — see §11.)
 - **Allowed third-party libraries:** Must be compatible with the target OS/arch. License text must be obtained and put into /licenses folder, and @/licenses/LICENSES.md must be updated with the cross reference between the library used and the corresponding license text file valid for that library.
 - **License constraints:** TBD
 
@@ -60,13 +60,16 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | -t | float | required  | mm | 0.4 - 20 | NA | Side length of the diamond rod profile. Must be smaller than the cell edge `a = cc/√2`; that is the only cross-constraint. |
 | -v --verbose | flag | optional | NA | NA | disabled | Enable verbose console diagnostics while always writing a full `.log` file. |
 | --cores | int | optional | count | 1 - 128 | logical cores on the machine | Maximum CPU cores this run may use. One worker process per core, honoured exactly — the master needs none reserved for it, being blocked waiting on results for effectively the whole boundary stage. Since workers always run at below-normal priority, this exists to further protect the response time of the system for other tasks. |
-| --ram | float | optional | GB | 1 - total physical RAM detected | free RAM at startup | Maximum memory this run may use. May be set above or below what is currently free, but never above the machine's total physical RAM. Advisory: recorded in the run log next to the measured peak. |
 
-Both are optional **budgets** rather than a mandatory pair, and both resolve to a
-concrete figure either way: an explicit value is honoured exactly, and an omitted
-one is taken from the machine — logical core count for `--cores`, free memory at
-startup for `--ram`. Detection lives in
+`--cores` is an optional **budget** and resolves to a concrete figure either
+way: an explicit value is honoured exactly, and an omitted one is taken from
+the machine — its logical core count. Detection lives in
 [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py).
+
+**There used to be a second budget, `--ram`, removed 2026-08-17.** It was
+accepted, range-checked and recorded in the run log next to the measured peak,
+but nothing in the pipeline ever read it to change what a run did — see §11
+for the full account of why, and what was done instead.
 
 **Process priority is not a parameter.** Every run — master and every worker —
 executes at below-normal priority so the machine stays usable for other work.
@@ -172,7 +175,7 @@ All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
 |----------|-----------|------------------|
 | smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | generation < 10 minutes. **Measured: 6.4 s.** |
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
-| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --ram 20 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
+| dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
 ### 6.2 Automated pass/fail checks
@@ -230,72 +233,6 @@ assumed by default. Delete each line once resolved.*
 that found them. Each item should carry enough context (what's broken, where, why, and
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
-
-### `--ram` is accepted and validated but never enforced
-
-**Found 2026-08-17**, while reading the rehearsal's memory profile
-([profiling-reports.md](profiling-reports.md)). Not a regression — it has always
-been this way — but the rehearsal came close enough to the number the user
-supplied that the gap is worth closing or documenting honestly.
-
-**What's wrong.** `--ram` is parsed, range-checked against the machine's
-physical RAM, resolved to `Args.ram_budget_gb` (`cli.py`), and then **only
-printed**. Nothing in `pipeline.py`, `parallel.py`, `weld.py`, `boundary.py` or
-`runlog.py` ever reads it. §3's table is accurate — "Advisory: recorded in the
-run log next to the measured peak" — but `cli.py`'s own module docstring opens
-by calling both budgets "ceilings on what a run may use, not hints it may
-exceed". That is true of `--cores`, which resolves to the worker count and is
-genuinely enforced, and false of `--ram`. **The two statements contradict each
-other and one of them has to change.**
-
-**Why it matters now.** The 2026-08-17 rehearsal was run with `--ram 20` and
-peaked at **19,291 MB** of whole-tree RSS — inside 3 % of the stated budget,
-with nothing watching. Had it crossed, the run would have continued exactly as
-it did: no warning, no throttle, no failure, and a summary reporting a peak
-above the budget without remarking on it.
-
-**What happens on real exhaustion, since it is not what the exit codes suggest.**
-Windows grows the pagefile first, so the run degrades rather than fails — worst
-of all in `export`, which is both the memory peak and CPU-bound serialisation.
-If commit charge is then exhausted, a Python-level `MemoryError` is caught by
-`__main__`'s `except Exception`, reported as one `FAILED: unexpected ...` line
-and re-raised, so it surfaces as **exit 1 with a traceback**; an allocation
-failure inside OCCT may instead abort natively with no reason line at all.
-Exit 5 ("Resource limits") is unreachable (docs/algorithm.md §10), so a genuine
-out-of-memory reads as a bug rather than as the resource limit it is.
-
-**A second, independent defect: the reported peak under-counts.**
-`RunLog.max_rss` is the master's own `PeakWorkingSetSize`, plus worker peaks
-only where a stage explicitly folds them in with `note_worker_rss` — `boundary`,
-`stitch`, `simplify` and `validate` do; no other stage does. On the rehearsal
-the tool reported **18.12 GB** where external whole-tree sampling measured
-**19,291 MB**. Any future budget check written against `max_rss` inherits that
-~1.2 GB under-count, so this needs fixing first either way.
-
-**Two ways forward. [TODO: needs decision]**
-
-*(a) Keep it advisory, and say so consistently.* Correct `cli.py`'s docstring so
-only `--cores` is described as a ceiling, and have the end-of-run summary state
-plainly when the measured peak exceeded the budget. Cheap, no behaviour change,
-and it makes the number honest rather than decorative.
-
-*(b) Actually enforce it.* Harder than it looks, and worth being clear about why
-before anyone starts: **the run's peak is not in the workers.** It is the master
-holding the whole 2 GB result while `export` serialises it, so capping worker
-count or tile concurrency — the obvious levers, and the ones Phase 3's risk R5
-proposes — cannot lower the number that actually sets the peak. Real enforcement
-would mean changing how the result is held and written (streaming the STEP
-write, or exporting per solid), which is a substantially larger change than the
-flag suggests. Anything less would be enforcement in name only.
-
-**How to verify a fix.** For (a): run with `--ram` set deliberately below a known
-peak and confirm the summary says so, with the run still succeeding. For either:
-fix the under-count first — fold every stage's worker peak into `max_rss`, or
-have the master sample its own process tree — and check the reported peak
-against `tools/profile_run.py` on the same run; today they differ by ~1.2 GB and
-should agree. `python -m pytest test -q` and `python tools/e2e.py` must stay
-green; `test_cli.py` already pins the budget's parsing and defaulting.
-
 
 ### `stitch` pays the full round-2 cost on heavily trimmed parts
 
@@ -382,6 +319,66 @@ result as sewing in one call, which is the property any change here must keep.
 ---
 
 ## 11. Closed — kept for the reasoning, not as work
+
+### `--ram` removed — an accepted-but-unenforced budget, taken out rather than fixed
+
+**Found 2026-08-17**, moved here and closed the same day. Originally logged in
+§10 as "`--ram` is accepted and validated but never enforced": the flag was
+parsed, range-checked against the machine's physical RAM, resolved to
+`Args.ram_budget_gb`, and then **only printed**. Nothing in `pipeline.py`,
+`parallel.py`, `weld.py`, `boundary.py` or `runlog.py` ever read it, which
+directly contradicted `cli.py`'s own module docstring calling both budgets
+"ceilings on what a run may use, not hints it may exceed" — true of `--cores`,
+false of `--ram`. The write-up also found a second, independent defect: the
+peak `--ram` would have been checked against already under-counted by ~1.2 GB
+(`RunLog.max_rss` folds in worker RSS only where a stage explicitly calls
+`note_worker_rss`, which not every stage does), and it recorded why real
+enforcement is harder than the flag suggests — the run's peak sits in the
+master holding the finished result while `export` serialises it, a place no
+worker-count or tile-size lever can reach, so genuine enforcement would mean
+streaming the STEP write or exporting per solid, a substantially larger change
+than the flag ever implied.
+
+**The decision.** Given a choice between (a) keeping the budget advisory and
+making the docstring and summary honest about that, or (b) building real
+enforcement, the user chose neither: **remove `--ram` outright.** A budget nothing
+enforces and that costs a materially larger change to enforce for real is not
+worth carrying as CLI surface, log fields, and documentation weight for what it
+actually does today — print a number back at the user.
+
+**What was done.** `--ram` is gone from the CLI: `cli.py` no longer parses the
+flag, validates its range, or carries `ram`/`ram_budget_gb` on `Args`; the
+`--cores` budget is unaffected and still the only one. `sysinfo.py`'s
+`total_ram_gb`/`free_ram_gb` are deleted along with it, since the `--ram`
+ceiling and default were their only callers. That in turn left `psutil` with no
+remaining use anywhere in `src/` — core-count detection has always come from
+the standard library — so `psutil` was dropped as a **packaged runtime
+dependency**: out of `pyproject.toml`'s `dependencies`, `requirements-bundle.txt`,
+`licenses/LICENSES.md`'s table (and `licenses/psutil-LICENSE.txt` deleted with
+it, since nothing shipped needs the text), README.md's dependency table and
+install command, and the `latticegen2.bat`/`latticegen2.sh` launchers' dependency
+probe. `psutil` remains exactly what it already partly was: a development-only
+dependency of `tools/profile_run.py`, which was never bundled either way — the
+same footing as `pytest`.
+
+Every other reference to `--ram` or the budget it fed was removed from CLI help
+text, `docs/algorithm.md`, `docs/testing.md`, `docs/specification.md` §2/§3/§6.1,
+`README.md` and `CLAUDE.md`, and from the committed test suite
+(`test_cli.py`'s three budget tests and `test_sysinfo.py`'s memory-detection
+test) and `tools/e2e.py`'s `dense-lattice` invocation. Historical measurement
+records that quote real past commands run with `--ram` — `docs/profiling-reports.md`,
+`tools/prototypes/RESULTS.md`, and the already-closed narrative entries later in
+this chapter — were left untouched: they are verbatim accounts of what was
+actually run at the time, not current usage instructions, and rewriting them
+would misrepresent history rather than clarify it.
+
+**Verification.** `python -m pytest test -q` and `python tools/e2e.py` (unit
+tests plus the four committed end-to-end scenarios, `smoke-fast`,
+`smoke-verified`, `dense-lattice`, `invalid-input` — golden-sample comparison
+included, since e2e.py always runs it, but no separate rehearsal-scale run) both
+green after the change. `--ram` now behaves like any other removed flag
+(`-bg`, `--background`, `--workers`): rejected as `Unknown argument`, pinned by
+`test_cli.py::test_removed_flags_are_rejected`.
 
 ### Pipeline parallelism between `classify` and `assemble` — chapter closed, two stages won, two proposals disproved
 

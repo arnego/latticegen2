@@ -59,7 +59,7 @@ rc=$?
 case "$rc" in
     3|4|5|6|130) exit "$rc" ;;
 esac
-"$PY" -c "import numpy, psutil, OCP.TopoDS" >/dev/null 2>&1 && exit "$rc"
+"$PY" -c "import numpy, OCP.TopoDS" >/dev/null 2>&1 && exit "$rc"
 
 {
     echo
@@ -68,9 +68,9 @@ esac
     echo
     echo "  interpreter: $PY"
     echo
-    "$PY" -c "import numpy, psutil, OCP.TopoDS"
+    "$PY" -c "import numpy, OCP.TopoDS"
     echo
-    echo "  Point LATTICEGEN2_PYTHON at a Python 3.11+ that has numpy, psutil and"
+    echo "  Point LATTICEGEN2_PYTHON at a Python 3.11+ that has numpy and"
     echo "  cadquery-ocp:"
     echo "    export LATTICEGEN2_PYTHON=/path/to/python3"
     echo

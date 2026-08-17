@@ -107,14 +107,18 @@ def test_flags_are_recognised():
     assert parse_args(BASE + ["-v"]).verbose
 
 
-@pytest.mark.parametrize("argv", [["-bg"], ["--background"], ["--workers", "4"]])
+@pytest.mark.parametrize(
+    "argv", [["-bg"], ["--background"], ["--workers", "4"], ["--ram", "20"]]
+)
 def test_removed_flags_are_rejected(argv):
-    """``-bg`` and ``--workers`` are gone, and silence would be the wrong answer.
+    """``-bg``, ``--workers`` and ``--ram`` are gone, and silence would be wrong.
 
     Every run is below-normal priority now, so ``-bg`` has nothing left to
-    request; ``--cores`` is the only worker-count control. A removed flag has to
-    fail loudly rather than be ignored — a script still passing ``--workers 4``
-    would otherwise look like it was being honoured.
+    request; ``--cores`` is the only worker-count control; ``--ram`` was removed
+    outright, being validated and recorded but never enforced (specification.md
+    §11). A removed flag has to fail loudly rather than be ignored — a
+    script still passing ``--ram 20`` would otherwise look like it was being
+    honoured.
     """
     with pytest.raises(ParamError, match="Unknown argument"):
         parse_args(BASE + argv)
@@ -146,34 +150,9 @@ def test_worker_count_defaults_to_the_machines_logical_cores(monkeypatch):
     assert default_workers(None) == 12
 
 
-def test_ram_budget_is_recorded(monkeypatch):
-    monkeypatch.setattr(sysinfo, "total_ram_gb", lambda: 32.0)
-    args = parse_args(BASE + ["--ram", "20"])
-    assert args.ram == 20.0
-    assert args.ram_budget_gb == 20.0
-
-
-def test_ram_budget_defaults_to_free_ram(monkeypatch):
-    monkeypatch.setattr(sysinfo, "free_ram_gb", lambda: 18.5)
-    args = parse_args(BASE)
-    assert args.ram is None          # what the user gave: nothing
-    assert args.ram_budget_gb == 18.5  # what is actually in force
-    assert "free at startup" in args.as_dict()["ram"]
-
-
-def test_ram_budget_cannot_exceed_the_machines_physical_ram(monkeypatch):
-    """The ceiling is a machine fact, not a literal: a budget above what exists
-    is not a budget."""
-    monkeypatch.setattr(sysinfo, "total_ram_gb", lambda: 32.0)
-    parse_args(BASE + ["--ram", "32"])  # exactly at the ceiling is fine
-    with pytest.raises(ParamError, match="total physical memory"):
-        parse_args(BASE + ["--ram", "33"])
-
-
-@pytest.mark.parametrize("flag,value", [("--cores", "0"), ("--ram", "0.5")])
-def test_budget_ranges_are_validated(flag, value):
-    with pytest.raises(ParamError, match=flag):
-        parse_args(BASE + [flag, value])
+def test_budget_ranges_are_validated():
+    with pytest.raises(ParamError, match="--cores"):
+        parse_args(BASE + ["--cores", "0"])
 
 
 def test_default_output_path_is_derived_from_the_input():

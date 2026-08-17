@@ -23,7 +23,6 @@ adjacent cells and `-t` the strut profile's side length.
 | Python | 3.11 or newer | Runtime | PSF |
 | [OCP](https://github.com/CadQuery/OCP) (`cadquery-ocp`) | 7.7+ | Python bindings for the Open CASCADE (OCCT) geometry kernel — STEP I/O, booleans, sewing, meshing, exact validity checking | Apache-2.0 (OCP), LGPL-2.1 (OCCT) |
 | NumPy | 1.24+ | Vectorised classification and indexing | BSD-3-Clause |
-| psutil | 5.9+ | Total and free physical memory, for the `--ram` budget's ceiling and default. The stdlib has no call for it | BSD-3-Clause |
 
 Nothing else. License texts are in [`licenses/`](licenses/), cross-referenced in
 [`licenses/LICENSES.md`](licenses/LICENSES.md).
@@ -74,7 +73,7 @@ Not needed if you use a release bundle above. From a source checkout:
 Online, on a machine that can reach PyPI:
 
 ```bash
-python -m pip install numpy cadquery-ocp psutil
+python -m pip install numpy cadquery-ocp
 ```
 
 Offline (the deployment target — specification.md §2), download the wheels on a
@@ -120,7 +119,7 @@ which on a machine with several environments is often not the prepared one:
 set LATTICEGEN2_PYTHON=C:\path\to\python.exe
 ```
 
-If that interpreter cannot load `numpy`, `psutil` and `OCP`, the launcher says so, shows
+If that interpreter cannot load `numpy` and `OCP`, the launcher says so, shows
 the underlying error and exits 1 — worth knowing because the failure happens
 during import, before the tool runs, so it is not otherwise distinguishable from
 latticegen2's own errors. A conda environment invoked without being activated is
@@ -136,17 +135,21 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `-t` | float | yes | mm | 0.4 – 20 | — | Side length of the diamond strut profile |
 | `-o`, `--output` | path | no | — | — | `<input_stem>-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing |
 | `--cores` | int | no | count | 1 – 128 | logical cores on the machine | Maximum cores this run may use — one worker process per core, honoured exactly, in the shared pool used across every process-parallel stage (classification, boundary trim, boundary sew, same-domain unification). It also caps OCCT's *own* native thread pool, which the validity check uses instead of the process pool, so the total stays within the budget either way |
-| `--ram` | float | no | GB | 1 – total physical RAM | RAM free at startup | Maximum memory this run may use. May be above or below what is currently free, but never above the machine's total. Recorded in the log next to the measured peak |
 | `-v`, `--verbose` | flag | no | — | — | off | Verbose console output (a full `.log` is always written) |
 | `-h`, `--help` | flag | no | — | — | — | Usage |
 
 `-t` must be smaller than the cell edge `a = cc/√2`; a thicker strut cannot fit
 inside one cell. That is the only cross-constraint.
 
-`--cores` and `--ram` are optional budgets; each resolves to a concrete figure
-from the machine when omitted. **Every run executes at below-normal process
-priority**, master and workers alike, so the machine stays usable for other work
-— this was the `-bg` flag through v2.x and is now unconditional.
+`--cores` is an optional budget; it resolves to a concrete figure from the
+machine when omitted. There used to be a second budget, `--ram`, but it was
+never actually enforced — the run's peak lives in the master holding the
+finished result while `export` serialises it, a place no worker-count or
+tile-size lever can reach — so it was removed rather than kept as a number that
+only printed itself (docs/specification.md §11). **Every run executes at
+below-normal process priority**, master and workers alike, so the machine stays
+usable for other work — this was the `-bg` flag through v2.x and is now
+unconditional.
 
 ### Output
 

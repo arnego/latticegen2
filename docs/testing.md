@@ -345,13 +345,14 @@ changed in between, are in [profiling-reports.md](profiling-reports.md). Append
 there rather than rewriting: the series is the value, and a stage delta only
 means something when the untouched stages beside it agree.
 
-`profile_run.py` needs `psutil` for **sampling the process tree** — a different
-use from the tool's own, and worth not conflating. `psutil` is a runtime
-dependency of latticegen2 itself (`src/latticegen2/sysinfo.py` reads total and
-free physical memory for the `--ram` budget's ceiling and default), so it ships
-in every release bundle and is installed by any of README.md's routes. What is
-still development-only is `tools/` itself, which is `export-ignore`d and never
-reaches a bundle. The script says so plainly if `psutil` is missing anyway.
+`profile_run.py` needs `psutil` for **sampling the process tree**. `psutil` is
+not a runtime dependency of latticegen2 itself — the CLI's former `--ram`
+budget was its only use in `src/`, and that budget was removed (specification.md
+§11) — so it is not installed by any of README.md's routes and does not
+ship in a release bundle. It is purely a development-only dependency of
+`tools/`, which is itself `export-ignore`d and never reaches a bundle. The
+script says so plainly if `psutil` is missing:
+`python -m pip install psutil`.
 
 The measurements behind the architecture's load-bearing choices (junction cap
 integrity, join-mechanism throughput, per-junction intersection latency, STEP

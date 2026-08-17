@@ -45,7 +45,7 @@ from .interior import build_interior_shell, extract_template_mesh
 from .junction import build_template
 from .lattice import candidate_nodes, lattice_params, neighbor_step, part_name
 from .lattice import node as lattice_node
-from .parallel import WorkerPool
+from .parallel import WorkerPool, set_thread_budget
 from .parallel import read_brep as _read_brep
 from .parallel import write_brep as _write_brep
 from .runlog import RunLog, Timer, format_bytes
@@ -75,6 +75,12 @@ def run_pipeline(args: Args, rl: RunLog) -> dict:
 
 def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     occ.quiet_kernel()
+    # OCCT's own native thread pool sizes itself to the machine, not to what
+    # this run was told it may use, so `--cores 2` on a six-core box would
+    # otherwise let `validate` launch six threads (docs/algorithm.md §9,
+    # specification.md §3). Set once here, on the master, which is the only
+    # process that asks OCCT for threads.
+    set_thread_budget(args.workers)
     lp = lattice_params(args.cc, args.t)
     stats: dict[str, object] = {}
     rl.line(f"temp directory: {tmpdir}")
@@ -110,41 +116,61 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         f"(classification margin r+d={lp.r + mesh.deviation:.5f} mm)"
     )
 
-    with Timer(rl, "classify"):
-        candidates = candidate_nodes(lp, lo, hi)
-        classification = classify_nodes(lp, mesh, candidates)
-    counts = classification.counts()
-    rl.line(
-        f"classification: {counts['candidates']} candidate nodes -> "
-        f"interior {counts['interior']}, boundary {counts['boundary']}, "
-        f"outside {counts['outside']}"
-    )
-    stats.update({f"nodes_{k}": v for k, v in counts.items()})
-
-    interior_nodes = classification.of(Klass.INTERIOR)
-    boundary_nodes = classification.of(Klass.BOUNDARY)
-    if len(interior_nodes) == 0 and len(boundary_nodes) == 0:
-        raise ProcessingError(
-            "No lattice nodes fall inside the input geometry. The volume is likely "
-            "smaller than one lattice cell at these parameters — try a smaller -cc."
-        )
-
     # One worker pool for the whole rest of the run (docs/algorithm.md §8, §12),
-    # shared by every parallel stage from here on — boundary trim, boundary-sew,
-    # same-domain unification and validation — instead of each stage building and
-    # tearing down its own. Built even when `args.workers <= 1`: `WorkerPool` is
-    # then inert (`.active` is False) and every stage below takes its own
-    # sequential path exactly as if no pool existed, so this costs nothing when
-    # there is nothing to parallelise. Entered and exited explicitly rather than
-    # as a `with` block wrapping the rest of this function, purely to avoid
-    # re-indenting the whole boundary-through-validate span; the effect is
-    # identical, and a Ctrl+C here is still caught at the top level as
-    # `CancelledError` after the pool tears its workers down (docs/algorithm.md
-    # §10) — `Pool.__exit__` terminates unconditionally, so it does not matter
-    # that no real exception info is threaded through this `finally`.
+    # shared by every parallel stage from here on — classification, boundary
+    # trim, boundary-sew, same-domain unification and validation — instead of
+    # each stage building and tearing down its own. Built even when
+    # `args.workers <= 1`: `WorkerPool` is then inert (`.active` is False) and
+    # every stage below takes its own sequential path exactly as if no pool
+    # existed, so this costs nothing when there is nothing to parallelise.
+    # Entered and exited explicitly rather than as a `with` block wrapping the
+    # rest of this function, purely to avoid re-indenting the whole
+    # classify-through-validate span; the effect is identical, and a Ctrl+C here
+    # is still caught at the top level as `CancelledError` after the pool tears
+    # its workers down (docs/algorithm.md §10) — `Pool.__exit__` terminates
+    # unconditionally, so it does not matter that no real exception info is
+    # threaded through this `finally`.
+    #
+    # This is built *before* `classify` rather than after it because
+    # `classify_nodes` is itself dispatched across it: the sweep decides every
+    # node independently of every other, and it was measured single-threaded at
+    # 126 s of the `cc=5, t=1` rehearsal (specification.md §10). Nothing OCCT
+    # crosses this stage's process boundary — the mesh and the node indices are
+    # plain arrays — so it is the one parallel stage here that needs neither
+    # G7's GIL finding nor G15's identity argument.
     pool = WorkerPool(args.workers)
     pool.__enter__()
     try:
+        with Timer(rl, "classify"):
+            candidates = candidate_nodes(lp, lo, hi)
+            classification = classify_nodes(
+                lp, mesh, candidates, tmpdir=tmpdir, pool=pool
+            )
+        counts = classification.counts()
+        rl.line(
+            f"classification: {counts['candidates']} candidate nodes -> "
+            f"interior {counts['interior']}, boundary {counts['boundary']}, "
+            f"outside {counts['outside']}"
+        )
+        stats.update({f"nodes_{k}": v for k, v in counts.items()})
+        if classification.max_worker_rss:
+            rl.note_worker_rss(classification.max_worker_rss)
+            rl.line(
+                f"peak classify worker memory: "
+                f"{format_bytes(classification.max_worker_rss)}"
+            )
+            stats["peak_classify_worker_memory"] = format_bytes(
+                classification.max_worker_rss
+            )
+
+        interior_nodes = classification.of(Klass.INTERIOR)
+        boundary_nodes = classification.of(Klass.BOUNDARY)
+        if len(interior_nodes) == 0 and len(boundary_nodes) == 0:
+            raise ProcessingError(
+                "No lattice nodes fall inside the input geometry. The volume is likely "
+                "smaller than one lattice cell at these parameters — try a smaller -cc."
+            )
+
         return _run_with_pool(
             args, rl, tmpdir, lp, tpl, tmesh, body, body_path, stats,
             interior_nodes, boundary_nodes, pool,
@@ -285,7 +311,28 @@ def _run_with_pool(
             workers=args.workers, tmpdir=tmpdir,
             pool=pool, want_rings=want_rings,
         )
+        t_rings = _dt.datetime.now()
         rings = weld.interface_rings(lp, tmesh, boundary_faces, want_rings)
+        t_rings = (_dt.datetime.now() - t_rings).total_seconds()
+    # `stitch` is one Timer covering five phases with very different characters
+    # — round 1 is worker-parallel, everything after it is serial on the master
+    # — which is why the profile reports this stage at 1.09 mean cores against a
+    # 5.42 peak (docs/profiling-reports.md). Reported per phase so that gap is
+    # attributable rather than merely visible, and in particular so the cost of
+    # a discarded seam-only attempt (`round2` when `repair` is nonzero) can be
+    # read off directly.
+    rl.line(
+        f"  stitch phases: round1 {sew_stats.t_round1:.1f}s, split "
+        f"{sew_stats.t_split:.1f}s, round2 {sew_stats.t_round2:.1f}s, repair "
+        f"{sew_stats.t_repair:.1f}s, retolerance {sew_stats.t_retolerance:.1f}s, "
+        f"rings {t_rings:.1f}s"
+    )
+    stats["stitch_round1_s"] = round(sew_stats.t_round1, 2)
+    stats["stitch_split_s"] = round(sew_stats.t_split, 2)
+    stats["stitch_round2_s"] = round(sew_stats.t_round2, 2)
+    stats["stitch_repair_s"] = round(sew_stats.t_repair, 2)
+    stats["stitch_retolerance_s"] = round(sew_stats.t_retolerance, 2)
+    stats["stitch_rings_s"] = round(t_rings, 2)
     if sew_stats.max_worker_rss:
         # Same fold-plus-report pattern as the boundary-trim stage above: folded
         # into the run's high-water mark, and also reported per-stage so a peak
@@ -382,11 +429,7 @@ def _run_with_pool(
     stats["unmerged_solids"] = simplify_stats["unmerged_solids"]
 
     with Timer(rl, "validate"):
-        invalid, total_volume, validate_rss = _validate(result_solids, pool=pool, tmpdir=tmpdir)
-    if validate_rss:
-        rl.note_worker_rss(validate_rss)
-        rl.line(f"peak validate worker memory: {format_bytes(validate_rss)}")
-        stats["peak_validate_worker_memory"] = format_bytes(validate_rss)
+        invalid, total_volume = _validate(result_solids)
     if invalid:
         raise ProcessingError(
             f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
@@ -662,48 +705,42 @@ def _unify(solids: list[TopoDS_Shape], *, pool: WorkerPool | None = None, tmpdir
     return _unify_serial(solids)
 
 
-def _worker_validate(path: str):
-    """Validate one solid in a worker process."""
-    solid = _read_brep(path)
-    valid = occ.is_valid(solid)
-    volume = occ.volume(solid)
-
-    from .runlog import peak_rss_bytes
-
-    return valid, volume, peak_rss_bytes()
-
-
-def _validate(
-    solids: list[TopoDS_Shape], *, pool: WorkerPool | None = None, tmpdir: str | None = None
-) -> tuple[list[int], float, int]:
+def _validate(solids: list[TopoDS_Shape]) -> tuple[list[int], float]:
     """Run ``BRepCheck_Analyzer`` and sum the volume of every result solid.
 
-    Same dispatch rule as :func:`_unify`: a shared, active pool with more than
-    one solid to spread across it and somewhere to stage ``.brep`` files, or
-    the master, unchanged from before this existed. G7 found no thread
-    speedup here either (`tools/prototypes/RESULTS.md`), so this reuses the
-    same process-pool mechanism rather than introducing a second one.
+    **On the master, in one process, with OCCT's own threads** — not dispatched
+    per solid across :class:`WorkerPool`, which is what this did before gate
+    G18. That dispatch was docs/specification.md §10's "path 4", kept despite
+    measuring *slower* (2 m 59 s -> 3 m 29.6 s) on the reasoning that a part
+    with evenly-sized components would benefit even though the rehearsal's 14
+    solids — one dominant body plus 13 scraps — could not. G18 changed the
+    arithmetic behind that trade in two ways:
 
-    Returns the indices of any invalid solids, the total volume, and the
-    highest peak worker RSS observed (0 on the serial path, folded into the
-    run's high-water mark by the caller exactly like every other stage's
-    worker RSS).
+    * ``BRepCheck_Analyzer`` has a parallel flag of its own
+      (:func:`latticegen2.occ.is_valid`), so the dominant solid is no longer
+      stuck on one core just because it is one job. That is the case per-solid
+      dispatch could never reach, and it is the case that sets this stage's
+      floor on any real part.
+    * The two cannot simply be combined. ``--cores`` is "honoured exactly"
+      (specification.md §3), and W worker processes each launching W OCCT
+      threads is W² threads on W cores. Keeping the dispatch would mean
+      bounding each worker to one thread, which gives up exactly the win above.
+
+    Running here also deletes a whole ``.brep`` round trip that existed only to
+    reach the workers: the master wrote every solid out and each worker read it
+    back, 464 MB each way on the rehearsal, to compute two scalars per solid.
+    The solids are already in memory here.
+
+    What this gives up is real and worth stating: on a part whose components
+    *are* evenly sized, per-solid dispatch across W processes would beat 1.6x.
+    No such part has been measured, and the failure mode is "slower than it
+    could have been", never a wrong verdict — docs/algorithm.md §11's rule.
+
+    Returns the indices of any invalid solids and the total volume.
     """
-    if pool is not None and pool.active and tmpdir is not None and len(solids) >= 2:
-        paths = []
-        sizes: dict[str, int] = {}
-        for i, solid in enumerate(solids):
-            path = os.path.join(tmpdir, f"validate_{i}.brep")
-            _write_brep(solid, path)
-            paths.append(path)
-            sizes[path] = occ.count_subshapes(solid)[0]  # dispatch order only; see _unify_parallel
-        results, max_rss = pool.run(_worker_validate, paths, sort_by=lambda p: sizes[p])
-        invalid = [i for i, (valid, _v, _rss) in enumerate(results) if not valid]
-        total_volume = sum(v for _valid, v, _rss in results)
-        return invalid, total_volume, max_rss
     invalid = [i for i, s in enumerate(solids) if not occ.is_valid(s)]
     total_volume = sum(occ.volume(s) for s in solids)
-    return invalid, total_volume, 0
+    return invalid, total_volume
 
 
 @dataclass

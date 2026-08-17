@@ -1179,3 +1179,86 @@ object and the same reference count concurrently — exactly the case OCCT's
 thread-safety notes do not cover. Probe B ran without crashing, and that is not
 evidence: a data race that does not fire is indistinguishable from no race.
 The question simply never becomes worth asking, because probe A closes it first.
+
+---
+
+## G18 — can `validate` use more than one core, and at what risk?
+
+`tools/prototypes/g18_validate_decomposition.py`. Run on a real trimmed lattice
+solid (`test-cylinder` at `cc=10, t=1.5`) plus the four real invalid faces
+committed from the `cc=5, t=1` rehearsal.
+
+**Asked because `validate` and `simplify` are not the same problem, though
+docs/testing.md long described them together.** Per-*body* dispatch failed for
+both for one reason — one dominant solid sets the floor. Going *below* the body
+is where they diverge: `simplify` must hand back geometry, so its tiles have to
+reassemble by shared topology and G15's file boundary destroys that.
+`_worker_validate` handed back `(bool, float)`. Nothing reassembles, so G15 has
+nothing to attach to.
+
+### The answer was not the split this gate was written to evaluate
+
+`BRepCheck_Analyzer` has a parallel flag of its own:
+
+    BRepCheck_Analyzer(S, GeomControls=True, theIsParallel=False, theIsExact=False)
+
+G17 recorded that `ShapeUpgrade_UnifySameDomain` "exposes no `SetRunParallel` or
+thread-pool hook, so unlike OCCT's booleans and mesher there is nothing to
+switch on". **This one has the hook.** The threads are OCCT's own native ones,
+so the GIL result does not bind them, and the verdict stays OCCT's rather than a
+conjunction assembled here.
+
+| solid | serial | `theIsParallel` | speedup | cores |
+|---|---|---|---|---|
+| 14,790 faces | 3.791 s | 2.370 s | **1.60×** | 0.96 → **3.43** |
+| 1,176 faces | 0.283 s | 0.179 s | **1.58×** | 0.94 → **3.93** |
+
+**A — verdict safety, the part that decides it.** All four committed invalid
+faces (`invalid-vertex-tolerance-{ellipse,bspline}.brep`,
+`self-intersecting-wire-{cylinder,bspline}.brep` — the real geometry behind
+docs/algorithm.md §8's two repair rungs) read `False` on **both** sides, and
+both valid solids read `True` on both. This control is the point of the gate,
+not the timings: `validate` is the exit-4 gate before a 2 GB file ships, and per
+G10 a scanner that only ever agrees on sound geometry proves nothing. Pinned as
+a permanent regression in `test_pipeline.py`.
+
+### The manual split would go further, and was not taken
+
+| | share of the serial check |
+|---|---|
+| per-face checks, summed | **94.4 %** |
+| structural only (shell closure + orientation) | 4.8 % |
+
+So ~94 % of the work is local to a face and would divide across `W` workers —
+roughly 5× against the flag's 1.6×. **Not built**, by decision, and the reason
+is not effort: `BRepCheck_Analyzer(solid)` checks subshapes **in context**, and
+a standalone per-face check is a different predicate — that difference is
+precisely what G12 exploited to find rung 2's mechanism. Replacing this
+project's final correctness gate with a hand-assembled conjunction needs a
+control proving it catches an in-context-only fault, and no such control exists
+cheaply. Under docs/algorithm.md §11 the failure mode of an optimization must be
+"do more work", never "produce a wrong result"; this one's would be the latter.
+The 94.4 % figure is recorded so the option stays visible if the stage ever
+justifies building that control.
+
+### What shipped
+
+The flag, plus moving `validate` off the worker pool onto the master
+(docs/algorithm.md §9). The two are one decision, not two: `--cores` is
+"honoured exactly" (specification.md §3), and `W` worker processes each
+launching `W` OCCT threads is `W²` threads on `W` cores.
+`latticegen2.parallel.set_thread_budget` caps OCCT's own pool to the budget.
+Running on the master also deletes a `.brep` round trip that existed only to
+reach the workers — 464 MB each way on the rehearsal, to compute two scalars per
+solid.
+
+Measured as a controlled pair on `dense-lattice`, back to back:
+`validate` **5.49 s → 2.11 s (−61.6 %)**, better than the flag alone because the
+round trip goes too. Output byte-identical.
+
+**What this gives up**, stated plainly: on a part whose components *are* evenly
+sized, per-solid dispatch across `W` processes would beat 1.6×. That was
+docs/specification.md §10 path 4's justification for keeping a change that
+measured *slower* (2 m 59 s → 3 m 29.6 s) on the only part it was ever run on.
+No evenly-sized part has been measured, so what is traded away here is a
+projected benefit against a measured one.

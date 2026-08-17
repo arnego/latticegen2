@@ -151,8 +151,29 @@ def is_valid(shape: TopoDS_Shape) -> bool:
     This is an *exact* check on the B-rep itself, not a mesh-based approximation
     of one, which is what makes it worth running on every output solid before a
     run reports success (docs/algorithm.md §9).
+
+    **Run with OCCT's own parallel flag on** (``theIsParallel``, the third
+    constructor argument). This is the one heavy call in the pipeline that has
+    such a flag: docs/specification.md §11 records that
+    ``ShapeUpgrade_UnifySameDomain`` has none — "no ``SetRunParallel``, no
+    thread-pool hook, so there is nothing to switch on either" — and that is
+    half of why sub-body parallelism is closed for `simplify` and open here.
+    The threads are OCCT's own native ones, so G17's GIL result does not bind
+    them, and the verdict stays OCCT's rather than a conjunction this project
+    assembles itself. Gate G18 measured **1.60x** at 3.43 core-equivalents on a
+    real trimmed lattice solid, with the verdict unchanged on valid solids *and*
+    on all four of the real invalid faces committed from the `cc=5, t=1`
+    rehearsal (``test/*.brep``, docs/algorithm.md §8) — a control that matters
+    more than the speedup, since this is the exit-4 gate and a check that only
+    ever agrees on good geometry would prove nothing (G10).
+
+    Thread count is bounded by :func:`latticegen2.parallel.set_thread_budget`
+    so ``--cores`` keeps meaning what specification.md §3 says it means. That
+    bound is why this call is made on the master rather than in a worker
+    (docs/algorithm.md §9): W worker processes each launching W OCCT threads
+    would be W² threads on W cores.
     """
-    return BRepCheck_Analyzer(shape).IsValid()
+    return BRepCheck_Analyzer(shape, True, True).IsValid()
 
 
 # --- Construction -----------------------------------------------------------

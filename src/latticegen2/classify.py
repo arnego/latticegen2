@@ -30,6 +30,7 @@ explicitly, because the rest of the pipeline is built on them:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -38,7 +39,8 @@ from OCP.TopoDS import TopoDS_Shape
 
 from . import occ
 from .errors import InputGeometryError
-from .lattice import LatticeParams, half_strut_offset, nodes
+from .lattice import LatticeParams, half_strut_offset, lattice_params, nodes
+from .parallel import WorkerPool
 
 
 class Klass(IntEnum):
@@ -71,6 +73,29 @@ class TriMesh:
 
     def bounds(self) -> tuple[np.ndarray, np.ndarray]:
         return self.verts.min(axis=0), self.verts.max(axis=0)
+
+
+def save_mesh(mesh: TriMesh, path: str) -> None:
+    """Stage a mesh for worker processes, as plain arrays.
+
+    Classification is the one parallel stage of this pipeline that touches no
+    OCCT geometry at all (:func:`classify_slice` is pure NumPy), so its workers
+    exchange an ``.npz`` rather than the ``.brep`` every other stage uses. The
+    small-IPC discipline is the same one docs/algorithm.md §7 states — the mesh
+    goes to disk once and workers read it directly; only paths and small plain
+    data cross the process boundary.
+    """
+    np.savez(
+        path, verts=mesh.verts, tris=mesh.tris, deviation=np.float64(mesh.deviation)
+    )
+
+
+def load_mesh(path: str) -> TriMesh:
+    """Read back what :func:`save_mesh` wrote."""
+    with np.load(path) as z:
+        return TriMesh(
+            verts=z["verts"], tris=z["tris"], deviation=float(z["deviation"])
+        )
 
 
 def chordal_target(lp: LatticeParams) -> float:
@@ -811,6 +836,12 @@ class Classification:
     node_class: np.ndarray
     """``(N,)`` :class:`Klass` values."""
     n_triangles: int
+    max_worker_rss: int = 0
+    """Highest peak RSS seen in a classification worker, 0 on the serial path.
+
+    Folded into the run's high-water mark by the caller exactly like every other
+    stage's worker RSS: the summary's "Peak memory" must be the maximum the run
+    used anywhere, not just in the master (specification.md §3)."""
 
     def of(self, k: Klass) -> np.ndarray:
         return self.node_index[self.node_class == int(k)]
@@ -824,10 +855,34 @@ class Classification:
         }
 
 
-def classify_nodes(lp: LatticeParams, mesh: TriMesh, candidates: np.ndarray) -> Classification:
-    """Classify every candidate node as INTERIOR, BOUNDARY or OUTSIDE.
+class _ClassifyIndex:
+    """The mesh-derived indices :func:`classify_slice` queries.
 
-    The sweep is staged cheapest-first:
+    Split out from the sweep itself because none of it depends on *which* nodes
+    are being classified — it is a function of ``lp`` and the mesh alone. That
+    is what makes the sweep divisible: a worker rebuilds these from the staged
+    mesh and then answers for its own slice of nodes without needing to know
+    anything about the others.
+    """
+
+    def __init__(self, lp: LatticeParams, mesh: TriMesh):
+        self.margin = lp.r + mesh.deviation
+        # Keep the grid no finer than a quarter of the largest query box, so each
+        # half-strut query touches a handful of cells regardless of mesh density.
+        self.hash = SpatialHash(mesh, min_cell=(lp.a / 2.0 + 2.0 * self.margin) / 4.0)
+        self.inside = PointInside(mesh)
+        # A junction reaches at most a/2 from its node, so anything further than
+        # a/2 + margin from the surface has all six half-struts provably clear.
+        self.occupancy = Occupancy(mesh, lp.a / 2.0 + self.margin)
+
+
+def classify_slice(
+    lp: LatticeParams,
+    mesh: TriMesh,
+    candidates: np.ndarray,
+    index: _ClassifyIndex | None = None,
+) -> np.ndarray:
+    """``(N,)`` :class:`Klass` values for ``candidates``, staged cheapest-first:
 
     1. A grid-resolution occupancy query rules out every node whose junction
        cannot come near the surface at all (the overwhelming majority — the
@@ -836,18 +891,23 @@ def classify_nodes(lp: LatticeParams, mesh: TriMesh, candidates: np.ndarray) -> 
        of their six half-struts can touch the surface.
     3. Only the remaining near-surface nodes pay for exact segment-triangle
        distances, six segments each.
+
+    **Every node is decided independently of every other**, which is the
+    property :func:`classify_nodes` divides the sweep on. It is a statement
+    about the arithmetic, not a hope: :meth:`Occupancy.near` is elementwise,
+    :meth:`SpatialHash.query` takes only one node's own box, and
+    :meth:`_DirectionalCaster.hit_counts` buckets each point by its own
+    projected cell and sums an integer count of crossings over that bucket's
+    triangles. So a row gets bit-identical values whether it arrives here in
+    the whole candidate set or in any subset containing it — there is no
+    reduction across nodes anywhere to reassociate.
     """
-    margin = lp.r + mesh.deviation
-    # Keep the grid no finer than a quarter of the largest query box, so each
-    # half-strut query touches a handful of cells regardless of mesh density.
-    sh = SpatialHash(mesh, min_cell=(lp.a / 2.0 + 2.0 * margin) / 4.0)
+    idx = index if index is not None else _ClassifyIndex(lp, mesh)
+    margin = idx.margin
     positions = nodes(lp, candidates)
 
-    inside = PointInside(mesh)(positions)
-
-    # A junction reaches at most a/2 from its node, so anything further than
-    # a/2 + margin from the surface has all six half-struts provably clear.
-    near = Occupancy(mesh, lp.a / 2.0 + margin).near(positions)
+    inside = idx.inside(positions)
+    near = idx.occupancy.near(positions)
 
     node_class = np.where(inside, int(Klass.INTERIOR), int(Klass.OUTSIDE)).astype(np.int64)
 
@@ -860,7 +920,7 @@ def classify_nodes(lp: LatticeParams, mesh: TriMesh, candidates: np.ndarray) -> 
             p1 = p0 + offsets[h]
             lo = np.minimum(p0, p1) - margin
             hi = np.maximum(p0, p1) + margin
-            cand = sh.query(lo, hi)
+            cand = idx.hash.query(lo, hi)
             if len(cand) == 0:
                 continue
             dist = segment_triangle_dist(p0, p1, A[cand], B[cand], C[cand])
@@ -870,5 +930,103 @@ def classify_nodes(lp: LatticeParams, mesh: TriMesh, candidates: np.ndarray) -> 
         if touched:
             node_class[i] = int(Klass.BOUNDARY)
 
+    return node_class
+
+
+def _worker_classify(job):
+    """Classify one strided slice of the candidate set in a worker process.
+
+    Only paths and small plain data cross the process boundary, and unlike every
+    other worker in this codebase none of it is geometry — the mesh and the
+    candidate indices are plain arrays, and what comes back is one ``(N,)``
+    integer array. G15's identity problem (specification.md §11) has nothing to
+    attach to here: no topology is serialized, so none can be duplicated.
+
+    The mesh-derived indices are rebuilt per worker rather than shipped. They
+    are a pure function of ``(cc, t)`` and the mesh, so this is duplicated work
+    — but it is duplicated *in parallel*, and the alternative is pickling three
+    ray-caster bucket dictionaries per job.
+    """
+    (mesh_path, nodes_path, cc, t, offset, stride) = job
+    lp = lattice_params(cc, t)
+    mesh = load_mesh(mesh_path)
+    with np.load(nodes_path) as z:
+        candidates = z["candidates"]
+
+    node_class = classify_slice(lp, mesh, candidates[offset::stride])
+
+    from .runlog import peak_rss_bytes
+
+    # `rss` stays last: WorkerPool.run reads it positionally at rss_index=-1, a
+    # convention shared by every worker function in this codebase.
+    return node_class, peak_rss_bytes()
+
+
+def _classify_parallel(
+    lp: LatticeParams,
+    mesh: TriMesh,
+    candidates: np.ndarray,
+    pool: WorkerPool,
+    tmpdir: str,
+) -> tuple[np.ndarray, int]:
+    """Spread :func:`classify_slice` across the run's shared worker pool.
+
+    **Slices are strided, not contiguous** — the one place this stage's batching
+    deliberately differs from :func:`latticegen2.boundary._split_batches`, which
+    keeps batches contiguous so a worker's junctions share input-body regions and
+    help OCCT's caching. There is no kernel and no cache to help here, and
+    contiguity would actively hurt: :func:`latticegen2.lattice.candidate_nodes`
+    ravels a meshgrid with the last index varying fastest, so a contiguous slice
+    is a slab through the part. Step 3 above — the only expensive step — runs
+    only for near-surface nodes, and those sit on a shell, so slabs divide the
+    cost extremely unevenly while a stride of ``workers * 4`` spreads that shell
+    across every batch.
+
+    Reassembly is the same stride, so the result is identical to the serial
+    path's row for row, and `imap`'s ordered results make it identical run to
+    run as well.
+    """
+    mesh_path = os.path.join(tmpdir, "classify_mesh.npz")
+    save_mesh(mesh, mesh_path)
+    nodes_path = os.path.join(tmpdir, "classify_nodes.npz")
+    np.savez(nodes_path, candidates=np.asarray(candidates, dtype=np.int64))
+
+    stride = max(1, min(len(candidates), pool.workers * 4))
+    jobs = [
+        (mesh_path, nodes_path, lp.cc, lp.t, offset, stride) for offset in range(stride)
+    ]
+    results, max_rss = pool.run(_worker_classify, jobs)
+
+    node_class = np.empty(len(candidates), dtype=np.int64)
+    for offset, (part, _rss) in enumerate(results):
+        node_class[offset::stride] = part
+    return node_class, max_rss
+
+
+def classify_nodes(
+    lp: LatticeParams,
+    mesh: TriMesh,
+    candidates: np.ndarray,
+    *,
+    tmpdir: str | None = None,
+    pool: WorkerPool | None = None,
+) -> Classification:
+    """Classify every candidate node as INTERIOR, BOUNDARY or OUTSIDE.
+
+    Dispatched across ``pool`` when one is active and there is somewhere to
+    stage the mesh, and run on the master exactly as before otherwise — the
+    same dispatch rule the rest of the pipeline uses, so a caller with no pool
+    (a unit test, or ``--cores 1``) needs no change and gets the same answer.
+
+    Unlike the other parallel stages this one is process-parallel for a plain
+    reason rather than a measured one: :func:`classify_slice` is pure NumPy, so
+    the GIL finding behind every other stage's process pool (G7, G17) does not
+    even arise, and neither does G15 — nothing here is topology.
+    """
+    if pool is not None and pool.active and tmpdir is not None and len(candidates) > 0:
+        node_class, max_rss = _classify_parallel(lp, mesh, candidates, pool, tmpdir)
+    else:
+        node_class, max_rss = classify_slice(lp, mesh, candidates), 0
+
     return Classification(node_index=candidates, node_class=node_class,
-                          n_triangles=int(len(mesh.tris)))
+                          n_triangles=int(len(mesh.tris)), max_worker_rss=max_rss)

@@ -321,6 +321,24 @@ results — this run reports `stitch_repaired_components: 1`, so the dominant
 component pays close to the untiled round-2 cost. That is the documented
 fallback behaving exactly as designed; the saving is simply unavailable here.
 
+**Measured per phase, 2026-08-17**, now that `stitch` carries its own timers
+(`SewStats.t_*`, reported in the run log and in
+[profiling-reports.md](profiling-reports.md)):
+
+    round1 49.1s   split 3.0s   round2 15.1s   repair 651.2s
+    retolerance 44.6s   rings 6.7s
+
+**The repair is 85 % of the stage.** Everything else together is 15 %.
+
+**This closes one proposal outright.** Running the unsplit sew *speculatively*
+alongside the seam-only one — dispatching both to idle workers and keeping
+whichever passes the free-edge check, so the discarded attempt leaves the
+critical path — was proposed on the assumption that the discarded attempt was
+expensive. It is **15.1 s**, 0.5 % of the run. The seam subset is small, so
+computing it and throwing it away is nearly free, and there is no scheduling
+change that recovers the 651 s. Do not build this; the measurement above is the
+disproof.
+
 **What would recover it.** Make the seam-only split correct in the presence of
 straddling edges — i.e. carry a seam face's straddling neighbours into the sewn
 subset so `BRepBuilderAPI_Sewing` cannot rebuild a shared edge onto a new
@@ -328,14 +346,32 @@ subset so `BRepBuilderAPI_Sewing` cannot rebuild a shared edge onto a new
 written up in §8 and in `tools/prototypes/RESULTS.md` G8). 144–720 such edges
 were measured in every prototype block tried once the check for them existed, so
 they are easy to enumerate; what is unproven is whether including them keeps
-round 2's cost below a full sew on a part this size.
+round 2's cost below a full sew on a part this size. **This is the only lever
+left in this stage that is worth more than ~1 %, and it is algorithmic, not a
+scheduling or parallelism change.**
 
 **A separate, much smaller item in the same stage.** `occ.fix_vertex_tolerances`
 (§8) runs one `BRepCheck_Analyzer` per boundary face, serially on the master:
-0.215 ms measured on real trimmed faces, ~1.1 min across this part's 301,505.
-It is embarrassingly parallel and could dispatch across the shared `WorkerPool`
-like `simplify` and `validate` do — though note specification.md §10's own
-finding that doing so bought nothing on this part's very unequal components.
+**measured 44.6 s** by the phase timers above, 5.8 % of `stitch` and 1.3 % of
+the run. It is embarrassingly parallel in principle, but two things about it are
+now known and both cut against the obvious implementation:
+
+* **The plan's "free I/O" route does not exist.** The idea was to hand workers
+  index ranges into the `.brep` round 2 already wrote. That file does not match
+  what needs scanning: `out[group]` is the sewn faces *concatenated with* the
+  master-native faces `_split_seam_interior` carried through, so no existing
+  file holds exactly that list in that order. Dispatching the scan means writing
+  ~380 MB first, against a ~37 s saving.
+* **A better mechanism exists and changes the predicate.** One
+  `BRepCheck_Analyzer` over a compound of every face, with `theIsParallel` on
+  (G18), would parallelise the scan with no extra I/O at all — but querying it
+  per face is the **in-context** overload, and the current code checks each face
+  **standalone**. Those are different predicates; that difference is exactly
+  what G12 used to diagnose rung 2. Changing it could change which faces get
+  repaired, and this part's result (19 corrected, 0 residual) is the only
+  evidence that the repair is complete.
+
+So this is worth ~1.2 % and needs a rehearsal-scale control to take safely.
 
 **How to verify either fix.** Re-run the rehearsal; `stitch_repaired_components`
 must be 0 (for the first) and `stitch` must drop, while the run still writes 14
@@ -346,6 +382,127 @@ result as sewing in one call, which is the property any change here must keep.
 ---
 
 ## 11. Closed — kept for the reasoning, not as work
+
+### Pipeline parallelism between `classify` and `assemble` — chapter closed, two stages won, two proposals disproved
+
+**Opened 2026-08-17** by the question: the pipeline runs at ~1.9 of 6 cores, so
+is there work between classification and assembly that could run concurrently
+rather than in sequence? Specifically — since interior nodes are handled
+separately from boundary nodes before the interior is built onto the interface
+rings, can the interior build be dispatched to the worker pool alongside the
+boundary work?
+
+**The originating hypothesis was structurally right and worth ~42 s.** The
+dependency really is narrower than it looks: of `build_interior_shell`'s seven
+arguments, six are available the moment `connect` finishes, and only `adopted`
+comes from `stitch`. `_rings_needed` emits an entry solely where an interior
+node's neighbour across a cap is *not* interior, so the adopted set is the
+shell's outer **skin** — 18 k rings against 97 k interfaces. Every node whose
+six neighbours are all interior depends on `stitch` for nothing.
+
+**But it cannot use the worker pool, for the same reason Phase 3 died.** The
+shell's watertightness *is* pointer identity, and `_ShellBuilder.adopt` must
+take the boundary sew's actual `TopoDS_Edge` objects, which live in the master's
+heap. And `instance` measures 46 s of a ~3,100 s run, so the ceiling is ~1 %
+even done perfectly. It was not built.
+
+#### What the search found instead
+
+Asking "which stages are single-core and *why*" turned out to be the productive
+form of the question, and the answer separates cleanly into two groups.
+
+**Two stages shipped.**
+
+| | `dense-lattice` (controlled pair) | rehearsal (clean window) |
+|---|---|---|
+| `classify` | 10.70 s → **4.08 s** | 126 s → **47.0 s**, 0.98 → **4.02 cores** |
+| `validate` | 5.49 s → **2.11 s** | 225 s → **114.0 s**, I/O 464/464 MB → **0/0 MB** |
+
+`dense-lattice` went 50.30 s → 40.50 s (−19.5 %) with the output
+byte-identical outside the header timestamp; the rehearsal wrote its 14 valid
+solids, 584,028 faces, 330,354.002 mm³ unchanged.
+
+**The distinction that made both possible, and that generalises past them:**
+every stage the earlier chapters failed to parallelise failed for one of two
+reasons — OCP holds the GIL (G7, G17), or tiles must reassemble by shared
+topology and a file boundary destroys it (G15). Neither applies to a stage that
+moves no geometry:
+
+* **`classify` is pure NumPy.** Nothing OCCT crosses its process boundary — the
+  mesh and node indices are plain arrays over an `.npz` — so both findings are
+  simply irrelevant, and the sweep divides exactly because every node is decided
+  independently of every other. Slices are *strided* rather than contiguous:
+  `candidate_nodes` ravels a meshgrid, so contiguous slices are slabs, and the
+  only expensive step runs solely for near-surface nodes, which lie on a shell.
+* **`validate` returns a scalar, not geometry.** That is precisely what
+  `simplify` lacks, and it is why sub-body parallelism is closed there and open
+  here. It also turned out to need no decomposition at all: G18 found
+  `BRepCheck_Analyzer` has its own `theIsParallel` flag — OCCT's *native*
+  threads, which the GIL result does not bind. 1.60×, verdict identical on all
+  four real invalid faces committed from this part.
+
+**Two proposals were disproved by measurement, and both had been ranked above
+the two that shipped.**
+
+* **Speculative round-2 sew — 15.1 s, not minutes.** On this part `stitch`
+  computes a seam-only round 2, fails the `expected_rings` check, and re-sews
+  the dominant component from scratch on the master while workers idle. The
+  proposal was to run both jobs concurrently and keep whichever passes. Adding
+  per-phase timers to `stitch` priced it: `round1 49.1s, split 3.0s, round2
+  15.1s, repair 651.2s, retolerance 44.6s, rings 6.7s`. **The discarded attempt
+  costs 15.1 s** — 0.5 % of the run — because the seam subset is small. The
+  repair is 85 % of the stage and no scheduling change reaches it (§10).
+* **A chunked per-face split of `validate` — measured worth ~5×, rejected on
+  correctness.** G18 measured per-face checks at 94.4 % of the serial cost
+  against a 4.8 % structural floor, so it would beat the flag substantially.
+  Not built: `BRepCheck_Analyzer(solid)` checks subshapes **in context**, and a
+  standalone per-face check is a different predicate — the very difference G12
+  used to diagnose rung 2. Replacing the exit-4 gate with a hand-assembled
+  conjunction would make its failure mode "produce a wrong result", which
+  algorithm.md §11 forbids. The 94.4 % is recorded so the option stays visible
+  if a control for in-context faults is ever built.
+
+#### Three things worth keeping beyond this chapter
+
+**A stage timer that lumps phases together prices the stage, not the proposal.**
+`stitch` had sat at "0.96 mean cores against a 4.38 peak" across several
+profiles — visible but unattributable. Six timers, costing nothing, retired a
+proposal on their first run. Had they existed earlier, the speculative sew would
+never have been ranked first.
+
+**`--cores` and OCCT's own thread pool are two different budgets, and using both
+at once double-counts.** Once `BRepCheck_Analyzer` runs threaded, `W` worker
+processes each launching `W` threads is `W²` on `W` cores — so the flag and
+path 4's per-solid dispatch cannot coexist. Choosing the flag means running
+`validate` on the master, which also deleted a 464 MB round trip that existed
+only to reach the workers. `parallel.set_thread_budget` caps the OCCT side.
+Anything added later that asks OCCT for threads inherits this constraint.
+
+**Cross-session stage comparison remains the trap this project keeps falling
+into.** `boundary` in the verification run measured 889 s at 4.28 cores against
+the previous session's 721 s at 5.20 — and was briefly written up here as a
+possible regression, before the 2026-08-15 profile was found recording 14 m 51 s
+at **4.22 cores** on untouched code, labelled "no — variance" in §10's own
+table. The re-run reproduces that slow-band point to within 1 %. A stage
+measured in a clean window and a whole-run total are not the same kind of claim,
+and only the controlled pair supports the second.
+
+#### What this chapter leaves open
+
+Nothing large. `stitch`'s 651 s repair is §10's existing item and is
+algorithmic, not a scheduling change. The retolerance scan (44.6 s, ~1.2 %) is
+rescoped there with two findings that make the obvious implementation worse than
+it looked. The interior-overlap hypothesis above is ~1 % and needs a background
+submission path in `parallel.py` plus a two-phase shell build.
+
+One loose thread, recorded rather than resolved: the verification run wrote
+**2,517,853 edges against the 2,517,881** of the Phase 2 pair, a difference of
+28 (0.001 %). Nothing in this chapter can plausibly cause it — the
+classification is identical, `validate` is read-only, and `set_thread_budget(6)`
+is a no-op where OCCT's default is already 6 — and every other figure matches
+exactly with all 14 solids valid. It sits inside what algorithm.md §9 calls
+unification's own representation choice. A future rehearsal should confirm it is
+variance rather than drift.
 
 ### `simplify` beyond body-for-body — chapter closed, two levers disproved
 

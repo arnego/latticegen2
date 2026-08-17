@@ -30,6 +30,7 @@ from latticegen2.classify import (
 )
 from latticegen2.errors import InputGeometryError
 from latticegen2.lattice import candidate_nodes, lattice_params
+from latticegen2.parallel import WorkerPool
 
 TESTDIR = os.path.dirname(os.path.abspath(__file__))
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
@@ -202,6 +203,39 @@ def test_classification_of_a_sphere_is_layered_correctly():
     assert np.all(radius[interior] < 30.0 - margin)
     # Every OUTSIDE node must be beyond the sphere.
     assert np.all(radius[outside] > 30.0 - lp.a / 2 - margin)
+
+
+def test_parallel_classification_is_identical_to_the_serial_sweep(tmp_path):
+    """The one classification path that crosses a process boundary.
+
+    :func:`latticegen2.classify.classify_slice` divides the sweep on the claim
+    that every node is decided independently of every other, so the parallel
+    path must return not "equivalent" results but **the same** ones — the
+    strided slicing and reassembly leave no room for a near-miss, and a
+    tolerance here would hide exactly the off-by-one that stride arithmetic
+    invites.
+
+    This also exercises the IPC plumbing for real, the way
+    ``test_weld.py``'s worker-path test does: a bad job tuple, a mesh that does
+    not survive the ``.npz`` round trip, or a worker exception swallowed rather
+    than propagated fails here rather than at rehearsal scale.
+    """
+    lp = lattice_params(10.0, 1.5)
+    mesh = icosphere(30.0, subdivisions=3)
+    mesh.deviation = 0.2
+    cand = candidate_nodes(lp, np.array([-30.0] * 3), np.array([30.0] * 3))
+
+    serial = classify_nodes(lp, mesh, cand)
+    with WorkerPool(4) as pool:
+        parallel = classify_nodes(lp, mesh, cand, tmpdir=str(tmp_path), pool=pool)
+
+    counts = serial.counts()
+    assert counts["interior"] > 0 and counts["boundary"] > 0 and counts["outside"] > 0, \
+        "a sweep with an empty class would not test the reassembly at all"
+    assert np.array_equal(serial.node_class, parallel.node_class)
+    assert np.array_equal(serial.node_index, parallel.node_index)
+    assert parallel.counts() == counts
+    assert parallel.max_worker_rss > 0, "a worker actually ran and reported its RSS"
 
 
 def test_interior_nodes_never_neighbour_an_outside_node():

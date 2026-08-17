@@ -205,7 +205,72 @@ samples — noise, not a change.
 are 1,545 s, half the run, and all three are pinned at one core. `simplify` and
 `validate` already dispatch across the shared pool *per body*;
 docs/specification.md §10 records why that bought nothing on this part's very
-unequal 14 solids. Sub-body tiling (§10 Phase 3) is aimed exactly at that gap —
-tempered by this pair's own finding that `simplify` scales with the output it
+unequal 14 solids. Sub-body tiling was aimed exactly at that gap and is now
+**disproved** (docs/specification.md §11, G15) — as is the input-side
+alternative tried in its place, which the entry below measures. This pair's own
+finding is what predicted the second one: `simplify` scales with the output it
 must produce (unchanged at 584,028 faces) more than with the input it consumes
 (down ~31 %).
+
+---
+
+## 2026-08-17 — the restricted face merge (**reverted, kept as the measurement**)
+
+Not a state of the tool. This run carries an uncommitted change that restricted
+same-domain unification's *face* merge to the boundary layer plus one hop,
+carrying the interior into the result by reference (docs/specification.md §11).
+It is recorded because the number is the whole reason the change was reverted,
+and a negative result nobody can see is a negative result somebody repeats.
+
+**Read this against the entry above with more caution than that pair deserves.**
+It was run the following morning rather than back to back, and the untouched
+stages show it: `classify` agrees to **+0.1 %** and `connect` to +0.5 %, but
+`boundary` is +4.0 % and `export` **+17.6 %** on identical code. So the
+`simplify` figure below supports "no measurable win" and not a precise delta.
+
+Run duration **54 m 10.9 s** against 51 m 43.3 s. Output **identical to both
+entries above** in every figure — 584,028 faces, 2,517,881 edges, 14 solids,
+330,354.002 mm³, 2.00 GB, volume drift 1.60e-07 — with 375,489 of 690,997 faces
+reaching the kernel (−46 %) and 0 reassembly fallbacks. The restriction loses no
+merge; it simply does not pay.
+
+```
+run started : 2026-08-17 11:41:30
+samples     : 1588  (11:41:31 -> 12:35:41)
+stages      : 12
+cores       : 6 physical (100% CPU == 1 core)
+```
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| tessellate | 3.0s | 47% | 95% | 0.47 | 247 MB | 268 MB | 1 | 0 MB | 0 MB |
+| classify | 126.0s | 95% | 98% | 0.95 | 287 MB | 308 MB | 1 | 0 MB | 0 MB |
+| boundary | 751.0s | 507% | 544% | 5.07 | 1,703 MB | 2,056 MB | 7 | 165 MB | 156 MB |
+| connect | 11.0s | 98% | 100% | 0.98 | 2,231 MB | 2,254 MB | 7 | 0 MB | 0 MB |
+| stitch | 636.0s | 109% | 526% | 1.09 | 3,071 MB | 3,178 MB | 7 | 382 MB | 360 MB |
+| instance | 43.0s | 97% | 100% | 0.97 | 3,540 MB | 4,038 MB | 7 | 0 MB | 0 MB |
+| assemble | 21.0s | 97% | 99% | 0.97 | 3,803 MB | 3,803 MB | 7 | 0 MB | 0 MB |
+| simplify | 1,146.0s | 97% | 105% | 0.97 | 6,657 MB | 7,604 MB | 7 | 940 MB | 939 MB |
+| validate | 228.0s | 97% | 104% | 0.97 | 9,811 MB | 15,128 MB | 7 | 464 MB | 464 MB |
+| export | 274.0s | 96% | 100% | 0.96 | 11,675 MB | 19,266 MB | 7 | 2,007 MB | 2,007 MB |
+
+```
+total to last stage : 3,239.0s (54.0 min)
+peak tree RSS       : 19,266 MB
+```
+
+**What this rules out, beyond the change itself.** `simplify`'s I/O is
+**940 MB read / 939 MB written against the previous entry's 941 / 940** — so
+the extra time is not the IPC of shipping the split, which was the obvious
+suspect and is now excluded. Its RSS peak moved 7,339 → 7,604 MB (+3.6 %), the
+bookkeeping's own footprint. Cores stayed at 0.97: this lever never touched
+parallelism, and the stage is exactly as single-threaded as before.
+
+The mechanism was then measured directly rather than inferred from this delta —
+cutting the face merge's input 20 % cuts its time 6 %, an elasticity near 0.3,
+where a *generic* subset of the same size gives 0.98 (G16) — which is what makes
+the conclusion safe despite the imperfect pair, and what identifies the cause as
+the restriction's own selection rather than the kernel. See
+docs/specification.md §11.

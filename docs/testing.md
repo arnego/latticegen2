@@ -203,6 +203,18 @@ that the paths 1–4 chapter is closed:
   unchanged) plus dispatching it across the shared pool took it from 8 m 57 s
   to **1 m 13.5 s** — this single change is 95 % of the run's total
   improvement (73.1 → 47.1 min).
+* **`simplify` is the largest stage and both obvious levers are now
+  disproved.** It cannot be spread *below* the body — unified tiles reassemble
+  by shared topology only while they stay in one process, and dispatching them
+  to workers as `.brep` files duplicates every seam edge (G15) — and it cannot
+  usefully be fed *less*: restricting its face merge to the region that can
+  still merge was exact (byte-identical output, 46 % less input at rehearsal
+  scale) and no faster, because a correct restriction skips exactly the faces
+  the kernel would have returned unchanged — the cheap ones — and keeps the ones
+  that merge. Elasticity ~0.3, against 0.98 for a generic subset of the same
+  size (G16), so the selection is what defeats it and no implementation can do
+  better. Both are written up in docs/specification.md §11. **Do not propose a
+  new way to parallelise or restrict this call without reading them first.**
 * **Parallelising `simplify` and `validate` is correct but was not a
   wall-clock win on this part.** Both still measure at 0.99 cores in
   `profile_report.py` — this part's 14 solids are one dominant body plus 13

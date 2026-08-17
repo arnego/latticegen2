@@ -52,11 +52,12 @@ def test_split_unification_matches_a_single_combined_call():
     """Running the two passes separately must describe the solid identically.
 
     `_unify_one` merges faces first and concatenates edges in a second call,
-    rather than asking for both at once, so that a tile can be face-merged with
-    the edge pass off (docs/specification.md §10 Phase 3 — the edge pass rewrites
-    edges *on* a tile boundary and breaks the shared-topology reassembly). That
-    reordering is only admissible while it produces the same B-rep, which is
-    what this pins: same faces *and* same edges as the combined call.
+    rather than asking for both at once. The sub-body tiling that originally
+    required the split is disproved (docs/specification.md §11, G15), but the
+    split is kept for its degradation behaviour — a throwing edge pass no longer
+    discards a completed face merge. Either way the reordering is only
+    admissible while it produces the same B-rep, which is what this pins: same
+    faces *and* same edges as the combined call.
     """
     solid = two_boxes_sharing_a_face()
     combined = occ.unify_same_domain(solid)

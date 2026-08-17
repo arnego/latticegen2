@@ -460,16 +460,17 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
     The output is simply described more verbosely, and every downstream gate
     still applies to it.
 
-    **The two passes are run separately, and this buys structure, not speed.**
-    ``ShapeUpgrade_UnifySameDomain`` merges coplanar faces and then concatenates
-    the collinear edge pairs left inside each merged wire. Splitting them is
-    what lets the face merge run with edge merging *off*, which
-    docs/specification.md §10 Phase 3 requires: the edge pass rewrites edges on a
-    tile boundary, so with it enabled a tiled unification no longer reassembles
-    by shared topology (G13, `tools/prototypes/RESULTS.md`). Measured on
-    `dense-lattice`, splitting is neutral — `simplify` 13.87 s and 13.94 s split
-    against 13.21 s and 16.18 s combined — and `test_pipeline.py` pins the B-rep
-    it produces as identical to the combined call's, faces *and* edges.
+    **The two passes are run separately, and what that now buys is degradation,
+    not speed.** ``ShapeUpgrade_UnifySameDomain`` merges coplanar faces and then
+    concatenates the collinear edge pairs left inside each merged wire.
+    Splitting them was built to let the face merge run with edge merging *off*,
+    which the sub-body tiling of docs/specification.md §10 required — and that
+    tiling is now disproved (G15: tiles reassemble by shared topology only while
+    they stay in one process). The split is kept anyway, for the reason at the
+    end of this docstring, and because measurement says it costs nothing:
+    `simplify` 13.87 s and 13.94 s split against 13.21 s and 16.18 s combined on
+    `dense-lattice`, with `test_pipeline.py` pinning the B-rep it produces as
+    identical to the combined call's, faces *and* edges.
 
     **Dropping the edge pass outright was tried and rejected**, so it is not
     retried. Edge merging is not the near-no-op docs/algorithm.md §9 once
@@ -481,7 +482,7 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
     run-time change (57.28 -> 57.57 s). Face count was identical throughout,
     which is what identifies edges as the whole of the difference.
 
-    Splitting does improve one thing besides enabling Phase 3. Edge merging is
+    What the split is actually worth is here. Edge merging is
     the part that raises ``Standard_Failure: Courbes non jointives`` on geometry
     this tool legitimately produces; now that it runs last and alone, a refusal
     costs only the edge concatenation, where the old ladder threw away a

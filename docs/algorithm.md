@@ -1002,6 +1002,26 @@ program builds itself.
   other four half-struts cut them apart at the node. `test/test_junction.py` pins
   both halves of that finding.
 
+  **Aiming the merge at only that region was tried and does not pay.** The two
+  statements above are together a proof about *which* faces can still merge —
+  an interior face has no interior partner left, so its only possible partner is
+  a boundary-derived face it touches — and the boundary-derived faces are known
+  by construction, being the objects §8's assembly added. Restricting the face
+  merge to them plus one hop is therefore exact, and it was implemented and
+  measured: on the `cc=5, t=1` rehearsal it took the kernel's input from 690,997
+  faces to 375,489 (−46 %) and produced a **byte-identical output**, losing no
+  merge at all. It also made the stage **slower**: cutting its input 20 % cut
+  its time only 6 % (1.515 s → 1.420 s on `dense-lattice`), an elasticity near
+  0.3, against ~0.045 ms/face of linear bookkeeping to achieve it.
+
+  **The reason is not that the kernel prices its input poorly — G16 measures it
+  pricing a generic subset almost exactly linearly, at 0.98.** It is that a
+  *correct* restriction skips exactly the faces unification would have returned
+  unchanged, which are exactly the cheap ones, and keeps exactly the faces that
+  merge. It is self-defeating by construction, so no implementation improves on
+  it. There is consequently no input-side lever here at all, and
+  docs/specification.md §11 keeps the measurement rather than the code.
+
   Measured on `dense-lattice`: **29,974 → 15,966 faces**, 122,556 → 67,898 edges,
   98.9 MB → 52.6 MB, with the exact symmetric-difference volume against the
   un-unified solid confirming no geometry moved. It costs ~8 s and *pays for
@@ -1237,7 +1257,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Classification | `O(N)` cheap tests + `O(S)` exact ones |
 | Interior | `O(N)` index operations and face constructions, **no booleans** |
 | Assembly | `O(N + S)` index operations, **no booleans and no search** |
-| Unification | `O(faces/W)`, ~0.24 ms/face before dispatch, across the shared pool (§9, specification.md §10 path 1) |
+| Unification | `O(faces)` per solid, across the shared pool (§9, specification.md §10 path 1). Cost per face **rises with scale** — 0.06 ms/face at 25 k faces, ~1.1 ms/face at 1 M (G13) — and tracks the faces it must emit, not the merges it finds: a 46 % smaller input leaves it no faster (§9) |
 | Validity | `O(faces/W)`, across the same shared pool (§9, specification.md §10 path 4) |
 | Boundary | `O(S/W)` single-operand intersections |
 | Connectivity | `O(N + S)` union-find |
@@ -1282,6 +1302,22 @@ Alternatives evaluated and rejected:
 * **`BOPAlgo_GlueFull`:** measured, does not merge (§6).
 * **CGAL Nef polyhedra:** correct and robust, but redundant once no large boolean
   exists to perform.
+* **Spreading one solid's unification across processes as spatial tiles**
+  (docs/specification.md §10 Phase 3): rejected by measurement, G15. Tiles
+  reassemble by shared topology only while they stay in one process — a `.brep`
+  preserves sharing within a file and cannot preserve it between two, so one
+  file per tile returns every seam edge duplicated (864 and 1,760 free edges
+  where 0 were expected, against 0 for the same tiles written as one file).
+  Re-identifying the duplicates needs `BRepTools_ReShape` to replace vertices,
+  which §8 already measured coming apart; sewing the seam subset is G8's split,
+  whose production failure mode is a full sew of a volume-scaling face set. The
+  restricted face merge above is the lever that survives, and it removes work
+  rather than spreading it.
+* **Restricting the face merge to the region that can still merge** (§9):
+  built, measured, reverted. Exact — the output was byte-identical on the
+  rehearsal — and no faster, because a correct restriction removes exactly the
+  faces that were cheapest to process (elasticity ~0.3, against 0.98 for a
+  generic subset of the same size — G16). Self-defeating by construction.
 * **Hierarchical tree reduction for boundary-sew round 2:** rejected on paper
   before being built (§8) — G6 already showed round 2's cost tracks total face
   count almost flatly in shape count, so it is dominated by a flat per-face

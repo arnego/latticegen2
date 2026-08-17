@@ -343,19 +343,24 @@ valid solids and `python -m pytest test -q` plus `python tools/e2e.py` stay
 green. `test_weld.py` already pins that tiling produces the same watertight
 result as sewing in one call, which is the property any change here must keep.
 
-### `simplify` beyond body-for-body: Phases 1–2 done, Phase 3 open
+---
 
-**Proposed by Claude 2026-08-15, approved for implementation 2026-08-16.**
-**Phases 1 and 2 are done and measured at rehearsal scale; Phase 3 is not
-built.** Phase 1's headline projection was wrong and Phase 2's was too
-optimistic — both are recorded below rather than quietly dropped, because what
-they cost to learn is the useful part.
+## 11. Closed — kept for the reasoning, not as work
 
-*This entry stays in §10 rather than moving to §11 because Phase 3 is live work
-with an open plan and unretired risks. The Phase 1 and Phase 2 write-ups below
-are closed records kept in place: splitting them out would separate Phase 3 from
-the measurements that set its bars, which are the whole basis for deciding
-whether to build it.*
+### `simplify` beyond body-for-body — chapter closed, two levers disproved
+
+**Proposed by Claude 2026-08-15, approved for implementation 2026-08-16,
+closed 2026-08-17.** Of four things tried on this stage, **one paid**: Phase 2,
+building the interior pre-merged, −6.5 % on the rehearsal. Phase 1's projection
+was wrong, Phase 3 is impossible as designed, and the input-side alternative
+built in its place is exact and worth nothing. All four are recorded here rather
+than quietly dropped, because what they cost to learn is the useful part — and
+because two of them close off directions that would otherwise look obvious to
+the next person.
+
+*Read this as one chapter: the later sections' bars are set by the earlier
+sections' measurements, so splitting them apart would leave each half
+unreadable.*
 
 The measurement the proposals rest on is gate G13
 ([`tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md),
@@ -564,74 +569,159 @@ dominates. If anything it leaves Phase 3 worth **more** in absolute terms than
 projected, because the base it attacks measured 18 m 07.9 s rather than the
 ~11 m 45 s that was extrapolated.
 
-#### Phase 3 — sub-body tiling of `simplify`
+#### Phase 3 — sub-body tiling of `simplify`: **BLOCKED, not built**
 
-Partition the solid's faces into tiles, unify each across the shared
-`WorkerPool`, reassemble with `BRep_Builder.Add`, then apply the existing
-`pipeline._check_unify_result` guards to the reassembled solid *plus* the
-every-edge-twice proof from `weld.assemble` — a strictly stronger gate than what
-runs today. Tile **by strut, not by centroid**: tag each face with its owning
-node during the interior build and bucket by lattice-index block, reusing
-`weld._tile_edge_length`; boundary faces fall back to centroid bucketing.
+The plan was to partition a solid's faces into tiles, unify each across the
+shared `WorkerPool`, and reassemble with `BRep_Builder.Add` — resting on G13's
+and G14's finding that unification leaves the edges it did not merge as the same
+objects, so a tile seam stays one `TShape` and nothing has to be sewn.
 
-**Its gate condition is met.** "Do this only if `simplify` is still a top-3 cost
-after Phase 2" — after Phase 2 it is the **largest single stage**, 18 m 07.9 s
-of a 51 m 43.3 s run (35 %), and one of only three stages left that are pinned
-at 0.98 cores while five of six sit idle (profiling-reports.md).
+**Its gate condition was met and its risk list was wrong.** After Phase 2
+`simplify` is the largest single stage — 18 m 07.9 s of a 51 m 43.3 s run
+(35 %), pinned at 0.98 cores while five of six sit idle — so it was worth
+attacking. R2 (curved faces) had been cleared by G14; R3, R5 and R6 were open
+but manageable. **None of the four risks asked whether the mechanism survives
+the process boundary the plan's own first sentence puts it across** — which is
+the one that decides it, and which two gates had silently assumed away.
 
-Only the *face* merge tiles; the edge pass has to stay global, since
-concatenating collinear pairs is exactly what breaks tile identity. Measured on
-`dense-lattice` the two split roughly 68 % / 32 % (9.45 s face merge, ~4.4 s
-edges), so tiling can only ever attack about two thirds of the stage and the
-edge pass becomes the new floor. Carrying that split onto the rehearsal's
-measured 18 m 07.9 s gives ~12 m 20 s of tileable face merge against ~5 m 48 s
-of global edge pass; at the ~5x the shared pool achieves elsewhere that is
-`simplify` **~18 m 08 s -> ~8 m 20 s, worth ~9-10 min**, or ~19 % of the run.
-Treat it as an upper bound and quote any total against the measured 51 m 43 s,
-not against the withdrawn 47.1-minute profile.
+**G15 answers it: tile identity is pointer identity, and Phase 3 puts a process
+boundary through the middle of it.** G13 and G14 both measured reassembly *in
+one process*. Phase 3's entire purpose is to spread tiles across workers, and
+every stage that does so moves geometry as `.brep` files (docs/algorithm.md §7,
+§8). A `.brep` preserves sharing *within* a file and cannot preserve it
+*between* two, because each file writes its own copy of every edge it
+references. On G14's own trimmed test solid
+(`tools/prototypes/g15_tiled_unify_ipc.py`):
 
-*Blocking risk R2 — **CLEARED** by gate G14, 2026-08-16.* G13 tested only planar
-instanced faces, leaving `TShape` identity across a tile seam unproven for the
-trimmed, curved faces a boolean produces — which Phase 2 made the *dominant*
-part of what `simplify` still sees (on `dense-lattice`, 15,718 boundary-derived
-faces of 25,234). `tools/prototypes/g14_tiled_unify_trimmed.py` tests both a
-closed instanced-grid ∩ sphere solid (1,804 faces, 76 curved) and a shell sewn
-from a kept run's real trimmed boundary pieces (2,342 faces, 176 curved):
-**0 free edges at 8, 27 and 64 tiles on both**, valid, volume/area preserved.
-So tiling need not fall back to interior-only. Two caveats are recorded in
-`RESULTS.md` G14: the gate's inputs merge only lightly (Phase 2 having already
-merged the interior), so "identity survives *heavy* merging" still rests on
-G13's planar case; and its first volume bar (1e-12, carried over from planar
-measurements) wrongly failed a correct tiling at 5.31e-10 drift before being
-reset to `pipeline.UNIFY_VOLUME_TOL`.
+| reassembly route | 8 tiles | 27 tiles | |
+|---|---|---|---|
+| in-process (G14's route) | **0** free edges | **0** | control: reproduces G14 |
+| one file, all tiles as one compound | **0** | **0** | control: serialization itself is fine |
+| **one file per tile** | **864** | **1,760** | what Phase 3 actually does |
 
-*Risk R3 — merge loss.* Strut-aware bucketing must measure ~0 % loss against a
-whole-solid unification at m=14 and m=16. *Fallback:* accept the centroid
-partition and a few percent more faces (a §11-acceptable larger output), or skip
-tiling.
+The middle row is what makes this readable rather than arguable: serialization
+does not destroy sharing, the *file boundary* does — and that is precisely the
+boundary Phase 3 puts between workers. So this is not a `.brep` defect to work
+around; it is what one-process-per-tile means.
 
-*Risk R5 — memory and IPC.* Verify with `tools/profile_run.py` and
-`tools/profile_report.py` on the rehearsal. **Bars, against the measured
-post-Phase-2 profile rather than the withdrawn one:** whole-tree peak RSS at or
-below 19,291 MB, and `simplify` core-equivalents above 3.0 against today's 0.98.
-Note that `simplify`'s own peak is 7,339 MB, well under the run's 19,291 MB peak
-— which `export` sets — so there is real headroom to spend here before the run's
-high-water mark moves at all. *Fallback:* cap the number of concurrent tiles.
+**The three repairs are all closed off, each by a measurement this project
+already has.** Re-identifying the duplicates on the master is a cheap exact
+lookup, but *merging* them needs `BRepTools_ReShape` to replace edges **and**
+their vertices, which docs/algorithm.md §8 measured coming apart
+(`BRepCheck_NotConnected`, invalid solid, wrong volume, while the shell still
+"closes"). Sewing only the seam-bearing faces is G8's split, whose production
+failure mode is a full unsplit sew of a volume-scaling face set — the one thing
+docs/algorithm.md §6 and §8 exist to prevent, at 4 h 45 m of a 5 h 04 m run.
+Tiling inside a *single* worker is sound (the middle row proves it) but serial,
+and G13 measured serial tiling at an 8 % saving having already concluded "plan
+on tiling being worth about `W` and no more; the win is parallelism".
 
-*Risk R6 — the G8 trap.* Any new per-face bookkeeping must use
-`TopTools_IndexedMapOfShape`, never Python lists tested with `.IsSame()`. Not
-detectable at gate scale; only the rehearsal shows it.
+**Do not retry this without first disproving G15**, which takes one command
+(`python tools/prototypes/g15_tiled_unify_ipc.py`, about a minute). The one
+thing that would reopen it is a way to return merged geometry from a worker
+while preserving shared topology with another worker's output, and no such
+mechanism exists in this architecture today.
 
-#### Common gate for every phase
+#### The input-side alternative: exact, and worth nothing
 
-`python -m pytest test -q`, `python tools/e2e.py`, both golden samples at 0 mm³,
-then one full rehearsal under `profile_run.py`. On landing, update
-docs/algorithm.md §9 and §12, this section, and docs/testing.md's performance
-notes — including the §9 correction above.
+With tiling closed off, the other way to attack the same stage is to give the
+kernel less to do. Phase 2 makes that *provable* rather than heuristic: since
+the interior is built pre-merged, an interior face has no interior partner left
+— within a junction its coplanar neighbours are not adjacent, and across a
+mid-strut interface the two half-faces are already one — so the only merge it
+can still take part in is with a boundary-derived face it touches. And which
+faces are boundary-derived is known by construction: they are the objects
+`weld.assemble` added. So the face merge can be restricted to the boundary layer
+plus one hop, with the rest carried into the result by reference, exactly and
+with no search.
 
----
+**It was built, measured, and reverted.** The correctness half worked perfectly:
 
-## 11. Closed — kept for the reasoning, not as work
+| | `dense-lattice` | rehearsal |
+|---|---|---|
+| faces reaching the kernel | 20,494 of 25,234 (−19 %) | **375,489 of 690,997 (−46 %)** |
+| output | 15,966 faces, 67,898 edges, 52.67 MB | 584,028 faces, 2,517,881 edges, 2.00 GB |
+| against the unrestricted run | **byte-identical** | **identical in every figure**, volume drift 1.60e-07 both |
+| reassembly fell back | 0 | 0 |
+
+So the restriction loses **no merge at all** — the proof about which faces can
+merge is sound, and the reassembly by shared topology held on the real part,
+checked with §8's every-edge-twice proof rather than trusted.
+
+**And it is not faster.** `simplify` measured 19 m 06.6 s against the
+post-Phase-2 18 m 07.9 s. That comparison is *not* a controlled pair — the
+untouched stages moved between +0.1 % (`classify`) and +17.6 % (`export`) — so
+the honest reading is "no measurable win", not "a 5 % loss". But the mechanism
+was then measured directly, on one solid in one run, and it is unambiguous:
+
+    cutting the face merge's input 20 % (23,236 -> 18,660 faces)
+    cuts its time 6 %   (1.515 s -> 1.420 s)
+
+**An elasticity near 0.3 — and the reason is not the one it looks like.** The
+obvious reading is that `ShapeUpgrade_UnifySameDomain` is priced by what it
+emits rather than what it consumes, so a smaller input buys little. **That
+reading is wrong, and gate G16 disproves it**
+(`tools/prototypes/g16_unify_elasticity.py`): on a *generic* subset the kernel
+prices its input almost exactly linearly, at a mean elasticity of **0.98** over
+removals of 10–60 %. Remove a representative 40 % of the faces and you save
+very nearly 40 % of the time.
+
+So the kernel is not letting the restriction down. **The selection is.** A
+*correct* restriction skips exactly the faces unification would have returned
+unchanged — which are exactly the cheap ones — and keeps exactly the faces that
+merge, which are the expensive ones. It is therefore self-defeating by
+construction: the better it is at removing only inert faces, the less of the
+cost it removes with them. 0.98 generic against ~0.3 targeted is the size of
+that effect, and no implementation can improve on it, because the property that
+makes the restriction *correct* is the same property that makes it worthless.
+
+Against that ~0.3, the restriction costs a *linear* ~0.045 ms/face of
+bookkeeping — the adjacency index plus the closure proof, ~45 s at rehearsal
+scale — which is the same order as the ~1 min the elasticity predicts it could
+save. There is no version of this that wins.
+
+This closes the input-reduction direction rather than leaving it open, and it
+generalises past this one attempt: **any** proposal to feed this stage less must
+skip only faces that would not have changed, so it inherits the same 0.3. Phase 2
+above already recorded that "`simplify` scales with its output, not its input"
+and that removing input buys less than face counts suggest; the mechanism here
+is the precise version of that observation, and it is a sharper claim — the
+earlier one blamed the kernel, and G16 shows the kernel is linear. The
+implementation itself is not in the tree; it is recorded here because what it
+cost to learn is the useful part, and the same is true of Phase 1.
+
+#### Where `simplify` stands now
+
+Still the largest single stage, still at ~0.98 cores, and now with both obvious
+levers disproved: it cannot be spread below the body (G15), and it cannot be
+*selectively* fed less, because the faces a correct restriction may skip are the
+cheap ones (G16).
+
+What is left is the direction Phase 2 already took: **have fewer faces exist at
+all**. G16's 0.98 says the cost really is close to linear in the faces this
+stage handles, so anything that reduces that count upstream converts almost
+one-for-one — which is exactly why Phase 2, which removed 44.8 % of the interior
+before it was ever built, is the one thing on this list that paid. The
+distinction that matters, and that took two failed attempts to see clearly, is
+between *not building* a face (works) and *not looking at* one that exists
+(does not).
+
+**There is no open plan here, and no obvious next candidate** — Phase 2 already
+took the interior close to its 50 % ceiling, and the remainder is the boundary
+layer, whose faces come out of booleans and are not ours to choose. Anyone
+picking this up should start from that distinction and from G16, not by
+proposing a new way to parallelise or restrict the call.
+
+#### The gate every phase was held to
+
+`python -m pytest test -q`, `python tools/e2e.py` with both golden samples at
+0 mm³, then one full rehearsal under `profile_run.py`. Phases 1 and 2 landed
+through it; Phase 3 never reached it, and the input-side alternative passed
+every correctness check in it and was reverted on the performance measurement
+alone. Worth keeping as the shape of gate this stage needs: **the rehearsal is
+the only place any of these could be judged**, since `dense-lattice` is
+boundary-dominated and a fortieth of the size.
+
 
 ### Invalid boundary faces from grazing trims — FIXED 2026-08-17 (34 → 0)
 

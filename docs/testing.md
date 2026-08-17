@@ -248,6 +248,11 @@ where parallelism would recover the most wall time. Core-equivalents is the
 number to look at: it is what shows that `boundary` uses the machine and nothing
 else does.
 
+Reports kept from past runs, with a note between consecutive ones on what
+changed in between, are in [profiling-reports.md](profiling-reports.md). Append
+there rather than rewriting: the series is the value, and a stage delta only
+means something when the untouched stages beside it agree.
+
 `profile_run.py` needs `psutil` for **sampling the process tree** — a different
 use from the tool's own, and worth not conflating. `psutil` is a runtime
 dependency of latticegen2 itself (`src/latticegen2/sysinfo.py` reads total and

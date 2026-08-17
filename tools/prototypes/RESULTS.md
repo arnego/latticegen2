@@ -1100,3 +1100,82 @@ generic figure is the honest half of the comparison, and the targeted one is
 the pipeline measurement above, taken on `dense-lattice` where the real merge
 is 25,234 → 15,966. Quoting this gate's 0.98 as if it were what a restriction
 would achieve would repeat exactly the mistake it exists to correct.
+
+---
+
+## G17 — threads instead of processes for a tiled unification? ❌ NO
+
+G15 killed sub-body tiling on the *transport*: unified tiles reassemble by
+shared topology only inside one process, and shipping them to workers as
+`.brep` files gives every seam edge two copies. Threads would sidestep that
+entirely — one heap, tiles pointing at literally the same `TShape`, no
+serialization anywhere — so the honest follow-up is whether the transport was
+ever the real obstacle.
+
+    python tools/prototypes/g17_thread_tiled_unify.py --m 12 --threads 6
+
+Input: a closed 12×12×12 instanced grid, 23,328 faces, 0 free edges.
+
+**Probe A — is the GIL released during the call?** A Python counter spins in a
+background thread while one `unify_same_domain` runs on the main thread, and its
+rate is compared against the same counter with nothing competing:
+
+| | iterations/s |
+|---|---|
+| counter alone | 8,369,062 |
+| counter during a 0.87 s OCCT call | 312,934 |
+
+**3.7 % retained — the GIL is held for essentially the whole call.**
+
+**Probe B — does threading go faster anyway?** 27 tiles, serial against 6
+threads:
+
+| | time | faces | free edges after reassembly |
+|---|---|---|---|
+| serial | 0.935 s | 23,328 | — |
+| 6 threads | 0.896 s | 23,328 | **0** |
+
+**1.04×.** No parallelism, exactly as probe A predicts.
+
+### The finding is the pair of results, not either one
+
+**Threads fix the thing processes break, and break the thing processes fix.**
+Reassembly after threaded tiling leaves **0 free edges** — identity is perfect,
+because nothing was ever serialized. And the tiles run one at a time regardless
+of how many threads dispatch them. Processes give real parallelism (`boundary`
+reaches 5.2 of 6 cores) and destroy tile identity. There is no third option in
+this architecture, so sub-body parallelism in `simplify` is closed, not merely
+unbuilt.
+
+This also upgrades G7's finding from symptom to mechanism. G7 inferred a held
+GIL from a 0.91–1.01× speedup; probe A observes the interpreter stalling
+directly, which is the thing a scaling measurement can only imply.
+
+### The escape hatches, and why none is available
+
+* **No internal parallel mode.** `ShapeUpgrade_UnifySameDomain` exposes no
+  `SetRunParallel` or thread-pool hook (checked: its whole surface is
+  `AllowInternalEdges`, `Build`, `History`, `Initialize`, `KeepShape(s)`,
+  `SetAngularTolerance`, `SetLinearTolerance`, `SetSafeInputMode`, `Shape`), so
+  unlike OCCT's booleans and mesher there is nothing to switch on.
+* **A C extension releasing the GIL around the call** would work in principle
+  and is ruled out by packaging: specification.md §2 requires ordinary wheels,
+  no build step and no compiler on the target.
+* **Free-threaded CPython (PEP 703)** is the only thing that would change the
+  answer. The project pins Python 3.11 with pinned wheels, and no free-threaded
+  `cadquery-ocp` build exists.
+* **Shared memory instead of files** does not help. It addresses I/O, which was
+  never the cost — `simplify`'s round trip measured 940 MB against an 18-minute
+  stage. A `TopoDS_Shape` is a graph of pointer-linked C++ objects with
+  vtables; another process cannot use it at a different base address, which is
+  why `.brep` serialization is the only supported transfer and why the identity
+  loss is structural rather than an artefact of choosing files.
+
+### What this gate does *not* establish
+
+**That threading would be safe if it were fast.** Tiles sharing a seam edge
+share a `TShape`, so two threads unifying neighbouring tiles touch the same
+object and the same reference count concurrently — exactly the case OCCT's
+thread-safety notes do not cover. Probe B ran without crashing, and that is not
+evidence: a data race that does not fire is indistinguishable from no race.
+The question simply never becomes worth asking, because probe A closes it first.

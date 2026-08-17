@@ -616,11 +616,38 @@ Tiling inside a *single* worker is sound (the middle row proves it) but serial,
 and G13 measured serial tiling at an 8 % saving having already concluded "plan
 on tiling being worth about `W` and no more; the win is parallelism".
 
-**Do not retry this without first disproving G15**, which takes one command
-(`python tools/prototypes/g15_tiled_unify_ipc.py`, about a minute). The one
-thing that would reopen it is a way to return merged geometry from a worker
-while preserving shared topology with another worker's output, and no such
-mechanism exists in this architecture today.
+**Threads were then checked, because they would sidestep all of this** — one
+heap, tiles pointing at the same objects, nothing serialized. Gate G17 measures
+both halves and they cancel exactly:
+
+| | parallelism | tile identity |
+|---|---|---|
+| processes (`.brep`) | real — `boundary` reaches 5.2 of 6 cores | **destroyed**: 864 free edges |
+| threads (shared heap) | **none**: 1.04x on 6 threads | perfect: **0** free edges |
+
+Threads fix precisely what processes break and break precisely what processes
+fix. G17's probe A shows why, by mechanism rather than by symptom: a Python
+counter running alongside one `unify_same_domain` call retains **3.7 %** of its
+solo throughput, so OCP holds the GIL for essentially the whole call and the
+tiles run one at a time however many threads dispatch them. (This is G7's
+finding, which had been inferred from a 0.91–1.01x speedup, now observed
+directly.) `ShapeUpgrade_UnifySameDomain` also exposes no internal parallel
+mode — no `SetRunParallel`, no thread-pool hook — so there is nothing to switch
+on either.
+
+**So sub-body parallelism here is closed, not merely unbuilt.** There is no
+third transport in this architecture. The only thing that would change the
+answer is free-threaded CPython (PEP 703), and the project pins Python 3.11
+with pinned wheels against which no free-threaded `cadquery-ocp` build exists;
+a C extension releasing the GIL is ruled out by specification.md §2's
+no-compiler, ordinary-wheels packaging. Shared memory is not an alternative
+either — it addresses I/O, which was never the cost (940 MB against an
+18-minute stage), and a `TopoDS_Shape` is a graph of pointer-linked C++ objects
+that another process cannot use at a different base address, which is why the
+identity loss is structural rather than a consequence of choosing files.
+
+**Do not retry this without first disproving G15 and G17**, which take one
+command each and about a minute together.
 
 #### The input-side alternative: exact, and worth nothing
 
@@ -693,9 +720,10 @@ cost to learn is the useful part, and the same is true of Phase 1.
 #### Where `simplify` stands now
 
 Still the largest single stage, still at ~0.98 cores, and now with both obvious
-levers disproved: it cannot be spread below the body (G15), and it cannot be
-*selectively* fed less, because the faces a correct restriction may skip are the
-cheap ones (G16).
+levers disproved: it cannot be spread below the body — not by processes, which
+break tile identity (G15), and not by threads, which do not run in parallel at
+all (G17) — and it cannot be *selectively* fed less, because the faces a correct
+restriction may skip are the cheap ones (G16).
 
 What is left is the direction Phase 2 already took: **have fewer faces exist at
 all**. G16's 0.98 says the cost really is close to linear in the faces this

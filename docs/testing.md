@@ -204,9 +204,13 @@ that the paths 1–4 chapter is closed:
   to **1 m 13.5 s** — this single change is 95 % of the run's total
   improvement (73.1 → 47.1 min).
 * **`simplify` is the largest stage and both obvious levers are now
-  disproved.** It cannot be spread *below* the body — unified tiles reassemble
-  by shared topology only while they stay in one process, and dispatching them
-  to workers as `.brep` files duplicates every seam edge (G15) — and it cannot
+  disproved.** It cannot be spread *below* the body: unified tiles reassemble
+  by shared topology only while they stay in one process, so dispatching them to
+  worker processes duplicates every seam edge (G15), while threads keep identity
+  perfectly and deliver 1.04x on six of them because OCP holds the GIL for the
+  whole call (G17, which retains 3.7 % of Python throughput during it). The two
+  transports fix and break exactly opposite things, and there is no third. It
+  also cannot
   usefully be fed *less*: restricting its face merge to the region that can
   still merge was exact (byte-identical output, 46 % less input at rehearsal
   scale) and no faster, because a correct restriction skips exactly the faces

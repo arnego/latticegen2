@@ -1302,17 +1302,21 @@ Alternatives evaluated and rejected:
 * **`BOPAlgo_GlueFull`:** measured, does not merge (§6).
 * **CGAL Nef polyhedra:** correct and robust, but redundant once no large boolean
   exists to perform.
-* **Spreading one solid's unification across processes as spatial tiles**
-  (docs/specification.md §10 Phase 3): rejected by measurement, G15. Tiles
-  reassemble by shared topology only while they stay in one process — a `.brep`
-  preserves sharing within a file and cannot preserve it between two, so one
-  file per tile returns every seam edge duplicated (864 and 1,760 free edges
-  where 0 were expected, against 0 for the same tiles written as one file).
-  Re-identifying the duplicates needs `BRepTools_ReShape` to replace vertices,
-  which §8 already measured coming apart; sewing the seam subset is G8's split,
-  whose production failure mode is a full sew of a volume-scaling face set. The
-  restricted face merge above is the lever that survives, and it removes work
-  rather than spreading it.
+* **Spreading one solid's unification below the body, as spatial tiles**
+  (docs/specification.md §11): rejected by measurement, and both transports were
+  measured rather than one. *Processes* (G15): tiles reassemble by shared
+  topology only inside one process — a `.brep` preserves sharing within a file
+  and cannot preserve it between two — so one file per tile returns every seam
+  edge duplicated (864 and 1,760 free edges where 0 were expected, against 0 for
+  the same tiles written as one file). Re-identifying the duplicates needs
+  `BRepTools_ReShape` to replace vertices, which §8 already measured coming
+  apart; sewing the seam subset is G8's split, whose production failure mode is
+  a full sew of a volume-scaling face set. *Threads* (G17): identity is perfect
+  (0 free edges, nothing serialized) and there is no parallelism — 1.04x on six
+  threads, because OCP holds the GIL for the whole call, with a Python counter
+  retaining 3.7 % of its solo throughput during one. The two fix and break
+  exactly opposite things, and `ShapeUpgrade_UnifySameDomain` has no internal
+  parallel mode to fall back on.
 * **Restricting the face merge to the region that can still merge** (§9):
   built, measured, reverted. Exact — the output was byte-identical on the
   rehearsal — and no faster, because a correct restriction removes exactly the

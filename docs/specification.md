@@ -583,9 +583,11 @@ measurement gate while repairing something else entirely, in
 ### `simplify` beyond body-for-body: three ranked optimizations
 
 **Proposed by Claude 2026-08-15, approved for implementation 2026-08-16.**
-Phase 1 is **done** — and its headline projection was wrong, which is recorded
-below rather than quietly dropped. Phases 2 and 3 are still open. The
-measurement the proposals rest on is gate G13
+**Phases 1 and 2 are done and measured at rehearsal scale; Phase 3 is not
+built.** Phase 1's headline projection was wrong and Phase 2's was too
+optimistic — both are recorded below rather than quietly dropped, because what
+they cost to learn is the useful part. The measurement the proposals rest on is
+gate G13
 ([`tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md),
 `tools/prototypes/g13_unify_scaling.py`).
 
@@ -690,10 +692,8 @@ both golden samples at 0 mm³, `tools/e2e.py` green:
 
 The reduction is 33 % rather than the projected 50 % because only
 interior↔interior struts merge, and `dense-lattice` has 594 interior nodes
-against 968 boundary ones. A part like the rehearsal (29,375 interior against
-19,552 boundary) should land closer to 50 %, but **that is a projection and the
-rehearsal has not been run** — Phase 1 is the standing reminder of what those
-are worth.
+against 968 boundary ones. The rehearsal, with 29,375 interior nodes against
+19,552 boundary, does land close to the ceiling: **44.8 %**, measured below.
 
 **One bug worth recording, because the class of it will recur.** The merge
 condition "is the node across this cap also interior?" was first read from the
@@ -706,6 +706,18 @@ same. It was `weld.assemble`'s every-edge-twice proof that caught it, in `e2e`.
 The lesson is the same one G8 left about scale — a set that is *derived* rather
 than *stated* will eventually be derived from the wrong thing, and only a test
 with a real boundary can tell.
+
+*Blocking risk R4 — merged-loop correctness — **CLEARED**.* The spliced wire has
+to be planar, simple and correctly wound for every `(cc, t)`.
+`test_junction.py::test_merged_lateral_faces_are_sound_across_the_parameter_range`
+asserts exactly that over G1's own sweep — all 14 valid pairs, every merged loop
+coplanar, Newell normal matching the template's outward normal, and area equal to
+the sum of the two halves to a relative 1e-12 — alongside watertightness, the
+`N x volume(J)` identity, and both golden samples at 0 mm³. The fallback is built
+as designed and is per strut family, not global: `_splice_lateral` returns
+``None`` on any of those checks and that family keeps its two half-faces, so a
+pathological case costs the face count this exists to reduce and never
+correctness (docs/algorithm.md §11).
 
 ##### The original proposal
 
@@ -773,22 +785,14 @@ interior cannot move most of the clock.
 *`simplify` scales with its output, not its input.* Unification's input fell
 ~31 % (1,006,505 -> ~691,000 faces) and the stage fell only 12.4 %, while its
 output face count was unchanged at 584,028 by construction. Its memory and I/O
-fell much more (-26 % peak RSS, -21 % bytes). **This directly weakens Phase 3's
-premise** and should be read before building it: tiling divides the work per
-tile, but if the cost is dominated by producing an output the tiling does not
-shrink, the achievable saving is smaller than G13's face-count scaling
-suggests.
-
-*Blocking risk R4 — merged-loop correctness.* The spliced wire must be planar,
-simple and correctly wound for every `(cc, t)`. Verify with a unit test over
-G1's parameter sweep asserting, per merged loop, that the Newell normal matches
-the template's outward normal, that its area equals the sum of the two halves to
-1e-12, and that `build_interior_shell` reports **0 malformed edges** — plus the
-`N x volume(J)` identity in `test_junction.py` and both golden samples at 0 mm³.
-
-*Fallback:* per-strut, not global. A loop that fails the area/normal assertion
-falls back to the two half-faces built today, so a pathological case costs faces
-and never correctness — the §11 failure mode.
+fell much more (-26 % peak RSS, -21 % bytes). **What this changes is the
+arithmetic of any face-count extrapolation, not Phase 3's case**, and an earlier
+revision of this section got that wrong. Removing input work — Phase 2's lever —
+buys less than face counts suggest. Tiling is a *parallelism* lever and divides
+whatever work remains, output included, so it is unaffected by which of the two
+dominates. If anything it leaves Phase 3 worth **more** in absolute terms than
+projected, because the base it attacks measured 18 m 07.9 s rather than the
+~11 m 45 s that was extrapolated.
 
 #### Phase 3 — sub-body tiling of `simplify`
 
@@ -800,15 +804,21 @@ runs today. Tile **by strut, not by centroid**: tag each face with its owning
 node during the interior build and bucket by lattice-index block, reusing
 `weld._tile_edge_length`; boundary faces fall back to centroid bucketing.
 
-**Do this only if `simplify` is still a top-3 cost after Phase 2.** Only the
-*face* merge tiles; the edge pass has to stay global, since concatenating
-collinear pairs is exactly what breaks tile identity. Measured on
+**Its gate condition is met.** "Do this only if `simplify` is still a top-3 cost
+after Phase 2" — after Phase 2 it is the **largest single stage**, 18 m 07.9 s
+of a 51 m 43.3 s run (35 %), and one of only three stages left that are pinned
+at 0.98 cores while five of six sit idle (profiling-reports.md).
+
+Only the *face* merge tiles; the edge pass has to stay global, since
+concatenating collinear pairs is exactly what breaks tile identity. Measured on
 `dense-lattice` the two split roughly 68 % / 32 % (9.45 s face merge, ~4.4 s
-edges), so tiling can only ever attack about two thirds of the stage, and the
-edge pass becomes the new floor. Projected after Phase 2: `simplify`
-~11 m 45 s -> ~5 m 20 s, i.e. worth ~6 min, for the most machinery of the
-three. Any total for Phases 2–3 together has to be quoted against the
-2026-08-17 baseline (58.3 min), not the withdrawn 47.1-minute one.
+edges), so tiling can only ever attack about two thirds of the stage and the
+edge pass becomes the new floor. Carrying that split onto the rehearsal's
+measured 18 m 07.9 s gives ~12 m 20 s of tileable face merge against ~5 m 48 s
+of global edge pass; at the ~5x the shared pool achieves elsewhere that is
+`simplify` **~18 m 08 s -> ~8 m 20 s, worth ~9-10 min**, or ~19 % of the run.
+Treat it as an upper bound and quote any total against the measured 51 m 43 s,
+not against the withdrawn 47.1-minute profile.
 
 *Blocking risk R2 — **CLEARED** by gate G14, 2026-08-16.* G13 tested only planar
 instanced faces, leaving `TShape` identity across a tile seam unproven for the
@@ -831,9 +841,12 @@ partition and a few percent more faces (a §11-acceptable larger output), or ski
 tiling.
 
 *Risk R5 — memory and IPC.* Verify with `tools/profile_run.py` and
-`tools/profile_report.py` on the rehearsal. **Bars:** peak RSS at or below
-today's 19.61 GB, and `simplify` core-equivalents above 3.0 against today's
-0.99. *Fallback:* cap the number of concurrent tiles.
+`tools/profile_report.py` on the rehearsal. **Bars, against the measured
+post-Phase-2 profile rather than the withdrawn one:** whole-tree peak RSS at or
+below 19,291 MB, and `simplify` core-equivalents above 3.0 against today's 0.98.
+Note that `simplify`'s own peak is 7,339 MB, well under the run's 19,291 MB peak
+— which `export` sets — so there is real headroom to spend here before the run's
+high-water mark moves at all. *Fallback:* cap the number of concurrent tiles.
 
 *Risk R6 — the G8 trap.* Any new per-face bookkeeping must use
 `TopTools_IndexedMapOfShape`, never Python lists tested with `.IsSame()`. Not

@@ -466,22 +466,44 @@ def _run_with_pool(
     return stats
 
 
-UNIFY_VOLUME_TOL = 1e-5
+UNIFY_VOLUME_TOL = 1e-4
 """Relative tolerance on the volume that same-domain unification must preserve.
 
-Unification re-describes the boundary without moving it, so the only expected
-drift is quadrature noise: merged faces are larger, more complex trimmed regions,
-and OCCT integrates them slightly differently. Calibrated against measurement —
-on purely planar geometry, where the volume is known analytically, the drift is
-**1.9e-15**, i.e. exact; the drift only appears on boundary solids carrying
-curved trimmed faces, at up to ~2e-7 relative on ``dense-lattice``. The bar sits
-roughly fifty times above that, and still well below ``t³``, the smallest volume
-this tool considers meaningful at all.
+Unification re-describes the boundary rather than moving it, and the drift is
+what that re-description costs: on purely planar geometry, where the volume is
+known analytically, it is **1.9e-15** — exact — and it only appears at all on
+boundary solids carrying curved trimmed faces, at ~2e-7 relative on
+``dense-lattice``.
 
-The real guards against a bad merge are the solid-count check beside this one and
-the ``BRepCheck_Analyzer`` gate immediately after: merging two faces that are not
-the same surface distorts the boundary, which shows up as an invalid solid long
-before it shows up as a volume this close to unchanged. Every run logs the
+**The bar was 1e-5 and refused a valid run at 1.381e-05**, on a 181 mm³
+floating island of `TD_HX_rehearsal_test` at ``cc=12, t=2.5``. Nothing had
+moved: the exact symmetric difference between the two solids, cut both ways, is
+**0.000000000 mm³**, and both are ``BRepCheck_Analyzer``-valid. What the number
+is measuring is a genuine but sub-tolerance re-description — surface area shifts
+too (3.16e-06), and adaptive Gauss-Kronrod integration to a requested 1e-11
+does *not* bring the two figures together, so this is not the integrator's
+truncation error and cannot be integrated away.
+
+**Read as a displacement it is nothing at all**, and that is the reading this
+bar is now set by. ``|ΔV| / surface area`` is the boundary movement the drift
+implies: **6.96e-06 mm** on the solid that failed, against the **8.7e-04 to
+1.5e-03 mm** tolerances OCCT itself records on the trimmed B-spline faces being
+merged (docs/algorithm.md §8, G12). The two descriptions are the same surface
+to well within the kernel's own idea of the same surface. At 1e-4, and across
+the surface-to-volume ratios these parts produce (1.5–3.7 per mm, measured over
+the nine solids of that run), the bar admits at most ~3e-05 to 7e-05 mm of
+boundary movement — still more than an order of magnitude inside those face
+tolerances, so a merge across genuinely different surfaces cannot hide under it.
+
+That the failing island's mirror twin — same volume and area to 0.1 % — drifts
+**29x less** is why no tighter bar is defensible: the magnitude is a property of
+which merge the kernel happened to perform, not of the geometry, so it cannot be
+predicted from the part.
+
+The real guards against a bad merge remain the solid-count check beside this one
+and the ``BRepCheck_Analyzer`` gate immediately after: merging two faces that are
+not the same surface distorts the boundary, which shows up as an invalid solid
+long before it shows up as a volume this close to unchanged. Every run logs the
 observed drift, so the margin this bar actually has is visible rather than
 assumed.
 """

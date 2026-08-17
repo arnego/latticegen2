@@ -234,6 +234,56 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
+### `verify_geometry.material_outside` fails silently above ~40 k faces
+
+**Found 2026-08-17**, while verifying the `cc=12, t=2.5` output of
+`TD_HX_rehearsal_test` by hand after fixing the two guards recorded in §11. Not
+a defect in the generator, and not reached by any committed scenario — but it
+means the §6.2 check "no generated material lies outside the input body" cannot
+currently be run on a part of production size, which is exactly where one would
+want it.
+
+**What's wrong.** `material_outside` (`tools/verify_geometry.py`) is one
+`BRepAlgoAPI_Cut` of the whole output against the input body. On a 43,530-face
+solid the call reports `IsDone()` **true** and returns its own argument
+untouched — 354733 mm³ of "material outside" against the solid's own
+354733.0042 mm³, i.e. the boolean quietly did nothing. `_cut_volume` only
+guards `IsDone()`, so the harness would report a spectacular false failure
+rather than an inconclusive result.
+
+**It is purely a size limit, and the threshold is bracketed.** Cutting the same
+output *solid by solid* against the same input gives **exactly 0 mm³** for eight
+of the nine, at 18 to 68 faces each; only the 43,530-face body misbehaves. The
+committed scenarios top out at 15,966 faces (`dense-lattice`), which is why this
+has never been seen.
+
+**The output itself is fine**, established boolean-free: meshing that body at
+0.05 mm and classifying all 55,513 distinct surface points against the input
+with `BRepClass3d_SolidClassifier` puts **1** point outside at a 1e-6 mm
+tolerance and **0** at 1e-4 mm — i.e. that point lies *on* the input surface,
+well inside the 8.7e-04 to 1.5e-03 mm tolerances the part's own faces carry
+(docs/algorithm.md §8). A lattice trimmed against the input has faces lying
+exactly on it, so points classifying ON-or-marginally-OUT is the expected
+result, not a defect.
+
+**How to fix it.** Two independent halves, and the first is worth doing on its
+own:
+
+* *Detect the failure.* `_cut_volume` should reject a result whose volume equals
+  the argument's to within rounding when the two shapes' bounding boxes overlap,
+  and return `nan` — the value the harness already treats as "not measured" —
+  rather than a number that reads as total failure. A check that cannot tell
+  "everything is outside" from "the kernel declined" is worse than no check.
+* *Make it measurable.* Cut per solid and sum, which is exact and already
+  demonstrated for eight of nine; or fall back to the classifier sampling above
+  for solids the cut declines on, labelled as the weaker check the way
+  `golden_sample_agreement` already labels its own fallback (docs/testing.md).
+
+**How to verify a fix.** `python tools/e2e.py` must stay green, and the check
+must return ~0 mm³ — not `nan`, and not the candidate's own volume — for
+`-cc 12 -t 2.5` on `TD_HX_rehearsal_test`, whose output is committed to be
+sound by the measurements above.
+
 ### `stitch` pays the full round-2 cost on heavily trimmed parts
 
 **Found 2026-08-17**, on the first rehearsal of `TD_HX_rehearsal_test.step` at
@@ -904,6 +954,77 @@ alone. Worth keeping as the shape of gate this stage needs: **the rehearsal is
 the only place any of these could be judged**, since `dense-lattice` is
 boundary-dominated and a fortieth of the size.
 
+
+### Two guards that refused valid input — FIXED 2026-08-17
+
+`-cc 12 -t 2.5` on `TD_HX_rehearsal_test` failed, twice in succession, on two
+unrelated guards in two different stages. Both parameters are inside §3's ranges
+and satisfy `t < a`, so both failures are the one thing docs/algorithm.md §11
+says is never acceptable: refusing correct input. Neither was a regression —
+both bars had been there since the checks were written, and this part is simply
+the first to reach them.
+
+**They are the same mistake at one remove from each other**, which is why they
+are recorded together: a scalar proxy standing in for "did the geometry change",
+with its bar expressed in units that do not match what the number actually
+varies with. The fix differs because the answer to "is there a cheap exact test
+instead?" differs.
+
+**First, the pinhole repair's volume bar** (`PINHOLE_VOLUME_TOL`, 1e-9;
+docs/algorithm.md §7, `tools/prototypes/RESULTS.md` G19). Removing a 1.010641e-06
+mm pinhole wire "changed" a 77.4 mm³ junction's volume by 1.235e-09 relative.
+It changed nothing. `BRepGProp::VolumeProperties` requires a shape "exempt of
+any free boundary" and a pinhole wire *is* one, so the pre-repair figure was
+never OCCT's to promise. Adding a synthetic open wire to a clean face reproduces
+the same footprint to within 1 %, unchanged when the wire is lengthened a
+thousandfold and varying tenfold with which face carries it — so there is
+nothing the repair controls to size a bar with, and the 2.7e-15 the bar was
+calibrated on was two wires that happened to sit on faces contributing nothing.
+Three plausible readings — quadrature noise, a coordinate-magnitude artifact, a
+bar mis-scaled for junction size — are each disproved by measurement in G19
+rather than argued away; the third is the one worth remembering, since the
+failing junction is 9x the calibration junction's volume with a *shorter* wire
+and drifts seven orders further.
+
+*Fixed by replacing the bar with an exact structural proof*,
+`occ.only_inner_wires_dropped`: same face count, every face's outer wire the
+same object, same orientations, bit-identical areas, and exactly the accounted-for
+wires gone. That pins the enclosed region object-for-object, where volume could
+only ever be a biased proxy for it. Area — the check §7 always argued was the
+sound one — stays exactly as it was, and is bit-identical throughout.
+
+**Second, same-domain unification's volume bar** (`UNIFY_VOLUME_TOL`, 1e-5;
+docs/algorithm.md §9, G20), reached for the first time once the pinhole guard
+was cleared. A 181 mm³ floating island drifted 1.381e-05. Here something
+genuinely does change — surface area shifts too, and adaptive Gauss-Kronrod to
+1e-11 does not converge the two figures, so it is a real re-description and not
+the integrator — but the exact symmetric difference, cut both ways, is
+**0.000000000 mm³**, and read as a displacement (`|ΔV| / area`) it is
+**6.96e-06 mm**, two orders inside the 8.7e-04 to 1.5e-03 mm tolerances OCCT
+itself records on the faces being merged. The island's mirror twin, identical to
+0.1 % in volume and area, drifts 29x less, so the magnitude belongs to the merge
+rather than to the part and cannot be predicted from it.
+
+*Fixed by loosening the bar to 1e-4*, per the user's decision, which across the
+1.5–3.7 per mm surface-to-volume ratios that run spans admits at most ~3e-05 to
+7e-05 mm of boundary movement — still over an order of magnitude inside those
+face tolerances. No exact structural test was available to replace it with: the
+symmetric-difference boolean that settles the question takes seconds on a
+99-face island and does not finish quickly on the 69,305-face body beside it.
+The guards §9 always named as the stronger pair — the solid-count check and
+`BRepCheck_Analyzer` — are untouched.
+
+**Result.** `python src/main.py -i test/TD_HX_rehearsal_test.step -cc 12 -t 2.5
+--cores 6` completes and writes a valid STEP. `python -m pytest test -q` and
+`python tools/e2e.py` stay green, both golden samples at 0 mm³; the committed
+scenarios never reach either bar, so neither change alters their output.
+
+**The lesson, added to the four G9–G12 already carry.** Those were repairs aimed
+at the wrong object. These are *checks* aimed at the wrong quantity —
+docs/algorithm.md §5.1 already warns that a gate is only as trustworthy as the
+tightness of what it compares, and these add that it is only as trustworthy as
+whether that quantity is defined, and dimensionally right, on the shape it is
+handed. Where a check can be made structural, it should be.
 
 ### Invalid boundary faces from grazing trims — FIXED 2026-08-17 (34 → 0)
 

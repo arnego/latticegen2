@@ -98,11 +98,18 @@ Measured on the piece this was built for, the drift is 0.0 — bit-identical, no
 merely small. This bar exists to catch a wire that turned out to bound
 something, which is the only way this repair could go wrong."""
 
-PINHOLE_VOLUME_TOL = 1e-9
-"""Relative volume change allowed when pinhole wires are removed. Measured
-2.7e-15 (machine precision, the order docs/algorithm.md §9 records as exact for
-planar geometry); this leaves six orders of headroom over that while still
-catching any real change."""
+# There is deliberately no volume tolerance here, and the absence is
+# load-bearing enough to be worth a note where the one that used to live here
+# was. A relative-volume bar of 1e-9 stood here until it refused a valid run
+# (`-cc 12 -t 2.5` on `TD_HX_rehearsal_test`, drift 1.235e-09 on a junction of
+# 77.4 mm³) — not because anything moved, but because OCCT cannot measure the
+# volume of the *unrepaired* piece: `BRepGProp::VolumeProperties` requires a
+# shape "exempt of any free boundary", and a pinhole wire is one by definition.
+# The drift is that measurement's bias, not the repair's effect, and G19
+# measured it length-independent over three decades and set per face, so no bar
+# expressed relative to volume, `t` or junction size can bound it.
+# :func:`latticegen2.occ.only_inner_wires_dropped` replaces it and is exact.
+# See docs/algorithm.md §7.
 
 
 @dataclass
@@ -284,8 +291,16 @@ def _remove_pinholes(node_pos: np.ndarray, solid):
     carried it, so unlike a merge or a unification there is no quadrature noise
     to allow for: the measured drift on the piece this repair was built for is
     0.0, bit-identical, and anything else means a wire that did bound something
-    was removed. Volume is checked too, at machine precision, as a second
-    signal.
+    was removed.
+
+    **Volume is deliberately not the second signal it once was.** OCCT can only
+    integrate the volume of a shape "exempt of any free boundary", and the
+    pinhole is a free boundary — so the pre-repair figure carries a bias that
+    disappears with the wire, and comparing the two measures the defect rather
+    than the repair (see the note above the constants, and G19). What stands in
+    its place is :func:`latticegen2.occ.only_inner_wires_dropped`, which proves
+    the same thing structurally and exactly: same faces, same outer wires, same
+    orientations, and exactly the accounted-for wires gone.
 
     This is a correctness repair, not an optimization, so it does not degrade
     silently: skipping it leaves the shell unclosed hours later with no
@@ -312,13 +327,12 @@ def _remove_pinholes(node_pos: np.ndarray, solid):
             f"it, so one that bounded something was removed."
         )
 
-    v0, v1 = occ.volume(solid), occ.volume(cleaned)
-    vdrift = abs(v1 - v0) / max(abs(v0), 1e-30)
-    if vdrift > PINHOLE_VOLUME_TOL:
+    reason = occ.only_inner_wires_dropped(solid, cleaned, n_removed)
+    if reason is not None:
         raise ProcessingError(
             f"Removing {n_removed} pinhole wire(s) from the junction at "
-            f"{tuple(node_pos)} changed its volume from {v0:.9g} to {v1:.9g} "
-            f"mm^3 ({vdrift:.3e} relative, tolerance {PINHOLE_VOLUME_TOL:g})."
+            f"{tuple(node_pos)} did not leave the piece's boundary intact: "
+            f"{reason}."
         )
     return cleaned, n_removed
 

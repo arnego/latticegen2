@@ -19,7 +19,7 @@ from latticegen2 import occ, weld
 from latticegen2.boundary import (
     BoundaryPiece,
     CAP_AREA_REL_TOL,
-    PINHOLE_VOLUME_TOL,
+    PINHOLE_WIRE_TOL,
     _open_shell,
     _piece_from,
     finalize_pieces,
@@ -465,7 +465,6 @@ def test_removing_a_pinhole_moves_no_geometry(pinhole_case):
     faces, tags, volume = trim_junction(lp5, tpl, pos, body).pieces[0]
 
     assert sum(occ.area(f) for f in faces) == sum(occ.area(f) for f in occ.faces(raw))
-    assert volume == pytest.approx(occ.volume(raw), rel=PINHOLE_VOLUME_TOL)
     assert occ.is_valid(occ.make_solid(_closed(_open_shell(faces))))
 
     # And the caps resolve_interfaces compares are untouched, so a repaired
@@ -489,6 +488,83 @@ def _cap_area_map(lp, node_pos, faces):
         if h is not None:
             per[h] = per.get(h, 0.0) + occ.area(f)
     return per
+
+
+REFUSED_CASE = (12.0, 2.5, (262, -27, -37))
+"""`(cc, t, node)` — the junction a relative-volume bar of 1e-9 refused.
+
+The only pinhole-bearing junction of `TD_HX_rehearsal_test` at these
+parameters, out of 2,907 boundary junctions. Its wire is 1.010641e-06 mm, on a
+6.01 mm^2 planar face of a 77.4 mm^3 piece, and removing it moves the volume
+OCCT reports by 1.235e-09 relative — over a bar the same repair on the same
+part at `cc=5, t=1` clears by six orders. Both parameter sets are inside the
+CLI's ranges, so this was a valid input being refused (docs/algorithm.md §11).
+"""
+
+
+@pytest.fixture(scope="module")
+def refused_case():
+    """`(lp, template, body, node position)` for the junction above."""
+    cc, t, ijk = REFUSED_CASE
+    lp12 = lattice_params(cc, t)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    body = occ.read_step(os.path.join(here, "test", "TD_HX_rehearsal_test.step"))
+    return lp12, build_template(lp12), body, lattice_node(lp12, np.array(ijk))
+
+
+def test_a_pinhole_that_shifts_the_reported_volume_is_still_repaired(refused_case):
+    """The regression: this junction must trim, not raise.
+
+    What moves is the volume OCCT *reports*, not the piece. The unrepaired piece
+    has a free boundary — that is what a pinhole is — and
+    `BRepGProp::VolumeProperties` requires a shape "exempt of any free boundary",
+    so the pre-repair figure carries a bias that disappears with the wire. Gate
+    G19 measures that bias reproduced within 1 % by adding a synthetic open wire
+    to a clean face, at a magnitude independent of the wire's length over three
+    decades and set by which face carries it.
+    """
+    lp12, tpl, body, pos = refused_case
+    raw = raw_trim(tpl, pos, body)
+
+    result = trim_junction(lp12, tpl, pos, body)
+
+    assert result.n_pinholes_removed == 1
+    assert len(result.pieces) == 1
+    faces, _, volume = result.pieces[0]
+    assert weld.shell_defects(_open_shell(faces))[:2] == (0, 0)
+    # Area is the quantity that can be trusted here, and it is bit-identical.
+    assert sum(occ.area(f) for f in faces) == sum(occ.area(f) for f in occ.faces(raw))
+    # The volume genuinely differs, well past what any relative bar could absorb
+    # without also absorbing a real change. It is the defect's footprint on the
+    # integral, and the repaired figure is the one the pipeline goes on to use.
+    assert abs(volume - occ.volume(raw)) / occ.volume(raw) > 1e-9
+
+
+def test_the_repair_is_proved_structurally_rather_than_by_an_integral(refused_case):
+    """`only_inner_wires_dropped` is what replaced the volume bar."""
+    lp12, tpl, body, pos = refused_case
+    raw = raw_trim(tpl, pos, body)
+    cleaned, n_removed = occ.remove_pinhole_wires(raw, PINHOLE_WIRE_TOL)
+    assert n_removed == 1
+
+    assert occ.only_inner_wires_dropped(raw, cleaned, n_removed) is None
+    # Only the repaired face is rebuilt; every other face comes back as the
+    # same object, which is what makes this a walk over objects, not geometry.
+    same = sum(1 for a, b in zip(occ.faces(raw), occ.faces(cleaned)) if a.IsSame(b))
+    assert same == len(occ.faces(raw)) - 1
+    # And it does not simply return None: an unaccounted-for wire is rejected.
+    assert occ.only_inner_wires_dropped(raw, cleaned, n_removed + 1) is not None
+    assert occ.only_inner_wires_dropped(cleaned, raw, n_removed) is not None
+
+
+def test_the_structural_check_rejects_a_face_that_lost_a_real_wire(lp):
+    """A wire that bounded something changes an area, and is caught by name."""
+    tpl = build_template(lp)
+    faces = occ.faces(tpl.solid)
+    # Dropping a whole face is the coarsest possible violation of "only inner
+    # wires went"; the check must not need geometry to see it.
+    reason = occ.only_inner_wires_dropped(tpl.solid, _open_shell(faces[:-1]), 0)
+    assert reason is not None and "face count" in reason
 
 
 def test_a_paired_wire_is_never_removed_however_small_the_bar_says(lp):

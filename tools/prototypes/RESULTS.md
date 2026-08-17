@@ -17,11 +17,13 @@ python tools/prototypes/g10_pinhole_wires.py
 python tools/prototypes/g12_self_intersecting_wire.py
 python tools/prototypes/g13_unify_scaling.py
 python tools/prototypes/g14_tiled_unify_trimmed.py
+python tools/prototypes/g18_validate_decomposition.py
+python tools/prototypes/g19_pinhole_volume_bias.py
 ```
 
-G9 and G11 have no standalone script: both were found and fixed against the
-real production rehearsal rather than a synthetic prototype (see their
-sections).
+G9, G11 and G20 have no standalone script: all three were found and fixed
+against the real production rehearsal rather than a synthetic prototype (see
+their sections).
 
 Machine: Windows 11, 6-core CPU, 32 GB RAM, Python 3.11.13, OCP 7.9.3.1.1
 (OCCT 7.9.3), NumPy 2.4.6.
@@ -1262,3 +1264,192 @@ docs/specification.md §10 path 4's justification for keeping a change that
 measured *slower* (2 m 59 s → 3 m 29.6 s) on the only part it was ever run on.
 No evenly-sized part has been measured, so what is traded away here is a
 projected benefit against a measured one.
+## G19 — the pinhole repair's volume guard refused a valid run ✅ FIXED
+
+`-cc 12 -t 2.5` on `TD_HX_rehearsal_test` failed with
+
+    FAILED: Removing 1 pinhole wire(s) from the junction at (2036.89, 60.0,
+    969.998) changed its volume from 77.3988208 to 77.3988207 mm^3
+    (1.235e-09 relative, tolerance 1e-09).
+
+Both parameters are inside the CLI's ranges and satisfy `t < a`, so this is
+docs/algorithm.md §11's worst failure mode — refusing correct input — and it had
+been there since the repair was written.
+
+    python tools/prototypes/g19_pinhole_volume_bias.py
+
+### The three readings that fit the symptom, and why each is wrong
+
+The absolute change is 9.6e-08 mm³ on a 77.4 mm³ piece, which reads as noise of
+some kind. It is not.
+
+| reading | test | result |
+|---|---|---|
+| quadrature noise | adaptive Gauss-Kronrod at eps 1e-3 … **1e-11** | drift **9.555971e-08** at every eps — the two shapes integrate to genuinely different values |
+| a coordinate-magnitude artifact (the part sits 2,257 mm from the origin) | properties taken about the origin / the node / 100× the node; piece translated to the origin and 10× further out | **9.55597e-08 throughout** — location-invariant |
+| a scaling the bar got wrong for junction size or `t` | compare against the `cc=5, t=1` junction the bar was calibrated on | the cc=12 wire is **shorter** (1.010641e-06 mm against 3.171691e-06 and 5.808982e-06) and drifts **seven orders further** (1.235e-09 against 3.097e-15) |
+
+The third is the one worth dwelling on, because "the bar is mis-scaled for a
+larger junction" is the natural diagnosis and it is quantitatively hopeless: the
+piece is 9× the volume and the drift is 4×10⁵ times larger, on a shorter wire.
+
+### What it actually is
+
+`BRepGProp::VolumeProperties` states that its shape "must be exempt of any free
+boundary … results will be false if [the conditions] are not respected". **A
+pinhole wire is a free boundary** — an edge used by exactly one face is the
+definition of the defect (G10). So the volume of the *unrepaired* piece is
+computed outside OCCT's stated precondition and the repaired one inside it. The
+guard was comparing a figure OCCT does not promise against one it does, and
+calling the difference geometry loss.
+
+Surface area is untouched by this, at 172.14799496928404 mm² **bit-identical**
+before and after — which is exactly what docs/algorithm.md §7 argues must
+happen, and it is why the area check was always the one doing the work.
+
+### The control: add a free boundary to a clean face
+
+If a free boundary biases the integral, adding one to a repaired piece must
+reproduce the bias. A synthetic open inner wire — one edge, with a pcurve, on a
+planar face, nothing else changed — was added to four faces of the repaired
+piece at four lengths each:
+
+| face | area mm² | dV at L=1e-6 | at L=1e-5 | at L=1e-4 | at L=1e-3 | dA |
+|---|---|---|---|---|---|---|
+| 0 | 7.3207 | +9.665055e-08 | +9.665057e-08 | +9.665058e-08 | +9.665089e-08 | **0** |
+| 1 | 6.4368 | +2.488447e-07 | +2.488447e-07 | +2.488446e-07 | +2.488443e-07 | **0** |
+| 2 | 7.1440 | −2.413901e-08 | −2.413948e-08 | −2.414404e-08 | −2.418949e-08 | **0** |
+| 3 | 3.4968 | +2.549071e-08 | +2.549102e-08 | +2.549426e-08 | +2.552665e-08 | **0** |
+
+and, on the face that carried the real pinhole, +9.471e-08 against the real
+defect's 9.556e-08 — **the same footprint to within 1 %**.
+
+Three things follow, and together they close the question of what bar to use:
+
+* **Area is exactly blind to it**, at every length and position tried (a further
+  15-point sweep of the wire's position over ±0.5 in UV: `dA = 0.0` throughout).
+* **The magnitude is not the wire's.** A thousandfold change in length moves it
+  by at most 0.21 %, where a length-proportional term would move it by 1000×.
+* **The magnitude is the face's**, varying 10.3× across four faces of one piece
+  (3.12e-10 to 3.22e-09 relative) and changing sign between them.
+
+So there is nothing the repair controls to express a tolerance in terms of, and
+the 2.7e-15 the original bar was calibrated on was not headroom — it was two
+wires that happened to sit on faces contributing almost nothing.
+
+### The fix: prove it structurally instead
+
+`occ.only_inner_wires_dropped(before, after, n_removed)` replaces the bar and
+returns a reason or `None`. It requires the face count unchanged; every face's
+**outer wire to be the same object** as some face's before, one for one; the
+paired faces to have the same orientation and bit-identical area; every wire
+kept to have been a wire of its counterpart; and the wires lost to number
+exactly `n_removed`. That pins the enclosed region object-for-object, which is
+a question with an exact answer where volume is one OCCT can only answer with a
+bias while the defect is present.
+
+It is cheap because `BRepTools_ReShape` rebuilds only what it touches: **27 of
+28** faces come back `IsSame`, so this is a walk over objects plus one area
+evaluation per face.
+
+| | before the fix | after |
+|---|---|---|
+| `cc=5, t=1`, node (591,−46,−70) | passes | passes, `only_inner_wires_dropped` clean |
+| `cc=12, t=2.5`, node (262,−27,−37) | **exit 4** | passes, `only_inner_wires_dropped` clean |
+| a deliberately wrong `n_removed` | — | rejected |
+| the repair run backwards (a wire *gained*) | — | rejected |
+
+A serial census of all **2,907** boundary junctions at `cc=12, t=2.5` finds
+exactly **one** pinhole-bearing piece — the one that failed — so this defect is
+rare, and a run either clears it or loses everything.
+
+### The lesson, which is the fourth of its kind here
+
+G9–G12 each turned on a repair being aimed at the wrong object. This one turns
+on a *check* being aimed at a quantity that is not defined on the shape it is
+handed. docs/algorithm.md §5.1 already says a gate is only as trustworthy as
+the tightness of the quantity it compares; this adds that it is only as
+trustworthy as whether that quantity means anything on the input. **Where a
+check can be made structural — the same objects, in the same places — it should
+be.**
+
+---
+
+## G20 — the unification volume bar refused a valid run too ✅ FIXED
+
+Found immediately after G19, on the same command, because clearing the pinhole
+guard let `-cc 12 -t 2.5` reach `simplify` for the first time:
+
+    FAILED: Same-domain unification changed a solid's volume from 181.005368 to
+    181.007867 mm^3 (1.38e-05 relative, tolerance 1e-05).
+
+No standalone script — like G9 and G11, this was measured against the real run's
+kept temp directory (`unify_*.brep` and `unify_*_out.brep`, the exact shapes the
+workers unified), which is more faithful than any reproduction.
+
+### Nothing moved, and that is measured three ways
+
+| test | result |
+|---|---|
+| exact symmetric difference, `BRepAlgoAPI_Cut` both ways | **0.000000000e+00 mm³** each way |
+| `BRepCheck_Analyzer` | valid before **and** after |
+| whole-run output | 9 solids, unchanged everywhere else |
+
+### But it is not integrator noise either, and that is the surprise
+
+The obvious reading — quadrature over larger merged regions — predicts that a
+better integrator converges the two figures. It does not:
+
+| | before | after | drift |
+|---|---|---|---|
+| default integrator | 181.00536767629785 | 181.0078668508196 | 1.3807e-05 |
+| Gauss-Kronrod, eps 1e-6 | 181.0053536917804 | 181.0078507197767 | 1.3795e-05 |
+| Gauss-Kronrod, eps **1e-11** | 181.00535226444575 | 181.00784910601723 | **1.3794e-05** |
+
+Surface area moves too — 359.32946624725827 → 359.3283313326181, 3.16e-06
+relative. So unification really does re-describe the boundary slightly; it does
+not merely re-integrate it. (Contrast G19, where area was bit-identical and the
+volume difference was an artifact of the *defect*, not of the repair.)
+
+### Sized as a displacement, it is 7 nanometres
+
+`|ΔV| / surface area` is the boundary movement the drift implies, and it is the
+quantity that makes the nine solids of this run comparable:
+
+| solid | volume mm³ | area mm² | A/V | rel. volume drift | `|ΔV|/A` mm |
+|---|---|---|---|---|---|
+| 0 (the body) | 354,735.33 | 535,623.19 | 1.51 | 2.584e-06 | 1.711e-06 |
+| **3** | **181.01** | **359.33** | **1.99** | **1.381e-05** | **6.955e-06** |
+| 4 (3's mirror twin) | 181.16 | 360.11 | 1.99 | 4.787e-07 | 2.408e-07 |
+| 1, 2, 5, 6, 7, 8 | 16.8 – 42.9 | 61.7 – 97.8 | 2.26 – 3.67 | 1.1e-11 – 1.6e-09 | 2.9e-12 – 4.3e-10 |
+
+Against that, the faces being merged carry recorded tolerances of **8.7e-04 to
+1.5e-03 mm** (G12) — two orders larger. The two descriptions are the same
+surface to well inside the kernel's own idea of one, which is also why the
+boolean above finds nothing to report.
+
+### Why no tighter bar is defensible
+
+**Solid 3 and solid 4 are mirror images** — same volume and area to 0.1 %, both
+99 → 68 faces, both 436 → 340 edges — and they drift **29x** apart. The
+magnitude belongs to which merge the kernel happened to perform, not to the
+geometry, so it cannot be predicted from the part, and a bar set just above
+today's worst case is a bar waiting to refuse tomorrow's.
+
+`UNIFY_VOLUME_TOL` is therefore **1e-5 → 1e-4**. Across the 1.5–3.7 per mm
+surface-to-volume ratios this run spans, that admits at most ~3e-05 to 7e-05 mm
+of boundary movement — still over an order of magnitude inside the face
+tolerances above, so a merge across genuinely different surfaces cannot hide
+under it. The guards that actually catch such a merge are unchanged and are the
+ones docs/algorithm.md §9 always named as the stronger pair: the solid-count
+check beside it, and `BRepCheck_Analyzer` immediately after.
+
+### Both halves of the session's lesson
+
+G19 and G20 are the same failure at one remove from each other: a scalar proxy
+standing in for "did the geometry change", with its bar expressed in units that
+do not match what it varies with. G19's answer was to replace the proxy with an
+exact structural test, because one existed. G20's is to keep the proxy and size
+it by the physical quantity it stands for, because no cheap exact test does — the
+symmetric-difference boolean that settles it took seconds on a 99-face island and
+does not finish quickly on the 69,305-face body beside it.

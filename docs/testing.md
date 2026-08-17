@@ -35,7 +35,7 @@ header rewrite.
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
 | `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell | yes |
-| `test_boundary.py` | The symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7), tested against the **real** failing junction in `TD_HX_Indre_Volum.step` rather than a synthetic stand-in — see the note below | yes |
+| `test_boundary.py` | The symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7) and the two guards on it, tested against the **real** failing junctions in `TD_HX_rehearsal_test.step` rather than synthetic stand-ins — both the `cc=5, t=1` junction the repair was built for and the `cc=12, t=2.5` one whose repair a relative-volume bar wrongly refused (G19) — see the note below | yes |
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6. Also that the strided parallel sweep (docs/algorithm.md §5.4) returns *identical* classes to the serial one, across a real process boundary — identical rather than equivalent, because stride arithmetic invites off-by-ones that a tolerance would hide | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
 | `test_pipeline.py` | Same-domain unification's fallback ladder — a kernel that refuses to merge must yield a larger file, never a failed run | yes |
@@ -85,8 +85,8 @@ it.
 
 ### Testing against real geometry, not a reproduction of it
 
-`test_boundary.py`'s pinhole-wire tests load `test/TD_HX_Indre_Volum.step` and
-trim one named junction from it, rather than constructing a small synthetic
+`test_boundary.py`'s pinhole-wire tests load `test/TD_HX_rehearsal_test.step`
+and trim two named junctions from it, rather than constructing a small synthetic
 case the way the rest of the suite does. That is deliberate, and it is worth
 knowing why before "simplifying" it.
 
@@ -98,6 +98,12 @@ measured drift across 25 configurations, and passed. It was repairing ordinary
 two-owner small edges. The real defect is a one-owner *pinhole wire* bounding no
 area, which OCCT's small-edge machinery cannot see at all
 (`tools/prototypes/RESULTS.md` G10).
+
+The second junction, at `cc=12, t=2.5`, is there for the opposite reason: not a
+defect the repair missed, but a valid repair a *guard* refused. Its wire is
+shorter than either of the first junction's and it shifts the volume OCCT
+reports seven orders further (G19), which is exactly the kind of thing no
+synthetic case would have suggested was possible.
 
 So where the geometry that actually fails is committed to the repo, test against
 it. A synthetic case proves the code does what you think; only the real one

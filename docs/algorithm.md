@@ -426,6 +426,63 @@ faces **minus all six cap quads** (legitimate by §5.3(b)). Two adjacent instanc
 therefore present matching square holes to each other, and joining them is
 bookkeeping rather than geometry.
 
+**Where both ends of a strut are instanced, its lateral faces are built merged.**
+A half-strut contributes four lateral faces, so a strut whose two junctions are
+both interior would carry eight where four suffice — and §9's same-domain
+unification then spends the `simplify` stage merging them back, rediscovering by
+search over the whole solid a pairing that is known here exactly: one per
+surviving mid-strut interface. Instead the two loops are spliced at template
+build time into one full-strut face, as a fixed pattern of
+`(side, local vertex)` indices — the same shape of precomputation the cap
+correspondence below already is, and at run time equally an integer lookup.
+
+The splice is the union of the two half-faces along the cap edge they share:
+each face's boundary minus that edge, walked one after the other. Because a
+closed orientable surface traverses a shared edge oppositely from its two sides,
+the neighbour presents `b → a` where this face presents `a → b`, so the two walks
+join without any search. The two cap corners then cease to be corners — in the
+merged face the edges meeting there both run along the strut axis — and are
+dropped, which makes the wire minimal and delivers the *edge* reduction OCCT's
+own edge pass would otherwise have to be paid for (§9).
+
+Merging is confined to interfaces where **both** nodes are interior. At an
+interior↔boundary interface the other side's faces come out of a boolean, so
+there is no template loop to splice and the half-faces stand as built. That
+condition must be read from the instanced node set itself and not from any cache
+the build populates as it goes: an earlier revision took it from the node-position
+cache, which `position` grows with any neighbour it is asked about — including
+boundary nodes reached through the cap correspondence — and merged an interior
+junction onto a neighbour that was never built, leaving 366 unmatched edges on
+the 80 mm ball. §8's every-edge-twice proof caught it, which is the argument for
+that proof in miniature.
+
+Each splice is validated once, at template build time, against the geometry it
+claims to replace: coplanar with the template's stated face plane, wound so its
+Newell normal is that plane's outward one, and of area exactly equal to the sum
+of the two halves (to a relative 1e-12, since both sides are the same Newell sum
+over the same exact coordinates). A family that fails falls back to its two
+half-faces, so the worst case is the face count this optimization exists to
+reduce — never a wrong face. `test/test_junction.py` runs this over the whole
+CLI parameter range.
+
+Measured on `dense-lattice`: interior faces 14,256 → 9,516, interior edges
+30,900 → 21,420, and with less to do downstream `simplify` 13.21 → 9.93 s,
+`validate` 6.24 → 5.44 s, `export` 6.25 → 5.32 s, the run 55.6 → 44.8 s. The
+output is unchanged — same 15,966 faces and 67,898 edges, both golden samples at
+0 mm³ — because this builds the result unification was already producing, rather
+than a different one.
+
+At production scale (`TD_HX_rehearsal_test` at `cc=5, t=1`, a controlled pair)
+the interior reduction is larger — 705,000 → 389,492 faces, −44.8 %, since that
+part has proportionally more interior nodes — while the *run* improves less,
+55 m 18 s → 51 m 43 s (−6.5 %), because `boundary` and `stitch` are 43 % of it
+and neither is touched. `instance` falls 43.8 % and `assemble` 31.9 %, tracking
+the face count directly; `simplify` falls only 12.4 % on a 31 % smaller input,
+because its cost tracks the output it must produce — unchanged at 584,028 faces
+— more than the input it consumes. Its peak memory falls 26.3 %. Output
+identical throughout: 584,028 faces, 2,517,881 edges, 14 solids,
+330,354.002 mm³ (docs/specification.md §10).
+
 The construction is *indexed*, not geometric:
 
 * A global vertex is keyed by `(owning node, local template vertex)`. A vertex on
@@ -926,16 +983,44 @@ program builds itself.
   compacted with `ShapeUpgrade_UnifySameDomain`, merging adjacent faces (and
   edges) that lie on one underlying surface.
 
-  This is needed precisely *because* the lattice is instanced rather than fused.
-  Instancing merges nothing, so across every shared mid-strut interface junction
-  A's lateral face and junction B's are coplanar and share an edge yet remain two
-  faces — every strut carries eight lateral faces where four suffice. The old
+  This was needed precisely *because* the lattice is instanced rather than fused:
+  instancing merges nothing, so across every shared mid-strut interface junction
+  A's lateral face and junction B's were coplanar and shared an edge yet remained
+  two faces — every strut carrying eight lateral faces where four suffice. The old
   fuse-based pipeline got this merge for free as a side effect of the boolean;
-  removing the boolean removed the merge with it. The junction template itself is
+  removing the boolean removed the merge with it.
+
+  **§6 now builds the interior already merged**, so most of what this stage used
+  to find is gone before it runs — on `dense-lattice`, interior faces arrive at
+  9,516 rather than 14,256, and unifying a purely interior grid is measurably a
+  no-op (`test/test_junction.py`). What remains for it is the boundary layer,
+  where the faces come out of booleans and no pairing is known in advance, and
+  the interior↔boundary seam. The step therefore stays, and stays worth its cost;
+  it simply no longer carries the volume-scaling part of the job. The junction template itself is
   already minimal and unifies to itself (30 faces → 30): within one junction the
   `+e_k` and `−e_k` lateral faces are coplanar but *not* adjacent, because the
   other four half-struts cut them apart at the node. `test/test_junction.py` pins
   both halves of that finding.
+
+  **Aiming the merge at only that region was tried and does not pay.** The two
+  statements above are together a proof about *which* faces can still merge —
+  an interior face has no interior partner left, so its only possible partner is
+  a boundary-derived face it touches — and the boundary-derived faces are known
+  by construction, being the objects §8's assembly added. Restricting the face
+  merge to them plus one hop is therefore exact, and it was implemented and
+  measured: on the `cc=5, t=1` rehearsal it took the kernel's input from 690,997
+  faces to 375,489 (−46 %) and produced a **byte-identical output**, losing no
+  merge at all. It also made the stage **slower**: cutting its input 20 % cut
+  its time only 6 % (1.515 s → 1.420 s on `dense-lattice`), an elasticity near
+  0.3, against ~0.045 ms/face of linear bookkeeping to achieve it.
+
+  **The reason is not that the kernel prices its input poorly — G16 measures it
+  pricing a generic subset almost exactly linearly, at 0.98.** It is that a
+  *correct* restriction skips exactly the faces unification would have returned
+  unchanged, which are exactly the cheap ones, and keeps exactly the faces that
+  merge. It is self-defeating by construction, so no implementation improves on
+  it. There is consequently no input-side lever here at all, and
+  docs/specification.md §11 keeps the measurement rather than the code.
 
   Measured on `dense-lattice`: **29,974 → 15,966 faces**, 122,556 → 67,898 edges,
   98.9 MB → 52.6 MB, with the exact symmetric-difference volume against the
@@ -981,16 +1066,36 @@ program builds itself.
   over a size optimization — §11's principle again. `ShapeUpgrade_UnifySameDomain`
   does throw on geometry this tool legitimately produces: on the 80 mm ball at
   `cc=10, t=1` it raises `Standard_Failure: Courbes non jointives` on a solid that
-  `BRepCheck_Analyzer` has already passed as valid. So the step degrades in two
-  rungs, and everything downstream still gates the result either way.
+  `BRepCheck_Analyzer` has already passed as valid. So the step degrades rather
+  than aborts, and everything downstream still gates the result either way.
 
-  The rungs are chosen from where the value is. It is specifically the **edge**
-  merging — concatenating the collinear pairs left inside a merged wire — that
-  throws, and on this geometry it is worth almost nothing: run alone it removes
-  4 edges out of 81,816. Face merging, the part that matters, succeeds on the same
-  solid and takes it from 20,268 faces to 10,554 and 81,816 edges to 62,376. So
-  the first retry drops edge merging, and only if that fails too is the solid
-  exported as built, with an explicit note in the log and the summary.
+  **The two passes are run as two calls**, face merging first with edge merging
+  off, then edge merging alone over the result. The reason is structural, not
+  speed: the edge pass concatenates collinear pairs *on* a tile boundary as
+  readily as inside one, so with it enabled a tiled unification's pieces stop
+  sharing topology and no longer reassemble without sewing (G13,
+  `tools/prototypes/RESULTS.md`; specification.md §10 Phase 3). Splitting is
+  measured neutral on `dense-lattice` — `simplify` 13.87/13.94 s split against
+  13.21/16.18 s combined — and produces an identical B-rep, faces and edges
+  alike, which `test/test_pipeline.py` pins.
+
+  Degradation follows from the split. The **edge** merging is what throws, and
+  running it last means a refusal costs only the edge concatenation: the face
+  merge is already done and is kept, where the previous two-rung ladder discarded
+  a completed merge and paid for a second one. A solid whose *face* merge throws
+  is exported as built, with an explicit note in the log and the summary.
+
+  **Edge merging is not optional, and an earlier claim here was wrong.** This
+  section previously recorded it as "worth almost nothing" on the strength of the
+  80 mm ball, where run alone it removes 4 edges of 81,816. That does not hold at
+  lattice scale: G13 measured it taking 307,200 edges down to 215,040, a 30 %
+  reduction. Dropping it was tried on that basis and rejected on measurement —
+  `simplify` fell to 9.45 s on `dense-lattice` and handed all of it back to
+  `validate` (6.24 → 8.21 s) and `export` (6.25 → 10.50 s), which scale with edge
+  count too, for a 35 % larger file (52.80 → 71.29 MB) and no net run-time change
+  (57.28 → 57.57 s). The face count was identical throughout, which is what
+  identifies edges as the whole of the difference. A gate is only as good as the
+  part it was measured on — the same lesson as §5.1's, in a different place.
 
 * **Validity gate.** Every output solid is checked with OCCT's
   `BRepCheck_Analyzer` before export. This is an *exact* B-rep check rather than a
@@ -1152,7 +1257,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Classification | `O(N)` cheap tests + `O(S)` exact ones |
 | Interior | `O(N)` index operations and face constructions, **no booleans** |
 | Assembly | `O(N + S)` index operations, **no booleans and no search** |
-| Unification | `O(faces/W)`, ~0.24 ms/face before dispatch, across the shared pool (§9, specification.md §10 path 1) |
+| Unification | `O(faces)` per solid, across the shared pool (§9, specification.md §10 path 1). Cost per face **rises with scale** — 0.06 ms/face at 25 k faces, ~1.1 ms/face at 1 M (G13) — and tracks the faces it must emit, not the merges it finds: a 46 % smaller input leaves it no faster (§9) |
 | Validity | `O(faces/W)`, across the same shared pool (§9, specification.md §10 path 4) |
 | Boundary | `O(S/W)` single-operand intersections |
 | Connectivity | `O(N + S)` union-find |
@@ -1164,6 +1269,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Classify before intersecting | Booleans only for the `O(S)` boundary junctions |
 | One junction template, instanced everywhere | The only *unconditional* general fuse is 6 operands, once per run — §7.1's repair fuse runs only for a disagreeing cap pair, `O(1)` occurrences in practice |
 | Indexed shared-topology interior shell | `O(N)` and exactly watertight; replaces a sewing step measured at 14.9 s per 1,000 junctions and growing superlinearly |
+| Full-strut lateral faces built merged (§6) | Removes the volume-scaling half of same-domain unification's job instead of dividing it: interior faces −33 % on `dense-lattice` and **−44.8 % at rehearsal scale** (705,000 → 389,492), shrinking `instance` (−43.8 %), `assemble` (−31.9 %), `simplify` (−12.4 %) and `validate` (−7.4 %) together, for an identical output. Whole-run effect is part-shaped: −19 % on `dense-lattice`, −6.5 % on the rehearsal, where `boundary` and `stitch` are 43 % of the clock and untouched |
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10) |
@@ -1196,6 +1302,26 @@ Alternatives evaluated and rejected:
 * **`BOPAlgo_GlueFull`:** measured, does not merge (§6).
 * **CGAL Nef polyhedra:** correct and robust, but redundant once no large boolean
   exists to perform.
+* **Spreading one solid's unification below the body, as spatial tiles**
+  (docs/specification.md §11): rejected by measurement, and both transports were
+  measured rather than one. *Processes* (G15): tiles reassemble by shared
+  topology only inside one process — a `.brep` preserves sharing within a file
+  and cannot preserve it between two — so one file per tile returns every seam
+  edge duplicated (864 and 1,760 free edges where 0 were expected, against 0 for
+  the same tiles written as one file). Re-identifying the duplicates needs
+  `BRepTools_ReShape` to replace vertices, which §8 already measured coming
+  apart; sewing the seam subset is G8's split, whose production failure mode is
+  a full sew of a volume-scaling face set. *Threads* (G17): identity is perfect
+  (0 free edges, nothing serialized) and there is no parallelism — 1.04x on six
+  threads, because OCP holds the GIL for the whole call, with a Python counter
+  retaining 3.7 % of its solo throughput during one. The two fix and break
+  exactly opposite things, and `ShapeUpgrade_UnifySameDomain` has no internal
+  parallel mode to fall back on.
+* **Restricting the face merge to the region that can still merge** (§9):
+  built, measured, reverted. Exact — the output was byte-identical on the
+  rehearsal — and no faster, because a correct restriction removes exactly the
+  faces that were cheapest to process (elasticity ~0.3, against 0.98 for a
+  generic subset of the same size — G16). Self-defeating by construction.
 * **Hierarchical tree reduction for boundary-sew round 2:** rejected on paper
   before being built (§8) — G6 already showed round 2's cost tracks total face
   count almost flatly in shape count, so it is dominated by a flat per-face

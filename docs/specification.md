@@ -231,12 +231,86 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
+### `--ram` is accepted and validated but never enforced
+
+**Found 2026-08-17**, while reading the rehearsal's memory profile
+([profiling-reports.md](profiling-reports.md)). Not a regression — it has always
+been this way — but the rehearsal came close enough to the number the user
+supplied that the gap is worth closing or documenting honestly.
+
+**What's wrong.** `--ram` is parsed, range-checked against the machine's
+physical RAM, resolved to `Args.ram_budget_gb` (`cli.py`), and then **only
+printed**. Nothing in `pipeline.py`, `parallel.py`, `weld.py`, `boundary.py` or
+`runlog.py` ever reads it. §3's table is accurate — "Advisory: recorded in the
+run log next to the measured peak" — but `cli.py`'s own module docstring opens
+by calling both budgets "ceilings on what a run may use, not hints it may
+exceed". That is true of `--cores`, which resolves to the worker count and is
+genuinely enforced, and false of `--ram`. **The two statements contradict each
+other and one of them has to change.**
+
+**Why it matters now.** The 2026-08-17 rehearsal was run with `--ram 20` and
+peaked at **19,291 MB** of whole-tree RSS — inside 3 % of the stated budget,
+with nothing watching. Had it crossed, the run would have continued exactly as
+it did: no warning, no throttle, no failure, and a summary reporting a peak
+above the budget without remarking on it.
+
+**What happens on real exhaustion, since it is not what the exit codes suggest.**
+Windows grows the pagefile first, so the run degrades rather than fails — worst
+of all in `export`, which is both the memory peak and CPU-bound serialisation.
+If commit charge is then exhausted, a Python-level `MemoryError` is caught by
+`__main__`'s `except Exception`, reported as one `FAILED: unexpected ...` line
+and re-raised, so it surfaces as **exit 1 with a traceback**; an allocation
+failure inside OCCT may instead abort natively with no reason line at all.
+Exit 5 ("Resource limits") is unreachable (docs/algorithm.md §10), so a genuine
+out-of-memory reads as a bug rather than as the resource limit it is.
+
+**A second, independent defect: the reported peak under-counts.**
+`RunLog.max_rss` is the master's own `PeakWorkingSetSize`, plus worker peaks
+only where a stage explicitly folds them in with `note_worker_rss` — `boundary`,
+`stitch`, `simplify` and `validate` do; no other stage does. On the rehearsal
+the tool reported **18.12 GB** where external whole-tree sampling measured
+**19,291 MB**. Any future budget check written against `max_rss` inherits that
+~1.2 GB under-count, so this needs fixing first either way.
+
+**Two ways forward. [TODO: needs decision]**
+
+*(a) Keep it advisory, and say so consistently.* Correct `cli.py`'s docstring so
+only `--cores` is described as a ceiling, and have the end-of-run summary state
+plainly when the measured peak exceeded the budget. Cheap, no behaviour change,
+and it makes the number honest rather than decorative.
+
+*(b) Actually enforce it.* Harder than it looks, and worth being clear about why
+before anyone starts: **the run's peak is not in the workers.** It is the master
+holding the whole 2 GB result while `export` serialises it, so capping worker
+count or tile concurrency — the obvious levers, and the ones Phase 3's risk R5
+proposes — cannot lower the number that actually sets the peak. Real enforcement
+would mean changing how the result is held and written (streaming the STEP
+write, or exporting per solid), which is a substantially larger change than the
+flag suggests. Anything less would be enforcement in name only.
+
+**How to verify a fix.** For (a): run with `--ram` set deliberately below a known
+peak and confirm the summary says so, with the run still succeeding. For either:
+fix the under-count first — fold every stage's worker peak into `max_rss`, or
+have the master sample its own process tree — and check the reported peak
+against `tools/profile_run.py` on the same run; today they differ by ~1.2 GB and
+should agree. `python -m pytest test -q` and `python tools/e2e.py` must stay
+green; `test_cli.py` already pins the budget's parsing and defaulting.
+
+
 ### `stitch` pays the full round-2 cost on heavily trimmed parts
 
 **Found 2026-08-17**, on the first rehearsal of `TD_HX_rehearsal_test.step` at
 `cc=5, t=1` to complete. `stitch` took **11 m 18 s**, against 1 m 13 s in the
 2026-08-15 profile. Not a regression, and worth recording precisely so it is not
 re-diagnosed as one.
+
+**Still live, re-confirmed 2026-08-17** on both halves of the Phase 2 controlled
+pair ([profiling-reports.md](profiling-reports.md)): `stitch` measured
+10 m 29.1 s on `82adbb1` and 10 m 23.0 s on `928cc57`, with
+`stitch_repaired_components: 1` and `stitch_tiles: 35` in both. Phase 2 moved it
+by −1.0 %, i.e. not at all — it touches nothing in this stage. At 10 m 23 s
+`stitch` is now the **second-largest stage**, 20 % of the run, behind `simplify`
+and ahead of `boundary`.
 
 **Why.** Boundary-sew round 2 sews only the free-edge-bearing subset of each
 tile's faces (algorithm.md §8, gate G8). That identity holds at every prototype
@@ -269,14 +343,513 @@ valid solids and `python -m pytest test -q` plus `python tools/e2e.py` stay
 green. `test_weld.py` already pins that tiling produces the same watertight
 result as sewing in one call, which is the property any change here must keep.
 
+---
+
+## 11. Closed — kept for the reasoning, not as work
+
+### `simplify` beyond body-for-body — chapter closed, two levers disproved
+
+**Proposed by Claude 2026-08-15, approved for implementation 2026-08-16,
+closed 2026-08-17.** Of four things tried on this stage, **one paid**: Phase 2,
+building the interior pre-merged, −6.5 % on the rehearsal. Phase 1's projection
+was wrong, Phase 3 is impossible as designed, and the input-side alternative
+built in its place is exact and worth nothing. All four are recorded here rather
+than quietly dropped, because what they cost to learn is the useful part — and
+because two of them close off directions that would otherwise look obvious to
+the next person.
+
+*Read this as one chapter: the later sections' bars are set by the earlier
+sections' measurements, so splitting them apart would leave each half
+unreadable.*
+
+The measurement the proposals rest on is gate G13
+([`tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md),
+`tools/prototypes/g13_unify_scaling.py`).
+
+**Why this exists.** Path 1 of the scale-rehearsal chapter (§11) —
+parallelising `simplify` across the shared pool, body for body — is
+implemented, correct, and measured at **no wall-clock win** (17 m 17 s -> 18 m 39 s, still 0.99 cores), because this part's 14 solids
+are one dominant body plus 13 scraps and "the largest single solid is the floor,
+not the sum". Dispatching by body cannot lower that floor. G13 asked whether
+tiling *within* a solid can, and answered two questions that were open.
+
+#### What G13 measured
+
+Closed all-interior `m x m x m` grids at `cc=10, t=1.5`, 1,632 -> 99,840 faces.
+
+* **Cost is mildly superlinear and worsening.** Overall log-log slope **1.135**
+  (under the 1.15 bar this gate set in advance), but local slopes climb with
+  scale — 1.044 at 12 k->25 k faces, 1.193 at 42 k->67 k, **1.273** at
+  67 k->100 k — and ms/face rises monotonically 0.128 -> 0.230. Serially, 8
+  tiles cost 6.494 s against the whole solid's 7.054 s, an 8 % saving. **Plan on
+  tiling being worth about `W` and no more**; the win is parallelism, not a
+  smaller exponent. This trend is also why G7's 0.17 ms/face (<=8.5 k faces) and
+  the rehearsal's 1.11 ms/face (1 M faces) cannot be reconciled by assuming
+  linearity.
+* **Tiles reassemble with no sewing — but only with `unify_edges=False`.** With
+  edge unification on, 3,632–11,232 seam edges come back as two distinct objects
+  and the reassembled shell is full of holes: the edge pass concatenates
+  collinear pairs *on* the tile boundary, so the two sides stop being the same
+  `TShape`. With it off, identity is exact at every tile count and both scales
+  tried — **0 free edges**, `BRepCheck_Analyzer` valid, volume preserved to
+  ~1e-13 — so `BRep_Builder.Add` alone suffices and nothing sews the
+  volume-scaling face set (docs/algorithm.md §6, §8).
+* **`unify_edges=False` is 3.1–3.3x faster and merges exactly the same faces.**
+  23.007 s -> 7.054 s at m=16, both producing 53,760 faces; 14.183 s -> 4.512 s
+  at m=14, both 36,456.
+* **Correction to docs/algorithm.md §9.** Its "edge merging is worth almost
+  nothing" (4 edges of 81,816) was measured on the 80 mm ball and **does not
+  hold at lattice scale**: at m=16 the edge pass takes 307,200 edges down to
+  215,040, a 30 % reduction. Dropping it is therefore a *trade*, not a free win.
+* **Tiling costs merged faces at tile seams** — +2.1 % to +11.4 % here — but that
+  is an upper bound from a deliberately *generic* partition (by face centroid).
+  The merge pairs are known by construction, one per surviving mid-strut
+  interface, so bucketing by **strut** makes the loss zero.
+
+#### Phase 1 — drop edge unification: **R1 FAILED, landed as enabling work only**
+
+Projected `simplify` 18 m 39 s -> ~5 m 45 s, ~27 % off the run. **Delivered
+nothing of the sort.** Both candidate forms were measured on `dense-lattice`
+and `smoke-verified` on 2026-08-16, against R1's pre-set bars — net run time
+must improve, file size must not grow more than ~20 %:
+
+| `simplify` on `dense-lattice` | time | output |
+|---|---|---|
+| combined, one call (baseline) | 13.21 s, 16.18 s | 67,898 edges, 52.80 MB |
+| edge pass dropped (the proposal) | 9.45 s | 94,476 edges, 71.29 MB |
+| split: faces, then edges alone (the fallback) | 13.87 s, 13.94 s | 67,898 edges, 52.80 MB |
+
+**The proposal fails both bars.** Dropping the edge pass saves 3.8 s in
+`simplify` and hands all of it to `validate` (6.24 -> 8.21 s) and `export`
+(6.25 -> 10.50 s) — both scale with edge count, which the projection assumed
+away — for a **35 % larger file** and no net run-time change (57.28 ->
+57.57 s). The 80 mm ball behaves the same way (+43 % file).
+
+**The fallback is neutral, not cheap.** Its premise — that the edge pass would
+be far cheaper over an already-face-merged solid — is disproved: it costs
+~4.4 s either way.
+
+Two things went wrong in the projection, both worth remembering. First, the
+3.1–3.3x speedup came from G13's synthetic all-planar grid and is only ~1.4x on
+a real trimmed solid. Second, `simplify`'s "baseline" of 16.18 s was a
+cold-cache first run; the true baseline is ~13.2 s, and the repeat measurement
+that caught this is the only reason the fallback was not recorded as a win.
+
+**What landed, and why.** The split (`_unify_one` calls face merging with
+`unify_edges=False`, then edge merging alone) is kept — not as a speed win, but
+because it is a precondition for Phase 3: the edge pass rewrites edges on a tile
+boundary, so tiles only reassemble by shared topology if the face merge runs
+with it off. It also degrades better — a throwing edge pass no longer discards a
+completed face merge. `test/test_pipeline.py` pins its B-rep as identical to the
+combined call's, faces and edges alike, and `tools/e2e.py` passes with both
+golden samples at 0 mm³ and byte-identical file sizes.
+
+**Do not retry dropping the edge pass.** The measurement above is the disproof.
+
+#### Phase 2 — build the interior pre-merged: **DONE, and it delivered**
+
+Implemented 2026-08-16 in `interior.py` (`_merge_lateral_pairs`,
+`_splice_lateral`, `MergedLateral`) and documented normatively in
+[algorithm.md](algorithm.md) §6, §9 and §12. Measured on the two committed
+scenarios, with the output unchanged throughout — same face and edge counts,
+both golden samples at 0 mm³, `tools/e2e.py` green:
+
+| `dense-lattice` | before | after |
+|---|---|---|
+| interior faces | 14,256 | **9,516** (−33 %) |
+| interior edges | 30,900 | **21,420** (−31 %) |
+| `instance` | 1.60 s | 1.06 s |
+| `assemble` | 0.97 s | 0.74 s |
+| `simplify` | 13.21 s | **9.93 s** (−25 %) |
+| `validate` | 6.24 s | **5.44 s** (−13 %) |
+| `export` | 6.25 s | **5.32 s** (−15 %) |
+| total | 55.6 s | **44.8 s** (−19 %) |
+
+The reduction is 33 % rather than the projected 50 % because only
+interior↔interior struts merge, and `dense-lattice` has 594 interior nodes
+against 968 boundary ones. The rehearsal, with 29,375 interior nodes against
+19,552 boundary, does land close to the ceiling: **44.8 %**, measured below.
+
+**One bug worth recording, because the class of it will recur.** The merge
+condition "is the node across this cap also interior?" was first read from the
+node-position cache, which `position()` grows with any neighbour it is asked
+about — including boundary nodes reached through the cap correspondence. Interior
+junctions then merged onto neighbours that were never built, leaving 366
+unmatched edges on the 80 mm ball. Every unit test still passed: they use
+synthetic all-interior grids, where the polluted set and the correct one are the
+same. It was `weld.assemble`'s every-edge-twice proof that caught it, in `e2e`.
+The lesson is the same one G8 left about scale — a set that is *derived* rather
+than *stated* will eventually be derived from the wrong thing, and only a test
+with a real boundary can tell.
+
+*Blocking risk R4 — merged-loop correctness — **CLEARED**.* The spliced wire has
+to be planar, simple and correctly wound for every `(cc, t)`.
+`test_junction.py::test_merged_lateral_faces_are_sound_across_the_parameter_range`
+asserts exactly that over G1's own sweep — all 14 valid pairs, every merged loop
+coplanar, Newell normal matching the template's outward normal, and area equal to
+the sum of the two halves to a relative 1e-12 — alongside watertightness, the
+`N x volume(J)` identity, and both golden samples at 0 mm³. The fallback is built
+as designed and is per strut family, not global: `_splice_lateral` returns
+``None`` on any of those checks and that family keeps its two half-faces, so a
+pathological case costs the face count this exists to reduce and never
+correctness (docs/algorithm.md §11).
+
+##### The original proposal
+
+
+
+`interior.py` emits 4 lateral faces per half-strut and `simplify` merges them
+back across every mid-strut interface. Emit the merged full-strut lateral face
+directly instead: at template-build time, splice junction A's loop with the
+neighbour's matching loop and drop the shared cap edge — a fixed pattern of
+`(node-local, neighbour-local)` vertex indices computed once, the same shape of
+precomputation `interior._pair_caps` already does — with the collinear pairs
+already dropped so the wire is minimal. Merge only where the cap is in
+`interfaces` **and** both nodes are interior; at a boundary interface the
+neighbour's face comes from a boolean.
+
+This is the strongest item on the list, and Phase 1's failure does not touch it:
+it removes work rather than reordering or parallelising it. It halves interior
+faces *before they are built* (G13: unification achieves exactly 99,840 ->
+53,760), so it shrinks `instance`, `assemble`, `simplify`, `validate`, `export`,
+file size and peak memory together — and because the wire is ours to choose, it
+delivers the edge reduction by construction, at no kernel cost.
+
+##### Measured at rehearsal scale: **-6.5 %**, not the -19 % `dense-lattice` showed
+
+The projection this once carried (47.1 -> ~37 min) is withdrawn, not restated:
+it was anchored on the 2026-08-15 profile, which ran with the `assemble`
+watertightness gate bypassed and before the G9-G12 defect family was fixed.
+Phase 2 was instead measured directly, as a **controlled pair run back to back
+on the same machine on 2026-08-17** — `82adbb1` against `928cc57`, same input,
+same `--cores 6 --ram 20`.
+
+| Stage | before (`82adbb1`) | after (Phase 2) | delta |
+|---|---|---|---|
+| classify | 2 m 06.3 s | 2 m 05.9 s | -0.3 % |
+| boundary | 11 m 54.6 s | 12 m 01.3 s | +0.9 % |
+| connect | 11.3 s | 11.3 s | -0.6 % |
+| stitch | 10 m 29.1 s | 10 m 23.0 s | -1.0 % |
+| **instance** | 1 m 14.2 s | **41.7 s** | **-43.8 %** |
+| **assemble** | 30.9 s | **21.0 s** | **-31.9 %** |
+| **simplify** | 20 m 41.3 s | **18 m 07.9 s** | **-12.4 %** |
+| **validate** | 4 m 02.8 s | **3 m 44.9 s** | **-7.4 %** |
+| export | 3 m 49.3 s | 3 m 52.5 s | +1.4 % |
+| **total** | **55 m 17.9 s** | **51 m 43.3 s** | **-6.5 %** |
+| peak tree RSS | 19,827 MB | 19,291 MB | -2.7 % |
+| `simplify` peak RSS | 9,956 MB | **7,339 MB** | **-26.3 %** |
+
+**The five untouched stages agree to within 1 %**, which is what makes the
+touched-stage deltas readable at all — and is the control the 2026-08-14/15
+pair lacked, where untouched stages swung 25-36 % from machine load alone.
+
+**The output is identical**: 584,028 faces, 2,517,881 edges, 14 solids,
+330,354.002 mm³, 2.00 GB. Interior faces fell 705,000 -> **389,492 (-44.8 %)**,
+close to the 50 % ceiling this optimization can reach, and far above
+`dense-lattice`'s 33 % — exactly as predicted from the interior/boundary node
+ratio.
+
+**Two findings worth carrying forward.**
+
+*The gain does not transfer between parts.* `dense-lattice` measured -19 %; the
+rehearsal measures -6.5 %, on a **larger** interior reduction. The reason is
+that this part's run is dominated by stages Phase 2 does not touch — `boundary`
+(12 m) and `stitch` (10 m 23 s) are 43 % of it between them — so halving the
+interior cannot move most of the clock.
+
+*`simplify` scales with its output, not its input.* Unification's input fell
+~31 % (1,006,505 -> ~691,000 faces) and the stage fell only 12.4 %, while its
+output face count was unchanged at 584,028 by construction. Its memory and I/O
+fell much more (-26 % peak RSS, -21 % bytes). **What this changes is the
+arithmetic of any face-count extrapolation, not Phase 3's case**, and an earlier
+revision of this section got that wrong. Removing input work — Phase 2's lever —
+buys less than face counts suggest. Tiling is a *parallelism* lever and divides
+whatever work remains, output included, so it is unaffected by which of the two
+dominates. If anything it leaves Phase 3 worth **more** in absolute terms than
+projected, because the base it attacks measured 18 m 07.9 s rather than the
+~11 m 45 s that was extrapolated.
+
+#### Phase 3 — sub-body tiling of `simplify`: **BLOCKED, not built**
+
+The plan was to partition a solid's faces into tiles, unify each across the
+shared `WorkerPool`, and reassemble with `BRep_Builder.Add` — resting on G13's
+and G14's finding that unification leaves the edges it did not merge as the same
+objects, so a tile seam stays one `TShape` and nothing has to be sewn.
+
+**Its gate condition was met and its risk list was wrong.** After Phase 2
+`simplify` is the largest single stage — 18 m 07.9 s of a 51 m 43.3 s run
+(35 %), pinned at 0.98 cores while five of six sit idle — so it was worth
+attacking. R2 (curved faces) had been cleared by G14; R3, R5 and R6 were open
+but manageable. **None of the four risks asked whether the mechanism survives
+the process boundary the plan's own first sentence puts it across** — which is
+the one that decides it, and which two gates had silently assumed away.
+
+**G15 answers it: tile identity is pointer identity, and Phase 3 puts a process
+boundary through the middle of it.** G13 and G14 both measured reassembly *in
+one process*. Phase 3's entire purpose is to spread tiles across workers, and
+every stage that does so moves geometry as `.brep` files (docs/algorithm.md §7,
+§8). A `.brep` preserves sharing *within* a file and cannot preserve it
+*between* two, because each file writes its own copy of every edge it
+references. On G14's own trimmed test solid
+(`tools/prototypes/g15_tiled_unify_ipc.py`):
+
+| reassembly route | 8 tiles | 27 tiles | |
+|---|---|---|---|
+| in-process (G14's route) | **0** free edges | **0** | control: reproduces G14 |
+| one file, all tiles as one compound | **0** | **0** | control: serialization itself is fine |
+| **one file per tile** | **864** | **1,760** | what Phase 3 actually does |
+
+The middle row is what makes this readable rather than arguable: serialization
+does not destroy sharing, the *file boundary* does — and that is precisely the
+boundary Phase 3 puts between workers. So this is not a `.brep` defect to work
+around; it is what one-process-per-tile means.
+
+**The three repairs are all closed off, each by a measurement this project
+already has.** Re-identifying the duplicates on the master is a cheap exact
+lookup, but *merging* them needs `BRepTools_ReShape` to replace edges **and**
+their vertices, which docs/algorithm.md §8 measured coming apart
+(`BRepCheck_NotConnected`, invalid solid, wrong volume, while the shell still
+"closes"). Sewing only the seam-bearing faces is G8's split, whose production
+failure mode is a full unsplit sew of a volume-scaling face set — the one thing
+docs/algorithm.md §6 and §8 exist to prevent, at 4 h 45 m of a 5 h 04 m run.
+Tiling inside a *single* worker is sound (the middle row proves it) but serial,
+and G13 measured serial tiling at an 8 % saving having already concluded "plan
+on tiling being worth about `W` and no more; the win is parallelism".
+
+**Threads were then checked, because they would sidestep all of this** — one
+heap, tiles pointing at the same objects, nothing serialized. Gate G17 measures
+both halves and they cancel exactly:
+
+| | parallelism | tile identity |
+|---|---|---|
+| processes (`.brep`) | real — `boundary` reaches 5.2 of 6 cores | **destroyed**: 864 free edges |
+| threads (shared heap) | **none**: 1.04x on 6 threads | perfect: **0** free edges |
+
+Threads fix precisely what processes break and break precisely what processes
+fix. G17's probe A shows why, by mechanism rather than by symptom: a Python
+counter running alongside one `unify_same_domain` call retains **3.7 %** of its
+solo throughput, so OCP holds the GIL for essentially the whole call and the
+tiles run one at a time however many threads dispatch them. (This is G7's
+finding, which had been inferred from a 0.91–1.01x speedup, now observed
+directly.) `ShapeUpgrade_UnifySameDomain` also exposes no internal parallel
+mode — no `SetRunParallel`, no thread-pool hook — so there is nothing to switch
+on either.
+
+**So sub-body parallelism here is closed, not merely unbuilt.** There is no
+third transport in this architecture. The only thing that would change the
+answer is free-threaded CPython (PEP 703), and the project pins Python 3.11
+with pinned wheels against which no free-threaded `cadquery-ocp` build exists;
+a C extension releasing the GIL is ruled out by specification.md §2's
+no-compiler, ordinary-wheels packaging. Shared memory is not an alternative
+either — it addresses I/O, which was never the cost (940 MB against an
+18-minute stage), and a `TopoDS_Shape` is a graph of pointer-linked C++ objects
+that another process cannot use at a different base address, which is why the
+identity loss is structural rather than a consequence of choosing files.
+
+**Do not retry this without first disproving G15 and G17**, which take one
+command each and about a minute together.
+
+#### The input-side alternative: exact, and worth nothing
+
+With tiling closed off, the other way to attack the same stage is to give the
+kernel less to do. Phase 2 makes that *provable* rather than heuristic: since
+the interior is built pre-merged, an interior face has no interior partner left
+— within a junction its coplanar neighbours are not adjacent, and across a
+mid-strut interface the two half-faces are already one — so the only merge it
+can still take part in is with a boundary-derived face it touches. And which
+faces are boundary-derived is known by construction: they are the objects
+`weld.assemble` added. So the face merge can be restricted to the boundary layer
+plus one hop, with the rest carried into the result by reference, exactly and
+with no search.
+
+**It was built, measured, and reverted.** The correctness half worked perfectly:
+
+| | `dense-lattice` | rehearsal |
+|---|---|---|
+| faces reaching the kernel | 20,494 of 25,234 (−19 %) | **375,489 of 690,997 (−46 %)** |
+| output | 15,966 faces, 67,898 edges, 52.67 MB | 584,028 faces, 2,517,881 edges, 2.00 GB |
+| against the unrestricted run | **byte-identical** | **identical in every figure**, volume drift 1.60e-07 both |
+| reassembly fell back | 0 | 0 |
+
+So the restriction loses **no merge at all** — the proof about which faces can
+merge is sound, and the reassembly by shared topology held on the real part,
+checked with §8's every-edge-twice proof rather than trusted.
+
+**And it is not faster.** `simplify` measured 19 m 06.6 s against the
+post-Phase-2 18 m 07.9 s. That comparison is *not* a controlled pair — the
+untouched stages moved between +0.1 % (`classify`) and +17.6 % (`export`) — so
+the honest reading is "no measurable win", not "a 5 % loss". But the mechanism
+was then measured directly, on one solid in one run, and it is unambiguous:
+
+    cutting the face merge's input 20 % (23,236 -> 18,660 faces)
+    cuts its time 6 %   (1.515 s -> 1.420 s)
+
+**An elasticity near 0.3 — and the reason is not the one it looks like.** The
+obvious reading is that `ShapeUpgrade_UnifySameDomain` is priced by what it
+emits rather than what it consumes, so a smaller input buys little. **That
+reading is wrong, and gate G16 disproves it**
+(`tools/prototypes/g16_unify_elasticity.py`): on a *generic* subset the kernel
+prices its input almost exactly linearly, at a mean elasticity of **0.98** over
+removals of 10–60 %. Remove a representative 40 % of the faces and you save
+very nearly 40 % of the time.
+
+So the kernel is not letting the restriction down. **The selection is.** A
+*correct* restriction skips exactly the faces unification would have returned
+unchanged — which are exactly the cheap ones — and keeps exactly the faces that
+merge, which are the expensive ones. It is therefore self-defeating by
+construction: the better it is at removing only inert faces, the less of the
+cost it removes with them. 0.98 generic against ~0.3 targeted is the size of
+that effect, and no implementation can improve on it, because the property that
+makes the restriction *correct* is the same property that makes it worthless.
+
+Against that ~0.3, the restriction costs a *linear* ~0.045 ms/face of
+bookkeeping — the adjacency index plus the closure proof, ~45 s at rehearsal
+scale — which is the same order as the ~1 min the elasticity predicts it could
+save. There is no version of this that wins.
+
+This closes the input-reduction direction rather than leaving it open, and it
+generalises past this one attempt: **any** proposal to feed this stage less must
+skip only faces that would not have changed, so it inherits the same 0.3. Phase 2
+above already recorded that "`simplify` scales with its output, not its input"
+and that removing input buys less than face counts suggest; the mechanism here
+is the precise version of that observation, and it is a sharper claim — the
+earlier one blamed the kernel, and G16 shows the kernel is linear. The
+implementation itself is not in the tree; it is recorded here because what it
+cost to learn is the useful part, and the same is true of Phase 1.
+
+#### Where `simplify` stands now
+
+Still the largest single stage, still at ~0.98 cores, and now with both obvious
+levers disproved: it cannot be spread below the body — not by processes, which
+break tile identity (G15), and not by threads, which do not run in parallel at
+all (G17) — and it cannot be *selectively* fed less, because the faces a correct
+restriction may skip are the cheap ones (G16).
+
+What is left is the direction Phase 2 already took: **have fewer faces exist at
+all**. G16's 0.98 says the cost really is close to linear in the faces this
+stage handles, so anything that reduces that count upstream converts almost
+one-for-one — which is exactly why Phase 2, which removed 44.8 % of the interior
+before it was ever built, is the one thing on this list that paid. The
+distinction that matters, and that took two failed attempts to see clearly, is
+between *not building* a face (works) and *not looking at* one that exists
+(does not).
+
+**There is no open plan here, and no obvious next candidate** — Phase 2 already
+took the interior close to its 50 % ceiling, and the remainder is the boundary
+layer, whose faces come out of booleans and are not ours to choose. Anyone
+picking this up should start from that distinction and from G16, not by
+proposing a new way to parallelise or restrict the call.
+
+#### The gate every phase was held to
+
+`python -m pytest test -q`, `python tools/e2e.py` with both golden samples at
+0 mm³, then one full rehearsal under `profile_run.py`. Phases 1 and 2 landed
+through it; Phase 3 never reached it, and the input-side alternative passed
+every correctness check in it and was reverted on the performance measurement
+alone. Worth keeping as the shape of gate this stage needs: **the rehearsal is
+the only place any of these could be judged**, since `dense-lattice` is
+boundary-dominated and a fortieth of the size.
+
+
+### Invalid boundary faces from grazing trims — FIXED 2026-08-17 (34 → 0)
+
+Tracked from 2026-08-16, when the seam-split (#13) and pinhole-wire (#15) fixes
+first got the `cc=5, t=1` rehearsal of `TD_HX_rehearsal_test.step` to assemble
+**14 watertight solids** — and it then failed `validate`, with 1 of those 14
+solids carrying **34 individually invalid faces** (exit 4, no output written).
+
+Closed in two passes, because it was **two unrelated faults wearing one
+symptom**. Both are repaired by `occ.fix_vertex_tolerances`, as two rungs, and
+both turn out to be a *recorded tolerance* being wrong rather than any geometry
+being wrong (docs/algorithm.md §8; `tools/prototypes/RESULTS.md` G11 and G12).
+
+* **Rung 1 (#17) — 34 → 4.** Not 34 bad faces but **17 bad edges**: each
+  invalid face had exactly one invalid edge, and faces came in pairs because
+  the two faces of a pair *shared* it. On each, a vertex sat off the edge's own
+  3D curve (2.474044e-05 mm on an ellipse, 3.316370e-04 mm on a B-spline) with
+  that vertex's tolerance inflated to *exactly* that distance, so the check sat
+  on the knife edge. Repaired with `ShapeFix_Edge.FixVertexTolerance`.
+* **Rung 2 (this change) — 4 → 0.** The remaining 4 had **no** standalone-invalid
+  edge or vertex and passed every named face check, which G11 read as a
+  *contextual pcurve-versus-3D-curve* fault. **That reading was wrong.** The
+  fault is `BRepCheck_SelfIntersectingWire`, for two edges *adjacent in the
+  wire* — and it is not a real self-intersection: their pcurves cross at exactly
+  one point, at the shared vertex, *inside* its tolerance. The shared vertex's
+  recorded tolerance was simply left too tight to swallow the crossing.
+  Repaired by widening that vertex, bounded at 4× the tolerance the kernel
+  itself recorded and at 4e-3 mm absolutely.
+
+**What the wrong diagnosis cost, and how it was caught.** The pcurve deviation
+G11 named is real — on each of the four faces one edge deviates by 98–100 % of
+its own tolerance, which reads as a root cause. Two measurements disproved it:
+widening that edge's tolerance fixes nothing at any factor up to 5×, and
+`BRepLib.SameParameter` improves the deviation on the one face it cannot fix.
+The mechanism was then found with `BRepCheck_Analyzer.IsValid(subshape)` — the
+*in-context* overload — run as a **controlled** probe: it fires on all four and
+clears on the three `SameParameter` does fix, so a negative on the fourth could
+not have been the probe being blind. That control is the lesson from G10, where
+a blind scanner reporting "no faults" cost real time.
+
+This makes **four** defects in this family, each first diagnosed wrongly in a
+way that matched the symptom quantitatively and convincingly (G9, G10, G11,
+G12). The pattern worth keeping: OCCT's named repair for the named symptom did
+not touch the actual defect in any of them — `ShapeFix_Wireframe` for the
+"small edges" that were pinhole wires, `ShapeFix_Wire.FixSelfIntersection` for
+this self-intersection (a complete no-op). Establish the mechanism on the real
+failing geometry before building the repair.
+
+**Result, measured on the full rehearsal 2026-08-17** (`-cc 5 -t 1 --cores 6
+--ram 20 -v`, 58m 18s, 18.57 GB peak):
+
+* `vertex tolerances corrected on 19 sewn boundary face(s); no geometry moved`,
+  with **no residual** — against 15 corrected and 4 remaining before this change.
+* `validity: all 14 solid(s) pass BRepCheck_Analyzer` — the gate passing for the
+  first time on this part.
+* The run **wrote its STEP**: 2.01 GB, 14 solids, 584,028 faces, lattice volume
+  330,354.002 mm³, AP214, part name `TD_HX_rehearsal_test+cc5+t1`. Every figure
+  the defect does not touch is unchanged from the 2026-08-15 profile (21,955
+  boundary pieces, 122,180 interfaces, 2 pinhole wires, 1,006,505 faces before
+  unification, same volume), which is evidence the repair changed only what it
+  was aimed at.
+
+`python -m pytest test -q` and `python tools/e2e.py` stay green (0 mm³ against
+both golden samples); the committed scenarios contain no grazing trims this
+severe, so neither rung fires on them, exactly as intended.
+
+### Micron-scale debris edges from near-tangential trims — FIXED 2026-08-16
+
+Tracked from 2026-08-14 as "2 edges used by exactly one face" at
+`[1874.836, 60.370, 970.121]` and `[1874.836, 59.912, 969.775]`, with three
+candidate repairs of which two were disproved and the third — `ShapeFix`
+small-edge removal in the worker — was recommended as the remaining one.
+
+**The diagnosis was wrong, and convincingly so.** They are not small *edges*.
+Each is an **inner wire of a single edge whose endpoints do not meet**, bounding
+no area — a pinhole. That is why each is used by exactly one face inside a solid
+`BRepCheck_Analyzer` calls valid, and why OCCT's small-edge machinery cannot see
+them: `ShapeFix_Wireframe.CheckSmallEdges` reports **0** candidates at every
+precision from 1e-5 to 1e-2, and `ShapeFix_Face.FixSmallAreaWire` removes
+nothing. **Do not retry `ShapeFix` here.**
+
+Fixed by `occ.remove_pinhole_wires`, called from `boundary.trim_junction`
+before cap tagging: it drops a non-outer wire when every edge in it is under
+`PINHOLE_WIRE_TOL` **and** every edge is already used exactly once, so it can
+only ever delete edges that are already unpaired. Surface area is preserved
+bit-identically, volume to 2.7e-15, and `shell_defects` on the affected piece
+goes from `(2, 0)` to `(0, 0)`. On the full rehearsal it removes 2 wires from 1
+junction of 19,552 and `assemble` reports 14 watertight solids. Full account,
+including why a synthetic reproduction of this defect passed a complete
+measurement gate while repairing something else entirely, in
+`tools/prototypes/RESULTS.md` G10 and docs/algorithm.md §7.
+
 ### Scale rehearsal, chapter closed: paths 1–4 implemented and re-measured
 
 **First run 2026-08-14**, **re-profiled 2026-08-15** after implementing paths
 1–4 below, both on `TD_HX_rehearsal_test.step` at `cc=5, t=1`,
 `--cores 6 --ram 20 -bg` on the 6-core / 32 GB development workstation. Both
 runs used a temporary, uncommitted bypass of the `assemble`-stage watertightness
-gate ("Micron-scale debris edges" below, still open and still out of scope for
-this chapter) so every later stage could be measured; neither run's output is a
+gate (the defect closed above as "Micron-scale debris edges" — it was open and
+out of scope at the time) so every later stage could be measured; neither run's output is a
 shippable file, but the stage costs are representative because the same work is
 done either way, and both runs agree on everything the defect doesn't touch —
 330,354 mm³, 14 solids, 705,000 interior faces, 301,505 boundary faces,
@@ -306,6 +879,16 @@ proven at a few hundred faces is not a performance gate, and a design meant
 for hundred-thousand-face parts needs at least one measurement taken there.
 
 #### Per-stage cost and resource profile, 2026-08-15
+
+> **Superseded as a baseline, kept as a record.** Both columns below were
+> measured with the `assemble` watertightness gate bypassed and before the
+> G9–G12 defect family was fixed, so neither is a figure current work should be
+> compared against — the 47.1-minute total in particular has been withdrawn
+> wherever it was used as an anchor. The current profile, measured as a
+> controlled pair with no bypass, is in
+> [profiling-reports.md](profiling-reports.md): **55 m 17.9 s** before Phase 2
+> and **51 m 43.3 s** after. What this table is still good for is the *shape* of
+> the chapter it documents — which of paths 1–4 paid and which did not.
 
 Wall time from the run's `.log`; CPU, memory and I/O from
 [`tools/profile_run.py`](../tools/profile_run.py), joined to the stage boundaries by
@@ -418,98 +1001,3 @@ happened to produce (round 2's seam-only split changed *which* face objects
 those are, though not the shell they describe — see path 3 above), and
 unification is a size optimization, not a correctness one, so this difference
 is expected and harmless (algorithm.md §9, §11).
-
----
-
-## 11. Closed — kept for the reasoning, not as work
-
-### Invalid boundary faces from grazing trims — FIXED 2026-08-17 (34 → 0)
-
-Tracked from 2026-08-16, when the seam-split (#13) and pinhole-wire (#15) fixes
-first got the `cc=5, t=1` rehearsal of `TD_HX_rehearsal_test.step` to assemble
-**14 watertight solids** — and it then failed `validate`, with 1 of those 14
-solids carrying **34 individually invalid faces** (exit 4, no output written).
-
-Closed in two passes, because it was **two unrelated faults wearing one
-symptom**. Both are repaired by `occ.fix_vertex_tolerances`, as two rungs, and
-both turn out to be a *recorded tolerance* being wrong rather than any geometry
-being wrong (docs/algorithm.md §8; `tools/prototypes/RESULTS.md` G11 and G12).
-
-* **Rung 1 (#17) — 34 → 4.** Not 34 bad faces but **17 bad edges**: each
-  invalid face had exactly one invalid edge, and faces came in pairs because
-  the two faces of a pair *shared* it. On each, a vertex sat off the edge's own
-  3D curve (2.474044e-05 mm on an ellipse, 3.316370e-04 mm on a B-spline) with
-  that vertex's tolerance inflated to *exactly* that distance, so the check sat
-  on the knife edge. Repaired with `ShapeFix_Edge.FixVertexTolerance`.
-* **Rung 2 (this change) — 4 → 0.** The remaining 4 had **no** standalone-invalid
-  edge or vertex and passed every named face check, which G11 read as a
-  *contextual pcurve-versus-3D-curve* fault. **That reading was wrong.** The
-  fault is `BRepCheck_SelfIntersectingWire`, for two edges *adjacent in the
-  wire* — and it is not a real self-intersection: their pcurves cross at exactly
-  one point, at the shared vertex, *inside* its tolerance. The shared vertex's
-  recorded tolerance was simply left too tight to swallow the crossing.
-  Repaired by widening that vertex, bounded at 4× the tolerance the kernel
-  itself recorded and at 4e-3 mm absolutely.
-
-**What the wrong diagnosis cost, and how it was caught.** The pcurve deviation
-G11 named is real — on each of the four faces one edge deviates by 98–100 % of
-its own tolerance, which reads as a root cause. Two measurements disproved it:
-widening that edge's tolerance fixes nothing at any factor up to 5×, and
-`BRepLib.SameParameter` improves the deviation on the one face it cannot fix.
-The mechanism was then found with `BRepCheck_Analyzer.IsValid(subshape)` — the
-*in-context* overload — run as a **controlled** probe: it fires on all four and
-clears on the three `SameParameter` does fix, so a negative on the fourth could
-not have been the probe being blind. That control is the lesson from G10, where
-a blind scanner reporting "no faults" cost real time.
-
-This makes **four** defects in this family, each first diagnosed wrongly in a
-way that matched the symptom quantitatively and convincingly (G9, G10, G11,
-G12). The pattern worth keeping: OCCT's named repair for the named symptom did
-not touch the actual defect in any of them — `ShapeFix_Wireframe` for the
-"small edges" that were pinhole wires, `ShapeFix_Wire.FixSelfIntersection` for
-this self-intersection (a complete no-op). Establish the mechanism on the real
-failing geometry before building the repair.
-
-**Result, measured on the full rehearsal 2026-08-17** (`-cc 5 -t 1 --cores 6
---ram 20 -v`, 58m 18s, 18.57 GB peak):
-
-* `vertex tolerances corrected on 19 sewn boundary face(s); no geometry moved`,
-  with **no residual** — against 15 corrected and 4 remaining before this change.
-* `validity: all 14 solid(s) pass BRepCheck_Analyzer` — the gate passing for the
-  first time on this part.
-* The run **wrote its STEP**: 2.01 GB, 14 solids, 584,028 faces, lattice volume
-  330,354.002 mm³, AP214, part name `TD_HX_rehearsal_test+cc5+t1`. Every figure
-  the defect does not touch is unchanged from the 2026-08-15 profile (21,955
-  boundary pieces, 122,180 interfaces, 2 pinhole wires, 1,006,505 faces before
-  unification, same volume), which is evidence the repair changed only what it
-  was aimed at.
-
-`python -m pytest test -q` and `python tools/e2e.py` stay green (0 mm³ against
-both golden samples); the committed scenarios contain no grazing trims this
-severe, so neither rung fires on them, exactly as intended.
-
-### Micron-scale debris edges from near-tangential trims — FIXED 2026-08-16
-
-Tracked from 2026-08-14 as "2 edges used by exactly one face" at
-`[1874.836, 60.370, 970.121]` and `[1874.836, 59.912, 969.775]`, with three
-candidate repairs of which two were disproved and the third — `ShapeFix`
-small-edge removal in the worker — was recommended as the remaining one.
-
-**The diagnosis was wrong, and convincingly so.** They are not small *edges*.
-Each is an **inner wire of a single edge whose endpoints do not meet**, bounding
-no area — a pinhole. That is why each is used by exactly one face inside a solid
-`BRepCheck_Analyzer` calls valid, and why OCCT's small-edge machinery cannot see
-them: `ShapeFix_Wireframe.CheckSmallEdges` reports **0** candidates at every
-precision from 1e-5 to 1e-2, and `ShapeFix_Face.FixSmallAreaWire` removes
-nothing. **Do not retry `ShapeFix` here.**
-
-Fixed by `occ.remove_pinhole_wires`, called from `boundary.trim_junction`
-before cap tagging: it drops a non-outer wire when every edge in it is under
-`PINHOLE_WIRE_TOL` **and** every edge is already used exactly once, so it can
-only ever delete edges that are already unpaired. Surface area is preserved
-bit-identically, volume to 2.7e-15, and `shell_defects` on the affected piece
-goes from `(2, 0)` to `(0, 0)`. On the full rehearsal it removes 2 wires from 1
-junction of 19,552 and `assemble` reports 14 watertight solids. Full account,
-including why a synthetic reproduction of this defect passed a complete
-measurement gate while repairing something else entirely, in
-`tools/prototypes/RESULTS.md` G10 and docs/algorithm.md §7.

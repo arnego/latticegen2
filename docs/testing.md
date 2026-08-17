@@ -157,8 +157,17 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 | Scenario | Total | Dominant stages |
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
-| test cylinder, `cc=10 t=1.5` | ~48 s | classify, simplify, boundary sew |
-| `TD_HX_rehearsal_test`, `cc=5 t=1` | 58.3 min, 18.6 GB peak, 2.01 GB output | boundary trim, simplify, stitch, export |
+| test cylinder, `cc=10 t=1.5` | ~45 s | classify, simplify, boundary trim |
+| `TD_HX_rehearsal_test`, `cc=5 t=1` | 51.7 min, 19.3 GB peak, 2.00 GB output | simplify, boundary trim, stitch, validate |
+
+Both scenario rows and the rehearsal are post-Phase-2 (specification.md §10):
+building the interior's full-strut lateral faces already merged took the
+cylinder from ~56 s to ~45 s and the rehearsal from 55.3 min to 51.7 min, with
+an identical output in both cases. The rehearsal figure comes from a
+**controlled pair run back to back on the same machine** rather than from
+comparing two sessions — its five untouched stages agree to within 1 %, where
+the 2026-08-14/15 pair swung 25-36 % on machine load alone. Prefer that method
+for any future performance claim here.
 
 The third row is the scale rehearsal, first run end to end on 2026-08-14,
 re-profiled on 2026-08-15 after implementing specification.md §10's paths 1–4
@@ -194,6 +203,22 @@ that the paths 1–4 chapter is closed:
   unchanged) plus dispatching it across the shared pool took it from 8 m 57 s
   to **1 m 13.5 s** — this single change is 95 % of the run's total
   improvement (73.1 → 47.1 min).
+* **`simplify` is the largest stage and both obvious levers are now
+  disproved.** It cannot be spread *below* the body: unified tiles reassemble
+  by shared topology only while they stay in one process, so dispatching them to
+  worker processes duplicates every seam edge (G15), while threads keep identity
+  perfectly and deliver 1.04x on six of them because OCP holds the GIL for the
+  whole call (G17, which retains 3.7 % of Python throughput during it). The two
+  transports fix and break exactly opposite things, and there is no third. It
+  also cannot
+  usefully be fed *less*: restricting its face merge to the region that can
+  still merge was exact (byte-identical output, 46 % less input at rehearsal
+  scale) and no faster, because a correct restriction skips exactly the faces
+  the kernel would have returned unchanged — the cheap ones — and keeps the ones
+  that merge. Elasticity ~0.3, against 0.98 for a generic subset of the same
+  size (G16), so the selection is what defeats it and no implementation can do
+  better. Both are written up in docs/specification.md §11. **Do not propose a
+  new way to parallelise or restrict this call without reading them first.**
 * **Parallelising `simplify` and `validate` is correct but was not a
   wall-clock win on this part.** Both still measure at 0.99 cores in
   `profile_report.py` — this part's 14 solids are one dominant body plus 13
@@ -238,6 +263,11 @@ That prints a per-stage table of duration, mean and peak CPU, **core-equivalents
 where parallelism would recover the most wall time. Core-equivalents is the
 number to look at: it is what shows that `boundary` uses the machine and nothing
 else does.
+
+Reports kept from past runs, with a note between consecutive ones on what
+changed in between, are in [profiling-reports.md](profiling-reports.md). Append
+there rather than rewriting: the series is the value, and a stage delta only
+means something when the untouched stages beside it agree.
 
 `profile_run.py` needs `psutil` for **sampling the process tree** — a different
 use from the tool's own, and worth not conflating. `psutil` is a runtime

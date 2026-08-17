@@ -460,22 +460,42 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
     The output is simply described more verbosely, and every downstream gate
     still applies to it.
 
-    Two rungs, because the failure is not all-or-nothing. Merging *edges*
-    (concatenating the collinear pairs left inside a merged wire) is the part
-    that throws, and it is nearly worthless here: measured on the 80 mm ball at
-    ``cc=10, t=1``, dropping it still merges 20,268 faces down to 10,554 and
-    81,816 edges down to 62,376, while OCCT's edge pass on its own removes 4
-    edges out of 81,816 — and, with face merging enabled alongside it, raises
-    ``Standard_Failure: Courbes non jointives`` instead.
+    **The two passes are run separately, and what that now buys is degradation,
+    not speed.** ``ShapeUpgrade_UnifySameDomain`` merges coplanar faces and then
+    concatenates the collinear edge pairs left inside each merged wire.
+    Splitting them was built to let the face merge run with edge merging *off*,
+    which the sub-body tiling of docs/specification.md §10 required — and that
+    tiling is now disproved (G15: tiles reassemble by shared topology only while
+    they stay in one process). The split is kept anyway, for the reason at the
+    end of this docstring, and because measurement says it costs nothing:
+    `simplify` 13.87 s and 13.94 s split against 13.21 s and 16.18 s combined on
+    `dense-lattice`, with `test_pipeline.py` pinning the B-rep it produces as
+    identical to the combined call's, faces *and* edges.
+
+    **Dropping the edge pass outright was tried and rejected**, so it is not
+    retried. Edge merging is not the near-no-op docs/algorithm.md §9 once
+    recorded from the 80 mm ball (4 edges of 81,816): at lattice scale G13
+    measured it taking 307,200 edges down to 215,040. Skipping it took
+    `simplify` to 9.45 s on `dense-lattice` and handed every second of that back
+    to `validate` (6.24 -> 8.21 s) and `export` (6.25 -> 10.50 s), which scale
+    with edge count too, for a 35 % larger file (52.80 -> 71.29 MB) and no net
+    run-time change (57.28 -> 57.57 s). Face count was identical throughout,
+    which is what identifies edges as the whole of the difference.
+
+    What the split is actually worth is here. Edge merging is
+    the part that raises ``Standard_Failure: Courbes non jointives`` on geometry
+    this tool legitimately produces; now that it runs last and alone, a refusal
+    costs only the edge concatenation, where the old ladder threw away a
+    completed face merge and paid for a second one.
     """
     try:
-        return occ.unify_same_domain(solid), True
-    except Standard_Failure:
-        pass
-    try:
-        return occ.unify_same_domain(solid, unify_edges=False), True
+        merged = occ.unify_same_domain(solid, unify_edges=False)
     except Standard_Failure:
         return solid, False
+    try:
+        return occ.unify_same_domain(merged, unify_edges=True, unify_faces=False), True
+    except Standard_Failure:
+        return merged, True
 
 
 def _check_unify_result(pre_volume: float, post_volume: float, n_produced: int) -> float:

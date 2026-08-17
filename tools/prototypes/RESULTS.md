@@ -13,7 +13,15 @@ python tools/prototypes/g5_stitch_scaling.py
 python tools/prototypes/g6_tile_stitch.py
 python tools/prototypes/g7_thread_scaling.py
 python tools/prototypes/g8_seam_only_sew.py
+python tools/prototypes/g10_pinhole_wires.py
+python tools/prototypes/g12_self_intersecting_wire.py
+python tools/prototypes/g13_unify_scaling.py
+python tools/prototypes/g14_tiled_unify_trimmed.py
 ```
+
+G9 and G11 have no standalone script: both were found and fixed against the
+real production rehearsal rather than a synthetic prototype (see their
+sections).
 
 Machine: Windows 11, 6-core CPU, 32 GB RAM, Python 3.11.13, OCP 7.9.3.1.1
 (OCCT 7.9.3), NumPy 2.4.6.
@@ -746,3 +754,428 @@ bounds clear it comfortably; a face that exhausts them is left in
 {cylinder,bspline}.brep`. Both are kept for the same reason G11 kept two:
 they discriminate between the candidates — `SameParameter` fixes the B-spline
 one and not the cylinder one.
+
+---
+
+## G13 — can same-domain unification be tiled *below* the solid? ⚠️ CONDITIONAL PASS
+
+docs/specification.md §10 records optimization path 1 — parallelising
+`simplify` across the shared pool — as implemented, correct, and **not a
+wall-clock win** on the `cc=5, t=1` rehearsal (17 m 17 s → 18 m 39 s, still
+0.99 cores), because that part's 14 solids are one dominant body plus 13
+scraps and "the largest single solid is the floor, not the sum". Dispatching
+body-for-body cannot lower that floor; tiling *within* a solid is the only
+lever that can. Two questions decide whether it is worth building.
+
+    python tools/prototypes/g13_unify_scaling.py --tiles 2 3 4
+
+> **Re-running this gate now gives different numbers, by design.** Every figure
+> below was measured *before* docs/specification.md §10 Phase 2, when the
+> interior was instanced with one lateral face per half-strut. Phase 2 builds
+> the merged full-strut face directly, so the grids this script constructs now
+> arrive at roughly the face count unification used to produce — which is
+> exactly the change Phase 2 made, and it means part A's inputs are no longer
+> the ones tabulated here. The scaling exponent and the tiling identity results
+> still stand as measurements of `ShapeUpgrade_UnifySameDomain` itself.
+
+Method: closed all-interior `m × m × m` grids at `cc=10, t=1.5` (the same
+family G7 used), `m` from 4 to 16. Part A times a whole-solid unification at
+each scale. Part B partitions the largest two solids' faces into an `n³`
+spatial grid **by face centroid**, unifies each tile's face set on its own,
+concatenates the results with `BRep_Builder.Add` and counts edges used by
+exactly one face. The input is closed, so "did the tile seams survive" is a
+count against zero, not a judgement.
+
+### A — cost against face count: mildly superlinear, and worsening
+
+| m | faces in | unify s | ms/face | faces out |
+|---|---|---|---|---|
+| 4 | 1,632 | 0.209 | 0.128 | 1,056 |
+| 8 | 12,672 | 2.197 | 0.173 | 7,296 |
+| 12 | 42,336 | 7.996 | 0.189 | 23,328 |
+| 14 | 67,032 | 13.831 | 0.206 | 36,456 |
+| 16 | 99,840 | 22.968 | 0.230 | 53,760 |
+
+Overall log-log slope **1.135**, just under this gate's 1.15 "superlinear"
+bar — but the local slopes climb with scale (1.044 at 12 k→25 k faces, 1.193
+at 42 k→67 k, **1.273** at 67 k→100 k) and cost per face rises monotonically
+from 0.128 to 0.230 ms. So: **plan on tiling being worth about `W` and no
+more.** The serial sums in part B agree — 8 tiles cost 6.494 s against the
+whole solid's 7.054 s, an 8 % saving before any parallelism — so essentially
+all of the available win is parallelism, not a smaller `n^k` term. The
+upward trend does mean the extrapolation to a 1 M-face solid is not linear,
+and it is the reason the per-face rates in G7 (0.17 ms/face at ≤8.5 k faces)
+and the rehearsal (1.11 ms/face at 1 M) cannot be reconciled by assuming one.
+
+### B — tiles reassemble without sewing, but only with `unify_edges=False`
+
+| Scale | `unify_edges` | tiles | whole | slowest tile | faces | free edges | valid |
+|---|---|---|---|---|---|---|---|
+| m=16 | True | 8 | 23.007 s | 2.361 s | +4.94 % | **3,632** | — |
+| m=16 | True | 27 | 23.007 s | 2.270 s | +2.14 % | **11,232** | — |
+| m=16 | False | 8 | 7.054 s | 0.908 s | +4.94 % | **0** | yes |
+| m=16 | False | 27 | 7.054 s | 0.866 s | +2.14 % | **0** | yes |
+| m=16 | False | 64 | 7.054 s | 0.374 s | +7.17 % | **0** | yes |
+
+**With edge unification on, tiling is impossible.** Thousands of seam edges
+come back as two distinct objects and the reassembled shell is full of holes.
+That is the edge pass doing exactly what it is for: concatenating the
+collinear pairs left inside a merged wire rewrites edges *on* the tile
+boundary, so the two sides stop being the same `TShape`.
+
+**With it off, identity is exact.** Zero free edges at every tile count and
+both scales, `BRepCheck_Analyzer` valid, volume preserved to ~1e-13 relative.
+`BRep_Builder.Add` alone suffices — no sewing ever touches the
+volume-scaling face set, which is what docs/algorithm.md §6 and §8 require.
+
+### The finding that was not being looked for
+
+**`unify_edges=False` is 3.1–3.3× faster and merges exactly the same faces.**
+At m=16: 23.007 s → 7.054 s, both producing 53,760 faces. At m=14: 14.183 s →
+4.512 s, both 36,456 faces. The edge pass is ~70 % of the stage's cost and
+contributes nothing to face merging.
+
+It is **not** free to drop, and docs/algorithm.md §9's "worth almost nothing"
+(4 edges out of 81,816, measured on the 80 mm ball) does not hold at lattice
+scale: at m=16 the edge pass takes 307,200 edges down to 215,040, a **30 %
+reduction**.
+
+### Follow-up on a real part: neither the drop nor the split is a speed win
+
+The trade above was measured on `dense-lattice` before being taken, and **both
+candidate forms failed** (docs/specification.md §10, Phase 1):
+
+| `simplify` on `dense-lattice` | time | output |
+|---|---|---|
+| combined, one call (baseline) | 13.21 s, 16.18 s | 67,898 edges, 52.80 MB |
+| edge pass dropped | 9.45 s | 94,476 edges, 71.29 MB |
+| split: faces, then edges alone | 13.87 s, 13.94 s | 67,898 edges, 52.80 MB |
+
+**Dropping the edge pass fails on the downstream cost it creates.** The 3.8 s
+it saves is handed straight back to `validate` (6.24 → 8.21 s) and `export`
+(6.25 → 10.50 s), which scale with edge count as well as face count, and the
+file grows 35 %. Net run time does not change (57.28 → 57.57 s).
+
+**Splitting the passes is neutral, not cheap.** The hypothesis that the edge
+pass would be far cheaper over an already-face-merged solid is **disproved**:
+it costs ~4.4 s either way. The 3.1–3.3× above therefore does not transfer from
+the synthetic grid to a real trimmed solid, where the edge pass is ~33 % of the
+stage rather than ~70 %.
+
+The split was nonetheless adopted, on structural grounds rather than speed: it
+is what allows the face merge to run with edge merging **off**, which is a
+precondition for the tiling below, and it improves degradation (a throwing edge
+pass no longer discards a completed face merge). `test/test_pipeline.py` pins
+the split's B-rep as identical to the combined call's.
+
+**The lesson for the rest of this gate.** Part A's exponent and the tiling
+ceilings below are measured on synthetic all-planar instanced grids. This
+follow-up shows that a ratio measured there can be off by 2× on a real part
+carrying trimmed curved faces. Treat every projection derived from part A as an
+upper bound until it is confirmed on a real one.
+
+### Merge loss, and why the partition should not be generic
+
+A merge group straddling a tile seam merges partially in each tile, so the
+tiled result carries more faces than a whole-solid unification: **+2.1 % to
++11.4 %** here, non-monotonic in tile count because it depends on where the
+centroid grid falls relative to the lattice. That is a "the output is slightly
+larger" failure mode, which docs/algorithm.md §11 accepts — but it need not be
+paid at all. The centroid partition used here is deliberately the *generic*
+one, so its loss is an upper bound: the merge pairs are known by construction
+(one per surviving mid-strut interface), so bucketing by **strut** rather than
+by face centroid gives a partition no merge group can straddle, and a loss of
+zero.
+
+### What this decides
+
+* Sub-body tiling is viable, and `unify_edges=False` is a **precondition**,
+  not an option.
+* Expect ~`W`, not more. The mechanism must therefore not add serial cost
+  comparable to what it saves — reassembly and `.brep` IPC included.
+* Tile by strut, not by centroid, so the merge loss is zero by construction.
+* The edge-merge trade above is a separate decision from tiling, worth more
+  than tiling is on its own, and needs one measurement on a real part.
+
+---
+
+## G14 — does tiled unification survive *trimmed, curved* faces? ✅ PASS
+
+G13 proved that unifying a solid's faces in spatial tiles and concatenating the
+results with `BRep_Builder.Add` reproduces a closed valid solid with zero free
+edges, provided edge merging is off — the property docs/specification.md §10
+Phase 3 rests on. But it measured that on **all-planar instanced grids only**,
+which Phase 3 records as blocking risk R2: real output carries faces trimmed by
+`BRepAlgoAPI_Common` against the input body, where `TShape` identity across a
+tile seam was unproven.
+
+Phase 2 sharpened the question rather than retiring it. With the interior now
+built pre-merged (docs/algorithm.md §6), the faces still entering `simplify` are
+mostly boundary-derived — on `dense-lattice`, 15,718 of 25,234 — so the region
+Phase 3 would tile is exactly the region G13 never tested.
+
+    python tools/prototypes/g14_tiled_unify_trimmed.py --tiles 2 3 4 --pieces path/to/temp/<stamp>
+
+Two inputs, both carrying genuinely curved trimmed faces:
+
+**(a) A closed solid: instanced grid ∩ sphere** — 1,804 faces, **76 curved**,
+valid, 4590.670414 mm³.
+
+| tiles | free edges | faces | valid | volume drift |
+|---|---|---|---|---|
+| whole solid | 0 | 1,800 | yes | 6.06e-12 |
+| 8 | **0** | 1,804 (+0.22 %) | yes | 1.19e-15 |
+| 27 | **0** | 1,800 (+0.00 %) | yes | 6.06e-12 |
+| 64 | **0** | 1,804 (+0.22 %) | yes | 1.39e-15 |
+
+**(b) Real trimmed boundary pieces** from a kept `temp/<stamp>` of an 80 mm ball
+run, sewn as `weld` sews them — 2,342 faces, **176 curved**. This shell is open
+at every interface hole, so the bar is that tiling introduces no *new* free
+edge, not that there are none.
+
+| tiles | free edges (baseline 0) | faces | area drift |
+|---|---|---|---|
+| 8 | **0** | 2,342 | 5.31e-10 |
+| 26 | **0** | 2,328 | 3.69e-16 |
+| 60 | **0** | 2,342 | 5.31e-10 |
+
+**PASS on both.** Curved trimmed faces do not break tile identity, so Phase 3
+need not fall back to tiling only the interior-derived faces.
+
+> **Superseded by G15, and this verdict must not be read as a green light.**
+> Every measurement in this gate — like G13's — reassembles tiles *in one
+> process*, where identity is pointer identity. Phase 3 dispatches tiles to
+> separate worker processes as `.brep` files, and G15 measures the seam not
+> surviving that. What G14 establishes is narrower than it reads: curved
+> trimmed faces are not what breaks tiling. Something else is.
+
+### Two things this gate does *not* establish
+
+**The amount of merging in it is small.** Whole-solid unification took (a) from
+1,804 faces to 1,800 and (b) from 2,342 to 2,328 — because Phase 2 already
+merged the interior before this gate ever sees it. Identity is only really
+stressed where unification *rebuilds* faces, so the strongest evidence for
+"identity survives heavy merging" remains G13's planar case (99,840 → 53,760).
+Together they cover the two axes separately rather than jointly; a part that
+merges heavily *and* is mostly curved is not represented here.
+
+**The bar had to be corrected mid-gate, and the first version was wrong in a
+familiar way.** Volume/area preservation was initially barred at 1e-12, carried
+over from G13's planar measurements, and it failed a *correct* tiling at an area
+drift of 5.31e-10. Quadrature over curved trimmed faces is not exact —
+docs/algorithm.md §9 already records 2.4e-7 relative drift from the same cause
+on `dense-lattice` — so the bar now reuses `pipeline.UNIFY_VOLUME_TOL` (1e-5),
+the figure production already applies to this exact operation. This is the same
+mistake docs/specification.md §10 records against the boundary-unification
+attempt, made again; the tolerance-free part of the gate is the free-edge
+count, and that is what the verdict should rest on.
+
+A first run was also **vacuous** and said so: the sphere radius was scaled from
+the bounding box *diagonal*, and the lattice box is elongated along Z, so the
+sphere contained the whole grid and trimmed nothing. The curved-face count is
+now checked before the result is believed.
+
+---
+
+## G15 — does tile identity survive the `.brep` round trip? ❌ FAIL
+
+G13 and G14 both concluded that a tiled same-domain unification reassembles with
+`BRep_Builder.Add` alone — 0 free edges, valid, volume preserved — because
+`ShapeUpgrade_UnifySameDomain` leaves the edges it did not merge as *the same
+objects*, so a tile seam stays one `TShape`. That is the property
+docs/specification.md §10 Phase 3 is built on.
+
+**Both gates measured it in one process, where identity is pointer identity.**
+Phase 3 does not run in one process. Its entire purpose is to spread tiles
+across `latticegen2.parallel.WorkerPool`, and every stage that does so moves
+geometry as `.brep` files (docs/algorithm.md §7, §8). A `.brep` is a
+serialization: sharing is preserved *within* one file and cannot be preserved
+*between* two, because each file writes its own copy of every edge it
+references. Two tiles sharing a seam edge are written by two different workers
+into two different files.
+
+    python tools/prototypes/g15_tiled_unify_ipc.py
+
+Input: G14's instanced grid ∩ sphere — 1,804 faces, **76 curved**, closed, so
+the whole-solid unification has 0 free edges by construction and the test is a
+count rather than a judgement. Three reassembly routes, the first two controls:
+
+| route | 8 tiles | 27 tiles | |
+|---|---|---|---|
+| in-process (G14's route) | **0** | **0** | control: reproduces G14 |
+| one file, all tiles as one compound | **0** | **0** | control: serialization itself is fine |
+| **one file per tile** | **864** | **1,760** | what Phase 3 actually does |
+
+**The middle row is what makes this readable.** Serialization does not destroy
+sharing — a compound written to one file and read back keeps every seam. What
+destroys it is the *file boundary*, which is precisely the boundary Phase 3
+puts between workers. So this is not a `.brep` defect to work around; it is
+what one-process-per-tile means.
+
+### Why the obvious repairs do not rescue it
+
+* **Re-identify the duplicates on the master.** The geometry is unchanged, so
+  matching the pairs is a cheap exact lookup. *Merging* them is not: it needs
+  `BRepTools_ReShape` to replace edges **and** their vertices, and
+  docs/algorithm.md §8 already measured that — replacing an edge's vertices
+  leaves the neighbouring edges pointing at the old ones, the wire comes apart
+  (`BRepCheck_NotConnected`), the solid is invalid and the volume wrong, while
+  every edge still has two faces and the shell still "closes".
+* **Sew only the seam-bearing faces.** This is G8's split, and its failure mode
+  is documented at production scale: on the rehearsal's real trimmed pieces it
+  produced 118,760 open edges where 10 were expected, and the checked fallback
+  is a full unsplit sew. A full sew over a volume-scaling face set is the one
+  thing docs/algorithm.md §6 and §8 exist to prevent (it cost 4 h 45 m of a
+  5 h 04 m run). The failure mode here would be "catastrophically more work",
+  not §11's acceptable "a little more work".
+* **Tile inside a single worker.** Sound — the middle row proves it — but then
+  the tiles are serial, and G13 measured serial tiling at an 8 % saving
+  (6.494 s against 7.054 s at 8 tiles). G13's own conclusion was "plan on tiling
+  being worth about `W` and no more; the win is parallelism". Without the
+  parallelism there is close to nothing left.
+
+**The lesson is G8's, in a new place.** A property proven at prototype scale is
+proven *under the prototype's conditions*, and "runs in one process" was a
+condition neither G13 nor G14 stated because neither had a reason to. Phase 3's
+risk list carried R2 (curved faces), R3 (merge loss), R5 (memory/IPC volume) and
+R6 (the `IsSame` trap) — five gates' worth of scepticism — and none of them
+asked whether the mechanism survives the process boundary the plan's first
+sentence puts it across.
+
+---
+
+## G16 — is unification priced by the size of its input? ✅ YES (and that is the surprise)
+
+docs/specification.md §11 records two attempts to make `simplify` cheaper by
+giving `ShapeUpgrade_UnifySameDomain` less to look at. Phase 2 cut its input
+~31 % and the stage fell 12.4 %. The restricted face merge cut it **46 %** and
+the stage did not fall at all, on a byte-identical output.
+
+The natural conclusion — "the call is priced by what it emits, not what it
+consumes" — was written into this project's docs twice before being tested.
+**It is wrong.**
+
+    python tools/prototypes/g16_unify_elasticity.py
+
+On G14's trimmed test solid (4,350 faces, 270 curved), timing the face merge
+over spatially coherent subsets, with `elasticity = (relative time saved) /
+(relative input removed)`:
+
+| input | share | time | saved | elasticity |
+|---|---|---|---|---|
+| 4,350 | 1.00 | 0.156 s | — | — |
+| 3,915 | 0.90 | 0.141 s | 9.5 % | 0.95 |
+| 3,480 | 0.80 | 0.127 s | 18.9 % | 0.94 |
+| 2,610 | 0.60 | 0.094 s | 39.7 % | 0.99 |
+| 1,740 | 0.40 | 0.057 s | 63.3 % | 1.06 |
+
+**Mean 0.98 — very nearly linear.** Remove a representative 40 % of the faces
+and you save 40 % of the time.
+
+### What that changes
+
+The pipeline's own measurement stands: on a real `dense-lattice` solid,
+removing 20 % of the faces saved **6 %** of the time, an elasticity near 0.3.
+Against 0.98 for a generic removal of the same size, the gap is not the
+kernel's pricing — it is **which** faces a correct restriction removes.
+
+A correct restriction skips exactly the faces unification would have returned
+unchanged, because those are the only ones it is *allowed* to skip. Those are
+also the cheap ones. It keeps exactly the faces that merge, which are the
+expensive ones. **The property that makes the restriction correct is the
+property that makes it worthless**, so no implementation improves on 0.3, and
+the ~0.045 ms/face of bookkeeping any restriction needs is never recovered.
+
+That is a stronger and more transferable claim than "the kernel is priced by
+its output", and it is the one to carry forward: *any* future proposal to feed
+this stage less inherits the same 0.3, whatever mechanism it uses to identify
+what to skip.
+
+### What this gate does not measure
+
+The **targeted** elasticity itself. Doing that needs geometry that merges
+heavily, and the trimmed test solid here merges 4,350 → 4,344 — six faces —
+now that Phase 2 builds the interior pre-merged (docs/algorithm.md §6). The
+generic figure is the honest half of the comparison, and the targeted one is
+the pipeline measurement above, taken on `dense-lattice` where the real merge
+is 25,234 → 15,966. Quoting this gate's 0.98 as if it were what a restriction
+would achieve would repeat exactly the mistake it exists to correct.
+
+---
+
+## G17 — threads instead of processes for a tiled unification? ❌ NO
+
+G15 killed sub-body tiling on the *transport*: unified tiles reassemble by
+shared topology only inside one process, and shipping them to workers as
+`.brep` files gives every seam edge two copies. Threads would sidestep that
+entirely — one heap, tiles pointing at literally the same `TShape`, no
+serialization anywhere — so the honest follow-up is whether the transport was
+ever the real obstacle.
+
+    python tools/prototypes/g17_thread_tiled_unify.py --m 12 --threads 6
+
+Input: a closed 12×12×12 instanced grid, 23,328 faces, 0 free edges.
+
+**Probe A — is the GIL released during the call?** A Python counter spins in a
+background thread while one `unify_same_domain` runs on the main thread, and its
+rate is compared against the same counter with nothing competing:
+
+| | iterations/s |
+|---|---|
+| counter alone | 8,369,062 |
+| counter during a 0.87 s OCCT call | 312,934 |
+
+**3.7 % retained — the GIL is held for essentially the whole call.**
+
+**Probe B — does threading go faster anyway?** 27 tiles, serial against 6
+threads:
+
+| | time | faces | free edges after reassembly |
+|---|---|---|---|
+| serial | 0.935 s | 23,328 | — |
+| 6 threads | 0.896 s | 23,328 | **0** |
+
+**1.04×.** No parallelism, exactly as probe A predicts.
+
+### The finding is the pair of results, not either one
+
+**Threads fix the thing processes break, and break the thing processes fix.**
+Reassembly after threaded tiling leaves **0 free edges** — identity is perfect,
+because nothing was ever serialized. And the tiles run one at a time regardless
+of how many threads dispatch them. Processes give real parallelism (`boundary`
+reaches 5.2 of 6 cores) and destroy tile identity. There is no third option in
+this architecture, so sub-body parallelism in `simplify` is closed, not merely
+unbuilt.
+
+This also upgrades G7's finding from symptom to mechanism. G7 inferred a held
+GIL from a 0.91–1.01× speedup; probe A observes the interpreter stalling
+directly, which is the thing a scaling measurement can only imply.
+
+### The escape hatches, and why none is available
+
+* **No internal parallel mode.** `ShapeUpgrade_UnifySameDomain` exposes no
+  `SetRunParallel` or thread-pool hook (checked: its whole surface is
+  `AllowInternalEdges`, `Build`, `History`, `Initialize`, `KeepShape(s)`,
+  `SetAngularTolerance`, `SetLinearTolerance`, `SetSafeInputMode`, `Shape`), so
+  unlike OCCT's booleans and mesher there is nothing to switch on.
+* **A C extension releasing the GIL around the call** would work in principle
+  and is ruled out by packaging: specification.md §2 requires ordinary wheels,
+  no build step and no compiler on the target.
+* **Free-threaded CPython (PEP 703)** is the only thing that would change the
+  answer. The project pins Python 3.11 with pinned wheels, and no free-threaded
+  `cadquery-ocp` build exists.
+* **Shared memory instead of files** does not help. It addresses I/O, which was
+  never the cost — `simplify`'s round trip measured 940 MB against an 18-minute
+  stage. A `TopoDS_Shape` is a graph of pointer-linked C++ objects with
+  vtables; another process cannot use it at a different base address, which is
+  why `.brep` serialization is the only supported transfer and why the identity
+  loss is structural rather than an artefact of choosing files.
+
+### What this gate does *not* establish
+
+**That threading would be safe if it were fast.** Tiles sharing a seam edge
+share a `TShape`, so two threads unifying neighbouring tiles touch the same
+object and the same reference count concurrently — exactly the case OCCT's
+thread-safety notes do not cover. Probe B ran without crashing, and that is not
+evidence: a data race that does not fire is indistinguishable from no race.
+The question simply never becomes worth asking, because probe A closes it first.

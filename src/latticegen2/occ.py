@@ -239,7 +239,9 @@ def make_solid(shell: TopoDS_Shell) -> TopoDS_Shape:
     return BRepBuilderAPI_MakeSolid(shell).Solid()
 
 
-def unify_same_domain(shape: TopoDS_Shape, unify_edges: bool = True) -> TopoDS_Shape:
+def unify_same_domain(
+    shape: TopoDS_Shape, unify_edges: bool = True, unify_faces: bool = True
+) -> TopoDS_Shape:
     """Merge adjacent faces (and edges) that lie on the same underlying surface.
 
     A pure *representation* change: the point set is identical, only its
@@ -248,17 +250,20 @@ def unify_same_domain(shape: TopoDS_Shape, unify_edges: bool = True) -> TopoDS_S
     lateral faces are coplanar and share an edge, but nothing ever merges them
     (docs/algorithm.md §9).
 
-    ``unify_edges`` also concatenates the collinear edge pairs left inside a
-    merged face's wire. It is the part of the algorithm that can throw on
-    otherwise sound geometry, and it is worth far less than the face merging —
-    see :func:`latticegen2.pipeline._unify`, which retries without it.
+    The two passes are separable, and :func:`latticegen2.pipeline._unify_one`
+    runs them as two calls. ``unify_faces`` merges the coplanar faces — the part
+    that shrinks the output. ``unify_edges`` then concatenates the collinear edge
+    pairs left inside a merged face's wire. Splitting them costs nothing and
+    describes the solid identically; it exists so the face merge can run with
+    edge merging off, which is what a tiled unification needs (see
+    ``_unify_one``, and G13 in `tools/prototypes/RESULTS.md`).
 
     OCCT's default tolerances are used deliberately. The faces this is expected
     to merge are exactly coplanar by construction, so the defaults suffice;
     loosening them would let genuinely distinct faces merge, which would change
     the geometry rather than just how it is described.
     """
-    upgrade = ShapeUpgrade_UnifySameDomain(shape, unify_edges, True, False)
+    upgrade = ShapeUpgrade_UnifySameDomain(shape, unify_edges, unify_faces, False)
     upgrade.Build()
     return upgrade.Shape()
 

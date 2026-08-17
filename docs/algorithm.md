@@ -472,6 +472,17 @@ output is unchanged — same 15,966 faces and 67,898 edges, both golden samples 
 0 mm³ — because this builds the result unification was already producing, rather
 than a different one.
 
+At production scale (`TD_HX_rehearsal_test` at `cc=5, t=1`, a controlled pair)
+the interior reduction is larger — 705,000 → 389,492 faces, −44.8 %, since that
+part has proportionally more interior nodes — while the *run* improves less,
+55 m 18 s → 51 m 43 s (−6.5 %), because `boundary` and `stitch` are 43 % of it
+and neither is touched. `instance` falls 43.8 % and `assemble` 31.9 %, tracking
+the face count directly; `simplify` falls only 12.4 % on a 31 % smaller input,
+because its cost tracks the output it must produce — unchanged at 584,028 faces
+— more than the input it consumes. Its peak memory falls 26.3 %. Output
+identical throughout: 584,028 faces, 2,517,881 edges, 14 solids,
+330,354.002 mm³ (docs/specification.md §10).
+
 The construction is *indexed*, not geometric:
 
 * A global vertex is keyed by `(owning node, local template vertex)`. A vertex on
@@ -1238,7 +1249,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Classify before intersecting | Booleans only for the `O(S)` boundary junctions |
 | One junction template, instanced everywhere | The only *unconditional* general fuse is 6 operands, once per run — §7.1's repair fuse runs only for a disagreeing cap pair, `O(1)` occurrences in practice |
 | Indexed shared-topology interior shell | `O(N)` and exactly watertight; replaces a sewing step measured at 14.9 s per 1,000 junctions and growing superlinearly |
-| Full-strut lateral faces built merged (§6) | Removes the volume-scaling half of same-domain unification's job instead of dividing it: interior faces 14,256 → 9,516 and edges 30,900 → 21,420 on `dense-lattice`, which also shrinks `instance`, `assemble`, `validate` and `export` together — the run 55.6 → 44.8 s for an identical output |
+| Full-strut lateral faces built merged (§6) | Removes the volume-scaling half of same-domain unification's job instead of dividing it: interior faces −33 % on `dense-lattice` and **−44.8 % at rehearsal scale** (705,000 → 389,492), shrinking `instance` (−43.8 %), `assemble` (−31.9 %), `simplify` (−12.4 %) and `validate` (−7.4 %) together, for an identical output. Whole-run effect is part-shaped: −19 % on `dense-lattice`, −6.5 % on the rehearsal, where `boundary` and `stitch` are 43 % of the clock and untouched |
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10) |

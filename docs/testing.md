@@ -158,11 +158,16 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
 | test cylinder, `cc=10 t=1.5` | ~45 s | classify, simplify, boundary trim |
-| `TD_HX_rehearsal_test`, `cc=5 t=1` | 58.3 min, 18.6 GB peak, 2.01 GB output | boundary trim, simplify, stitch, export |
+| `TD_HX_rehearsal_test`, `cc=5 t=1` | 51.7 min, 19.3 GB peak, 2.00 GB output | simplify, boundary trim, stitch, validate |
 
-The cylinder row is post-Phase-2 (specification.md §10): building the interior's
-full-strut lateral faces already merged took it from ~56 s to ~45 s with an
-identical output.
+Both scenario rows and the rehearsal are post-Phase-2 (specification.md §10):
+building the interior's full-strut lateral faces already merged took the
+cylinder from ~56 s to ~45 s and the rehearsal from 55.3 min to 51.7 min, with
+an identical output in both cases. The rehearsal figure comes from a
+**controlled pair run back to back on the same machine** rather than from
+comparing two sessions — its five untouched stages agree to within 1 %, where
+the 2026-08-14/15 pair swung 25-36 % on machine load alone. Prefer that method
+for any future performance claim here.
 
 The third row is the scale rehearsal, first run end to end on 2026-08-14,
 re-profiled on 2026-08-15 after implementing specification.md §10's paths 1–4

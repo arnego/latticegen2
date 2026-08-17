@@ -662,14 +662,56 @@ faces *before they are built* (G13: unification achieves exactly 99,840 ->
 file size and peak memory together — and because the wire is ours to choose, it
 delivers the edge reduction by construction, at no kernel cost.
 
-**The projection this once carried is withdrawn rather than restated.** It was
-anchored on the 2026-08-15 profile (47.1 min, `simplify` 18 m 39 s), which was
-measured with the `assemble` watertightness gate bypassed and before the four
-defects of the G9–G12 family were fixed. The current pre-Phase-2 baseline is the
-2026-08-17 rehearsal — **58.3 min, 18.6 GB peak, 2.01 GB output** — the first
-run of this part to pass `validate` and write its STEP. Phase 2's gain at that
-scale is measured below rather than extrapolated, precisely because Phase 1
-demonstrated such extrapolations can be off by 2x.
+##### Measured at rehearsal scale: **-6.5 %**, not the -19 % `dense-lattice` showed
+
+The projection this once carried (47.1 -> ~37 min) is withdrawn, not restated:
+it was anchored on the 2026-08-15 profile, which ran with the `assemble`
+watertightness gate bypassed and before the G9-G12 defect family was fixed.
+Phase 2 was instead measured directly, as a **controlled pair run back to back
+on the same machine on 2026-08-17** — `82adbb1` against `928cc57`, same input,
+same `--cores 6 --ram 20`.
+
+| Stage | before (`82adbb1`) | after (Phase 2) | delta |
+|---|---|---|---|
+| classify | 2 m 06.3 s | 2 m 05.9 s | -0.3 % |
+| boundary | 11 m 54.6 s | 12 m 01.3 s | +0.9 % |
+| connect | 11.3 s | 11.3 s | -0.6 % |
+| stitch | 10 m 29.1 s | 10 m 23.0 s | -1.0 % |
+| **instance** | 1 m 14.2 s | **41.7 s** | **-43.8 %** |
+| **assemble** | 30.9 s | **21.0 s** | **-31.9 %** |
+| **simplify** | 20 m 41.3 s | **18 m 07.9 s** | **-12.4 %** |
+| **validate** | 4 m 02.8 s | **3 m 44.9 s** | **-7.4 %** |
+| export | 3 m 49.3 s | 3 m 52.5 s | +1.4 % |
+| **total** | **55 m 17.9 s** | **51 m 43.3 s** | **-6.5 %** |
+| peak tree RSS | 19,827 MB | 19,291 MB | -2.7 % |
+| `simplify` peak RSS | 9,956 MB | **7,339 MB** | **-26.3 %** |
+
+**The five untouched stages agree to within 1 %**, which is what makes the
+touched-stage deltas readable at all — and is the control the 2026-08-14/15
+pair lacked, where untouched stages swung 25-36 % from machine load alone.
+
+**The output is identical**: 584,028 faces, 2,517,881 edges, 14 solids,
+330,354.002 mm³, 2.00 GB. Interior faces fell 705,000 -> **389,492 (-44.8 %)**,
+close to the 50 % ceiling this optimization can reach, and far above
+`dense-lattice`'s 33 % — exactly as predicted from the interior/boundary node
+ratio.
+
+**Two findings worth carrying forward.**
+
+*The gain does not transfer between parts.* `dense-lattice` measured -19 %; the
+rehearsal measures -6.5 %, on a **larger** interior reduction. The reason is
+that this part's run is dominated by stages Phase 2 does not touch — `boundary`
+(12 m) and `stitch` (10 m 23 s) are 43 % of it between them — so halving the
+interior cannot move most of the clock.
+
+*`simplify` scales with its output, not its input.* Unification's input fell
+~31 % (1,006,505 -> ~691,000 faces) and the stage fell only 12.4 %, while its
+output face count was unchanged at 584,028 by construction. Its memory and I/O
+fell much more (-26 % peak RSS, -21 % bytes). **This directly weakens Phase 3's
+premise** and should be read before building it: tiling divides the work per
+tile, but if the cost is dominated by producing an output the tiling does not
+shrink, the achievable saving is smaller than G13's face-count scaling
+suggests.
 
 *Blocking risk R4 — merged-loop correctness.* The spliced wire must be planar,
 simple and correctly wound for every `(cc, t)`. Verify with a unit test over

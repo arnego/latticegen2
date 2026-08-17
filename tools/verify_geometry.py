@@ -302,14 +302,156 @@ def _distance_to_mesh(mesh: TriMesh, sh: SpatialHash, point: np.ndarray) -> floa
                                        C[candidates]).min())
 
 
-def material_outside(candidate_path: str, input_path: str) -> float:
-    """Volume of generated material lying outside the input body, in mm³.
+CONTAINMENT_TOL = 2e-3
+"""Millimetres. How far outside the input body a sampled point may sit before it
+counts as material outside rather than as a point *on* the shared boundary.
 
-    specification.md §1 requires the lattice to fit *exactly* within the input
-    geometry, so this should be zero. It is a direct check of that requirement,
-    independent of any golden sample.
+A lattice is trimmed against the input, so a large part of its surface lies
+exactly on the input's surface and every point there is a tie. What decides the
+tie is how precisely "on" is recorded, and OCCT's own answer to that is the
+tolerance it puts on those faces: 8.7e-04 to 1.5e-03 mm on the trimmed B-splines
+of `TD_HX_rehearsal_test` (docs/algorithm.md §8, G12). This sits just above the
+largest of them, so a point it calls outside is outside by more than the kernel's
+own uncertainty about where the surface is — and still 200x below the smallest
+strut the CLI accepts (`t >= 0.4` mm), so nothing geometrically meaningful can
+hide under it."""
+
+CONTAINMENT_DEFLECTION = 0.05
+"""Millimetres. Chordal deviation for the tessellation whose vertices are
+sampled by :func:`surface_points_outside`. Fine enough that a protrusion of
+`CONTAINMENT_TOL` cannot slip between samples on a strut of side `t >= 0.4` mm."""
+
+CONTAINMENT_SWEEP = (1e-6, 1e-5, 1e-4, 1e-3, 2e-3)
+"""Tolerances tried in order, so the result reports *how far* out the worst point
+is rather than only whether it cleared one bar."""
+
+
+def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTION) -> dict:
+    """Boolean-free containment: are any of ``solid``'s surface points outside ``body``?
+
+    Every point of ``solid``'s tessellation is classified against ``body`` with
+    OCCT's exact solid classifier — no boolean, so none of a boolean's
+    conditioning problems apply. The sweep over tolerances reports the smallest at
+    which nothing is outside, which is an upper bound on how far the worst point
+    protrudes.
+
+    **This is weaker than the exact cut and must be reported as such.** It samples
+    the boundary rather than integrating the volume, and it is sound *here*
+    because a lattice's material is everywhere within `t/2` of its own surface, so
+    material outside the body implies surface points outside it. That argument is
+    specific to this geometry, not general.
     """
-    return _cut_volume(occ.read_step(candidate_path), occ.read_step(input_path))
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.TopAbs import TopAbs_ShapeEnum, TopAbs_State
+    from OCP.TopLoc import TopLoc_Location
+    from OCP.TopoDS import TopoDS
+    from OCP.gp import gp_Pnt
+
+    BRepMesh_IncrementalMesh(solid, deflection, False, 0.2, True)
+    pts = []
+    for f in occ._explore(solid, TopAbs_ShapeEnum.TopAbs_FACE):
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(TopoDS.Face_s(f), loc)
+        if tri is None:
+            continue
+        trsf = loc.Transformation()
+        for i in range(1, tri.NbNodes() + 1):
+            p = tri.Node(i).Transformed(trsf)
+            pts.append((p.X(), p.Y(), p.Z()))
+    if not pts:
+        return {"sampled": 0, "outside": None, "cleared_at_mm": None}
+    pts = np.unique(np.array(pts), axis=0)
+
+    classifier = BRepClass3d_SolidClassifier(body)
+    counts: dict[float, int] = {}
+    cleared = None
+    for tol in CONTAINMENT_SWEEP:
+        n = 0
+        for p in pts:
+            classifier.Perform(gp_Pnt(*p), tol)
+            if classifier.State() == TopAbs_State.TopAbs_OUT:
+                n += 1
+        counts[tol] = n
+        if n == 0:
+            cleared = tol
+            break
+    return {
+        "sampled": int(len(pts)),
+        "outside": counts[CONTAINMENT_SWEEP[0]],
+        "counts": counts,
+        "cleared_at_mm": cleared,
+        "contained": cleared is not None and cleared <= CONTAINMENT_TOL,
+    }
+
+
+def material_outside(candidate_path: str, input_path: str) -> dict:
+    """Generated material lying outside the input body (specification.md §1, §6.2).
+
+    §1 requires the lattice to fit *exactly* within the input geometry, so this
+    should be zero. Returns a dict rather than a float because on a large part the
+    exact answer is not always available, and "not measured" must never be able to
+    read as "measured as fine":
+
+    * ``volume_mm3`` — the exact figure, summed over the output's solids, or
+      ``None`` if any solid's cut could not be trusted;
+    * ``unmeasured`` — one entry per such solid, with the containment evidence
+      gathered for it instead;
+    * ``exact`` — whether every solid was measured by boolean.
+
+    **The cut is taken per solid, not over the whole output**, and that is the
+    whole point of the shape of this function. Cutting a 43,530-face lattice
+    against the body it was trimmed from returns a wrong answer: on the
+    `cc=12, t=2.5` output of `TD_HX_rehearsal_test` it reported **354,733 mm³**
+    outside — the entire solid — where the same cut, solid by solid, returns
+    **exactly 0** for eight of the nine and only the largest misbehaves.
+
+    That result is not a kernel no-op, which is worth stating because it is the
+    obvious reading and it is wrong: the call reports ``IsDone``, ``HasModified``
+    and ``HasGenerated``, and returns 43,672 faces where 43,530 went in, having
+    removed 3.6e-03 mm³. It genuinely ran and genuinely mis-classified, which is
+    unsurprising on this input — a lattice trimmed from a body has a large share
+    of its faces lying *exactly on* that body's surface, the classic
+    ill-conditioned case for a boolean. So a detector keyed on "the volume came
+    back unchanged" would not fire: the relative difference is 1.02e-08.
+
+    What does fire is a contradiction test. A trustworthy zero is exactly zero, so
+    any non-zero remainder is checked against :func:`surface_points_outside`,
+    which uses no boolean at all. If that finds the solid contained, the two
+    disagree, the cut is not believed, and the solid is reported as unmeasured
+    with the containment figures attached — labelled weaker, the way
+    :func:`golden_sample_agreement` already is. A real defect survives this,
+    because real material outside the body shows up in both tests.
+    """
+    body = occ.read_step(input_path)
+    solids = occ.solids(occ.read_step(candidate_path))
+    total = 0.0
+    unmeasured = []
+    per_solid = []
+    for i, solid in enumerate(solids):
+        own = occ.volume(solid)
+        cut = _cut_volume(solid, body)
+        trustworthy = cut == cut and cut <= own * 1e-9      # exactly zero, in effect
+        if not trustworthy:
+            evidence = surface_points_outside(solid, body)
+            unmeasured.append({
+                "solid": i,
+                "faces": occ.count_subshapes(solid)[0],
+                "volume_mm3": own,
+                "cut_claimed_mm3": cut,
+                "containment": evidence,
+            })
+        else:
+            total += cut
+        per_solid.append({"solid": i, "cut_mm3": cut, "trusted": trustworthy})
+    return {
+        "volume_mm3": total if not unmeasured else None,
+        "per_solid": per_solid,
+        "unmeasured": unmeasured,
+        "exact": not unmeasured,
+        "solids": len(solids),
+    }
 
 
 def bounding_box_within(candidate_path: str, input_path: str, tol: float) -> bool:

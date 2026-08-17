@@ -39,6 +39,7 @@ header rewrite.
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6. Also that the strided parallel sweep (docs/algorithm.md §5.4) returns *identical* classes to the serial one, across a real process boundary — identical rather than equivalent, because stride arithmetic invites off-by-ones that a tolerance would hide | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
 | `test_pipeline.py` | Same-domain unification's fallback ladder — a kernel that refuses to merge must yield a larger file, never a failed run | yes |
+| `test_verify_geometry.py` | The one part of the harness whose failure mode is a plausible number rather than an exception: `material_outside`'s per-solid cut, the contradiction against a boolean-free containment check, and that a face lying *on* the input surface is a tie rather than a protrusion. The only test file that reaches into `tools/` — see the note below | yes |
 
 ## E2E verification
 
@@ -71,7 +72,7 @@ python src/main.py -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke.step -v
 | **Exact B-rep validity** | `BRepCheck_Analyzer` on every solid |
 | Closed manifold | every mesh edge used by exactly 2 triangles |
 | No self-intersections | `triangles_properly_cross` — plane-straddle pre-check, then edge piercing |
-| No material outside the input body | boolean cut of output against input, volume ≈ 0 |
+| No material outside the input body | boolean cut of output against input **per solid**, volume ≈ 0; a non-zero remainder is contradicted against a boolean-free containment check and reported as unmeasured if the two disagree (see below) |
 | Bounding box within input + (cc+t) | direct comparison |
 | Runtime budget | wall clock: 10 min for `smoke-fast` and `dense-lattice`, 20 min for `smoke-verified` |
 | Golden-sample match | symmetric-difference volume both ways, tolerance `t³` |
@@ -82,6 +83,36 @@ face report hundreds of false crossings purely because their independent
 triangulations are not vertex-aligned. Measured on two boxes sharing one exact
 face with zero volume overlap: 344 false positives without the pre-check, 0 with
 it.
+
+The material-outside check has a similar story and a sharper edge to it. A
+lattice trimmed from a body has a large share of its faces lying *exactly on*
+that body's surface, which is the classic ill-conditioned input for a boolean —
+and at 43,530 faces the cut duly mis-classified, reporting the **entire** solid
+as outside. It did not decline: `IsDone`, `HasModified` and `HasGenerated` were
+all true and it returned 43,672 faces where 43,530 went in, so a test for "the
+result came back unchanged" would not have caught it. What catches it is that a
+trustworthy answer here is *exactly* zero, so any remainder is contradicted
+against `surface_points_outside` — an exact solid classification of the solid's
+own tessellation vertices, no boolean involved. Disagreement means unmeasured,
+never a pass. The same output measures exactly 0 mm³ on eight of its nine solids
+and, on the ninth, 1 of 55,513 surface points outside at 1e-06 mm and none at
+1e-05 mm — so nothing was actually wrong with the geometry; the check simply
+could not say so.
+
+Two things follow for anyone extending this file. A boolean-based check needs a
+scale at which it is known to work, and `dense-lattice`'s 15,966 faces is not
+evidence about 43,530. And a check whose failure mode is a *plausible number*
+rather than an exception is worse than one that raises: the harness reported a
+354,733 mm³ violation with total confidence.
+
+That second point is why `test/test_verify_geometry.py` exists at all, and it is
+the only test file that imports from `tools/`. The rest of the harness is tested
+by running it — a broken `manifold_check` shows up as a failed scenario — but a
+`material_outside` that quietly reports the wrong number cannot be caught by
+reading a passing run's output, so the contradiction logic is pinned directly.
+It uses boxes rather than the real part: "contained", "sticking out" and "flush
+with the boundary" are known there by construction, and the real part is covered
+by this harness and by specification.md §11.
 
 ### Testing against real geometry, not a reproduction of it
 

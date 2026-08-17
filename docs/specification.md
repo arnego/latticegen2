@@ -234,56 +234,6 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### `verify_geometry.material_outside` fails silently above ~40 k faces
-
-**Found 2026-08-17**, while verifying the `cc=12, t=2.5` output of
-`TD_HX_rehearsal_test` by hand after fixing the two guards recorded in §11. Not
-a defect in the generator, and not reached by any committed scenario — but it
-means the §6.2 check "no generated material lies outside the input body" cannot
-currently be run on a part of production size, which is exactly where one would
-want it.
-
-**What's wrong.** `material_outside` (`tools/verify_geometry.py`) is one
-`BRepAlgoAPI_Cut` of the whole output against the input body. On a 43,530-face
-solid the call reports `IsDone()` **true** and returns its own argument
-untouched — 354733 mm³ of "material outside" against the solid's own
-354733.0042 mm³, i.e. the boolean quietly did nothing. `_cut_volume` only
-guards `IsDone()`, so the harness would report a spectacular false failure
-rather than an inconclusive result.
-
-**It is purely a size limit, and the threshold is bracketed.** Cutting the same
-output *solid by solid* against the same input gives **exactly 0 mm³** for eight
-of the nine, at 18 to 68 faces each; only the 43,530-face body misbehaves. The
-committed scenarios top out at 15,966 faces (`dense-lattice`), which is why this
-has never been seen.
-
-**The output itself is fine**, established boolean-free: meshing that body at
-0.05 mm and classifying all 55,513 distinct surface points against the input
-with `BRepClass3d_SolidClassifier` puts **1** point outside at a 1e-6 mm
-tolerance and **0** at 1e-4 mm — i.e. that point lies *on* the input surface,
-well inside the 8.7e-04 to 1.5e-03 mm tolerances the part's own faces carry
-(docs/algorithm.md §8). A lattice trimmed against the input has faces lying
-exactly on it, so points classifying ON-or-marginally-OUT is the expected
-result, not a defect.
-
-**How to fix it.** Two independent halves, and the first is worth doing on its
-own:
-
-* *Detect the failure.* `_cut_volume` should reject a result whose volume equals
-  the argument's to within rounding when the two shapes' bounding boxes overlap,
-  and return `nan` — the value the harness already treats as "not measured" —
-  rather than a number that reads as total failure. A check that cannot tell
-  "everything is outside" from "the kernel declined" is worse than no check.
-* *Make it measurable.* Cut per solid and sum, which is exact and already
-  demonstrated for eight of nine; or fall back to the classifier sampling above
-  for solids the cut declines on, labelled as the weaker check the way
-  `golden_sample_agreement` already labels its own fallback (docs/testing.md).
-
-**How to verify a fix.** `python tools/e2e.py` must stay green, and the check
-must return ~0 mm³ — not `nan`, and not the candidate's own volume — for
-`-cc 12 -t 2.5` on `TD_HX_rehearsal_test`, whose output is committed to be
-sound by the measurements above.
-
 ### `stitch` pays the full round-2 cost on heavily trimmed parts
 
 **Found 2026-08-17**, on the first rehearsal of `TD_HX_rehearsal_test.step` at
@@ -954,6 +904,53 @@ alone. Worth keeping as the shape of gate this stage needs: **the rehearsal is
 the only place any of these could be judged**, since `dense-lattice` is
 boundary-dominated and a fortieth of the size.
 
+
+### `material_outside` reported the whole lattice as outside — FIXED 2026-08-18
+
+**Found 2026-08-17** while verifying the `cc=12, t=2.5` output by hand after
+fixing the two guards below, and fixed the next day. A harness defect, not a
+generator one — but it meant §6.2's "no generated material lies outside the input
+body" could not be run at production scale, which is where it is worth most.
+
+**The symptom.** One `BRepAlgoAPI_Cut` of the whole output against the input body
+reported **354,733 mm³** outside — the entire lattice, on a part every junction
+of which was *built* by intersecting with that body.
+
+**The mechanism is not the obvious one, and the obvious one would have produced a
+detector that never fires.** This entry first recorded the cut as having "quietly
+did nothing" and returned "its own argument untouched". It did not. The call
+reports `IsDone`, `HasModified` **and** `HasGenerated`, returns **43,672** faces
+where 43,530 went in, and removes 3.6e-03 mm³. It ran, re-partitioned the solid,
+and mis-classified nearly all of it — so a test for "the volume came back
+unchanged" would have missed it, the relative difference being **1.02e-08**
+rather than zero. The input is the classic ill-conditioned case for a boolean: a
+lattice trimmed from a body has a large share of its faces lying *exactly on*
+that body's surface.
+
+**It is a scale limit, and it is bracketed.** Cutting the same output *solid by
+solid* gives **exactly 0 mm³** for eight of the nine, at 18 to 68 faces each;
+only the 43,530-face body misbehaves. The committed scenarios top out at 15,966
+faces (`dense-lattice`), which is why this was never seen.
+
+**The output is sound**, established without any boolean: meshing that body at
+0.05 mm and classifying all 55,513 distinct surface points against the input with
+`BRepClass3d_SolidClassifier` puts **1** point outside at 1e-06 mm and **0** at
+1e-05 mm — that point lies *on* the input surface, two orders inside the 8.7e-04
+to 1.5e-03 mm tolerances the part's own faces carry (docs/algorithm.md §8).
+
+**The fix, in three parts.** `material_outside` now cuts **per solid** and sums;
+it **contradicts** rather than trusts, checking any non-zero remainder against
+`surface_points_outside` — which uses no boolean — and reporting the solid as
+*unmeasured* when the two disagree; and it returns a dict, so "not measured" has
+somewhere to live that cannot read as "measured as fine". `tools/e2e.py` reports
+the exact sum over the solids it could measure plus a separate, explicitly
+weaker containment check for the rest, mirroring how `golden_check` already
+labels its own fallback. `tools/smoke_bundle.py` instead *fails* on an
+unmeasured solid, because at the ball's scale that would mean something is wrong
+with the bundle rather than with the check.
+
+A real defect survives all of this: material genuinely outside the body shows up
+in both tests, so the contradiction path cannot swallow one.
 
 ### Two guards that refused valid input — FIXED 2026-08-17
 

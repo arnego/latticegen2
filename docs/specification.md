@@ -361,8 +361,8 @@ The measurement the proposals rest on is gate G13
 ([`tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md),
 `tools/prototypes/g13_unify_scaling.py`).
 
-**Why this exists.** Path 1 of the scale-rehearsal chapter further down this
-section — parallelising `simplify` across the shared pool, body for body — is
+**Why this exists.** Path 1 of the scale-rehearsal chapter (§11) —
+parallelising `simplify` across the shared pool, body for body — is
 implemented, correct, and measured at **no wall-clock win** (17 m 17 s -> 18 m 39 s, still 0.99 cores), because this part's 14 solids
 are one dominant body plus 13 scraps and "the largest single solid is the floor,
 not the sum". Dispatching by body cannot lower that floor. G13 asked whether
@@ -631,14 +631,107 @@ notes — including the §9 correction above.
 
 ---
 
+## 11. Closed — kept for the reasoning, not as work
+
+### Invalid boundary faces from grazing trims — FIXED 2026-08-17 (34 → 0)
+
+Tracked from 2026-08-16, when the seam-split (#13) and pinhole-wire (#15) fixes
+first got the `cc=5, t=1` rehearsal of `TD_HX_rehearsal_test.step` to assemble
+**14 watertight solids** — and it then failed `validate`, with 1 of those 14
+solids carrying **34 individually invalid faces** (exit 4, no output written).
+
+Closed in two passes, because it was **two unrelated faults wearing one
+symptom**. Both are repaired by `occ.fix_vertex_tolerances`, as two rungs, and
+both turn out to be a *recorded tolerance* being wrong rather than any geometry
+being wrong (docs/algorithm.md §8; `tools/prototypes/RESULTS.md` G11 and G12).
+
+* **Rung 1 (#17) — 34 → 4.** Not 34 bad faces but **17 bad edges**: each
+  invalid face had exactly one invalid edge, and faces came in pairs because
+  the two faces of a pair *shared* it. On each, a vertex sat off the edge's own
+  3D curve (2.474044e-05 mm on an ellipse, 3.316370e-04 mm on a B-spline) with
+  that vertex's tolerance inflated to *exactly* that distance, so the check sat
+  on the knife edge. Repaired with `ShapeFix_Edge.FixVertexTolerance`.
+* **Rung 2 (this change) — 4 → 0.** The remaining 4 had **no** standalone-invalid
+  edge or vertex and passed every named face check, which G11 read as a
+  *contextual pcurve-versus-3D-curve* fault. **That reading was wrong.** The
+  fault is `BRepCheck_SelfIntersectingWire`, for two edges *adjacent in the
+  wire* — and it is not a real self-intersection: their pcurves cross at exactly
+  one point, at the shared vertex, *inside* its tolerance. The shared vertex's
+  recorded tolerance was simply left too tight to swallow the crossing.
+  Repaired by widening that vertex, bounded at 4× the tolerance the kernel
+  itself recorded and at 4e-3 mm absolutely.
+
+**What the wrong diagnosis cost, and how it was caught.** The pcurve deviation
+G11 named is real — on each of the four faces one edge deviates by 98–100 % of
+its own tolerance, which reads as a root cause. Two measurements disproved it:
+widening that edge's tolerance fixes nothing at any factor up to 5×, and
+`BRepLib.SameParameter` improves the deviation on the one face it cannot fix.
+The mechanism was then found with `BRepCheck_Analyzer.IsValid(subshape)` — the
+*in-context* overload — run as a **controlled** probe: it fires on all four and
+clears on the three `SameParameter` does fix, so a negative on the fourth could
+not have been the probe being blind. That control is the lesson from G10, where
+a blind scanner reporting "no faults" cost real time.
+
+This makes **four** defects in this family, each first diagnosed wrongly in a
+way that matched the symptom quantitatively and convincingly (G9, G10, G11,
+G12). The pattern worth keeping: OCCT's named repair for the named symptom did
+not touch the actual defect in any of them — `ShapeFix_Wireframe` for the
+"small edges" that were pinhole wires, `ShapeFix_Wire.FixSelfIntersection` for
+this self-intersection (a complete no-op). Establish the mechanism on the real
+failing geometry before building the repair.
+
+**Result, measured on the full rehearsal 2026-08-17** (`-cc 5 -t 1 --cores 6
+--ram 20 -v`, 58m 18s, 18.57 GB peak):
+
+* `vertex tolerances corrected on 19 sewn boundary face(s); no geometry moved`,
+  with **no residual** — against 15 corrected and 4 remaining before this change.
+* `validity: all 14 solid(s) pass BRepCheck_Analyzer` — the gate passing for the
+  first time on this part.
+* The run **wrote its STEP**: 2.01 GB, 14 solids, 584,028 faces, lattice volume
+  330,354.002 mm³, AP214, part name `TD_HX_rehearsal_test+cc5+t1`. Every figure
+  the defect does not touch is unchanged from the 2026-08-15 profile (21,955
+  boundary pieces, 122,180 interfaces, 2 pinhole wires, 1,006,505 faces before
+  unification, same volume), which is evidence the repair changed only what it
+  was aimed at.
+
+`python -m pytest test -q` and `python tools/e2e.py` stay green (0 mm³ against
+both golden samples); the committed scenarios contain no grazing trims this
+severe, so neither rung fires on them, exactly as intended.
+
+### Micron-scale debris edges from near-tangential trims — FIXED 2026-08-16
+
+Tracked from 2026-08-14 as "2 edges used by exactly one face" at
+`[1874.836, 60.370, 970.121]` and `[1874.836, 59.912, 969.775]`, with three
+candidate repairs of which two were disproved and the third — `ShapeFix`
+small-edge removal in the worker — was recommended as the remaining one.
+
+**The diagnosis was wrong, and convincingly so.** They are not small *edges*.
+Each is an **inner wire of a single edge whose endpoints do not meet**, bounding
+no area — a pinhole. That is why each is used by exactly one face inside a solid
+`BRepCheck_Analyzer` calls valid, and why OCCT's small-edge machinery cannot see
+them: `ShapeFix_Wireframe.CheckSmallEdges` reports **0** candidates at every
+precision from 1e-5 to 1e-2, and `ShapeFix_Face.FixSmallAreaWire` removes
+nothing. **Do not retry `ShapeFix` here.**
+
+Fixed by `occ.remove_pinhole_wires`, called from `boundary.trim_junction`
+before cap tagging: it drops a non-outer wire when every edge in it is under
+`PINHOLE_WIRE_TOL` **and** every edge is already used exactly once, so it can
+only ever delete edges that are already unpaired. Surface area is preserved
+bit-identically, volume to 2.7e-15, and `shell_defects` on the affected piece
+goes from `(2, 0)` to `(0, 0)`. On the full rehearsal it removes 2 wires from 1
+junction of 19,552 and `assemble` reports 14 watertight solids. Full account,
+including why a synthetic reproduction of this defect passed a complete
+measurement gate while repairing something else entirely, in
+`tools/prototypes/RESULTS.md` G10 and docs/algorithm.md §7.
+
 ### Scale rehearsal, chapter closed: paths 1–4 implemented and re-measured
 
 **First run 2026-08-14**, **re-profiled 2026-08-15** after implementing paths
 1–4 below, both on `TD_HX_rehearsal_test.step` at `cc=5, t=1`,
 `--cores 6 --ram 20 -bg` on the 6-core / 32 GB development workstation. Both
 runs used a temporary, uncommitted bypass of the `assemble`-stage watertightness
-gate (the defect since closed as "Micron-scale debris edges", §11 — it was open
-and out of scope at the time) so every later stage could be measured; neither run's output is a
+gate (the defect closed above as "Micron-scale debris edges" — it was open and
+out of scope at the time) so every later stage could be measured; neither run's output is a
 shippable file, but the stage costs are representative because the same work is
 done either way, and both runs agree on everything the defect doesn't touch —
 330,354 mm³, 14 solids, 705,000 interior faces, 301,505 boundary faces,
@@ -790,98 +883,3 @@ happened to produce (round 2's seam-only split changed *which* face objects
 those are, though not the shell they describe — see path 3 above), and
 unification is a size optimization, not a correctness one, so this difference
 is expected and harmless (algorithm.md §9, §11).
-
----
-
-## 11. Closed — kept for the reasoning, not as work
-
-### Invalid boundary faces from grazing trims — FIXED 2026-08-17 (34 → 0)
-
-Tracked from 2026-08-16, when the seam-split (#13) and pinhole-wire (#15) fixes
-first got the `cc=5, t=1` rehearsal of `TD_HX_rehearsal_test.step` to assemble
-**14 watertight solids** — and it then failed `validate`, with 1 of those 14
-solids carrying **34 individually invalid faces** (exit 4, no output written).
-
-Closed in two passes, because it was **two unrelated faults wearing one
-symptom**. Both are repaired by `occ.fix_vertex_tolerances`, as two rungs, and
-both turn out to be a *recorded tolerance* being wrong rather than any geometry
-being wrong (docs/algorithm.md §8; `tools/prototypes/RESULTS.md` G11 and G12).
-
-* **Rung 1 (#17) — 34 → 4.** Not 34 bad faces but **17 bad edges**: each
-  invalid face had exactly one invalid edge, and faces came in pairs because
-  the two faces of a pair *shared* it. On each, a vertex sat off the edge's own
-  3D curve (2.474044e-05 mm on an ellipse, 3.316370e-04 mm on a B-spline) with
-  that vertex's tolerance inflated to *exactly* that distance, so the check sat
-  on the knife edge. Repaired with `ShapeFix_Edge.FixVertexTolerance`.
-* **Rung 2 (this change) — 4 → 0.** The remaining 4 had **no** standalone-invalid
-  edge or vertex and passed every named face check, which G11 read as a
-  *contextual pcurve-versus-3D-curve* fault. **That reading was wrong.** The
-  fault is `BRepCheck_SelfIntersectingWire`, for two edges *adjacent in the
-  wire* — and it is not a real self-intersection: their pcurves cross at exactly
-  one point, at the shared vertex, *inside* its tolerance. The shared vertex's
-  recorded tolerance was simply left too tight to swallow the crossing.
-  Repaired by widening that vertex, bounded at 4× the tolerance the kernel
-  itself recorded and at 4e-3 mm absolutely.
-
-**What the wrong diagnosis cost, and how it was caught.** The pcurve deviation
-G11 named is real — on each of the four faces one edge deviates by 98–100 % of
-its own tolerance, which reads as a root cause. Two measurements disproved it:
-widening that edge's tolerance fixes nothing at any factor up to 5×, and
-`BRepLib.SameParameter` improves the deviation on the one face it cannot fix.
-The mechanism was then found with `BRepCheck_Analyzer.IsValid(subshape)` — the
-*in-context* overload — run as a **controlled** probe: it fires on all four and
-clears on the three `SameParameter` does fix, so a negative on the fourth could
-not have been the probe being blind. That control is the lesson from G10, where
-a blind scanner reporting "no faults" cost real time.
-
-This makes **four** defects in this family, each first diagnosed wrongly in a
-way that matched the symptom quantitatively and convincingly (G9, G10, G11,
-G12). The pattern worth keeping: OCCT's named repair for the named symptom did
-not touch the actual defect in any of them — `ShapeFix_Wireframe` for the
-"small edges" that were pinhole wires, `ShapeFix_Wire.FixSelfIntersection` for
-this self-intersection (a complete no-op). Establish the mechanism on the real
-failing geometry before building the repair.
-
-**Result, measured on the full rehearsal 2026-08-17** (`-cc 5 -t 1 --cores 6
---ram 20 -v`, 58m 18s, 18.57 GB peak):
-
-* `vertex tolerances corrected on 19 sewn boundary face(s); no geometry moved`,
-  with **no residual** — against 15 corrected and 4 remaining before this change.
-* `validity: all 14 solid(s) pass BRepCheck_Analyzer` — the gate passing for the
-  first time on this part.
-* The run **wrote its STEP**: 2.01 GB, 14 solids, 584,028 faces, lattice volume
-  330,354.002 mm³, AP214, part name `TD_HX_rehearsal_test+cc5+t1`. Every figure
-  the defect does not touch is unchanged from the 2026-08-15 profile (21,955
-  boundary pieces, 122,180 interfaces, 2 pinhole wires, 1,006,505 faces before
-  unification, same volume), which is evidence the repair changed only what it
-  was aimed at.
-
-`python -m pytest test -q` and `python tools/e2e.py` stay green (0 mm³ against
-both golden samples); the committed scenarios contain no grazing trims this
-severe, so neither rung fires on them, exactly as intended.
-
-### Micron-scale debris edges from near-tangential trims — FIXED 2026-08-16
-
-Tracked from 2026-08-14 as "2 edges used by exactly one face" at
-`[1874.836, 60.370, 970.121]` and `[1874.836, 59.912, 969.775]`, with three
-candidate repairs of which two were disproved and the third — `ShapeFix`
-small-edge removal in the worker — was recommended as the remaining one.
-
-**The diagnosis was wrong, and convincingly so.** They are not small *edges*.
-Each is an **inner wire of a single edge whose endpoints do not meet**, bounding
-no area — a pinhole. That is why each is used by exactly one face inside a solid
-`BRepCheck_Analyzer` calls valid, and why OCCT's small-edge machinery cannot see
-them: `ShapeFix_Wireframe.CheckSmallEdges` reports **0** candidates at every
-precision from 1e-5 to 1e-2, and `ShapeFix_Face.FixSmallAreaWire` removes
-nothing. **Do not retry `ShapeFix` here.**
-
-Fixed by `occ.remove_pinhole_wires`, called from `boundary.trim_junction`
-before cap tagging: it drops a non-outer wire when every edge in it is under
-`PINHOLE_WIRE_TOL` **and** every edge is already used exactly once, so it can
-only ever delete edges that are already unpaired. Surface area is preserved
-bit-identically, volume to 2.7e-15, and `shell_defects` on the affected piece
-goes from `(2, 0)` to `(0, 0)`. On the full rehearsal it removes 2 wires from 1
-junction of 19,552 and `assemble` reports 14 watertight solids. Full account,
-including why a synthetic reproduction of this defect passed a complete
-measurement gate while repairing something else entirely, in
-`tools/prototypes/RESULTS.md` G10 and docs/algorithm.md §7.

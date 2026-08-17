@@ -48,14 +48,37 @@ def test_unification_merges_the_redundant_partition():
     assert after == 6  # a fused pair of boxes is one 20x10x10 box
 
 
-def test_unification_falls_back_to_face_only_merging(monkeypatch):
-    """The edge pass is what throws; dropping it keeps the valuable half."""
+def test_split_unification_matches_a_single_combined_call():
+    """Running the two passes separately must describe the solid identically.
+
+    `_unify_one` merges faces first and concatenates edges in a second call,
+    rather than asking for both at once, so that a tile can be face-merged with
+    the edge pass off (docs/specification.md §10 Phase 3 — the edge pass rewrites
+    edges *on* a tile boundary and breaks the shared-topology reassembly). That
+    reordering is only admissible while it produces the same B-rep, which is
+    what this pins: same faces *and* same edges as the combined call.
+    """
+    solid = two_boxes_sharing_a_face()
+    combined = occ.unify_same_domain(solid)
+    split, ran = _unify_one(solid)
+
+    assert ran
+    assert occ.count_subshapes(split) == occ.count_subshapes(combined)
+    assert occ.volume(split) == pytest.approx(occ.volume(combined))
+
+
+def test_a_failing_edge_pass_keeps_the_face_merge(monkeypatch):
+    """The edge pass is what throws; losing it must not lose the face merge.
+
+    It now runs last and alone, so a refusal costs only the edge concatenation —
+    the face merge that carries the value has already happened and is kept.
+    """
     solid = two_boxes_sharing_a_face()
     real = occ.unify_same_domain
     seen = []
 
-    def refuse_edge_merging(shape, unify_edges=True):
-        seen.append(unify_edges)
+    def refuse_edge_merging(shape, unify_edges=True, unify_faces=True):
+        seen.append((unify_edges, unify_faces))
         if unify_edges:
             raise Standard_Failure("Courbes non jointives")
         return real(shape, unify_edges=False)
@@ -63,7 +86,7 @@ def test_unification_falls_back_to_face_only_merging(monkeypatch):
     monkeypatch.setattr(occ, "unify_same_domain", refuse_edge_merging)
     merged, ran = _unify_one(solid)
     faces, _ = occ.count_subshapes(merged)
-    assert seen == [True, False]
+    assert seen == [(False, True), (True, False)]
     assert ran  # the kernel did run, just not the edge pass
     assert faces == 6
 
@@ -88,7 +111,7 @@ def test_unification_that_cannot_run_at_all_returns_the_solid_unchanged(monkeypa
     """No merge is a bigger file, never a failed run or a different body."""
     solid = two_boxes_sharing_a_face()
 
-    def always_refuse(shape, unify_edges=True):
+    def always_refuse(shape, unify_edges=True, unify_faces=True):
         raise Standard_Failure("Courbes non jointives")
 
     monkeypatch.setattr(occ, "unify_same_domain", always_refuse)

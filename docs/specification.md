@@ -513,3 +513,227 @@ junction of 19,552 and `assemble` reports 14 watertight solids. Full account,
 including why a synthetic reproduction of this defect passed a complete
 measurement gate while repairing something else entirely, in
 `tools/prototypes/RESULTS.md` G10 and docs/algorithm.md §7.
+
+### `simplify` beyond body-for-body: three ranked optimizations
+
+**Proposed by Claude 2026-08-15, approved for implementation 2026-08-16.**
+Phase 1 is **done** — and its headline projection was wrong, which is recorded
+below rather than quietly dropped. Phases 2 and 3 are still open. The
+measurement the proposals rest on is gate G13
+([`tools/prototypes/RESULTS.md`](../tools/prototypes/RESULTS.md),
+`tools/prototypes/g13_unify_scaling.py`).
+
+**Why this exists.** Path 1 above — parallelising `simplify` across the shared
+pool, body for body — is implemented, correct, and measured at **no wall-clock
+win** (17 m 17 s -> 18 m 39 s, still 0.99 cores), because this part's 14 solids
+are one dominant body plus 13 scraps and "the largest single solid is the floor,
+not the sum". Dispatching by body cannot lower that floor. G13 asked whether
+tiling *within* a solid can, and answered two questions that were open.
+
+#### What G13 measured
+
+Closed all-interior `m x m x m` grids at `cc=10, t=1.5`, 1,632 -> 99,840 faces.
+
+* **Cost is mildly superlinear and worsening.** Overall log-log slope **1.135**
+  (under the 1.15 bar this gate set in advance), but local slopes climb with
+  scale — 1.044 at 12 k->25 k faces, 1.193 at 42 k->67 k, **1.273** at
+  67 k->100 k — and ms/face rises monotonically 0.128 -> 0.230. Serially, 8
+  tiles cost 6.494 s against the whole solid's 7.054 s, an 8 % saving. **Plan on
+  tiling being worth about `W` and no more**; the win is parallelism, not a
+  smaller exponent. This trend is also why G7's 0.17 ms/face (<=8.5 k faces) and
+  the rehearsal's 1.11 ms/face (1 M faces) cannot be reconciled by assuming
+  linearity.
+* **Tiles reassemble with no sewing — but only with `unify_edges=False`.** With
+  edge unification on, 3,632–11,232 seam edges come back as two distinct objects
+  and the reassembled shell is full of holes: the edge pass concatenates
+  collinear pairs *on* the tile boundary, so the two sides stop being the same
+  `TShape`. With it off, identity is exact at every tile count and both scales
+  tried — **0 free edges**, `BRepCheck_Analyzer` valid, volume preserved to
+  ~1e-13 — so `BRep_Builder.Add` alone suffices and nothing sews the
+  volume-scaling face set (docs/algorithm.md §6, §8).
+* **`unify_edges=False` is 3.1–3.3x faster and merges exactly the same faces.**
+  23.007 s -> 7.054 s at m=16, both producing 53,760 faces; 14.183 s -> 4.512 s
+  at m=14, both 36,456.
+* **Correction to docs/algorithm.md §9.** Its "edge merging is worth almost
+  nothing" (4 edges of 81,816) was measured on the 80 mm ball and **does not
+  hold at lattice scale**: at m=16 the edge pass takes 307,200 edges down to
+  215,040, a 30 % reduction. Dropping it is therefore a *trade*, not a free win.
+* **Tiling costs merged faces at tile seams** — +2.1 % to +11.4 % here — but that
+  is an upper bound from a deliberately *generic* partition (by face centroid).
+  The merge pairs are known by construction, one per surviving mid-strut
+  interface, so bucketing by **strut** makes the loss zero.
+
+#### Phase 1 — drop edge unification: **R1 FAILED, landed as enabling work only**
+
+Projected `simplify` 18 m 39 s -> ~5 m 45 s, ~27 % off the run. **Delivered
+nothing of the sort.** Both candidate forms were measured on `dense-lattice`
+and `smoke-verified` on 2026-08-16, against R1's pre-set bars — net run time
+must improve, file size must not grow more than ~20 %:
+
+| `simplify` on `dense-lattice` | time | output |
+|---|---|---|
+| combined, one call (baseline) | 13.21 s, 16.18 s | 67,898 edges, 52.80 MB |
+| edge pass dropped (the proposal) | 9.45 s | 94,476 edges, 71.29 MB |
+| split: faces, then edges alone (the fallback) | 13.87 s, 13.94 s | 67,898 edges, 52.80 MB |
+
+**The proposal fails both bars.** Dropping the edge pass saves 3.8 s in
+`simplify` and hands all of it to `validate` (6.24 -> 8.21 s) and `export`
+(6.25 -> 10.50 s) — both scale with edge count, which the projection assumed
+away — for a **35 % larger file** and no net run-time change (57.28 ->
+57.57 s). The 80 mm ball behaves the same way (+43 % file).
+
+**The fallback is neutral, not cheap.** Its premise — that the edge pass would
+be far cheaper over an already-face-merged solid — is disproved: it costs
+~4.4 s either way.
+
+Two things went wrong in the projection, both worth remembering. First, the
+3.1–3.3x speedup came from G13's synthetic all-planar grid and is only ~1.4x on
+a real trimmed solid. Second, `simplify`'s "baseline" of 16.18 s was a
+cold-cache first run; the true baseline is ~13.2 s, and the repeat measurement
+that caught this is the only reason the fallback was not recorded as a win.
+
+**What landed, and why.** The split (`_unify_one` calls face merging with
+`unify_edges=False`, then edge merging alone) is kept — not as a speed win, but
+because it is a precondition for Phase 3: the edge pass rewrites edges on a tile
+boundary, so tiles only reassemble by shared topology if the face merge runs
+with it off. It also degrades better — a throwing edge pass no longer discards a
+completed face merge. `test/test_pipeline.py` pins its B-rep as identical to the
+combined call's, faces and edges alike, and `tools/e2e.py` passes with both
+golden samples at 0 mm³ and byte-identical file sizes.
+
+**Do not retry dropping the edge pass.** The measurement above is the disproof.
+
+#### Phase 2 — build the interior pre-merged: **DONE, and it delivered**
+
+Implemented 2026-08-16 in `interior.py` (`_merge_lateral_pairs`,
+`_splice_lateral`, `MergedLateral`) and documented normatively in
+[algorithm.md](algorithm.md) §6, §9 and §12. Measured on the two committed
+scenarios, with the output unchanged throughout — same face and edge counts,
+both golden samples at 0 mm³, `tools/e2e.py` green:
+
+| `dense-lattice` | before | after |
+|---|---|---|
+| interior faces | 14,256 | **9,516** (−33 %) |
+| interior edges | 30,900 | **21,420** (−31 %) |
+| `instance` | 1.60 s | 1.06 s |
+| `assemble` | 0.97 s | 0.74 s |
+| `simplify` | 13.21 s | **9.93 s** (−25 %) |
+| `validate` | 6.24 s | **5.44 s** (−13 %) |
+| `export` | 6.25 s | **5.32 s** (−15 %) |
+| total | 55.6 s | **44.8 s** (−19 %) |
+
+The reduction is 33 % rather than the projected 50 % because only
+interior↔interior struts merge, and `dense-lattice` has 594 interior nodes
+against 968 boundary ones. A part like the rehearsal (29,375 interior against
+19,552 boundary) should land closer to 50 %, but **that is a projection and the
+rehearsal has not been run** — Phase 1 is the standing reminder of what those
+are worth.
+
+**One bug worth recording, because the class of it will recur.** The merge
+condition "is the node across this cap also interior?" was first read from the
+node-position cache, which `position()` grows with any neighbour it is asked
+about — including boundary nodes reached through the cap correspondence. Interior
+junctions then merged onto neighbours that were never built, leaving 366
+unmatched edges on the 80 mm ball. Every unit test still passed: they use
+synthetic all-interior grids, where the polluted set and the correct one are the
+same. It was `weld.assemble`'s every-edge-twice proof that caught it, in `e2e`.
+The lesson is the same one G8 left about scale — a set that is *derived* rather
+than *stated* will eventually be derived from the wrong thing, and only a test
+with a real boundary can tell.
+
+##### The original proposal
+
+
+
+`interior.py` emits 4 lateral faces per half-strut and `simplify` merges them
+back across every mid-strut interface. Emit the merged full-strut lateral face
+directly instead: at template-build time, splice junction A's loop with the
+neighbour's matching loop and drop the shared cap edge — a fixed pattern of
+`(node-local, neighbour-local)` vertex indices computed once, the same shape of
+precomputation `interior._pair_caps` already does — with the collinear pairs
+already dropped so the wire is minimal. Merge only where the cap is in
+`interfaces` **and** both nodes are interior; at a boundary interface the
+neighbour's face comes from a boolean.
+
+This is the strongest item on the list, and Phase 1's failure does not touch it:
+it removes work rather than reordering or parallelising it. It halves interior
+faces *before they are built* (G13: unification achieves exactly 99,840 ->
+53,760), so it shrinks `instance`, `assemble`, `simplify`, `validate`, `export`,
+file size and peak memory together — and because the wire is ours to choose, it
+delivers the edge reduction by construction, at no kernel cost.
+
+**The projection this once carried is withdrawn rather than restated.** It was
+anchored on the 2026-08-15 profile (47.1 min, `simplify` 18 m 39 s), which was
+measured with the `assemble` watertightness gate bypassed and before the four
+defects of the G9–G12 family were fixed. The current pre-Phase-2 baseline is the
+2026-08-17 rehearsal — **58.3 min, 18.6 GB peak, 2.01 GB output** — the first
+run of this part to pass `validate` and write its STEP. Phase 2's gain at that
+scale is measured below rather than extrapolated, precisely because Phase 1
+demonstrated such extrapolations can be off by 2x.
+
+*Blocking risk R4 — merged-loop correctness.* The spliced wire must be planar,
+simple and correctly wound for every `(cc, t)`. Verify with a unit test over
+G1's parameter sweep asserting, per merged loop, that the Newell normal matches
+the template's outward normal, that its area equals the sum of the two halves to
+1e-12, and that `build_interior_shell` reports **0 malformed edges** — plus the
+`N x volume(J)` identity in `test_junction.py` and both golden samples at 0 mm³.
+
+*Fallback:* per-strut, not global. A loop that fails the area/normal assertion
+falls back to the two half-faces built today, so a pathological case costs faces
+and never correctness — the §11 failure mode.
+
+#### Phase 3 — sub-body tiling of `simplify`
+
+Partition the solid's faces into tiles, unify each across the shared
+`WorkerPool`, reassemble with `BRep_Builder.Add`, then apply the existing
+`pipeline._check_unify_result` guards to the reassembled solid *plus* the
+every-edge-twice proof from `weld.assemble` — a strictly stronger gate than what
+runs today. Tile **by strut, not by centroid**: tag each face with its owning
+node during the interior build and bucket by lattice-index block, reusing
+`weld._tile_edge_length`; boundary faces fall back to centroid bucketing.
+
+**Do this only if `simplify` is still a top-3 cost after Phase 2.** Only the
+*face* merge tiles; the edge pass has to stay global, since concatenating
+collinear pairs is exactly what breaks tile identity. Measured on
+`dense-lattice` the two split roughly 68 % / 32 % (9.45 s face merge, ~4.4 s
+edges), so tiling can only ever attack about two thirds of the stage, and the
+edge pass becomes the new floor. Projected after Phase 2: `simplify`
+~11 m 45 s -> ~5 m 20 s, i.e. worth ~6 min, for the most machinery of the
+three. Any total for Phases 2–3 together has to be quoted against the
+2026-08-17 baseline (58.3 min), not the withdrawn 47.1-minute one.
+
+*Blocking risk R2 — **CLEARED** by gate G14, 2026-08-16.* G13 tested only planar
+instanced faces, leaving `TShape` identity across a tile seam unproven for the
+trimmed, curved faces a boolean produces — which Phase 2 made the *dominant*
+part of what `simplify` still sees (on `dense-lattice`, 15,718 boundary-derived
+faces of 25,234). `tools/prototypes/g14_tiled_unify_trimmed.py` tests both a
+closed instanced-grid ∩ sphere solid (1,804 faces, 76 curved) and a shell sewn
+from a kept run's real trimmed boundary pieces (2,342 faces, 176 curved):
+**0 free edges at 8, 27 and 64 tiles on both**, valid, volume/area preserved.
+So tiling need not fall back to interior-only. Two caveats are recorded in
+`RESULTS.md` G14: the gate's inputs merge only lightly (Phase 2 having already
+merged the interior), so "identity survives *heavy* merging" still rests on
+G13's planar case; and its first volume bar (1e-12, carried over from planar
+measurements) wrongly failed a correct tiling at 5.31e-10 drift before being
+reset to `pipeline.UNIFY_VOLUME_TOL`.
+
+*Risk R3 — merge loss.* Strut-aware bucketing must measure ~0 % loss against a
+whole-solid unification at m=14 and m=16. *Fallback:* accept the centroid
+partition and a few percent more faces (a §11-acceptable larger output), or skip
+tiling.
+
+*Risk R5 — memory and IPC.* Verify with `tools/profile_run.py` and
+`tools/profile_report.py` on the rehearsal. **Bars:** peak RSS at or below
+today's 19.61 GB, and `simplify` core-equivalents above 3.0 against today's
+0.99. *Fallback:* cap the number of concurrent tiles.
+
+*Risk R6 — the G8 trap.* Any new per-face bookkeeping must use
+`TopTools_IndexedMapOfShape`, never Python lists tested with `.IsSame()`. Not
+detectable at gate scale; only the rehearsal shows it.
+
+#### Common gate for every phase
+
+`python -m pytest test -q`, `python tools/e2e.py`, both golden samples at 0 mm³,
+then one full rehearsal under `profile_run.py`. On landing, update
+docs/algorithm.md §9 and §12, this section, and docs/testing.md's performance
+notes — including the §9 correction above.

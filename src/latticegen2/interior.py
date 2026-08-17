@@ -48,7 +48,15 @@ from OCP.gp import gp_Dir, gp_Pln
 from . import occ
 from .errors import ProcessingError
 from .junction import JunctionTemplate
-from .lattice import HALF_STRUTS, LatticeParams, half_strut_offset, neighbor_step, nodes, profile_vertices
+from .lattice import (
+    HALF_STRUTS,
+    OPPOSITE_HALF,
+    LatticeParams,
+    half_strut_offset,
+    neighbor_step,
+    nodes,
+    profile_vertices,
+)
 
 _WELD = 9
 """Decimal places used to identify coincident template vertices. The template is
@@ -70,6 +78,21 @@ def _first_vertex_position(edge) -> np.ndarray:
 
 
 @dataclass
+class MergedLateral:
+    """One full-strut lateral face, spliced from the two half-strut faces.
+
+    ``loop`` holds ``(side, local vertex)`` pairs, where side 0 is the node that
+    owns the outgoing half-strut and side 1 is its neighbour across the shared
+    cap. Resolving a side to a node is the caller's job, so one of these serves
+    every strut in the lattice — the same instancing argument as the template
+    itself (docs/algorithm.md §3.2).
+    """
+
+    loop: list[tuple[int, int]] = field(default_factory=list)
+    normal: np.ndarray = None
+
+
+@dataclass
 class TemplateMesh:
     """The junction template as plain indexed polyhedral data."""
 
@@ -80,6 +103,17 @@ class TemplateMesh:
     normal points *out* of the solid."""
     face_cap: list[int] = field(default_factory=list)
     """Per face, the half-strut id of the cap it is, or ``-1``."""
+    face_half: list[int] = field(default_factory=list)
+    """Per face, the half-strut whose cap edge this lateral face carries, or
+    ``-1`` for a cap face (or a lateral face that could not be attributed)."""
+    merged: dict[int, MergedLateral] = field(default_factory=dict)
+    """Outgoing-side lateral face index -> its merged full-strut face."""
+    merged_halves: set[int] = field(default_factory=set)
+    """Outgoing half-struts (``0..2``) whose four merged faces all validated.
+
+    Membership is per strut family rather than global, so a splice that fails
+    validation costs that family its merge and nothing else — the failure mode
+    docs/algorithm.md §11 requires of an optimization."""
     face_normal: list[np.ndarray] = field(default_factory=list)
     """Per face, its outward unit normal in template-local coordinates.
 
@@ -166,7 +200,198 @@ def extract_template_mesh(lp: LatticeParams, tpl: JunctionTemplate) -> TemplateM
 
     mesh.vertex_cap = _classify_vertices(lp, mesh.verts)
     mesh.cap_partner = _pair_caps(lp, mesh)
+    mesh.face_half = _classify_lateral_faces(mesh)
+    mesh.merged, mesh.merged_halves = _merge_lateral_pairs(lp, mesh)
     return mesh
+
+
+# --- Full-strut lateral faces (docs/algorithm.md §6) -------------------------
+#
+# Instancing emits four lateral faces per half-strut, so every strut whose two
+# ends are both instanced carries eight where four suffice, and same-domain
+# unification spends the `simplify` stage merging them back
+# (docs/algorithm.md §9). Emitting the merged face directly is strictly cheaper:
+# the pair is known by construction — one per surviving mid-strut interface —
+# where the kernel has to rediscover it by search over the whole solid.
+#
+# The splice is computed once here, on the template, as a fixed pattern of
+# `(side, local vertex)` indices, exactly the shape of precomputation
+# `_pair_caps` already does. At run time it is integer lookups only.
+
+_COLLINEAR_SIN_TOL = 1e-9
+"""Bar on ``|u x v| / (|u| |v|)`` — the sine of the turn at a vertex — for
+calling three consecutive loop points collinear.
+
+The points being tested are exact expressions at millimetre scale and the two
+edges meeting at a dropped cap corner are both *along the strut axis*, so the
+true sine is at ulp level; a genuine corner of this geometry turns by tens of
+degrees. Nothing real sits between the two, which is why a single loose-looking
+bar is safe here."""
+
+_PLANAR_TOL = 1e-9
+"""Millimetres a merged loop's points may deviate from the face plane."""
+
+_AREA_REL_TOL = 1e-12
+"""Relative bar on ``area(merged) == area(half) + area(half)``.
+
+Both sides are computed from the same exact vertex coordinates by the same
+Newell sum, so only floating-point summation order separates them."""
+
+
+def _polygon_area(points: np.ndarray) -> float:
+    return 0.5 * float(np.linalg.norm(_newell(points)))
+
+
+def _classify_lateral_faces(mesh: TemplateMesh) -> list[int]:
+    """Per face, the half-strut whose cap quad supplies its far edge.
+
+    A lateral face of half-strut ``h`` carries exactly two vertices of cap
+    ``h`` — one edge of that cap square — and a cap face carries four. Anything
+    else is left unattributed (``-1``) and simply never merges, which is why
+    this needs no tolerance: it is a count, not a measurement.
+    """
+    out: list[int] = []
+    for fi, loop in enumerate(mesh.loops):
+        if mesh.face_cap[fi] >= 0:
+            out.append(-1)
+            continue
+        counts: dict[int, int] = {}
+        for v in loop:
+            c = mesh.vertex_cap[v]
+            if c >= 0:
+                counts[c] = counts.get(c, 0) + 1
+        owners = [h for h, n in counts.items() if n == 2]
+        out.append(owners[0] if len(owners) == 1 else -1)
+    return out
+
+
+def _cap_edge_index(mesh: TemplateMesh, loop: list[int], h: int) -> int | None:
+    """Index ``i`` where ``loop[i] -> loop[i+1]`` is the cap-``h`` edge."""
+    n = len(loop)
+    hits = [
+        i
+        for i in range(n)
+        if mesh.vertex_cap[loop[i]] == h and mesh.vertex_cap[loop[(i + 1) % n]] == h
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _drop_collinear(loop: list[tuple[int, int]], points) -> list[tuple[int, int]]:
+    """Remove loop entries whose two neighbours are collinear with them.
+
+    The two cap corners are the point of this: in the merged face the edges
+    meeting there both run along the strut axis, so the corner stops being one.
+    Dropping them is what makes the merged wire *minimal* and delivers the edge
+    reduction the kernel's own edge pass would otherwise have to be paid for
+    (docs/algorithm.md §9). Written as a general collinearity test rather than
+    "delete the two cap corners" so the loop is minimal whatever the template
+    turns out to contain.
+    """
+    keep = list(loop)
+    pts = [np.asarray(p, dtype=float) for p in points]
+    i = 0
+    while len(keep) > 3 and i < len(keep):
+        p, c, q = pts[i - 1], pts[i], pts[(i + 1) % len(keep)]
+        u, v = c - p, q - c
+        nu, nv = float(np.linalg.norm(u)), float(np.linalg.norm(v))
+        if nu > 0 and nv > 0 and float(np.linalg.norm(np.cross(u, v))) <= _COLLINEAR_SIN_TOL * nu * nv:
+            del keep[i]
+            del pts[i]
+            i = 0  # a removal can make its neighbours collinear in turn
+            continue
+        i += 1
+    return keep
+
+
+def _merge_lateral_pairs(
+    lp: LatticeParams, mesh: TemplateMesh
+) -> tuple[dict[int, MergedLateral], set[int]]:
+    """Splice each outgoing half-strut's lateral faces with the neighbour's.
+
+    Returns the merged faces keyed by the *outgoing* side's template face index,
+    plus the set of half-struts for which all four splices validated. A family
+    that fails validation is simply absent, and the build falls back to the two
+    half-faces for it.
+    """
+    merged: dict[int, MergedLateral] = {}
+    halves: set[int] = set()
+    for h in range(3):
+        k, _ = HALF_STRUTS[h]
+        shift = lp.a * lp.e[k]
+        opp = OPPOSITE_HALF[h]
+        mine = [fi for fi, hh in enumerate(mesh.face_half) if hh == h]
+        theirs = [fi for fi, hh in enumerate(mesh.face_half) if hh == opp]
+        if len(mine) != len(theirs) or not mine:
+            continue
+        spliced = {}
+        for fi in mine:
+            got = _splice_lateral(mesh, fi, theirs, h, opp, shift)
+            if got is None:
+                spliced = None
+                break
+            spliced[fi] = got
+        if spliced:
+            merged.update(spliced)
+            halves.add(h)
+    return merged, halves
+
+
+def _splice_lateral(mesh, fi, candidates, h, opp, shift) -> MergedLateral | None:
+    """Join lateral face ``fi`` to the neighbour face sharing its cap edge.
+
+    The two faces share that edge already — it is why the instanced shell is
+    watertight — and a closed orientable surface traverses a shared edge
+    oppositely from its two sides, so the neighbour presents ``b -> a`` where
+    this face presents ``a -> b``. The union's boundary is therefore each
+    face's boundary minus that edge, walked one after the other.
+    """
+    f1 = mesh.loops[fi]
+    i = _cap_edge_index(mesh, f1, h)
+    if i is None:
+        return None
+    n = len(f1)
+    a, b = f1[i], f1[(i + 1) % n]
+
+    for fj in candidates:
+        f2 = mesh.loops[fj]
+        j = _cap_edge_index(mesh, f2, opp)
+        if j is None:
+            continue
+        m = len(f2)
+        x, y = f2[j], f2[(j + 1) % m]
+        # Mapped through the cap correspondence, the neighbour's cap edge must
+        # be this face's, reversed. Anything else is a different lateral side.
+        if mesh.cap_partner.get(x) != b or mesh.cap_partner.get(y) != a:
+            continue
+
+        normal = mesh.face_normal[fi]
+        if float(np.dot(normal, mesh.face_normal[fj])) < 1 - 1e-12:
+            return None  # not the same lateral plane after all
+
+        # f1 walked from b round to a (every f1 edge but a->b), then f2 walked
+        # from just past a round to just before b (every f2 edge but b->a).
+        loop = [(0, f1[(i + 1 + s) % n]) for s in range(n)]
+        loop += [(1, f2[(j + 2 + s) % m]) for s in range(m - 2)]
+
+        def pos(entry):
+            side, v = entry
+            return mesh.verts[v] + (shift if side else 0.0)
+
+        loop = _drop_collinear(loop, [pos(e) for e in loop])
+        pts = np.array([pos(e) for e in loop])
+        if len(pts) < 3:
+            return None
+        if float(np.abs((pts - pts[0]) @ normal).max()) > _PLANAR_TOL:
+            return None
+        nv = _newell(pts)
+        area = 0.5 * float(np.linalg.norm(nv))
+        if area <= 0 or float(np.dot(nv / np.linalg.norm(nv), normal)) < 1 - 1e-9:
+            return None
+        want = _polygon_area(mesh.verts[f1]) + _polygon_area(mesh.verts[f2])
+        if abs(area - want) > _AREA_REL_TOL * want:
+            return None
+        return MergedLateral(loop=loop, normal=normal)
+    return None
 
 
 def _which_cap(lp: LatticeParams, face, tpl: JunctionTemplate) -> int:
@@ -466,6 +691,15 @@ def build_interior_shell(
     for idx in range(len(interior_nodes)):
         node_pos[tuple(int(x) for x in interior_nodes[idx])] = positions[idx]
 
+    # Taken from `interior_nodes` and never from `node_pos`, which `position`
+    # below grows with any neighbour it is asked about — including boundary
+    # nodes reached through the cap correspondence, which are emphatically not
+    # instanced here. Reading membership out of that cache instead let an
+    # interior junction merge its lateral faces with a boundary neighbour that
+    # was never built, leaving the interface ring with nothing behind it: 366
+    # unmatched edges on the 80 mm ball, caught by weld's every-edge-twice proof.
+    interior_set = frozenset(node_pos)
+
     def owner(node: tuple[int, int, int], local: int):
         cap = vertex_cap[local]
         if cap >= 3:
@@ -498,14 +732,46 @@ def build_interior_shell(
         keys = [owner(node, local) for local in loop]
         builder.adopt(keys, [position(*k) for k in keys], ring_verts, ring_edges)
 
+    def merge_across(node: tuple[int, int, int], h: int):
+        """The neighbour this half-strut's lateral faces merge with, or ``None``.
+
+        Merging needs the cap to be an interface — otherwise there is no second
+        half to merge with — *and* the node across it to be interior. At a
+        boundary interface the other side's faces come out of a boolean, so
+        there is no template loop to splice and the half-faces stand as built.
+        """
+        if (h if h < 3 else h - 3) not in tmesh.merged_halves:
+            return None
+        if (node, h) not in interfaces:
+            return None
+        step = steps[h]
+        nb = (node[0] + step[0], node[1] + step[1], node[2] + step[2])
+        return nb if nb in interior_set else None
+
     for idx in range(len(interior_nodes)):
         node = tuple(int(x) for x in interior_nodes[idx])
         group = 0 if groups is None else groups[node]
         gid: dict[int, int] = {}
         for fi, loop in enumerate(tmesh.loops):
             cap = tmesh.face_cap[fi]
-            if cap >= 0 and (node, cap) in interfaces:
-                continue  # interface: dropped from both sides
+            if cap >= 0:
+                if (node, cap) in interfaces:
+                    continue  # interface: dropped from both sides
+                builder.face(globals_of(node, loop, gid), tmesh.face_normal[fi], group)
+                continue
+
+            half = tmesh.face_half[fi]
+            across = None if half < 0 else merge_across(node, half)
+            if across is not None:
+                if half >= 3:
+                    continue  # built once, from the outgoing side's node
+                mf = tmesh.merged[fi]
+                keys = [owner(node if side == 0 else across, v) for side, v in mf.loop]
+                builder.face(
+                    [builder.vertex(key, position(*key)) for key in keys], mf.normal, group
+                )
+                continue
+
             builder.face(globals_of(node, loop, gid), tmesh.face_normal[fi], group)
 
     shells, free = builder.result()

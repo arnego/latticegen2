@@ -843,26 +843,62 @@ measured. The seam-only reduction above is the lever that survives this
 argument: it reduces `F` itself, which a tree over the same `F` never could.
 
 **Vertex tolerances are corrected on the sewn result, before the rings are
-read.** Sewing can leave an edge whose vertex is *recorded* as sitting off the
-edge's own 3D curve, with that vertex's tolerance inflated to exactly the
-distance — so `BRepCheck_Analyzer` rejects both faces sharing the edge while
-the shell is perfectly closed. Measured on `TD_HX_rehearsal_test` at `cc=5,
-t=1`: 17 such edges, 34 faces, deviations of 2.474044e-05 and 3.316370e-04 mm
-(`tools/prototypes/RESULTS.md` G11). The trimmed pieces going into the sew are
-clean, which is why this is repaired here rather than in the worker beside §7's
-pinhole removal.
+read.** Sewing leaves two faults that are both a *recorded tolerance* being
+wrong rather than any geometry being wrong, on a shell that is perfectly closed.
+`occ.fix_vertex_tolerances` repairs both, in two rungs. The trimmed pieces going
+into the sew are clean, which is why this runs here rather than in the worker
+beside §7's pinhole removal.
 
-`occ.fix_vertex_tolerances` uses `ShapeFix_Edge.FixVertexTolerance`, which
-adjusts the recorded tolerance and moves no geometry — the bound it is held to,
-as a hard failure, is that a repaired face's surface area comes back
-**bit-identical**. That is exact rather than approximate because a tolerance is
-metadata; there is no quadrature noise to allow for. It runs before
-`interface_rings` so the interior adopts corrected vertices rather than a copy
-needing the same fix again, and it examines only faces the analyzer already
-rejects, so a sound boundary layer pays one validity check per face. Faces it
-does not account for are counted and logged rather than failed on: §9's
-validity gate is already the gate for that, and failing twice for one cause
-only obscures which check found it.
+**Rung 1 — a vertex recorded off its edge's own 3D curve**, with that vertex's
+tolerance inflated to exactly the distance, so `BRepCheck_Analyzer` rejects both
+faces sharing the edge. Measured on `TD_HX_rehearsal_test` at `cc=5, t=1`: 17
+such edges, 34 faces, deviations of 2.474044e-05 and 3.316370e-04 mm
+(`tools/prototypes/RESULTS.md` G11). Repaired with
+`ShapeFix_Edge.FixVertexTolerance`, OCCT's own tool for it.
+
+**Rung 2 — a false self-intersection at a shared vertex.** What rung 1 leaves is
+a face every edge and vertex of which is valid *standalone*, and which passes
+`IntersectWires`, `ClassifyWires` and `OrientationOfWires`, yet the analyzer
+rejects: 4 faces on the same rehearsal. The fault is
+`BRepCheck_SelfIntersectingWire`, reported for two edges **adjacent in the
+wire** — a tight-tolerance trim edge against the fat-tolerance (8.741e-04 to
+1.540e-03 mm) B-spline the boolean fitted to the strut/input-surface
+intersection. It is not a real self-intersection: the two pcurves cross at
+exactly one point, and that point lies at the shared vertex, *inside* its
+tolerance (3.5e-04 mm against 8.7e-04 mm on the worst of the four). What OCCT
+keys on is that vertex's recorded tolerance, left a little too tight to swallow
+the crossing — widening it clears the check on all four, while widening the fat
+edge does nothing at any factor up to 5× (G12).
+
+So rung 2 widens that vertex, asking OCCT's own predicate whether the result is
+enough rather than re-deriving the rule OCCT applies. It is bounded twice — at
+`SELF_INTERSECT_TOL_GROWTH` (4×) times the tolerance the kernel itself recorded,
+and at `SELF_INTERSECT_MAX_VERTEX_TOL` (4e-3 mm, a hundredfold below the CLI's
+smallest legal strut) — so its failure mode is a face left for `validate` to
+report, never an unbounded tolerance. Widening is also monotonically
+*permissive*: every check that reads a vertex tolerance is a "within tolerance"
+test, so a neighbouring face sharing the vertex can only become more valid.
+
+**Neither rung moves geometry, and that is the property that makes this safe on
+a shell `assemble` has already proven watertight.** No `TopoDS_Edge` or
+`TopoDS_Vertex` object is ever replaced, so the every-edge-twice proof cannot be
+disturbed — which is why `ShapeFix_Shape` is rejected even though it fixes all
+four rung-2 faces: it moves geometry (up to 6.4e-04 relative area) and rebuilds
+faces, minting new edges, the exact mechanism behind the seam-split regression
+(G9). `BRepLib.SameParameter` is rejected too, though more narrowly: it fixes
+three of the four at ~1e-09 drift by re-fitting pcurves until the pair happens to
+separate, which treats a symptom on a subset where the widening treats the
+mechanism on all four at zero drift. The bound both rungs are held to, as a hard
+failure, is that a repaired face's surface area comes back **bit-identical** —
+exact rather than approximate because a tolerance is metadata, with no
+quadrature noise to allow for.
+
+It runs before `interface_rings` so the interior adopts corrected vertices rather
+than a copy needing the same fix again, and it examines only faces the analyzer
+already rejects, so a sound boundary layer pays one validity check per face.
+Faces it does not account for are counted and logged rather than failed on: §9's
+validity gate is already the gate for that, and failing twice for one cause only
+obscures which check found it.
 
 Assembly is then `BRep_Builder.Add` into one shell per component, and
 watertightness is proved rather than assumed: **every edge used exactly twice,
@@ -1131,6 +1167,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10) |
+| Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is one validity check per boundary face on a sound layer (§8, G11, G12) |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
@@ -1176,7 +1213,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores`/`--ram` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind those budgets: logical core count, total and free RAM (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity, pinhole-wire removal (§7) |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity, pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |

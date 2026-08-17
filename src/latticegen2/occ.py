@@ -25,7 +25,7 @@ from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeSolid,
     BRepBuilderAPI_Sewing,
 )
-from OCP.BRepCheck import BRepCheck_Analyzer
+from OCP.BRepCheck import BRepCheck_Analyzer, BRepCheck_Status, BRepCheck_Wire
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
@@ -42,7 +42,15 @@ from OCP.TopAbs import TopAbs_ShapeEnum
 from OCP.TopExp import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 from OCP.TopLoc import TopLoc_Location
-from OCP.TopoDS import TopoDS, TopoDS_Compound, TopoDS_Face, TopoDS_Shape, TopoDS_Shell
+from OCP.TopoDS import (
+    TopoDS,
+    TopoDS_Compound,
+    TopoDS_Edge,
+    TopoDS_Face,
+    TopoDS_Shape,
+    TopoDS_Shell,
+    TopoDS_Vertex,
+)
 from OCP.gp import gp_Pnt, gp_Trsf, gp_Vec
 
 from .errors import InputGeometryError, OutputError, ProcessingError
@@ -255,13 +263,95 @@ def unify_same_domain(shape: TopoDS_Shape, unify_edges: bool = True) -> TopoDS_S
     return upgrade.Shape()
 
 
+# A vertex tolerance this repair widened may grow by at most this factor over
+# the one the kernel itself recorded. The repair is allowed to nudge a figure
+# OCCT chose, never to invent a new scale for it. Measured need on the four
+# `cc=5, t=1` rehearsal faces: 1.05x, 1.05x, 1.25x, 1.10x (G12).
+SELF_INTERSECT_TOL_GROWTH = 4.0
+
+# ...and never above this in absolute terms, whatever the kernel recorded.
+# The CLI's smallest legal strut is ``t = 0.4`` mm (specification.md §3), so
+# this sits a hundredfold below the smallest feature any legal run can produce
+# and needs no knowledge of the run's actual parameters. Measured need: at most
+# 1.093e-03 mm (G12), so this clears it by 3.7x.
+SELF_INTERSECT_MAX_VERTEX_TOL = 4e-3
+
+# Geometric step used to search for the smallest widening that satisfies OCCT's
+# own predicate. A search rather than a formula because the predicate is
+# OCCT's, not ours: `BRepCheck_Wire::SelfIntersect` is asked directly whether it
+# is satisfied, instead of this code re-deriving the rule it applies.
+SELF_INTERSECT_TOL_STEP = 1.25
+
+
+def _shared_vertices(a: TopoDS_Shape, b: TopoDS_Shape) -> list[TopoDS_Vertex]:
+    """Vertices belonging to both edges, by topological identity."""
+    first = {v.TShape(): v for v in _explore(a, TopAbs_ShapeEnum.TopAbs_VERTEX)}
+    return [
+        TopoDS.Vertex_s(first[v.TShape()])
+        for v in _explore(b, TopAbs_ShapeEnum.TopAbs_VERTEX)
+        if v.TShape() in first
+    ]
+
+
+def _self_intersecting_pair(
+    face: TopoDS_Face,
+) -> tuple[TopoDS_Edge, TopoDS_Edge] | None:
+    """The two edges ``BRepCheck_Wire`` reports as self-intersecting, if any."""
+    for w in _explore(face, TopAbs_ShapeEnum.TopAbs_WIRE):
+        a, b = TopoDS_Edge(), TopoDS_Edge()
+        status = BRepCheck_Wire(TopoDS.Wire_s(w)).SelfIntersect(face, a, b, False)
+        if status != BRepCheck_Status.BRepCheck_NoError:
+            return a, b
+    return None
+
+
+def _widen_self_intersection_vertices(face: TopoDS_Face) -> bool:
+    """Widen the shared vertex of a falsely self-intersecting adjacent pair.
+
+    Returns whether anything was widened. Moves no geometry: it only raises a
+    recorded tolerance, and ``BRep_Builder.UpdateVertex`` never lowers one.
+    """
+    builder = BRep_Builder()
+    as_built: dict = {}
+    touched = False
+    while True:
+        pair = _self_intersecting_pair(face)
+        if pair is None:
+            return touched
+        grew = False
+        for vertex in _shared_vertices(*pair):
+            key = vertex.TShape()
+            start = as_built.setdefault(key, BRep_Tool.Tolerance_s(vertex))
+            want = BRep_Tool.Tolerance_s(vertex) * SELF_INTERSECT_TOL_STEP
+            if want > min(
+                start * SELF_INTERSECT_TOL_GROWTH, SELF_INTERSECT_MAX_VERTEX_TOL
+            ):
+                continue  # capped: leave it for the caller to count as residual
+            builder.UpdateVertex(vertex, want)
+            grew = touched = True
+        if not grew:
+            return touched
+
+
 def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
-    """Correct vertices recorded as sitting off their edge's curve.
+    """Correct vertex tolerances the boundary sew leaves wrong.
 
     Returns ``(repaired, still_invalid)`` counted in faces.
 
-    Sewing can leave an edge whose vertex lies off the edge's own 3D curve, with
-    that vertex's tolerance inflated to *exactly* the distance — so the validity
+    Two faults, both of them a *recorded tolerance* being wrong rather than any
+    geometry being wrong, and both repaired the same way: by correcting the
+    number, never by moving a point or rebuilding a face. That is what makes
+    this safe to run on a shell ``assemble`` has already proven watertight — no
+    ``TopoDS_Edge`` or ``TopoDS_Vertex`` object is ever replaced, so the
+    every-edge-twice proof cannot be disturbed. It is checked rather than
+    assumed: a repaired face's surface area must come back **bit-identical**,
+    and anything else is a hard failure. That bar is exact rather than
+    approximate because a tolerance is metadata; there is no quadrature noise
+    to allow for.
+
+    **Rung 1 — a vertex sitting off its edge's 3D curve.** Sewing can leave an
+    edge whose vertex lies off the edge's own 3D curve, with that vertex's
+    tolerance inflated to *exactly* the distance — so the validity
     test sits on the knife edge and falls the wrong way, and
     ``BRepCheck_Analyzer`` rejects both faces sharing the edge. Measured on
     `TD_HX_rehearsal_test` at ``cc=5, t=1``: 17 such edges, 34 faces, deviations
@@ -269,16 +359,54 @@ def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
     ``tools/prototypes/RESULTS.md`` G11.
 
     ``ShapeFix_Edge.FixVertexTolerance`` is OCCT's own repair for it and adjusts
-    the *recorded tolerance* in place — it moves no geometry, which is why this
-    is safe to run on a shell that is already proven watertight. That is checked
-    rather than assumed: a repaired face's surface area must come back
-    bit-identical, and anything else is a hard failure.
+    the recorded tolerance in place. ``BRepLib.UpdateTolerances`` was measured
+    as the obvious alternative and rejected: it repairs the planar and
+    cylindrical cases but not the B-spline one (G11).
+
+    **Rung 2 — a false self-intersection at a shared vertex.** What rung 1
+    leaves behind is a face every one of whose edges and vertices is valid
+    *standalone*, and which passes ``IntersectWires``, ``ClassifyWires`` and
+    ``OrientationOfWires`` — yet the analyzer rejects it. The fault is
+    ``BRepCheck_SelfIntersectingWire``, reported for two edges that are
+    **adjacent in the wire**: a short, tight-tolerance trim edge against the
+    fat-tolerance B-spline the boolean fitted to the strut/input-surface
+    intersection. Measured on the same rehearsal: 4 faces, one pair each, fat
+    tolerances 8.741e-04 to 1.540e-03 mm (G12).
+
+    It is not a real self-intersection. The two pcurves cross at exactly one
+    point, and that point lies **at the shared vertex, inside its tolerance**
+    (3.5e-04 mm against 8.7e-04 mm on the worst of the four) — the edges meet
+    where they are supposed to. What OCCT keys on is the shared vertex's
+    recorded tolerance, which the sew left a little too tight to swallow the
+    crossing: widening it clears the check on all four, while widening the fat
+    edge instead does nothing at any factor up to 5x (G12).
+
+    So this rung widens that vertex, and asks OCCT's own predicate whether the
+    result is enough rather than re-deriving the rule OCCT applies. The search
+    is bounded twice — at :data:`SELF_INTERSECT_TOL_GROWTH` times the tolerance
+    the kernel itself recorded, and at
+    :data:`SELF_INTERSECT_MAX_VERTEX_TOL` absolutely — so its failure mode is a
+    face left in ``still_invalid`` for ``validate`` to report, never an
+    unbounded tolerance. Widening is also monotonically *permissive*: every
+    check that reads a vertex tolerance (the contextual vertex check, this
+    self-intersection check) is a "within tolerance" test, so a neighbouring
+    face sharing the vertex can only become more valid, never less.
+
+    ``ShapeFix_Wire.FixSelfIntersection`` is the obvious tool and was measured:
+    it is a **no-op** on all four, at either of its two modes.
+    ``ShapeFix_Shape.Perform`` does fix all four, and is rejected — it moves
+    geometry (up to 6.4e-04 relative area) and rebuilds faces, replacing 2 to 3
+    edge objects per face. Minting new edges on an already-proven shell is the
+    exact mechanism behind the seam-split regression that produced 118,760 open
+    edges (G9), so it is not an acceptable price for a repair whose whole
+    justification is that nothing needs to move. ``BRepLib.SameParameter``
+    fixes three of the four at ~1e-09 drift, by re-fitting pcurves until the
+    pair happens to separate; it is not used either, since it treats the
+    symptom on a subset while the widening treats the mechanism on all four at
+    zero drift.
 
     Only faces the analyzer already rejects are examined, so a sound boundary
     layer pays one validity check per face and nothing more.
-    ``BRepLib.UpdateTolerances`` was measured as the obvious alternative and
-    rejected: it repairs the planar and cylindrical cases but not the B-spline
-    one (G11).
     """
     fixer = ShapeFix_Edge()
     repaired = still_invalid = 0
@@ -293,6 +421,8 @@ def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
                 continue
             fixer.FixVertexTolerance(edge, face)
             touched = True
+        if not BRepCheck_Analyzer(face).IsValid():
+            touched |= _widen_self_intersection_vertices(face)
         if not touched:
             still_invalid += 1
             continue

@@ -231,6 +231,72 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
+### `--ram` is accepted and validated but never enforced
+
+**Found 2026-08-17**, while reading the rehearsal's memory profile
+([profiling-reports.md](profiling-reports.md)). Not a regression — it has always
+been this way — but the rehearsal came close enough to the number the user
+supplied that the gap is worth closing or documenting honestly.
+
+**What's wrong.** `--ram` is parsed, range-checked against the machine's
+physical RAM, resolved to `Args.ram_budget_gb` (`cli.py`), and then **only
+printed**. Nothing in `pipeline.py`, `parallel.py`, `weld.py`, `boundary.py` or
+`runlog.py` ever reads it. §3's table is accurate — "Advisory: recorded in the
+run log next to the measured peak" — but `cli.py`'s own module docstring opens
+by calling both budgets "ceilings on what a run may use, not hints it may
+exceed". That is true of `--cores`, which resolves to the worker count and is
+genuinely enforced, and false of `--ram`. **The two statements contradict each
+other and one of them has to change.**
+
+**Why it matters now.** The 2026-08-17 rehearsal was run with `--ram 20` and
+peaked at **19,291 MB** of whole-tree RSS — inside 3 % of the stated budget,
+with nothing watching. Had it crossed, the run would have continued exactly as
+it did: no warning, no throttle, no failure, and a summary reporting a peak
+above the budget without remarking on it.
+
+**What happens on real exhaustion, since it is not what the exit codes suggest.**
+Windows grows the pagefile first, so the run degrades rather than fails — worst
+of all in `export`, which is both the memory peak and CPU-bound serialisation.
+If commit charge is then exhausted, a Python-level `MemoryError` is caught by
+`__main__`'s `except Exception`, reported as one `FAILED: unexpected ...` line
+and re-raised, so it surfaces as **exit 1 with a traceback**; an allocation
+failure inside OCCT may instead abort natively with no reason line at all.
+Exit 5 ("Resource limits") is unreachable (docs/algorithm.md §10), so a genuine
+out-of-memory reads as a bug rather than as the resource limit it is.
+
+**A second, independent defect: the reported peak under-counts.**
+`RunLog.max_rss` is the master's own `PeakWorkingSetSize`, plus worker peaks
+only where a stage explicitly folds them in with `note_worker_rss` — `boundary`,
+`stitch`, `simplify` and `validate` do; no other stage does. On the rehearsal
+the tool reported **18.12 GB** where external whole-tree sampling measured
+**19,291 MB**. Any future budget check written against `max_rss` inherits that
+~1.2 GB under-count, so this needs fixing first either way.
+
+**Two ways forward. [TODO: needs decision]**
+
+*(a) Keep it advisory, and say so consistently.* Correct `cli.py`'s docstring so
+only `--cores` is described as a ceiling, and have the end-of-run summary state
+plainly when the measured peak exceeded the budget. Cheap, no behaviour change,
+and it makes the number honest rather than decorative.
+
+*(b) Actually enforce it.* Harder than it looks, and worth being clear about why
+before anyone starts: **the run's peak is not in the workers.** It is the master
+holding the whole 2 GB result while `export` serialises it, so capping worker
+count or tile concurrency — the obvious levers, and the ones Phase 3's risk R5
+proposes — cannot lower the number that actually sets the peak. Real enforcement
+would mean changing how the result is held and written (streaming the STEP
+write, or exporting per solid), which is a substantially larger change than the
+flag suggests. Anything less would be enforcement in name only.
+
+**How to verify a fix.** For (a): run with `--ram` set deliberately below a known
+peak and confirm the summary says so, with the run still succeeding. For either:
+fix the under-count first — fold every stage's worker peak into `max_rss`, or
+have the master sample its own process tree — and check the reported peak
+against `tools/profile_run.py` on the same run; today they differ by ~1.2 GB and
+should agree. `python -m pytest test -q` and `python tools/e2e.py` must stay
+green; `test_cli.py` already pins the budget's parsing and defaulting.
+
+
 ### `stitch` pays the full round-2 cost on heavily trimmed parts
 
 **Found 2026-08-17**, on the first rehearsal of `TD_HX_rehearsal_test.step` at

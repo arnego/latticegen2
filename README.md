@@ -135,7 +135,7 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `-cc` | float | yes | mm | 0.4 – 50 | — | XY distance between the bottom nodes of adjacent cells |
 | `-t` | float | yes | mm | 0.4 – 20 | — | Side length of the diamond strut profile |
 | `-o`, `--output` | path | no | — | — | `<input_stem>-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing |
-| `--cores` | int | no | count | 1 – 128 | logical cores on the machine | Maximum cores this run may use — one worker process per core, honoured exactly, in the shared pool used across every parallel stage (boundary trim, boundary sew, same-domain unification, validation) |
+| `--cores` | int | no | count | 1 – 128 | logical cores on the machine | Maximum cores this run may use — one worker process per core, honoured exactly, in the shared pool used across every process-parallel stage (classification, boundary trim, boundary sew, same-domain unification). It also caps OCCT's *own* native thread pool, which the validity check uses instead of the process pool, so the total stays within the budget either way |
 | `--ram` | float | no | GB | 1 – total physical RAM | RAM free at startup | Maximum memory this run may use. May be above or below what is currently free, but never above the machine's total. Recorded in the log next to the measured peak |
 | `-v`, `--verbose` | flag | no | — | — | off | Verbose console output (a full `.log` is always written) |
 | `-h`, `--help` | flag | no | — | — | — | Usage |
@@ -223,8 +223,10 @@ halving the face count and the file size.
 | Connectivity by graph, not by boolean | The floating-body rule is a BFS over surviving interfaces |
 | Sewing confined to the boundary | The boundary layer is sewn first and the interior is then built *onto* its topology, so the volume-scaling shell never enters a geometric search. Sewing's cost is dominated by total face count, so handing it the interior made stitching the bottleneck on large parts — see [docs/algorithm.md](docs/algorithm.md) §8 |
 | Process-parallel boundary junctions | Constant-size independent jobs |
-| One shared worker pool for the whole run | Boundary trim, boundary sew, same-domain unification and validation all dispatch through it, so process-creation cost is paid once per run rather than once per stage |
-| Same-domain unification before export | Instancing merges nothing, so coplanar faces meet unmerged at every strut interface; unifying them halves the face count and file size — and makes the run *faster*, since export then handles half as much. Unification and validation both dispatch across the shared worker pool, not threads: OCP holds the GIL around both calls (measured, `tools/prototypes/RESULTS.md` G7) |
+| Process-parallel classification | Every node is decided independently of every other, and the sweep is pure NumPy — the one parallel stage that moves no geometry at all, so it needs neither the GIL argument nor the shared-topology one. Measured 10.70 s → 4.08 s on six cores for a bit-identical classification |
+| One shared worker pool for the whole run | Classification, boundary trim, boundary sew and same-domain unification all dispatch through it, so process-creation cost is paid once per run rather than once per stage. Built before classification, which also means boundary trim starts with warm workers |
+| Same-domain unification before export | Instancing merges nothing, so coplanar faces meet unmerged at every strut interface; unifying them halves the face count and file size — and makes the run *faster*, since export then handles half as much. It dispatches across the shared worker pool rather than threads: OCP holds the GIL around the call (measured, `tools/prototypes/RESULTS.md` G7) |
+| Validity checked with OCCT's own threads | The validity gate is the one heavy call with an internal parallel flag, and the one heavy stage returning a number rather than geometry — so neither the GIL result nor the shared-topology result applies to it. Run on the master with that flag rather than dispatched per solid: measured 1.60×, verdict identical on every known-bad face, and it deletes a serialization round trip that existed only to reach the workers (`RESULTS.md` G18) |
 | Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |
 
 ### Memory
@@ -242,12 +244,19 @@ Measured on a 6-core / 32 GB Windows workstation:
 
 | Scenario | Nodes (interior / boundary) | Faces | Output | Time |
 |---|---|---|---|---|
-| 80 mm ball, `cc=20 t=4` | 27 / 176 | 1,338 | 4.7 MB | **7 s** |
-| test cylinder, `cc=10 t=1.5` | 594 / 968 | 15,966 | 52.6 MB | **1 m 01 s** |
+| 80 mm ball, `cc=20 t=4` | 27 / 176 | 1,338 | 4.7 MB | **6 s** |
+| test cylinder, `cc=10 t=1.5` | 594 / 968 | 15,966 | 52.6 MB | **~40 s** |
 
 Both match their golden samples with a symmetric-difference volume of 0 mm³, put
 0 mm³ of material outside the input body, and pass `BRepCheck_Analyzer` with zero
 self-intersections.
+
+The cylinder figure is the whole run wall clock and has come down in two steps,
+each measured as a controlled pair with the output byte-identical either side:
+building the interior's lateral faces pre-merged (~56 s → ~45 s), then
+parallelising classification and the validity gate (50.3 s → 40.5 s). Per-stage
+timings for any run are in its `.log`; [docs/testing.md](docs/testing.md)
+explains how to profile one.
 
 ---
 

@@ -1,8 +1,9 @@
 """Shared spawn-process worker pool infrastructure.
 
-Every stage that distributes work across processes — boundary trimming
+Every stage that distributes work across processes — classification
+(:mod:`latticegen2.classify`), boundary trimming
 (:mod:`latticegen2.boundary`), the boundary-sew tiling and its round-2 merge
-(:mod:`latticegen2.weld`), same-domain unification and validation
+(:mod:`latticegen2.weld`), same-domain unification
 (:mod:`latticegen2.pipeline`) — follows the same discipline: a ``spawn``-context
 pool, ordered ``imap`` so results land in job order regardless of which worker
 finishes first (reproducibility matters more than the marginal speed of
@@ -32,6 +33,7 @@ from typing import Callable
 
 from OCP.BRep import BRep_Builder
 from OCP.BRepTools import BRepTools
+from OCP.OSD import OSD_ThreadPool
 from OCP.TopoDS import TopoDS_Iterator, TopoDS_Shape
 
 from .errors import ProcessingError
@@ -58,6 +60,33 @@ def set_background_priority() -> None:
             os.nice(5)
     except Exception:
         pass  # priority is a courtesy, never a reason to fail a run
+
+
+def set_thread_budget(cores: int) -> None:
+    """Cap OCCT's *own* native thread pool to the ``--cores`` budget.
+
+    Distinct from :class:`WorkerPool`, and the distinction is the whole point.
+    That pool is processes this code dispatches to; this is the thread pool
+    OCCT launches inside a single call when asked — today only
+    :func:`latticegen2.occ.is_valid`, via ``BRepCheck_Analyzer``'s
+    ``theIsParallel`` (docs/algorithm.md §9). Left at its default, that pool
+    sizes itself to the *machine*, which would quietly make ``--cores 2`` on a
+    six-core box use six threads and break the plain reading of
+    specification.md §3: "Maximum CPU cores this run may use", honoured exactly.
+
+    ``SetNbDefaultThreadsToLaunch`` caps what one launcher may lock rather than
+    resizing the pool, which is what makes it safe to call on an already-created
+    default pool — ``Init`` would throw if any job were active.
+
+    This is deliberately *not* called in the worker initializer. Nothing
+    dispatched to a worker asks OCCT for threads, so there is nothing there to
+    bound; and were that to change, the budget would have to be divided by the
+    worker count rather than repeated in each one.
+    """
+    try:
+        OSD_ThreadPool.DefaultPool_s().SetNbDefaultThreadsToLaunch(max(1, int(cores)))
+    except Exception:
+        pass  # a thread-count hint is never a reason to fail a run
 
 
 def read_brep(path: str) -> TopoDS_Shape:

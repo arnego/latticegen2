@@ -5,6 +5,8 @@ correct, so a kernel that refuses to perform it must not end the run — the
 failure mode of issue #6's second half.
 """
 
+import os
+
 import numpy as np
 import pytest
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
@@ -213,18 +215,11 @@ def test_unify_only_dispatches_to_the_pool_when_eligible(tmp_path):
     assert single_stats["max_worker_rss"] == 0
 
 
-def test_validate_parallel_matches_serial(tmp_path):
+def test_validate_passes_sound_solids_and_sums_their_volume():
     solids = two_solids_that_can_unify()
-    serial_invalid, serial_volume, serial_rss = _validate(solids)
-    with WorkerPool(2) as pool:
-        parallel_invalid, parallel_volume, parallel_rss = _validate(
-            solids, pool=pool, tmpdir=str(tmp_path)
-        )
-
-    assert parallel_invalid == serial_invalid == []
-    assert parallel_volume == pytest.approx(serial_volume)
-    assert serial_rss == 0
-    assert parallel_rss > 0
+    invalid, volume = _validate(solids)
+    assert invalid == []
+    assert volume == pytest.approx(sum(occ.volume(s) for s in solids))
 
 
 def _open_shell_solid():
@@ -247,13 +242,57 @@ def _open_shell_solid():
     return occ.make_solid(shell)
 
 
-def test_validate_catches_an_invalid_solid_through_the_pool(tmp_path):
-    """The gate must still fire when it runs in a worker, not just on the master."""
+def test_validate_catches_an_invalid_solid():
+    """The gate must fire, and must name *which* solid failed."""
     bad_solid = _open_shell_solid()
     assert not occ.is_valid(bad_solid)  # sanity: this really is invalid
 
-    with WorkerPool(2) as pool:
-        invalid, _volume, _rss = _validate(
-            [two_boxes_sharing_a_face(), bad_solid], pool=pool, tmpdir=str(tmp_path)
-        )
+    invalid, _volume = _validate([two_boxes_sharing_a_face(), bad_solid])
     assert invalid == [1]
+
+
+def test_occt_parallel_flag_does_not_change_a_validity_verdict():
+    """Gate G18's part A, pinned as a regression rather than left in a report.
+
+    :func:`latticegen2.occ.is_valid` runs ``BRepCheck_Analyzer`` with OCCT's own
+    ``theIsParallel`` on (docs/algorithm.md §9). That is a threading change to
+    the pipeline's exit-4 correctness gate, so what has to hold is not that it
+    is faster but that it answers **identically** — and identically on faults
+    above all. A check that only ever agrees on sound geometry proves nothing:
+    that is G10's lesson in this codebase, where a blind scanner reporting "no
+    faults" cost real time.
+
+    ``test_weld.py`` covers the same property on the four *real* invalid faces
+    committed from the `cc=5, t=1` rehearsal, by way of the ``occ.is_valid``
+    calls in its own fixtures; this covers a whole invalid **solid**, which is
+    the shape ``validate`` actually receives.
+    """
+    from OCP.BRepCheck import BRepCheck_Analyzer
+
+    for shape in (two_boxes_sharing_a_face(), _open_shell_solid()):
+        serial = BRepCheck_Analyzer(shape, True, False).IsValid()
+        assert occ.is_valid(shape) == serial
+
+    assert occ.is_valid(two_boxes_sharing_a_face())
+    assert not occ.is_valid(_open_shell_solid())
+
+
+def test_thread_budget_is_bounded_and_never_raises():
+    """``--cores`` must keep meaning what specification.md §3 says it means.
+
+    OCCT's default pool sizes itself to the machine, so without this a
+    ``--cores 2`` run could launch a thread per physical core inside
+    ``BRepCheck_Analyzer``. The call is also on the run's startup path, so it
+    must never throw — a thread-count hint is not a reason to fail a run.
+    """
+    from OCP.OSD import OSD_ThreadPool
+
+    from latticegen2.parallel import set_thread_budget
+
+    try:
+        set_thread_budget(2)
+        assert OSD_ThreadPool.DefaultPool_s().NbDefaultThreadsToLaunch() == 2
+        set_thread_budget(0)  # nonsense in, still bounded at 1, still no raise
+        assert OSD_ThreadPool.DefaultPool_s().NbDefaultThreadsToLaunch() == 1
+    finally:
+        set_thread_budget(os.cpu_count() or 1)

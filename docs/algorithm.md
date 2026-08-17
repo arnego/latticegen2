@@ -227,7 +227,7 @@ flowchart TD
     M0 --> S[Same-domain unification per solid,
     across the shared worker pool]
     S --> M[BRepCheck_Analyzer validity gate,
-    across the shared worker pool]
+    on the master, OCCT threads]
     M -->|invalid| E3
     M --> N[Write STEP AP214, rewrite header metadata]
     N -->|write failure| E4[Exit 6: output write error]
@@ -416,6 +416,42 @@ The sweep is ordered cheapest-first:
 Let `N` be the candidate node count (∝ volume) and `S` the near-surface count
 (∝ surface area, so `S = O(N^{2/3})`). Classification is `O(N)` cheap tests plus
 `O(S)` exact ones. The payoff is downstream: booleans run on `O(S)` junctions.
+
+**The sweep is dispatched across the run's shared `WorkerPool`**, which is built
+before this stage rather than after it for that reason (§13,
+`latticegen2.parallel`). Every node is decided independently of every other —
+`Occupancy.near` is elementwise, `SpatialHash.query` takes only one node's own
+box, and the ray caster buckets each point by its own projected cell and sums an
+integer crossing count over that bucket's triangles — so there is no reduction
+across nodes anywhere to reassociate, and a node's class is bit-identical
+whether it arrives in the whole candidate set or in a slice of it.
+
+**This is the one parallel stage in the pipeline that moves no geometry.** The
+mesh and the node indices are plain arrays, staged as an `.npz` rather than the
+`.brep` every other stage uses, and what comes back is one integer array per
+slice. So neither of the two findings that constrain parallelism everywhere else
+applies: G7/G17's GIL result is about OCP calls and this code is pure NumPy, and
+G15's identity result is about topology surviving a file boundary and no
+topology crosses one here.
+
+**Slices are strided, not contiguous** — deliberately the opposite of
+`boundary._split_batches`, which keeps batches contiguous so a worker's junctions
+share input-body regions and help OCCT's caching. There is no kernel here to
+cache, and contiguity would actively hurt: `candidate_nodes` ravels a meshgrid
+with the last index varying fastest, so a contiguous slice is a slab through the
+part, while step 3 — the only expensive step — runs solely for near-surface
+nodes, which lie on a shell. Slabs divide that cost very unevenly; a stride of
+`W * 4` spreads the shell across every batch.
+
+The mesh-derived indices are rebuilt per worker rather than shipped, since they
+are a pure function of `(cc, t)` and the mesh. Measured on
+`TD_HX_rehearsal_test` at `cc=5, t=1`, whose mesh is 28,654 triangles: the
+rebuild is **0.37 s**, against a **122.6 s** serial sweep over 527,425
+candidates — 6.7 % of one job's cost, paid in parallel. Measured on
+`dense-lattice`, the stage goes **10.33 s → 3.39 s** on six cores (3.05×), with
+the serial-only stages either side agreeing to within 1 % and the classification
+itself identical: 23,064 candidates → 594 interior, 968 boundary, 21,502
+outside, both ways.
 
 ---
 
@@ -1102,9 +1138,48 @@ program builds itself.
   mesh-based approximation of one, which matters because mesh-based
   self-intersection tests have well-known false-positive modes on this kind of
   geometry (see the plane-straddle pre-check in `tools/verify_geometry.py`).
-  Dispatched per solid across the same shared `WorkerPool` as unification
-  (specification.md §10 path 4) — G7 found no thread speedup here either, so
-  this reuses the process-pool mechanism rather than a second one.
+
+  **Run on the master, in one process, with OCCT's own parallel flag on** —
+  `BRepCheck_Analyzer(shape, True, True)`, the `theIsParallel` constructor
+  argument. This is the only heavy call in the pipeline that has such a flag:
+  §12 and specification.md §11 record that `ShapeUpgrade_UnifySameDomain` has
+  none, which is half of why sub-body parallelism is closed for `simplify` and
+  open here. The other half is that **this stage returns a scalar rather than
+  geometry**, so G15's finding — that tiles reassemble by shared topology only
+  inside one process — has nothing to attach to.
+
+  Gate G18 measured **1.60×** at 3.43 core-equivalents, with the verdict
+  unchanged on valid solids *and* on all four of the real invalid faces
+  committed from the `cc=5, t=1` rehearsal. That control is the load-bearing
+  half: this is the exit-4 gate before a 2 GB file ships, and per G10 a check
+  that only ever agrees on sound geometry proves nothing. `test_pipeline.py`
+  pins it.
+
+  **It is on the master rather than in workers, and the two are one decision.**
+  Per-solid dispatch across the shared pool was specification.md §10's path 4,
+  kept despite measuring slower (2 m 59 s → 3 m 29.6 s) on the argument that a
+  part with evenly-sized components would benefit. It cannot be combined with
+  the flag: `--cores` is "honoured exactly" (specification.md §3), and `W`
+  worker processes each launching `W` OCCT threads is `W²` threads on `W`
+  cores — so keeping the dispatch would mean bounding each worker to one thread,
+  giving up precisely the win. Since the dominant solid is what sets this
+  stage's floor on any real part, and it is one job either way, the flag reaches
+  the case the dispatch never could. `latticegen2.parallel.set_thread_budget`
+  caps OCCT's own pool to the `--cores` budget, called once on the master.
+
+  Running here also deletes a `.brep` round trip that existed only to reach the
+  workers — the master wrote every solid out and each worker read it back,
+  464 MB each way on the rehearsal, to compute two scalars per solid. Measured
+  as a controlled pair on `dense-lattice`: **5.49 s → 2.11 s (−61.6 %)**, output
+  byte-identical.
+
+  A manual chunked split would go further — G18 measured per-face checks at
+  94.4 % of the serial cost against a 4.8 % structural floor, so ~5× is
+  available — and is deliberately **not** built: `BRepCheck_Analyzer(solid)`
+  checks subshapes *in context*, a standalone per-face check is a different
+  predicate (that difference is what G12 used to find rung 2's mechanism), and
+  replacing this gate with a hand-assembled conjunction would make its failure
+  mode "produce a wrong result", which §11 forbids.
 * **Units.** STEP I/O is pinned to millimetres defensively, even though that is
   the default: a mismatched unit would silently corrupt every dimension rather
   than fail.
@@ -1254,11 +1329,11 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 |---|---|
 | Template | `O(1)` — one 6-operand fuse per run, ~40 ms |
 | Tessellation | `O(input faces)`, independent of lattice density |
-| Classification | `O(N)` cheap tests + `O(S)` exact ones |
+| Classification | `O(N/W)` cheap tests + `O(S/W)` exact ones, across the shared pool (§5.4) |
 | Interior | `O(N)` index operations and face constructions, **no booleans** |
 | Assembly | `O(N + S)` index operations, **no booleans and no search** |
 | Unification | `O(faces)` per solid, across the shared pool (§9, specification.md §10 path 1). Cost per face **rises with scale** — 0.06 ms/face at 25 k faces, ~1.1 ms/face at 1 M (G13) — and tracks the faces it must emit, not the merges it finds: a 46 % smaller input leaves it no faster (§9) |
-| Validity | `O(faces/W)`, across the same shared pool (§9, specification.md §10 path 4) |
+| Validity | `O(faces)` on the master, divided by OCCT's own thread pool rather than this project's process pool — 1.60× measured, G18 (§9) |
 | Boundary | `O(S/W)` single-operand intersections |
 | Connectivity | `O(N + S)` union-find |
 | Stitching | Round 1: `O(S^1.8)` over the boundary layer only, tiled into `O(S/k)` calls of size `k`, across the shared pool. Round 2: `O(F_seam/W)`, where `F_seam` is only the tile-boundary faces still bearing a free edge after round 1 (§8, G8) — not the full tiled face count `F` a monolithic round 2 would pay for |
@@ -1278,14 +1353,16 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
 | Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; identical to a full round 2 at every prototype scale tried (§8, G8), but not on real, heavily trimmed production geometry (§8) — a per-component free-edge check against `want_rings` catches and repairs the mismatch there, at the cost of the saving only for the repaired components |
-| One shared `WorkerPool` for the whole run | `spawn`'s process-creation cost is paid once per run rather than once per stage; boundary trim, boundary-sew round 1, boundary-sew round 2, unification and validation all dispatch through it (§8, §9, `latticegen2.parallel`) |
-| Same-domain unification and validity across the shared pool | Both were measured single-threaded at 24 % (17 m 17 s) and 4 % (2 m 59 s) of the `cc=5, t=1` rehearsal; G7 measured OCP holding the GIL around both calls, so this is the same process-pool-plus-`.brep` mechanism the rest of the pipeline uses, not threads (§9, specification.md §10 paths 1 and 4) |
+| One shared `WorkerPool` for the whole run | `spawn`'s process-creation cost is paid once per run rather than once per stage; classification, boundary trim, boundary-sew round 1, boundary-sew round 2 and unification all dispatch through it (§5.4, §8, §9, `latticegen2.parallel`). Built before `classify` rather than after it so that stage can use it too — which also means `boundary` now starts with warm workers instead of paying their first import, measured at −12.6 % on `dense-lattice`. Validity is the one parallel stage that does *not* use it, and §9 says why |
+| Same-domain unification across the shared pool | Measured single-threaded at 24 % (17 m 17 s) of the `cc=5, t=1` rehearsal; G7 measured OCP holding the GIL around the call, so this is the same process-pool-plus-`.brep` mechanism the rest of the pipeline uses, not threads (§9, specification.md §10 path 1) |
+| Validity via OCCT's own thread pool, on the master (§9) | The one heavy call with a `theIsParallel` flag, and the one heavy stage returning a scalar rather than geometry — so G17's GIL result does not bind OCCT's native threads and G15's identity result has nothing to attach to. 1.60× at 3.43 cores, verdict identical on valid solids and on all four real invalid faces (G18). Replaces path 4's per-solid process dispatch, which cannot coexist with it under `--cores` (`W` processes × `W` threads) and never reached the dominant solid that sets the floor; dropping it also deletes a 464 MB round trip |
 | Same-domain unification before export (§9) | Recovers the face merging the removed boolean used to do for free: 47% fewer faces and half the file size, and it makes the run *faster* by shrinking export |
 | Round-trip re-import removed after export (§9) | Was the single most expensive stage measured (22 m 29 s of 73.1 min) for a guarantee `tools/e2e.py` already establishes in dev/CI; a deliberate, user-approved trade rather than a speed lever discovered by measurement alone |
 | Process-parallel boundary junctions | Constant-size independent jobs |
 | Coarse occupancy pre-filter before exact distance tests | Only near-surface nodes pay for segment-triangle maths |
 | Vectorised ragged cell assignment in the spatial index | Building the index over a 200 k-triangle *output* mesh stays interactive |
 | One ray-parity test per node, not per half-strut | Justified by §5.3(a); a third of the work |
+| Classification dispatched across the shared pool, strided (§5.4) | Nodes are decided independently, so this divides `O(N)` by `W` exactly. The one parallel stage moving no geometry — plain arrays over an `.npz`, so neither G7/G17's GIL result nor G15's identity result applies. Measured 10.33 s → 3.39 s on `dense-lattice` (3.05× on six cores) for an identical classification; the per-worker index rebuild is 0.37 s against a 122.6 s serial sweep at rehearsal scale |
 | Planar faces skipped in deviation measurement | Lattice output is all planar, so verification re-tessellation stays cheap |
 | Deviation samples binned once against inflated triangle AABBs | One vectorised `searchsorted` replaces a 27-cell query per sample; on the 26 k-triangle heat exchanger that was most of the stage (§5.1) |
 | Centroid/AABB bounds before the exact point-triangle test | A neighbourhood holds tens of triangles and two can be nearest; the cheap bounds discard the rest without exact work |
@@ -1326,9 +1403,22 @@ Alternatives evaluated and rejected:
   before being built (§8) — G6 already showed round 2's cost tracks total face
   count almost flatly in shape count, so it is dominated by a flat per-face
   term rather than a shape-count term a tree could usefully attack, and a tree
-  pays that flat term once per level instead of once. Threads instead of
-  processes for same-domain unification and validity (specification.md §10
-  paths 1, 4): rejected by measurement, G7 — OCP holds the GIL around both.
+  pays that flat term once per level instead of once.
+* **Python threads instead of processes, for same-domain unification and
+  validity** (specification.md §10 paths 1, 4): rejected by measurement, G7 —
+  OCP holds the GIL around both calls, so *Python* threads serialize. Note
+  carefully what that does and does not rule out: it is a statement about
+  threads this code starts, not about threads OCCT starts inside a call. G18
+  found `BRepCheck_Analyzer` has a `theIsParallel` flag of its own and measured
+  it at 1.60×, which is why validity is now the one stage using native threads
+  rather than the process pool (§9). `ShapeUpgrade_UnifySameDomain` has no such
+  flag (G17), so unification keeps the process pool.
+* **A hand-assembled per-face conjunction in place of the whole-solid validity
+  check** (G18): measured worth ~5× — per-face work is 94.4 % of the check —
+  and rejected on correctness rather than cost. `BRepCheck_Analyzer(solid)`
+  checks subshapes *in context*; a standalone per-face check is a different
+  predicate, which is exactly the difference G12 used to diagnose rung 2. Its
+  failure mode would be a missed fault, which §11 forbids.
 
 ---
 
@@ -1341,13 +1431,13 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
 | [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity, pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
-| [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes) |
+| [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |
 | [`src/latticegen2/boundary.py`](../src/latticegen2/boundary.py) | §7 (single-operand trim, pinhole-wire repair and its guard, cap tagging, worker processes), §7.1 (interface resolution) |
 | [`src/latticegen2/connect.py`](../src/latticegen2/connect.py) | §8 (junction graph, components, floating-body rule) — kernel-free |
 | [`src/latticegen2/weld.py`](../src/latticegen2/weld.py) | §8 (boundary sew — tiled round 1, seam-only round 2 — interface-ring lookup, assembly and its watertightness proof) |
-| [`src/latticegen2/parallel.py`](../src/latticegen2/parallel.py) | §8, §9, §12 (the shared `WorkerPool`, `.brep` IPC helpers) — used by `boundary.py`, `weld.py` and `pipeline.py` |
+| [`src/latticegen2/parallel.py`](../src/latticegen2/parallel.py) | §5.4, §8, §9, §12 (the shared `WorkerPool`, `.brep` IPC helpers) — used by `classify.py`, `boundary.py`, `weld.py` and `pipeline.py` |
 | [`src/latticegen2/stepout.py`](../src/latticegen2/stepout.py) | §9 (header rewrite) |
 | [`src/latticegen2/runlog.py`](../src/latticegen2/runlog.py) | §10 (logging, stage timings, summary) |
-| [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration), §9 (parallel unification and validation) |
+| [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration), §5.4 (dispatching the classification sweep), §9 (parallel unification, and the master-side validity gate) |
 | [`src/latticegen2/__main__.py`](../src/latticegen2/__main__.py) | Entry point, failure reporting, exit codes |

@@ -60,6 +60,7 @@ mode must be "do more work", never "produce a different result".
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -513,6 +514,7 @@ def _sew_round_two(
     tmpdir: str | None,
     pool: WorkerPool | None,
     expected_rings: dict[int, int] | None = None,
+    stats: "SewStats | None" = None,
 ) -> tuple[dict[int, list], int, int]:
     """Sew each component's round-1 result (or its own pieces, if untiled)
     into that component's final boundary-layer shell.
@@ -580,6 +582,7 @@ def _sew_round_two(
     # an untiled component's "tile result" is just its own pieces' raw, never-
     # yet-sewn faces, which have no round-1 free-edge structure to exploit, so
     # it is sewn exactly as before this existed.
+    t0 = time.perf_counter()
     seam_face_lists: dict[int, list[list]] = {}
     interior_faces: dict[int, list] = {}
     for group in groups:
@@ -588,6 +591,9 @@ def _sew_round_two(
         else:
             seam_face_lists[group] = face_lists[group]
             interior_faces[group] = []
+    if stats is not None:
+        stats.t_split = time.perf_counter() - t0
+    t0 = time.perf_counter()
 
     def _finish(sewn: dict[int, list]) -> dict[int, list]:
         return {g: sewn[g] + interior_faces[g] for g in groups}
@@ -618,6 +624,10 @@ def _sew_round_two(
             with WorkerPool(min(workers, len(jobs))) as owned:
                 out, max_rss = _run(owned)
 
+    if stats is not None:
+        stats.t_round2 = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     repaired = 0
     if expected_rings is not None:
         for group in groups:
@@ -628,6 +638,8 @@ def _sew_round_two(
             if got != want:
                 out[group] = _sew_faces(face_lists[group], tolerance)
                 repaired += 1
+    if stats is not None:
+        stats.t_repair = time.perf_counter() - t0
 
     return out, max_rss, repaired
 
@@ -648,6 +660,29 @@ class SewStats:
     retoleranced_faces: int = 0
     """Faces made valid again by correcting a vertex recorded off its edge's
     curve (:func:`latticegen2.occ.fix_vertex_tolerances`, docs/algorithm.md §8)."""
+    t_round1: float = 0.0
+    """Seconds in round 1 — the tiled, worker-parallel sew."""
+    t_split: float = 0.0
+    """Seconds in :func:`_split_seam_interior`, on the master."""
+    t_round2: float = 0.0
+    """Seconds in round 2's *attempt* — the seam-only sew, worker or serial."""
+    t_repair: float = 0.0
+    """Seconds redoing round 2 as a full unsplit sew, on the master.
+
+    Zero unless ``repaired_components`` is nonzero. Split out from
+    :attr:`t_round2` because the two answer different questions: `t_round2` is
+    what the seam-only optimization costs, and on a part where the check fails
+    that cost is **discarded** — the repair recomputes the component from
+    scratch. Until these were measured separately, the run log could say
+    `stitch_repaired_components: 1` without saying what that had cost, and
+    profiling could only report the stage's 1.09 mean cores against a 5.42 peak
+    without attributing the gap."""
+    t_retolerance: float = 0.0
+    """Seconds in :func:`latticegen2.occ.fix_vertex_tolerances`, on the master.
+
+    One ``BRepCheck_Analyzer`` per boundary face, measured at 0.215 ms on real
+    trimmed faces — ~1.1 min across the rehearsal's 301,505 (specification.md
+    §10)."""
     still_invalid_faces: int = 0
     """Faces the analyzer rejects that this repair did **not** account for.
 
@@ -729,10 +764,13 @@ def sew_boundary(
         for group in want_rings.values():
             ring_counts[group] = ring_counts.get(group, 0) + 1
 
+    t0 = time.perf_counter()
     tile_results, max_rss1 = _sew_all_tiles(plan, SEW_TOLERANCE, workers, tmpdir, pool=pool)
+    stats.t_round1 = time.perf_counter() - t0
+
     out, max_rss2, repaired = _sew_round_two(
         by_group, plan, tile_results, SEW_TOLERANCE, workers, tmpdir, pool,
-        expected_rings=ring_counts,
+        expected_rings=ring_counts, stats=stats,
     )
     stats.max_worker_rss = max(max_rss1, max_rss2)
     stats.repaired_components = repaired
@@ -743,10 +781,12 @@ def sew_boundary(
     # trimmed pieces going in are clean (docs/algorithm.md §8, G11). Doing it
     # before the interface rings are read means the interior adopts the
     # corrected vertices rather than a copy that would have to be fixed twice.
+    t0 = time.perf_counter()
     for group_faces in out.values():
         fixed, residual = occ.fix_vertex_tolerances(group_faces)
         stats.retoleranced_faces += fixed
         stats.still_invalid_faces += residual
+    stats.t_retolerance = time.perf_counter() - t0
     return out, stats
 
 

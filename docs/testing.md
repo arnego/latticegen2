@@ -36,7 +36,7 @@ header rewrite.
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
 | `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell | yes |
 | `test_boundary.py` | The symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7), tested against the **real** failing junction in `TD_HX_Indre_Volum.step` rather than a synthetic stand-in — see the note below | yes |
-| `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6 | yes |
+| `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6. Also that the strided parallel sweep (docs/algorithm.md §5.4) returns *identical* classes to the serial one, across a real process boundary — identical rather than equivalent, because stride arithmetic invites off-by-ones that a tolerance would hide | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
 | `test_pipeline.py` | Same-domain unification's fallback ladder — a kernel that refuses to merge must yield a larger file, never a failed run | yes |
 
@@ -157,7 +157,7 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 | Scenario | Total | Dominant stages |
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
-| test cylinder, `cc=10 t=1.5` | ~45 s | classify, simplify, boundary trim |
+| test cylinder, `cc=10 t=1.5` | ~40 s | simplify, boundary trim, stitch |
 | `TD_HX_rehearsal_test`, `cc=5 t=1` | 51.7 min, 19.3 GB peak, 2.00 GB output | simplify, boundary trim, stitch, validate |
 
 Both scenario rows and the rehearsal are post-Phase-2 (specification.md §10):
@@ -168,6 +168,44 @@ an identical output in both cases. The rehearsal figure comes from a
 comparing two sessions — its five untouched stages agree to within 1 %, where
 the 2026-08-14/15 pair swung 25-36 % on machine load alone. Prefer that method
 for any future performance claim here.
+
+The cylinder's ~45 s → ~40 s since comes from two changes, measured together as
+a controlled pair on `dense-lattice` (**50.30 s → 40.50 s, −19.5 %**, output
+byte-identical outside the header timestamp):
+
+| Stage | before | after | |
+|---|---|---|---|
+| **classify** | 10.70 s | **4.08 s** | −61.9 % — the strided parallel sweep, §5.4 |
+| **validate** | 5.49 s | **2.11 s** | −61.6 % — OCCT's own parallel flag, on the master, §9 |
+| boundary | 8.10 s | 7.08 s | −12.6 % — a side effect: the pool is now built before `classify`, so `boundary` no longer pays worker spawn |
+| everything else | | | +1.8 % to +7.1 % |
+
+The untouched stages drifting up ~4–7 % rather than the ~1 % an ideal pair
+shows is worth naming rather than glossing: it is thermal, the two runs being
+seconds apart. It does not threaten the reading, since the two changed stages
+moved an order of magnitude further and in the opposite direction — but a
+smaller claim than −62 % would not survive that much drift, which is the reason
+to run the pair on an otherwise idle machine.
+
+**The rehearsal row is still 51.7 min deliberately, even though the part has
+been re-run since**, and the reason is a useful worked example of when *not* to
+update a number. The 2026-08-17 re-run with both changes in
+([profiling-reports.md](profiling-reports.md)) measured 56.8 min — slower — and
+neither half of that is usable as a whole-run figure:
+
+* another process started three seconds before `stitch` ended, so `instance`
+  onward ran under competition;
+* `boundary` measured 889 s at **4.28 cores**, and the 2026-08-15 profile
+  recorded 14 m 51 s at **4.22 cores** on *untouched* code, labelled "no —
+  variance" in specification.md §10's table. The run reproduces that slow-band
+  point to within 1 %.
+
+The per-stage results from it *are* usable where the window was clean —
+`classify` 126 s → 47.0 s at 4.02 cores, `validate` 225 s → 114.0 s with its
+I/O falling to exactly zero — and they are quoted in
+[profiling-reports.md](profiling-reports.md) rather than here. **A stage
+measurement in a clean window and a whole-run total are not the same kind of
+claim**, and this run yields the first and not the second.
 
 The third row is the scale rehearsal, first run end to end on 2026-08-14,
 re-profiled on 2026-08-15 after implementing specification.md §10's paths 1–4
@@ -190,10 +228,28 @@ not against 1 m 13 s. The per-face `BRepCheck_Analyzer` scan that
 0.215 ms on real trimmed boundary faces, or **~1.1 min** across this part's
 301,505 of them.
 
-If this stage becomes the constraint, that ~1 min scan is the easy half (it is
-embarrassingly parallel and currently serial on the master); the 10-minute half
-means making the seam-only split correct on heavily trimmed geometry, which is
-a real piece of work, not a tuning knob.
+**`stitch` now reports its own per-phase timings**, so this is measured rather
+than apportioned. On the 2026-08-17 re-run:
+
+    round1 49.1s   split 3.0s   round2 15.1s   repair 651.2s
+    retolerance 44.6s   rings 6.7s
+
+The repair is **85 %** of the stage. Two things follow, and the second is the
+one worth carrying:
+
+* The retolerance scan is 44.6 s — the easy half, embarrassingly parallel in
+  principle, worth ~1.2 % of the run, and carrying a subtle predicate change if
+  done the cheap way (specification.md §10).
+* **Running the unsplit sew speculatively alongside the seam-only one, so the
+  discarded attempt leaves the critical path, recovers at most 15.1 s.** That
+  proposal was worth building only while the discarded attempt was assumed
+  expensive. It is not. The 651 s means making the seam-only split correct on
+  heavily trimmed geometry, which is a real piece of work and not a scheduling
+  change.
+
+The general lesson is one this file keeps re-learning: a stage timer that lumps
+six phases together tells you the stage is slow and nothing about which proposal
+would help. These timers cost nothing and retired a proposal on their first run.
 
 What is worth knowing before doing performance work on this project at all, now
 that the paths 1–4 chapter is closed:
@@ -219,16 +275,36 @@ that the paths 1–4 chapter is closed:
   size (G16), so the selection is what defeats it and no implementation can do
   better. Both are written up in docs/specification.md §11. **Do not propose a
   new way to parallelise or restrict this call without reading them first.**
-* **Parallelising `simplify` and `validate` is correct but was not a
-  wall-clock win on this part.** Both still measure at 0.99 cores in
+* **Parallelising `simplify` across the pool is correct but was not a
+  wall-clock win on this part.** It still measures at 0.99 cores in
   `profile_report.py` — this part's 14 solids are one dominant body plus 13
   small scraps, so there is nothing to spread across workers, and the added
-  `.brep` round trip cost a few percent (`simplify` +8 %, `validate` +17 %)
-  rather than saving anything. Correct behaviour on a part with more evenly
-  sized components; not this one. See specification.md §10 for the full
-  account of why this was kept anyway.
-* **`boundary` remains the only stage that uses more than one core** —
-  parallel by construction, not by this chapter's changes.
+  `.brep` round trip cost a few percent (+8 %) rather than saving anything.
+  Correct behaviour on a part with more evenly sized components; not this one.
+  See specification.md §10 for the full account of why this was kept anyway.
+* **`validate` no longer uses the worker pool at all, and this is the one
+  distinction worth carrying away from that chapter.** Per-*body* dispatch
+  failed for `simplify` and `validate` alike, for the same reason. Going
+  *below* the body is where they part company: `simplify` must hand back
+  geometry, so its tiles must reassemble by shared topology and G15's file
+  boundary destroys that; `validate` hands back a boolean, so nothing
+  reassembles. G18 then found `BRepCheck_Analyzer` has a `theIsParallel` flag
+  of its own — OCCT's native threads, which G17's GIL result does not bind —
+  worth **1.60×** with the verdict unchanged on all four committed invalid
+  faces. It runs on the master because `--cores` cannot absorb `W` processes ×
+  `W` threads, which also deletes a 464 MB round trip. Controlled pair on
+  `dense-lattice`: **5.49 s → 2.11 s**. The rule this leaves behind: before
+  reaching for the process pool, ask whether the stage returns geometry or a
+  number, and whether the kernel call already has a parallel flag.
+* **`boundary` was for a long time the only stage that used more than one
+  core** — parallel by construction, not by that chapter's changes. `classify`
+  now joins it (docs/algorithm.md §5.4): it is pure NumPy, every node is decided
+  independently, and it measured 10.33 s → 3.39 s on `dense-lattice` (3.05× on
+  six cores) for a bit-identical classification. It is worth knowing *why* that
+  one was easy where the rest were not — nothing OCCT crosses its process
+  boundary, so neither the GIL result (G7, G17) nor the tile-identity result
+  (G15) has anything to attach to. Treat that as the test to apply to any new
+  candidate stage before reaching for a pool.
 * **The round-trip re-import stage is gone.** It cost 22 m 29 s on
   2026-08-14 — the single most expensive stage in that run — to re-establish
   in-process what `tools/e2e.py` already checks in dev/CI on every committed

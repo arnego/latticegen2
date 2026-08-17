@@ -274,3 +274,119 @@ where a *generic* subset of the same size gives 0.98 (G16) — which is what mak
 the conclusion safe despite the imperfect pair, and what identifies the cause as
 the restriction's own selection rather than the kernel. See
 docs/specification.md §11.
+
+---
+
+## What changed between the previous entry and the next
+
+Two stages were parallelised and one measurement gate closed a third direction.
+
+* **`classify` dispatches across the shared pool** (docs/algorithm.md §5.4).
+  Strided slices, an `.npz` mesh, pure NumPy — the one parallel stage that moves
+  no geometry, so neither G7/G17's GIL result nor G15's identity result applies.
+  The `WorkerPool` is consequently built *before* `classify` rather than after.
+* **`validate` came off the pool and onto the master**, with
+  `BRepCheck_Analyzer`'s own `theIsParallel` flag (docs/algorithm.md §9, G18).
+  Native OCCT threads, so the GIL result does not bind them; and since the stage
+  returns a scalar rather than geometry, G15 has nothing to attach to. This
+  replaces specification.md §10's path 4, which cannot coexist with it under
+  `--cores` (`W` processes × `W` threads).
+* **`stitch` gained per-phase timers** — round 1, split, round 2, repair,
+  retolerance, rings — because the stage's 0.96 mean against a 4.38 peak was
+  visible but not attributable.
+
+## 2026-08-17 — parallel `classify`, master-side `validate` (**partially contaminated**)
+
+**Read the caveats before the table.** This is *not* a controlled pair, and two
+separate things limit it:
+
+1. **Another process started at 21:36:22**, three seconds before `stitch` ended.
+   `template` through `stitch` are clean; `instance`, `assemble`, `simplify`,
+   `validate` and `export` ran under competition and their wall times are
+   inflated by an unknown amount.
+2. **`boundary` landed in this project's known slow band.** It measured 889 s at
+   **4.28 cores** against the previous entry's 721 s at 5.20 — but the
+   2026-08-15 profile recorded 14 m 51 s at **4.22 cores** on untouched code,
+   labelled "no — variance" in specification.md §10's own table. This run
+   reproduces that point to within 1 %. So the whole-run total below is **not**
+   comparable to the 3,092 s of the previous entry, and no conclusion should be
+   drawn from it.
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| tessellate | 3.0s | 49% | 98% | 0.49 | 251 MB | 269 MB | 1 | 1 MB | 0 MB |
+| **classify** | **47.0s** | **402%** | **492%** | **4.02** | 1,837 MB | 1,867 MB | 7 | 238 MB | 3 MB |
+| boundary | 889.0s | 428% | 467% | 4.28 | 1,822 MB | 2,173 MB | 7 | 170 MB | 156 MB |
+| connect | 13.0s | 94% | 98% | 0.94 | 2,332 MB | 2,347 MB | 7 | 0 MB | 0 MB |
+| stitch | 770.0s | 96% | 438% | 0.96 | 3,203 MB | 3,361 MB | 7 | 382 MB | 353 MB |
+| instance | 46.0s | 95% | 99% | 0.95 | 3,687 MB | 4,168 MB | 7 | 0 MB | 0 MB |
+| assemble | 22.0s | 97% | 100% | 0.97 | 3,928 MB | 3,928 MB | 7 | 0 MB | 0 MB |
+| simplify | 1,155.0s | 96% | 106% | 0.96 | 6,469 MB | 6,974 MB | 7 | 940 MB | 940 MB |
+| **validate** | **114.0s** | **159%** | **464%** | **1.59** | 9,845 MB | 14,476 MB | 7 | **0 MB** | **0 MB** |
+| export | 347.0s | 96% | 101% | 0.96 | 11,512 MB | 19,387 MB | 7 | 2,007 MB | 2,007 MB |
+
+```
+total to last stage : 3,406.0s (56.8 min)   <- not comparable, see caveats
+peak tree RSS       : 19,387 MB
+```
+
+### The two readable results
+
+**`classify`: 126 s → 47.0 s, 0.98 → 4.02 cores.** Measured in a clean window.
+The classification is unchanged — 527,425 candidates → 29,375 interior, 19,552
+boundary, exactly the previous entries' figures. The stage does not reach 6
+cores because each worker rebuilds the mesh-derived indices (0.37 s measured
+directly) and reads the staged `.npz` — visible as this stage's 238 MB read,
+which did not exist before.
+
+Note it undershoots the naive projection: the sweep alone measures 122.6 s
+serial off the committed mesh, so 6 workers "should" give ~21 s. It gives 47 s.
+The difference is staging, dispatch and per-worker index rebuild — the reason to
+quote the stage rather than the kernel.
+
+**`validate`: 225 s → 114.0 s, 0.98 → 1.59 cores, and I/O to exactly zero.**
+This ran *under competition*, so the true figure is better than shown. The
+`0 MB read / 0 MB written` is the most legible part of this entry: the previous
+entry moved 464 MB each way to compute two scalars per solid, and running on the
+master deleted that round trip outright. The 1.59 mean against a 4.64 peak is
+the shape G18 predicts — OCCT's threads fully engaged on the dominant solid and
+idle across the 13 scraps.
+
+### What `stitch`'s new phase timers say, and what it costs
+
+    round1 49.1s   split 3.0s   round2 15.1s   repair 651.2s
+    retolerance 44.6s   rings 6.7s
+
+**The repair is 85 % of the stage**, and this is the number that closes a
+proposal rather than opening one. Speculatively running the unsplit sew
+alongside the seam-only one — dispatching both and keeping whichever passes the
+free-edge check, to take the discarded attempt off the critical path — can
+recover at most the **15.1 s** the attempt costs. That is 0.5 % of the run, not
+the minutes it was worth building for. The seam subset is small, so computing it
+and throwing it away is nearly free.
+
+What remains expensive is exactly what specification.md §10 already said: the
+651 s full unsplit sew, reachable only by making the seam-only split correct in
+the presence of straddling edges. That is an algorithmic fix, not a parallelism
+lever, and no scheduling change touches it.
+
+`retolerance` at 44.6 s is the other newly-visible figure — 5.8 % of `stitch`,
+1.3 % of the run, and the one remaining embarrassingly-parallel item in this
+stage.
+
+### Correctness at production scale
+
+Unaffected by contention, and the reason this run was still worth finishing:
+**all 14 solids pass `BRepCheck_Analyzer`**, 19 vertex tolerances corrected with
+no residual, 122,180 interfaces, 584,028 faces, 330,354.002 mm³, 2.00 GB — every
+figure matching the previous entries.
+
+One exception worth recording rather than smoothing over: **edges came back at
+2,517,853 against 2,517,881, a difference of 28 (0.001 %)**. Nothing in this
+change can plausibly cause it — the classification is identical, `validate` is
+read-only, and `set_thread_budget(6)` is a no-op when OCCT's default on this
+machine is already 6. It sits inside what docs/algorithm.md §9 describes as
+same-domain unification's own representation choice. Flagged so a future run can
+confirm it is variance rather than drift.

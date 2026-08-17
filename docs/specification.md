@@ -304,6 +304,14 @@ green; `test_cli.py` already pins the budget's parsing and defaulting.
 2026-08-15 profile. Not a regression, and worth recording precisely so it is not
 re-diagnosed as one.
 
+**Still live, re-confirmed 2026-08-17** on both halves of the Phase 2 controlled
+pair ([profiling-reports.md](profiling-reports.md)): `stitch` measured
+10 m 29.1 s on `82adbb1` and 10 m 23.0 s on `928cc57`, with
+`stitch_repaired_components: 1` and `stitch_tiles: 35` in both. Phase 2 moved it
+by −1.0 %, i.e. not at all — it touches nothing in this stage. At 10 m 23 s
+`stitch` is now the **second-largest stage**, 20 % of the run, behind `simplify`
+and ahead of `boundary`.
+
 **Why.** Boundary-sew round 2 sews only the free-edge-bearing subset of each
 tile's faces (algorithm.md §8, gate G8). That identity holds at every prototype
 scale but **not** on this part's real, heavily trimmed pieces, where straddling
@@ -629,8 +637,8 @@ notes — including the §9 correction above.
 1–4 below, both on `TD_HX_rehearsal_test.step` at `cc=5, t=1`,
 `--cores 6 --ram 20 -bg` on the 6-core / 32 GB development workstation. Both
 runs used a temporary, uncommitted bypass of the `assemble`-stage watertightness
-gate ("Micron-scale debris edges" below, still open and still out of scope for
-this chapter) so every later stage could be measured; neither run's output is a
+gate (the defect since closed as "Micron-scale debris edges", §11 — it was open
+and out of scope at the time) so every later stage could be measured; neither run's output is a
 shippable file, but the stage costs are representative because the same work is
 done either way, and both runs agree on everything the defect doesn't touch —
 330,354 mm³, 14 solids, 705,000 interior faces, 301,505 boundary faces,
@@ -660,6 +668,16 @@ proven at a few hundred faces is not a performance gate, and a design meant
 for hundred-thousand-face parts needs at least one measurement taken there.
 
 #### Per-stage cost and resource profile, 2026-08-15
+
+> **Superseded as a baseline, kept as a record.** Both columns below were
+> measured with the `assemble` watertightness gate bypassed and before the
+> G9–G12 defect family was fixed, so neither is a figure current work should be
+> compared against — the 47.1-minute total in particular has been withdrawn
+> wherever it was used as an anchor. The current profile, measured as a
+> controlled pair with no bypass, is in
+> [profiling-reports.md](profiling-reports.md): **55 m 17.9 s** before Phase 2
+> and **51 m 43.3 s** after. What this table is still good for is the *shape* of
+> the chapter it documents — which of paths 1–4 paid and which did not.
 
 Wall time from the run's `.log`; CPU, memory and I/O from
 [`tools/profile_run.py`](../tools/profile_run.py), joined to the stage boundaries by

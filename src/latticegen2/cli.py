@@ -1,11 +1,18 @@
 """Command-line surface (specification.md §3).
 
-``--cores`` and ``--ram`` are optional *budgets* — ceilings on what a run may
-use, not hints it may exceed. Both resolve to a concrete number either way:
-``--cores`` to the worker count for every parallel stage, defaulting to this
-machine's logical cores; ``--ram`` to a memory budget, defaulting to what is
-actually free at startup and capped at what the machine physically has. The
-detection behind both defaults lives in :mod:`latticegen2.sysinfo`.
+``--cores`` is an optional *budget* — a ceiling on what a run may use, not a
+hint it may exceed. It resolves to a concrete number either way: the worker
+count for every parallel stage, defaulting to this machine's logical cores.
+The detection behind that default lives in :mod:`latticegen2.sysinfo`.
+
+There used to be a second budget, ``--ram``. It was removed (specification.md
+§11): it was validated and recorded but never enforced, and the run's
+actual peak lives in the master holding the finished result while ``export``
+serialises it — a place no worker-count or tile-size lever can reach — so
+enforcing it for real would have meant streaming the STEP write, a
+substantially larger change than the flag ever suggested. A budget nothing
+enforces is not a budget, so rather than leave a parameter that only ever
+printed itself, it was taken out.
 
 Every run executes at below-normal process priority, master and workers alike.
 That used to be the opt-in ``-bg`` flag; it is unconditional now, because a run
@@ -42,9 +49,6 @@ Optional:
   -o, --output <path>   Output .step path (default: <input_stem>-cc<cc>t<t>.step)
   --cores <n>           Maximum cores to use (1-128), one worker process per
                         core. Default: this machine's logical core count.
-  --ram <GB>            Memory budget, from 1 GB up to this machine's total
-                        physical RAM. Default: RAM free at startup. Advisory:
-                        recorded in the run log next to the measured peak.
   -v, --verbose         Verbose console output (a full .log is always written)
   -h, --help            Show this message and exit
 
@@ -71,21 +75,6 @@ class Args:
     the log can distinguish a run that was *told* to use six cores from one that
     happened to detect six.
     """
-    ram: float | None
-    """Memory budget in GB as the user gave it, or ``None`` if they did not.
-
-    Same distinction as :attr:`cores`, against the resolved
-    :attr:`ram_budget_gb`.
-    """
-    ram_budget_gb: float
-    """The memory budget actually in force, in GB — never ``None``.
-
-    Advisory in the sense that nothing enforces it: there is no tile-sizing
-    calculation left for it to feed and no memory watchdog, since the
-    distributed assembly stage that needed backpressure does not exist in this
-    architecture. It is recorded in the run log so a run's measured peak can be
-    read against the budget it was given.
-    """
 
     def as_dict(self) -> dict:
         """The parameter block the run header and summary report."""
@@ -96,10 +85,6 @@ class Args:
             "t": f"{format_param(self.t)} mm",
             "workers": self.workers,
             "cores": self.cores if self.cores is not None else "auto",
-            "ram": (
-                f"{self.ram_budget_gb:.1f} GB"
-                + ("" if self.ram is not None else " (free at startup)")
-            ),
         }
 
 
@@ -238,7 +223,7 @@ def parse_args(argv: list[str]) -> Args:
     out-of-range parameters are rejected before any computation starts.
     """
     input_path = output = None
-    cc = t = ram = cores = None
+    cc = t = cores = None
     verbose = False
 
     i = 0
@@ -257,9 +242,6 @@ def parse_args(argv: list[str]) -> Args:
         elif a == "--cores":
             v, i = _value(argv, i, a)
             cores = _as_int(a, v)
-        elif a == "--ram":
-            v, i = _value(argv, i, a)
-            ram = _as_float(a, v)
         elif a in ("-v", "--verbose"):
             verbose = True
             i += 1
@@ -279,18 +261,6 @@ def parse_args(argv: list[str]) -> Args:
     _in_range("-t", t, 0.4, 20.0)
     if cores is not None:
         _in_range("--cores", cores, 1, 128)
-    # The ceiling is the machine's own RAM rather than a static literal: a budget
-    # above what physically exists is not a budget. The floor stays a plain
-    # sanity check. Reported with its own message rather than through
-    # `_in_range`, so the ceiling reads as the machine fact it is instead of as
-    # a raw float with fifteen digits of detection noise.
-    if ram is not None:
-        total = sysinfo.total_ram_gb()
-        if ram < 1.0 or ram > total:
-            raise ParamError(
-                f"--ram = {ram} GB is out of the valid range [1.0, {total:.1f}] "
-                f"GB; the upper bound is this machine's total physical memory."
-            )
 
     a_edge = cc / (2.0 ** 0.5)
     if t >= a_edge:
@@ -313,8 +283,6 @@ def parse_args(argv: list[str]) -> Args:
         workers=default_workers(cores),
         verbose=verbose,
         cores=cores,
-        ram=ram,
-        ram_budget_gb=ram if ram is not None else sysinfo.free_ram_gb(),
     )
 
 

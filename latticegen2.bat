@@ -42,7 +42,7 @@ for %%C in (3 4 5 6 130) do if "%RC%"=="%%C" exit /b %RC%
 REM `%ERRORLEVEL% NEQ 0` rather than `not errorlevel 1`: `if errorlevel N` tests
 REM >= N, so a probe that dies from a native fault (0xC0000005 arrives as a
 REM negative code) would read as success and suppress the diagnostic.
-"%PY%" -c "import numpy, psutil, OCP.TopoDS" >nul 2>&1
+"%PY%" -c "import numpy, OCP.TopoDS" >nul 2>&1
 if %ERRORLEVEL% EQU 0 exit /b %RC%
 
 REM `>&2 echo text` rather than `echo text >&2`: the redirect has to lead, or the
@@ -53,9 +53,9 @@ REM space before it is echoed as trailing whitespace on every line.
 >&2 echo.
 >&2 echo   interpreter: %PY%
 >&2 echo.
-"%PY%" -c "import numpy, psutil, OCP.TopoDS" 1>&2
+"%PY%" -c "import numpy, OCP.TopoDS" 1>&2
 >&2 echo.
->&2 echo   Point LATTICEGEN2_PYTHON at a Python 3.11+ that has numpy, psutil and
+>&2 echo   Point LATTICEGEN2_PYTHON at a Python 3.11+ that has numpy and
 >&2 echo   cadquery-ocp:
 >&2 echo     set LATTICEGEN2_PYTHON=C:\path\to\python.exe
 >&2 echo.

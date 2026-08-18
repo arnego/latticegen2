@@ -582,7 +582,7 @@ A strut grazing the input surface almost tangentially leaves a face carrying an
 extra *inner wire* made of a single edge a few microns long whose two endpoints
 do not meet. It bounds no area — it is a pinhole, not a sliver — but it is a
 wire, so its edge is used by exactly one face and §8's every-edge-twice proof
-rejects the shell for it. Measured on `TD_HX_Indre_Volum` at `cc=5, t=1`: two of
+rejects the shell for it. Measured on `TD_HX_rehearsal_test` at `cc=5, t=1`: two of
 them, 3.171690e-06 and 5.808982e-06 mm, on planar faces of 1.19 and 1.25 mm², in
 a solid `BRepCheck_Analyzer` itself calls valid. The defect is present in the
 raw boolean output, so it is repaired at source, in the worker, where the piece
@@ -605,18 +605,59 @@ solid at a bar larger than every edge in it, where it removes nothing
 (`tools/prototypes/RESULTS.md` G10). The threshold is consequently not
 load-bearing, which is why it needs no wide calibrated margin.
 
-It is nonetheless checked rather than trusted, per §11. Whenever a piece loses a
-wire, its **surface area must be unchanged to `PINHOLE_AREA_TOL` (1e-12
-relative)** and its volume to `PINHOLE_VOLUME_TOL` (1e-9). The area bar sits
-near zero deliberately, and that is sound here specifically: a wire bounding no
-area cannot change the area of the face carrying it, so unlike §9's same-domain
-unification there is no larger merged region to re-integrate and no quadrature
-noise to absorb — the measured drift is 0.0, bit-identical, against 2.7e-15 for
-the volume. Anything else means a wire that bounded something was removed, and
-that is a hard failure naming the junction rather than a silent skip: this is a
-repair, not an optimization, so "carry on without it" would simply reinstate the
-defect hours later as an unclosed shell with no indication of where (§11).
-Removals are reported as one aggregate line per run.
+It is nonetheless checked rather than trusted, per §11, and by two things that
+are both exact.
+
+**Surface area must be unchanged to `PINHOLE_AREA_TOL` (1e-12 relative).** That
+bar sits near zero deliberately, and it is sound here specifically: a wire
+bounding no area cannot change the area of the face carrying it, so unlike §9's
+same-domain unification there is no larger merged region to re-integrate and no
+quadrature noise to absorb — the measured drift is 0.0, bit-identical. Anything
+else means a wire that bounded something was removed.
+
+**And the repair must be structural: `occ.only_inner_wires_dropped` requires
+that the face count is unchanged, that every face's outer wire comes back as the
+*same object*, that no face changed orientation or area, and that the wires lost
+across the piece number exactly the ones removed.** Together those pin the
+enclosed region object-for-object, which is a stronger statement than any
+measured quantity can make, and it costs one area evaluation per face —
+`BRepTools_ReShape` rebuilds only the face it touches, so 27 of 28 faces come
+back `IsSame`.
+
+Either failing is a hard failure naming the junction rather than a silent skip:
+this is a repair, not an optimization, so "carry on without it" would simply
+reinstate the defect hours later as an unclosed shell with no indication of
+where (§11). Removals are reported as one aggregate line per run.
+
+**Volume is deliberately not among the checks, and the reason is a property of
+OCCT rather than of this repair.** A relative-volume bar of 1e-9 stood beside
+the area one until it refused a valid run — `-cc 12 -t 2.5` on
+`TD_HX_rehearsal_test`, drift 1.235e-09 on a junction of 77.4 mm³ — where the
+same repair on the same part at `cc=5, t=1` drifts 3.1e-15. Nothing had moved.
+`BRepGProp::VolumeProperties` documents that its shape "must be exempt of any
+free boundary", and a pinhole wire **is** a free boundary — an edge used by
+exactly one face is the definition of the defect. So the pre-repair volume
+carries a spurious term that vanishes with the wire, and the bar was comparing a
+figure OCCT does not promise against one it does.
+
+The three readings that fit the symptom are each disproved rather than argued
+away (`tools/prototypes/RESULTS.md` G19): the difference is stable under
+adaptive Gauss-Kronrod integration to 1e-11, so it is not quadrature noise; it
+is unchanged when the piece is moved to the origin or ten times further out, so
+it is not a coordinate-magnitude artifact; and the cc=12 wire is *shorter* than
+either cc=5 wire while drifting seven orders further, so it does not scale with
+the wire, the junction or `t`. The control settles it: adding a synthetic open
+wire to a *clean* face reproduces the defect's own footprint on that face to
+within 1 %, at a magnitude that moves under 1 % when the wire is lengthened a
+thousandfold — where a length-proportional term would move by 1000× — and that
+varies tenfold with **which** face carries it. There is therefore nothing the
+repair controls to express a bar in terms of, and the 2.7e-15 the original bar
+was calibrated on was a face that happened to contribute nothing, not a
+tolerance with headroom.
+
+The volume the pipeline goes on to use — for §8's floating-body rule — is the
+repaired piece's, which is the one measured on a shape satisfying OCCT's
+precondition.
 
 **OCCT's own repair tools do not touch these, which is why this is hand-rolled
 rather than delegated.** `ShapeFix_Wireframe` targets small *edges* between two
@@ -1070,15 +1111,33 @@ program builds itself.
   It is a **representation** change and must never become a geometry change, so
   two guards bracket it, both hard failures: the solid count must be unchanged
   (a change would also invalidate the junction-graph cross-check that precedes
-  it), and each solid's volume must be preserved to `UNIFY_VOLUME_TOL` (1e-5
+  it), and each solid's volume must be preserved to `UNIFY_VOLUME_TOL` (1e-4
   relative). That bar is calibrated, not guessed: on purely planar geometry,
   where the volume is known analytically, the drift is 1.9e-15 — exact; it only
-  appears on boundary solids carrying curved trimmed faces, where quadrature over
-  a larger merged region differs slightly, at 2.4e-7 on `dense-lattice`. Every run
-  logs the observed drift so the margin is visible rather than assumed. The
-  stronger guard is the validity gate below: merging faces that are not the same
-  surface moves the boundary, which shows up as an invalid solid long before it
-  shows up as a changed volume.
+  appears on boundary solids carrying curved trimmed faces, at 2.4e-7 on
+  `dense-lattice`. Every run logs the observed drift so the margin is visible
+  rather than assumed. The stronger guard is the validity gate below: merging
+  faces that are not the same surface moves the boundary, which shows up as an
+  invalid solid long before it shows up as a changed volume.
+
+  **The bar was 1e-5 until it refused a valid run**, at 1.381e-05 on a 181 mm³
+  floating island of `TD_HX_rehearsal_test` at `cc=12, t=2.5` — the same failure
+  mode §11 names, and the second instance of it found in one session. Nothing
+  had moved: the exact symmetric difference between the two solids, cut both
+  ways, is 0.000000000 mm³, and both are `BRepCheck_Analyzer`-valid. Nor is it
+  the integrator's truncation error, since adaptive Gauss-Kronrod to a requested
+  1e-11 leaves the two figures exactly as far apart; surface area shifts too
+  (3.16e-06). It is a genuine re-description of the boundary, and the honest way
+  to size it is as a **displacement**: `|ΔV| / surface area` is **6.96e-06 mm**
+  there, against the 8.7e-04 to 1.5e-03 mm tolerances OCCT itself records on the
+  trimmed B-spline faces being merged (§8, G12) — the two descriptions are the
+  same surface to well inside the kernel's own idea of one. At 1e-4, across the
+  1.5–3.7 per mm surface-to-volume ratios that run's nine solids span, the bar
+  admits at most ~3e-05 to 7e-05 mm of movement, still over an order of
+  magnitude inside those face tolerances. The failing island's mirror twin —
+  same volume and area to 0.1 % — drifts 29x less, which is why no tighter bar
+  is defensible: the magnitude belongs to the merge the kernel happened to
+  perform, not to the geometry, so it cannot be predicted from the part.
 
   Each solid is unified independently rather than as one compound, which keeps
   the count guard exact and is what let this stage become the first item on
@@ -1313,6 +1372,13 @@ Because priority #1 is precision, every optimization is designed so that its
   the tightness of the quantity it compares (§5.1). A gate that rejects valid
   input is its own violation of the principle above: "do more work" is an
   acceptable failure mode, "refuse correct input" is not.
+* The same reading cost the pinhole repair its volume guard (§7). A gate is also
+  only as trustworthy as **whether the quantity it compares is defined at all**
+  on the shape it is given: OCCT cannot integrate the volume of a piece that
+  still carries the defect, so the bar was measuring the defect's footprint and
+  refused `-cc 12 -t 2.5` for it. Where a check can be made structural — the
+  same objects, in the same places — it should be, because that has an exact
+  answer where an integral has a bias.
 * The same reading applies to steps that are *optimizations* rather than
   correctness requirements. Same-domain unification only makes the output
   smaller, so when the kernel refuses to perform it the run degrades to a
@@ -1349,7 +1415,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Full-strut lateral faces built merged (§6) | Removes the volume-scaling half of same-domain unification's job instead of dividing it: interior faces −33 % on `dense-lattice` and **−44.8 % at rehearsal scale** (705,000 → 389,492), shrinking `instance` (−43.8 %), `assemble` (−31.9 %), `simplify` (−12.4 %) and `validate` (−7.4 %) together, for an identical output. Whole-run effect is part-shaped: −19 % on `dense-lattice`, −6.5 % on the rehearsal, where `boundary` and `stitch` are 43 % of the clock and untouched |
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
-| Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10) |
+| Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10). Guarded by an exact area bar and a structural one, never by volume — OCCT cannot integrate the volume of the unrepaired piece, because the pinhole is exactly the free boundary its precondition excludes (§7, G19) |
 | Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is one validity check per boundary face on a sound layer (§8, G11, G12) |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |

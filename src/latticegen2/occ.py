@@ -40,7 +40,10 @@ from OCP.ShapeFix import ShapeFix_Edge
 from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.TopAbs import TopAbs_ShapeEnum
 from OCP.TopExp import TopExp, TopExp_Explorer
-from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+from OCP.TopTools import (
+    TopTools_IndexedDataMapOfShapeListOfShape,
+    TopTools_IndexedMapOfShape,
+)
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import (
     TopoDS,
@@ -497,9 +500,17 @@ def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape,
 
     So this only ever deletes edges that are already defects, and only when they
     bound nothing. Measured on the piece above: surface area and cap areas
-    unchanged **exactly**, volume drift 2.7e-15 (machine precision, the same
-    order docs/algorithm.md §9 records for planar geometry), the solid still
-    valid, and ``shell_defects`` going from ``(2, 0)`` to ``(0, 0)``.
+    unchanged **exactly**, the solid still valid, and ``shell_defects`` going
+    from ``(2, 0)`` to ``(0, 0)``.
+
+    **What the caller must not check is volume**, and the reason is a property
+    of OCCT rather than of this repair: ``BRepGProp::VolumeProperties`` documents
+    that its shape "must be exempt of any free boundary", and a pinhole wire *is*
+    a free boundary — that is the definition of the defect. So the volume read
+    off the piece before this runs carries a spurious term, which vanishes when
+    the wire goes. It is length-independent and per-face, so it cannot be bounded
+    by anything the repair controls (G19). :func:`only_inner_wires_dropped` is
+    the check that replaces it, and it is exact.
     """
     edge_faces = TopTools_IndexedDataMapOfShapeListOfShape()
     TopExp.MapShapesAndAncestors_s(
@@ -539,6 +550,81 @@ def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape,
     if fixed is None or fixed.IsNull():
         return shape, 0
     return fixed, n_removed
+
+
+def only_inner_wires_dropped(
+    before: TopoDS_Shape, after: TopoDS_Shape, n_removed: int
+) -> str | None:
+    """``None`` when ``after`` is ``before`` minus exactly ``n_removed`` inner wires.
+
+    Returns a human-readable reason otherwise. This is the guard on
+    :func:`remove_pinhole_wires`, and it is deliberately **structural and exact**
+    rather than a comparison of two measured quantities: it asks whether the
+    region the piece encloses is the same object-for-object, which is a question
+    with a bit-exact answer, where volume is a question OCCT can only answer with
+    a bias while the defect is still present (see that function, and G19).
+
+    Four things are required of every face, and together they pin the enclosed
+    region completely:
+
+    * the face count is unchanged — nothing was merged away or split;
+    * each face's **outer wire is the same object** as some face's in ``before``,
+      one for one, so no face's outer boundary was rebuilt (which is the
+      mechanism behind the seam-split regression, docs/algorithm.md §8);
+    * the paired faces have the same orientation, so no face was flipped —
+      a shell can stay closed while enclosing the wrong volume, and
+      docs/algorithm.md §8's every-edge-twice proof exists because that has
+      happened here before;
+    * every wire ``after`` keeps was already a wire of its counterpart, and the
+      total lost across the piece is exactly ``n_removed``. Nothing was gained,
+      and nothing was lost that this repair did not account for.
+
+    In practice ``BRepTools_ReShape`` rebuilds only the faces it touches — 27 of
+    28 faces of the junction G19 was measured on come back ``IsSame`` — so this
+    walk is over objects, not geometry, and costs one area evaluation per face.
+    """
+    fb, fa = faces(before), faces(after)
+    if len(fb) != len(fa):
+        return f"the face count changed, {len(fb)} -> {len(fa)}"
+
+    outers = TopTools_IndexedMapOfShape()
+    for f in fb:
+        outers.Add(BRepTools.OuterWire_s(f))
+    if outers.Extent() != len(fb):
+        return "two faces share one outer wire, so they cannot be paired up"
+
+    lost = 0
+    matched: set[int] = set()
+    for f in fa:
+        i = outers.FindIndex(BRepTools.OuterWire_s(f))
+        if i == 0:
+            return "a face's outer wire was replaced, so its boundary was rebuilt"
+        if i in matched:
+            return "two faces came back with the same outer wire"
+        matched.add(i)
+        src = fb[i - 1]
+        if f.Orientation() != src.Orientation():
+            return "a face changed orientation"
+        a_src, a_out = area(src), area(f)
+        if a_out != a_src:
+            return (
+                f"a face's area changed, {a_src:.17g} -> {a_out:.17g} mm^2; a wire "
+                f"that bounds no area cannot change it, so one that bounded "
+                f"something was removed"
+            )
+        kept = TopTools_IndexedMapOfShape()
+        for w in _explore(src, TopAbs_ShapeEnum.TopAbs_WIRE):
+            kept.Add(w)
+        n_after = 0
+        for w in _explore(f, TopAbs_ShapeEnum.TopAbs_WIRE):
+            n_after += 1
+            if kept.FindIndex(w) == 0:
+                return "a face gained a wire it did not have before"
+        lost += kept.Extent() - n_after
+
+    if lost != n_removed:
+        return f"{lost} wire(s) went missing where {n_removed} were removed"
+    return None
 
 
 def count_subshapes(shape: TopoDS_Shape) -> tuple[int, int]:

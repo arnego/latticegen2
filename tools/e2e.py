@@ -72,9 +72,7 @@ def geometry_checks(rep: Report, output: str, input_path: str, cc: float, t: flo
     rep.check("exact B-rep validity (BRepCheck_Analyzer)", valid,
               "all valid" if valid else f"invalid solids: {invalid}")
 
-    outside = vg.material_outside(output, input_path)
-    rep.check("no material outside the input body",
-              abs(outside) < (t ** 3) * 1e-6, f"{outside:.6g} mm^3")
+    outside_check(rep, output, input_path, t)
     rep.check("bounding box within input + (cc+t)",
               vg.bounding_box_within(output, input_path, cc + t))
 
@@ -85,6 +83,47 @@ def geometry_checks(rep: Report, output: str, input_path: str, cc: float, t: flo
     no_cross, pairs = vg.self_intersection_check(mesh)
     rep.check("no self-intersections", no_cross,
               "0 crossing pairs" if no_cross else f"{len(pairs)}+ crossing pairs")
+
+
+def outside_check(rep: Report, output: str, input_path: str, t: float) -> None:
+    """§6.2's "no generated material lies outside the input body", exactly where
+    that is available and by a labelled weaker check where it is not.
+
+    The exact figure is a boolean cut per output solid. On a large part the cut
+    can mis-classify — it returned the whole solid as outside on a 43,530-face
+    lattice, having genuinely run rather than declined — so `vg.material_outside`
+    contradicts any non-zero remainder against a boolean-free containment check
+    and reports the solid as unmeasured when the two disagree. Reporting that as
+    a pass would be exactly the failure this check exists to catch, so it is
+    reported as its own named check with the containment evidence attached.
+    """
+    result = vg.material_outside(output, input_path)
+    if result["exact"]:
+        rep.check("no material outside the input body",
+                  abs(result["volume_mm3"]) < (t ** 3) * 1e-6,
+                  f"{result['volume_mm3']:.6g} mm^3 over {result['solids']} solid(s)")
+        return
+
+    measured = sum(s["cut_mm3"] for s in result["per_solid"] if s["trusted"])
+    n_ok = sum(1 for s in result["per_solid"] if s["trusted"])
+    rep.check("no material outside the input body (solids the cut could measure)",
+              abs(measured) < (t ** 3) * 1e-6,
+              f"{measured:.6g} mm^3 over {n_ok} of {result['solids']} solid(s)")
+    for item in result["unmeasured"]:
+        ev = item["containment"]
+        print(f"  [NOTE] solid {item['solid']} ({item['faces']} faces): the cut claimed "
+              f"{item['cut_claimed_mm3']:.6g} mm^3 of its own {item['volume_mm3']:.6g} mm^3 "
+              f"lies outside, which a boolean-free containment check contradicts; "
+              f"falling back to that check")
+        rep.check(f"solid {item['solid']} is contained in the input "
+                  f"(weaker than the exact cut)",
+                  bool(ev.get("contained")),
+                  f"{ev['outside']} of {ev['sampled']} surface points outside at "
+                  f"{vg.CONTAINMENT_SWEEP[0]:g} mm, none at "
+                  f"{ev['cleared_at_mm']:g} mm (bar {vg.CONTAINMENT_TOL:g} mm)"
+                  if ev.get("cleared_at_mm") is not None else
+                  f"{ev['outside']} of {ev['sampled']} surface points still outside at "
+                  f"{vg.CONTAINMENT_TOL:g} mm")
 
 
 GOLDEN_EXACT_BUDGET_S = 1800.0

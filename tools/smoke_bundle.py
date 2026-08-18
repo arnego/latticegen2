@@ -197,11 +197,22 @@ def verify_geometry(step: Path) -> int:
     else:
         print(f"  [ok]   BRepCheck_Analyzer: {n_solids} valid solid(s)")
 
-    outside = vg.material_outside(str(step), str(INPUT_STEP))
-    if abs(outside) >= (T ** 3) * 1e-6:      # same bar as tools/e2e.py
-        problems += fail(f"{outside:.6g} mm^3 of material lies outside the input body")
+    result = vg.material_outside(str(step), str(INPUT_STEP))
+    # The bundle smoke case is the small ball, far below the scale at which the
+    # cut mis-classifies, so "not exact" here means something is wrong with the
+    # bundle rather than with the check — report it instead of falling back.
+    if not result["exact"]:
+        problems += fail(
+            f"the material-outside cut could not be trusted for "
+            f"{len(result['unmeasured'])} of {result['solids']} solid(s); "
+            f"unexpected at this scale — run tools/e2e.py against the checkout"
+        )
+    elif abs(result["volume_mm3"]) >= (T ** 3) * 1e-6:   # same bar as tools/e2e.py
+        problems += fail(
+            f"{result['volume_mm3']:.6g} mm^3 of material lies outside the input body"
+        )
     else:
-        print(f"  [ok]   material outside input body: {outside:.6g} mm^3")
+        print(f"  [ok]   material outside input body: {result['volume_mm3']:.6g} mm^3")
 
     mesh = vg.mesh_of(str(step), CC, T)
     manifold_ok, bad_edges = vg.manifold_check(mesh)

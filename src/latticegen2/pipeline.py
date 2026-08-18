@@ -360,6 +360,20 @@ def _run_with_pool(
             f"full unsplit sew; the output is unaffected, only slower for those "
             f"components."
         )
+        # Which of the two things the check catches actually happened — see
+        # `SewStats.repair_evidence`. Free to report, since the unsplit sew has
+        # already run, and the only way to tell a real seam-split failure from
+        # an expectation neither route meets.
+        for group, want, got_split, got_unsplit in sew_stats.repair_evidence:
+            rl.always(
+                f"  component {group}: expected {want} free edge(s), seam-only "
+                f"split gave {got_split}, full unsplit sew gives {got_unsplit}"
+                + (
+                    " - the split reproduced the unsplit sew exactly, so this "
+                    "repair changed nothing"
+                    if got_unsplit == got_split else ""
+                )
+            )
     if sew_stats.retoleranced_faces or sew_stats.still_invalid_faces:
         rl.always(
             f"vertex tolerances corrected on {sew_stats.retoleranced_faces} sewn "

@@ -638,6 +638,19 @@ def _sew_round_two(
             if got != want:
                 out[group] = _sew_faces(face_lists[group], tolerance)
                 repaired += 1
+                # The unsplit sew has just run, so its own free-edge count is
+                # free to take — and it is the one number that says *which* of
+                # the two things this check can catch actually happened. If the
+                # unsplit result meets `want` and the split one did not, the
+                # split was wrong (G9's straddling-edge mechanism). If neither
+                # meets it, the split was not the problem and the ~11 min this
+                # repair costs at rehearsal scale bought nothing
+                # (docs/specification.md §10). Without these three numbers the
+                # log could only say a count was wrong, never which.
+                if stats is not None:
+                    stats.repair_evidence.append(
+                        (group, want, got, len(free_edges(out[group])))
+                    )
     if stats is not None:
         stats.t_repair = time.perf_counter() - t0
 
@@ -657,6 +670,18 @@ class SewStats:
     redone with a full, unsplit sew (:func:`_sew_round_two`'s ``expected_rings``
     check). Zero on every committed scenario; the check exists for real, heavily
     trimmed geometry where it has measured nonzero (docs/specification.md §10)."""
+    repair_evidence: list = field(default_factory=list)
+    """``(component, want, got_split, got_unsplit)`` for every repaired component.
+
+    Recorded because :attr:`repaired_components` alone cannot distinguish the
+    two things the check catches, and they call for opposite responses. If
+    ``got_unsplit == want != got_split`` the seam-only split really did produce
+    a different shell and the repair earned its cost. If ``got_unsplit ==
+    got_split != want`` the split reproduced the unsplit sew exactly and the
+    check fired on an expectation neither route can meet — the repair then
+    costs a full sew (651 s of the `cc=5, t=1` rehearsal's `stitch`) and
+    changes nothing. Both numbers are free: the unsplit sew has to run either
+    way before this can be known."""
     retoleranced_faces: int = 0
     """Faces made valid again by correcting a vertex recorded off its edge's
     curve (:func:`latticegen2.occ.fix_vertex_tolerances`, docs/algorithm.md §8)."""
@@ -794,7 +819,23 @@ def sew_boundary(
 
 
 def free_edges(faces) -> list:
-    """Edges used by exactly one of ``faces`` — the holes facing the interior."""
+    """Edges used by exactly one of ``faces`` — the holes facing the interior.
+
+    **Degenerate edges are not holes and are excluded**, for the same reason
+    and by the same test :func:`shell_defects` uses: an edge with no extent is
+    a parametric artefact whose owning face uses it once by construction, so
+    counting it as a free edge counts something that is not there.
+
+    That is not cosmetic. This count is what `_sew_round_two` compares against
+    ``4 x interior interfaces`` to decide whether the seam-only split produced a
+    correct shell, and on `TD_HX_rehearsal_test` at ``cc=5, t=1`` the trim
+    against a grazing surface leaves exactly **10** degenerate edges (3.0e-9 to
+    8.3e-8 mm, the same ones `shell_defects` records skipping). Counting them
+    made even a *correct* unsplit sew read 73,994 against an expected 73,984 —
+    a test that fires whatever the split does cannot report which of the two
+    happened, and would force a full re-sew on a part whose split was fine
+    (docs/specification.md §10).
+    """
     shell = occ.faces_shell(faces)
     edge_faces = TopTools_IndexedDataMapOfShapeListOfShape()
     TopExp.MapShapesAndAncestors_s(
@@ -803,6 +844,7 @@ def free_edges(faces) -> list:
     return [
         edge_faces.FindKey(i)
         for i in range(1, edge_faces.Extent() + 1)
+        if not BRep_Tool.Degenerated_s(TopoDS.Edge_s(edge_faces.FindKey(i)))
         if edge_faces.FindFromIndex(i).Extent() == 1
     ]
 

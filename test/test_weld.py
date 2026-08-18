@@ -91,6 +91,31 @@ def shell_of(faces):
     return shell
 
 
+def test_free_edges_does_not_count_a_degenerate_edge_as_a_hole():
+    """A degenerate edge has no extent, and the one face that owns it uses it
+    once by construction — so counting it as a free edge counts a hole that is
+    not there. `shell_defects` has always skipped them; `free_edges` did not,
+    and that difference is what made even a correct unsplit sew miss the
+    round-2 check by exactly the 10 degenerate edges `TD_HX_rehearsal_test`
+    leaves at cc=5, t=1 (docs/specification.md §10).
+
+    A sphere is the cheapest real carrier: the kernel gives it two degenerate
+    pole edges and a seam its single face uses twice, so a correct count finds
+    no free edge at all.
+    """
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeSphere
+    from OCP.TopoDS import TopoDS
+
+    face = occ.faces(BRepPrimAPI_MakeSphere(10.0).Shape())[0]
+    degenerate = [
+        e for e in occ._explore(face, TopAbs_ShapeEnum.TopAbs_EDGE)
+        if BRep_Tool.Degenerated_s(TopoDS.Edge_s(e))
+    ]
+    assert degenerate, "the fixture must actually carry degenerate edges"
+    assert weld.free_edges([face]) == []
+
+
 def test_a_closed_shell_has_no_defects(template):
     lp, tpl, _ = template
     faces, _, _ = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
@@ -501,6 +526,37 @@ def test_a_sound_face_is_left_alone(template):
     faces, _tags, _vol = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
     assert all(occ.is_valid(f) for f in faces), "the trim itself is clean"
     assert occ.fix_vertex_tolerances(faces) == (0, 0)
+
+
+def test_the_batch_scan_is_the_same_predicate_as_the_per_face_one(template):
+    """`fix_vertex_tolerances` finds its work with one parallel analyzer per
+    window rather than one per face (docs/algorithm.md §8, G22), and then
+    confirms every candidate with the standalone check. What is pinned here is
+    the whole two-stage result: it must contain exactly the faces the
+    standalone predicate rejects — no more, no less.
+
+    The two stages have never been observed to disagree — the confirmation is
+    insurance on the case no corpus of *loose* fault fixtures can reach, where a
+    compound analyzer shares one subshape's status between neighbouring faces.
+    What this test pins is the contract, so that stays true. Pinned against the
+    real committed faults as well as clean faces, because a scan that only ever
+    agrees on sound geometry proves nothing (G10), and with a chunk small enough
+    to put a window boundary between faces that share an edge.
+    """
+    from OCP.BRepCheck import BRepCheck_Analyzer
+
+    lp, tpl, _ = template
+    clean, _tags, _vol = trim_junction(lp, tpl, np.zeros(3), big_box()).pieces[0]
+    corpus = list(clean) + [load_face(n) for n in BAD_FACES + SELF_INTERSECTING_FACES]
+
+    per_face = {
+        id(f) for f in corpus if not BRepCheck_Analyzer(f).IsValid()
+    }
+    assert len(per_face) == len(BAD_FACES) + len(SELF_INTERSECTING_FACES), (
+        "the fixtures must load invalid, or this test proves nothing"
+    )
+    for chunk in (3, len(corpus)):
+        assert {id(f) for f in occ.invalid_faces(corpus, chunk=chunk)} == per_face
 
 
 def test_a_repair_that_moved_geometry_is_a_named_failure(monkeypatch):

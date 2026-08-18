@@ -234,91 +234,136 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### `stitch` pays the full round-2 cost on heavily trimmed parts
-
-**Found 2026-08-17**, on the first rehearsal of `TD_HX_rehearsal_test.step` at
-`cc=5, t=1` to complete. `stitch` took **11 m 18 s**, against 1 m 13 s in the
-2026-08-15 profile. Not a regression, and worth recording precisely so it is not
-re-diagnosed as one.
-
-**Still live, re-confirmed 2026-08-17** on both halves of the Phase 2 controlled
-pair ([profiling-reports.md](profiling-reports.md)): `stitch` measured
-10 m 29.1 s on `82adbb1` and 10 m 23.0 s on `928cc57`, with
-`stitch_repaired_components: 1` and `stitch_tiles: 35` in both. Phase 2 moved it
-by −1.0 %, i.e. not at all — it touches nothing in this stage. At 10 m 23 s
-`stitch` is now the **second-largest stage**, 20 % of the run, behind `simplify`
-and ahead of `boundary`.
-
-**Why.** Boundary-sew round 2 sews only the free-edge-bearing subset of each
-tile's faces (algorithm.md §8, gate G8). That identity holds at every prototype
-scale but **not** on this part's real, heavily trimmed pieces, where straddling
-edges let sewing split one shared edge into two. The per-component free-edge
-check against `want_rings` catches it and redoes round 2 on the unsplit tile
-results — this run reports `stitch_repaired_components: 1`, so the dominant
-component pays close to the untiled round-2 cost. That is the documented
-fallback behaving exactly as designed; the saving is simply unavailable here.
-
-**Measured per phase, 2026-08-17**, now that `stitch` carries its own timers
-(`SewStats.t_*`, reported in the run log and in
-[profiling-reports.md](profiling-reports.md)):
-
-    round1 49.1s   split 3.0s   round2 15.1s   repair 651.2s
-    retolerance 44.6s   rings 6.7s
-
-**The repair is 85 % of the stage.** Everything else together is 15 %.
-
-**This closes one proposal outright.** Running the unsplit sew *speculatively*
-alongside the seam-only one — dispatching both to idle workers and keeping
-whichever passes the free-edge check, so the discarded attempt leaves the
-critical path — was proposed on the assumption that the discarded attempt was
-expensive. It is **15.1 s**, 0.5 % of the run. The seam subset is small, so
-computing it and throwing it away is nearly free, and there is no scheduling
-change that recovers the 651 s. Do not build this; the measurement above is the
-disproof.
-
-**What would recover it.** Make the seam-only split correct in the presence of
-straddling edges — i.e. carry a seam face's straddling neighbours into the sewn
-subset so `BRepBuilderAPI_Sewing` cannot rebuild a shared edge onto a new
-`TopoDS_Edge` while the carried face keeps the original (that mechanism is
-written up in §8 and in `tools/prototypes/RESULTS.md` G8). 144–720 such edges
-were measured in every prototype block tried once the check for them existed, so
-they are easy to enumerate; what is unproven is whether including them keeps
-round 2's cost below a full sew on a part this size. **This is the only lever
-left in this stage that is worth more than ~1 %, and it is algorithmic, not a
-scheduling or parallelism change.**
-
-**A separate, much smaller item in the same stage.** `occ.fix_vertex_tolerances`
-(§8) runs one `BRepCheck_Analyzer` per boundary face, serially on the master:
-**measured 44.6 s** by the phase timers above, 5.8 % of `stitch` and 1.3 % of
-the run. It is embarrassingly parallel in principle, but two things about it are
-now known and both cut against the obvious implementation:
-
-* **The plan's "free I/O" route does not exist.** The idea was to hand workers
-  index ranges into the `.brep` round 2 already wrote. That file does not match
-  what needs scanning: `out[group]` is the sewn faces *concatenated with* the
-  master-native faces `_split_seam_interior` carried through, so no existing
-  file holds exactly that list in that order. Dispatching the scan means writing
-  ~380 MB first, against a ~37 s saving.
-* **A better mechanism exists and changes the predicate.** One
-  `BRepCheck_Analyzer` over a compound of every face, with `theIsParallel` on
-  (G18), would parallelise the scan with no extra I/O at all — but querying it
-  per face is the **in-context** overload, and the current code checks each face
-  **standalone**. Those are different predicates; that difference is exactly
-  what G12 used to diagnose rung 2. Changing it could change which faces get
-  repaired, and this part's result (19 corrected, 0 residual) is the only
-  evidence that the repair is complete.
-
-So this is worth ~1.2 % and needs a rehearsal-scale control to take safely.
-
-**How to verify either fix.** Re-run the rehearsal; `stitch_repaired_components`
-must be 0 (for the first) and `stitch` must drop, while the run still writes 14
-valid solids and `python -m pytest test -q` plus `python tools/e2e.py` stay
-green. `test_weld.py` already pins that tiling produces the same watertight
-result as sewing in one call, which is the property any change here must keep.
+*Nothing open.*
 
 ---
 
 ## 11. Closed — kept for the reasoning, not as work
+
+### `stitch`'s round-2 repair — chapter closed: the fix disproved, the check repaired, the scan parallelised
+
+**Opened 2026-08-17, closed 2026-08-18.** §10's last live item, in two parts:
+the ~545–651 s full unsplit sew that boundary-sew round 2 falls back to on this
+part (85 % of `stitch`), and the 44.1 s serial validity scan beside it. Both
+are resolved, neither the way the item expected, and the second half of each is
+the part worth keeping.
+
+#### The proposed fix is structurally the fallback — G21
+
+§10 recorded one lever "worth more than ~1 %" and marked it unproven: carry a
+seam face's **straddling** neighbours — edges used twice inside a tile but only
+once inside the seam-only subset — into the sewn subset, so
+`BRepBuilderAPI_Sewing` cannot rebuild one while the carried face keeps the
+original. [`g21_straddling_seam_split.py`](../tools/prototypes/g21_straddling_seam_split.py)
+measured it on the real part, at full extent.
+
+**A subset with no straddling edge is a union of connected components of the
+tile's face-adjacency graph**, and a tile's round-1 result is one connected
+shell but for a few strays. So the closure is the tile:
+
+| Tile | Faces | \|S0\| (today) | \|S1\| | \|S2\| | Fixpoint | Hops |
+|---|---|---|---|---|---|---|
+| 0 | 23,546 | 7,555 | 12,491 | 19,954 | **23,523** | 8 |
+| 1 | 22,872 | 6,514 | 10,966 | 17,769 | **22,837** | 8 |
+| 3 | 16,831 | 4,116 | 6,983 | 11,635 | **16,723** | 18 |
+
+and closing to it costs what the fallback costs — **523.20 s against the full
+unsplit sew's 520.89 s**, on the same 302,576 faces where the seam-only split
+takes 9.34 s. One hop is cheap (43.42 s) and is not a fix: it moves the
+frontier, leaving a fresh set of straddling edges of exactly the kind it exists
+to remove. **Do not build this**; the table is the disproof.
+
+That closes the stage. `stitch`'s repair is the price of a correct shell on
+heavily trimmed geometry, not an unfixed inefficiency, and the seam-only split
+stays because it is nearly free where it works and caught where it does not.
+
+**Nor is it worth predicting the failure to skip the attempt.** On a part where
+the split always fails, everything spent before the repair is waste — and the
+run log now prices it: `split 2.8s, round2 14.5s`, **17.3 s of a 53-minute
+run**, 0.5 %. A heuristic that guessed "this component is too heavily trimmed,
+sew it unsplit" would save that at the risk of skipping the split on a part
+where it works, which is the wrong side of docs/algorithm.md §11's rule. This is
+the same arithmetic that closed the speculative-sew proposal in §10, and it
+closes this one too.
+
+#### The check could not have told success from failure — and that is now fixed
+
+`_sew_round_two` now records `(component, want, got_split, got_unsplit)`
+whenever it repairs, which costs nothing because the unsplit sew has to run
+before either number exists. The rehearsal:
+
+    component 0: expected 73984 free edge(s), seam-only split gave 192692,
+                 full unsplit sew gives 73994
+
+The first two numbers confirm G9's mechanism is live at production scale — the
+split is wrong by a factor of 2.6, not by a rounding error. **The third is the
+finding.** A correct sew missed the expectation too, by exactly 10, because
+`free_edges` counted **degenerate** edges — parametric artefacts with no
+extent, whose one owning face uses them once by construction. `weld.shell_defects`
+has skipped them since the day it was written and records finding exactly 10 on
+this part (3.0e-9 to 8.3e-8 mm); the two counts should always have agreed, and
+now do.
+
+Until this, the check fired *whatever* round 2 produced. It happened to fire
+for the right reason here, but on a part whose split was sound it would have
+forced a full re-sew anyway, and `stitch_repaired_components` could not have
+meant what it says. This is docs/algorithm.md §11's rule about the quantity a
+gate compares, in the one place where both quantities were already in the file.
+
+#### The scan beside it: 44.1 s → 22.6 s, and two lessons
+
+The other half of §10's item. `occ.fix_vertex_tolerances` asked one
+`BRepCheck_Analyzer` per boundary face to find the 19 it repairs — 44.6 s over
+301,505 faces when §10 recorded it, 44.1 s in the controlled pair below. §10 had rejected the two obvious speed-ups, and both rejections
+stand: dispatch has no free-I/O route, and one analyzer over the assembled
+*solid* is the **in-context** overload, a different predicate.
+
+A `TopoDS_Compound` of loose faces is neither, and G22 measured **1.66x** at
+3.57 core-equivalents — **44.1 s → 22.6 s** in the rehearsal pair — with zero
+disagreements over a 17,308-face corpus
+carrying all four committed faults — chunked at 20,000 faces, since the
+analyzer holds ~14 kB per face and one call over the rehearsal's would hold
+~4.2 GB.
+
+**The change was nonetheless wrong on first landing, and the rehearsal said so
+within the hour**: 19 repaired and **15 "still invalid"**, where the serial scan
+had always reported none — on a run whose validity gate then passed all 14
+solids, which is what marked them as phantoms rather than news.
+
+**The first diagnosis of those 15 was wrong too, and the pair disproved it.**
+The obvious reading is a predicate difference: G22's faults are all *loose*
+faces, a sewn layer's have neighbours, and a compound analyzer holds one result
+per subshape shared between the faces using it — so a face could be rejected in
+batch for the fault beside it. A confirmation stage was added on that reading
+and the count stayed at 15, which settles it: all 34 candidates really are
+invalid standalone.
+
+**The cause is *when* the predicate is evaluated, not which one.** Both repair
+rungs widen tolerances on vertices and edges that neighbouring faces share, and
+widening is monotonically permissive — so repairing one face can make the next
+one valid before the loop reaches it. The serial loop asked at the moment it
+arrived at each face and never saw them; a scan-then-repair pass asks before any
+repair has happened. Re-checking each candidate as the repair reaches it
+restores the original set exactly, and cannot fail the other way, since no
+repair here invalidates a face. The confirmation stage stays as cheap insurance
+on the case G22's corpus cannot reach, now labelled as insurance rather than as
+a measured necessity.
+
+**Two lessons, and the second is the one that keeps recurring.** A control whose
+faults are isolated cannot test a predicate whose difference is about
+neighbours — G10's lesson in a new place. And a mechanism that *fits* the
+symptom is not the mechanism: this is the fifth time in this project's history
+(G9, G10, G11, G12) that the first convincing explanation was the wrong one, and
+what settled it here was the cheapest possible test — ship the fix the
+explanation implies, and see whether the number moves.
+
+It sits beside the other gate lesson this session produced. G21's part A sewed
+the same tiles both ways and found them *identical*, because the gate rebuilt
+the pipeline's front half and stopped one call short of `finalize_pieces`, which
+is what opens the interface holes. A prototype that rebuilds part of the
+pipeline has to rebuild all of it, or it measures a shape the pipeline never
+sees.
+
 
 ### `--ram` removed — an accepted-but-unenforced budget, taken out rather than fixed
 

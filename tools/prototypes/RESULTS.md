@@ -19,6 +19,8 @@ python tools/prototypes/g13_unify_scaling.py
 python tools/prototypes/g14_tiled_unify_trimmed.py
 python tools/prototypes/g18_validate_decomposition.py
 python tools/prototypes/g19_pinhole_volume_bias.py
+python tools/prototypes/g21_straddling_seam_split.py
+python tools/prototypes/g22_parallel_face_scan.py
 ```
 
 G9, G11 and G20 have no standalone script: all three were found and fixed
@@ -1453,3 +1455,212 @@ exact structural test, because one existed. G20's is to keep the proxy and size
 it by the physical quantity it stands for, because no cheap exact test does — the
 symmetric-difference boolean that settles it took seconds on a 99-face island and
 does not finish quickly on the 69,305-face body beside it.
+
+---
+
+## G22 — one parallel analyzer instead of 301,505 serial ones ✅ PASS
+
+`occ.fix_vertex_tolerances` (docs/algorithm.md §8) finds its work by asking, per
+boundary face, whether `BRepCheck_Analyzer` rejects it. On the `cc=5, t=1`
+rehearsal that scan is **44.6 s** over 301,505 faces — 5.8 % of `stitch`, ~1.2 %
+of the run — serial on the master, and docs/specification.md §10 carried it as
+the smaller of that chapter's two items along with two reasons the obvious
+speed-ups do not work:
+
+* dispatching it to workers has no free I/O route (~380 MB of writes for a
+  ~37 s saving), and
+* one analyzer over the assembled **solid** is a *different predicate* —
+  `IsValid(subshape)` there is the in-context overload, and the standalone check
+  is what this repair is calibrated against. That difference is exactly what
+  G12 used to diagnose repair rung 2.
+
+```
+python tools/prototypes/g22_parallel_face_scan.py [extra.step ...]
+```
+
+**What this gate tests is neither of those.** A `TopoDS_Compound` of loose
+faces has no shell and no solid in it, so a face's parent in the traversal is
+the compound itself and there is no context to be checked in — while
+`theIsParallel` (G18) still divides the scan across OCCT's own native threads.
+If that reading is right, the predicate is unchanged and the scan needs neither
+dispatch nor extra I/O.
+
+### A, B — predicate identity, with the real faults in the corpus
+
+Corpus: both committed golden samples (a real lattice output whose faces share
+edges exactly as the sewn boundary layer's do) plus the four real invalid faces
+committed from the rehearsal — 17,308 faces, of which 4 are genuinely invalid.
+
+| Comparison against the per-face predicate | Disagreements |
+|---|---|
+| compound scan, `theIsParallel=False` | **0** of 17,308 |
+| compound scan, `theIsParallel=True` | **0** of 17,308 |
+| chunked at 1,000 (window boundaries between edge-sharing faces) | **0** of 17,308 |
+| after `fix_vertex_tolerances` repairs all four | **0** of 4 |
+
+All four committed faults read invalid on both sides, before repair and valid
+on both sides after it (`repaired=4, still_invalid=0`). **That is the
+load-bearing half**: per G10, a scanner that only ever agrees on sound geometry
+proves nothing, and this scan decides which faces the repair ever looks at.
+
+### C — what it buys
+
+17,308 faces, 6-core machine:
+
+| Scan | Wall | CPU | Core-equivalents | Speedup |
+|---|---|---|---|---|
+| serial, one analyzer per face | 4.067 s | 3.953 s | 0.97 | 1.00 |
+| compound, `theIsParallel=False` | 4.238 s | 3.938 s | 0.93 | **0.96** |
+| compound, `theIsParallel=True` | 2.454 s | 8.766 s | 3.57 | **1.66** |
+| chunked at 1,000 / 5,000 / 20,000 | 2.450 / 2.443 / 2.458 s | | 3.35–3.54 | 1.65–1.66 |
+
+The two compound rows are reported separately on purpose: making **one call
+instead of N is worth nothing** (0.96×), so the whole 1.66× is OCCT's threads —
+the same figure G18 measured for the whole-solid check (1.60×), which is what
+one would expect if it is the same mechanism. Chunking costs nothing measurable
+at any window size from 1,000 up.
+
+### D — why it is chunked anyway
+
+The analyzer holds its per-subshape results for as long as it is alive:
+**~14 kB per face**, measured (RSS 333 → 589 MB over 17,308 faces). One call
+over the rehearsal's 301,505 faces would hold **~4.2 GB** at a point in `stitch`
+already carrying ~3 GB. `occ.FACE_SCAN_CHUNK` is therefore 20,000 faces
+(~0.3 GB), sized by memory rather than by speed — which costs nothing, since
+the speedup is flat from 1,000 upward.
+
+**Adopted** into `occ.invalid_faces`, used by `fix_vertex_tolerances`.
+Everything downstream of the scan — the repair itself and every re-check that
+decides `repaired` against `still_invalid` — still runs one face at a time,
+standalone, unchanged. `test_weld.py::test_the_batch_scan_is_the_same_predicate_as_the_per_face_one`
+pins the result, fault fixtures included, as a permanent regression.
+
+### E — what the corpus could not have caught, and what actually broke
+
+**The change was wrong on first landing and the rehearsal said so within the
+hour**: 19 faces corrected and **15 remaining invalid**, where the serial scan
+had always reported 19 and none. The same run's validity gate then passed all
+14 solids, which is what identified the 15 as phantoms.
+
+**The first explanation fitted perfectly and was wrong.** Every fault in this
+gate's corpus is a **loose** face — the four committed `.brep` fixtures — while
+a sewn layer's faults have neighbours, and a compound analyzer holds one result
+per subshape shared between the faces using it, so a face could be rejected in
+batch for the fault beside it. A confirmation stage was added on that reading
+and **the count stayed at 15**, which settles it: all 34 candidates are invalid
+standalone, and the two predicates have still never been observed to differ.
+
+**The real cause is ordering, in the caller.** Both repair rungs widen
+tolerances on vertices and edges that neighbouring faces share, and widening is
+monotonically permissive — so repairing one face can make the next one valid
+before the loop reaches it. The serial loop asked at the moment it arrived at
+each face and so never counted them; a scan-then-repair pass asks before any
+repair has happened. `fix_vertex_tolerances` now re-checks each candidate as it
+reaches it, which restores the original set exactly and cannot fail the other
+way, since no repair here invalidates a face.
+
+The confirmation stage stays, relabelled: **insurance on the case this corpus
+cannot reach, not a measured necessity.** It costs tens of checks against
+hundreds of thousands, and whatever the two stages might disagree about can only
+run one way — the batch scan records at least the statuses the standalone one
+does, so it can over-report and cannot hide a fault.
+
+Two lessons. **A control whose faults are isolated cannot test a predicate whose
+difference is about neighbours** — G10's, in a new place. And an explanation
+that fits the symptom is not the mechanism: that is the fifth time in this
+file's history (G9, G10, G11, G12), and what settled it here was the cheapest
+available test — ship the fix the explanation implies and see whether the number
+moves.
+
+---
+
+## G21 — can the seam-only round 2 be made correct on real trimmed parts? ❌ NO
+
+docs/specification.md §10's one remaining live item, and the only lever it
+listed as worth more than ~1 %. Boundary-sew round 2 sews only the
+free-edge-bearing subset of each tile (`weld._split_seam_interior`), which G9
+found wrong on the `cc=5, t=1` rehearsal; the `expected_rings` check catches it
+and redoes the component with a full unsplit sew, costing **545 s of that run's
+769 s `stitch`**. The proposal was to carry a seam face's *straddling*
+neighbours — edges used twice in the tile but once in the subset — into the
+sewn subset, so sewing cannot rebuild one while the carried face keeps the
+original.
+
+```
+python tools/prototypes/g21_straddling_seam_split.py --cores 6
+python tools/prototypes/g21_straddling_seam_split.py --tiles <dir>
+```
+
+Real geometry throughout: `TD_HX_rehearsal_test` at `cc=5, t=1`, classified and
+trimmed for real (19,552 junctions → 21,955 pieces, 754 s), tiled into 33
+tiles, round 1 run through worker `.brep` files exactly as production does.
+Round-1 results are cached per tile so the analysis can be replayed without
+re-trimming.
+
+### The closure is the whole tile — measured, on five tiles
+
+| Tile | Faces | \|S0\| (today) | \|S1\| | \|S2\| | Fixpoint | Hops |
+|---|---|---|---|---|---|---|
+| 0 | 23,546 | 7,555 | 12,491 | 19,954 | **23,523** | 8 |
+| 1 | 22,872 | 6,514 | 10,966 | 17,769 | **22,837** | 8 |
+| 2 | 19,201 | 6,275 | 10,303 | 16,339 | **19,189** | 6 |
+| 3 | 16,831 | 4,116 | 6,983 | 11,635 | **16,723** | 18 |
+| 4 | 16,172 | 4,581 | 7,740 | 12,663 | **16,160** | 7 |
+
+**A subset with no straddling edge is a union of connected components of the
+tile's face-adjacency graph**, and a tile's round-1 result is one connected
+shell but for a few strays — so the fixpoint is the tile itself, less the 12–108
+faces that are genuinely separate. Every hop short of it leaves a fresh
+frontier of exactly the edges the closure exists to remove.
+
+The cost table says the same thing in wall clock, on the full 302,576-face set:
+
+| Round 2 variant | Time |
+|---|---|
+| full, unsplit | 520.89 s |
+| seam-only (today) | 9.34 s |
+| closure, 1 hop | 43.42 s |
+| closure, 2 hops | 605.16 s |
+| **closure to fixpoint** | **523.20 s** |
+
+Closing to correctness costs what the fallback already costs, because it *is*
+the fallback. **The proposal is disproved: do not build it.**
+
+### What the production check actually reports, and the 10 edges hiding in it
+
+`_sew_round_two` now records `(component, want, got_split, got_unsplit)` for
+every repaired component — free, since the unsplit sew has to run before either
+number is known. On the rehearsal:
+
+    component 0: expected 73984 free edge(s), seam-only split gave 192692,
+                 full unsplit sew gives 73994
+
+Two separate findings in one line.
+
+* **The split really is wrong** at production scale — 192,692 against 73,994 —
+  so G9's mechanism is live, and the repair earns its cost on this part.
+* **The correct sew misses the expectation too, by exactly 10.** `free_edges`
+  counted **degenerate** edges, which are not holes: an edge with no extent is
+  a parametric artefact whose one owning face uses it once by construction.
+  `shell_defects` has always skipped them and records finding exactly 10 on
+  this part (3.0e-9 to 8.3e-8 mm). So the check fired *whatever* the split did,
+  and could not have reported a correct split as correct. Fixed by excluding
+  degenerate edges in `free_edges`, which is where the two counts should have
+  agreed all along; `test_weld.py` pins it with a sphere, whose poles the
+  kernel gives degenerate edges of its own.
+
+### The gate's own limitation, which nearly inverted its verdict
+
+Part A of this gate — sewing the same tiles both ways and comparing — reported
+the two **identical** (302,576 faces, 74,049 free edges, area to six decimals,
+60,228 straddling edges and *none* rebuilt). That is not a contradiction of the
+production numbers above; it is the gate reconstructing the pipeline's front
+half and stopping one call short. `finalize_pieces` is what drops interface cap
+faces and folds the kept ones back in, so without it the sewn face set has
+holes where production has closed caps, and the defect does not arise on it.
+
+**A prototype that rebuilds part of the pipeline has to rebuild all of it**, or
+it measures a shape the pipeline never sees. The cross-check that caught it was
+the production run's own evidence line — which is the general form of the
+lesson G8 and G9 already left twice: the gate's scale was not the problem this
+time, its *inputs* were.

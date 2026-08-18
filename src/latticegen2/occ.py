@@ -179,6 +179,70 @@ def is_valid(shape: TopoDS_Shape) -> bool:
     return BRepCheck_Analyzer(shape, True, True).IsValid()
 
 
+FACE_SCAN_CHUNK = 20_000
+"""Faces per window in :func:`invalid_faces`.
+
+Sized from memory, not from speed: G22 measured the analyzer holding ~14 kB per
+face while it is alive, so scanning the rehearsal's 301,505 boundary faces in
+one call would hold ~4.2 GB at a point in `stitch` already carrying ~3 GB. A
+20,000-face window is ~0.3 GB and measures within 1 % of the unchunked scan —
+the speedup is flat from 1,000 faces upward, so there is nothing to trade away
+by keeping the window small.
+"""
+
+
+def invalid_faces(
+    faces: Iterable[TopoDS_Face], chunk: int = FACE_SCAN_CHUNK
+) -> list[TopoDS_Face]:
+    """The faces ``BRepCheck_Analyzer`` rejects standalone, in input order.
+
+    The predicate is ``BRepCheck_Analyzer(face).IsValid()``, one face at a
+    time, unchanged — what changes is how the faces that need it are found. A
+    boundary layer is hundreds of thousands of faces of which a handful are
+    ever rejected (19 of 301,505 on the `cc=5, t=1` rehearsal), and asking one
+    analyzer per face cost **44.6 s** of that run's `stitch`, serial on the
+    master (docs/algorithm.md §8). So a batch scan proposes candidates and the
+    standalone check disposes of them:
+
+    * **Propose.** One ``BRepCheck_Analyzer`` per window of ``chunk`` faces,
+      packed into a ``TopoDS_Compound``, with ``theIsParallel`` on — OCCT's own
+      native threads, the flag G18 measured for the validity gate.
+    * **Dispose.** Every candidate is then re-checked **alone**, which is the
+      predicate everything downstream is calibrated against. Candidates are
+      tens of faces, so this costs nothing measurable.
+
+    **The confirmation stage is insurance rather than a measured necessity, and
+    it is worth being precise about which.** G22 compared the two face for face
+    over a 17,308-face corpus carrying the four real committed faults and found
+    zero disagreements, so the batch scan has never been *observed* to differ.
+    What that corpus cannot exercise is the case where it plausibly could: its
+    faults are loose faces, while a sewn layer's faults have neighbours, and a
+    compound analyzer holds one result per subshape shared between every face
+    using it. Confirming tens of candidates costs nothing next to scanning
+    hundreds of thousands, so the check that decides is the one this repair was
+    calibrated against, and the batch scan only ever proposes.
+
+    Whatever the two stages disagree about, the disagreement can only run one
+    way: the batch scan records at least the statuses the standalone one does,
+    so it can over-report and cannot hide a fault the standalone check would
+    find.
+
+    **This is not what produced the rehearsal's 15 phantom "still invalid"
+    faces** — that was an ordering effect in the caller, and
+    :func:`fix_vertex_tolerances` says where.
+    """
+    faces = list(faces)
+    out: list[TopoDS_Face] = []
+    for i in range(0, len(faces), chunk):
+        window = faces[i:i + chunk]
+        analyzer = BRepCheck_Analyzer(compound(window), True, True)
+        out.extend(
+            f for f in window
+            if not analyzer.IsValid(f) and not BRepCheck_Analyzer(f).IsValid()
+        )
+    return out
+
+
 # --- Construction -----------------------------------------------------------
 
 
@@ -435,11 +499,26 @@ def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
     zero drift.
 
     Only faces the analyzer already rejects are examined, so a sound boundary
-    layer pays one validity check per face and nothing more.
+    layer pays nothing beyond finding that out — and finding it out is the
+    stage's own cost, 44.6 s of the `cc=5, t=1` rehearsal's `stitch` over
+    301,505 faces (docs/specification.md §10). :func:`invalid_faces` finds them
+    with a parallel batch scan per window, so the set below is unchanged and
+    only the search for it got cheaper: measured as a controlled pair on that
+    part, **44.1 s -> 22.6 s**, with the same 19 faces repaired and the output
+    byte-identical.
     """
     fixer = ShapeFix_Edge()
     repaired = still_invalid = 0
-    for face in faces:
+    for face in invalid_faces(faces):
+        # Re-checked here, not only when the candidate list was built, because
+        # the two are not the same question. Rungs 1 and 2 widen tolerances on
+        # vertices and edges that neighbouring faces share, and widening is
+        # monotonically permissive — so repairing one face can make the next
+        # one valid before this loop reaches it. Asking once up front counted
+        # those neighbours as unrepaired: the rehearsal reported 19 corrected
+        # and 15 "still invalid" where the per-face loop had always reported
+        # none, on a run whose validity gate then passed all 14 solids.
+        # Nothing here can move the other way: no repair invalidates a face.
         if BRepCheck_Analyzer(face).IsValid():
             continue
         before = area(face)

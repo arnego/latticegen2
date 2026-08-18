@@ -34,7 +34,7 @@ header rewrite.
 | `test_connect.py` | The junction graph and the floating-body rule's three outcomes | no |
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
-| `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell | yes |
+| `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell. Also the two properties the round-2 check rests on: that the batch validity scan behind that repair returns exactly what the per-face predicate does, and that `free_edges` does not count a degenerate edge as a hole | yes |
 | `test_boundary.py` | The symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7) and the two guards on it, tested against the **real** failing junctions in `TD_HX_rehearsal_test.step` rather than synthetic stand-ins — both the `cc=5, t=1` junction the repair was built for and the `cc=12, t=2.5` one whose repair a relative-volume bar wrongly refused (G19) — see the note below | yes |
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6. Also that the strided parallel sweep (docs/algorithm.md §5.4) returns *identical* classes to the serial one, across a real process boundary — identical rather than equivalent, because stride arithmetic invites off-by-ones that a tolerance would hide | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
@@ -274,15 +274,21 @@ than apportioned. On the 2026-08-17 re-run:
 The repair is **85 %** of the stage. Two things follow, and the second is the
 one worth carrying:
 
-* The retolerance scan is 44.6 s — the easy half, embarrassingly parallel in
-  principle, worth ~1.2 % of the run, and carrying a subtle predicate change if
-  done the cheap way (specification.md §10).
+* The retolerance scan is 44.6 s — the easy half, worth ~1.2 % of the run.
+  **Done, 2026-08-18: 44.1 s → 22.6 s in a controlled pair** (docs/algorithm.md
+  §8). What bit was not the predicate change §10 warned about but *when* the
+  predicate is evaluated — repairs widen shared tolerances, so scanning every
+  face before repairing anything counts the neighbours a repair fixes for free
+  as unrepaired. See specification.md §11: the first explanation fitted the
+  symptom and was wrong, and shipping it is what disproved it.
 * **Running the unsplit sew speculatively alongside the seam-only one, so the
   discarded attempt leaves the critical path, recovers at most 15.1 s.** That
   proposal was worth building only while the discarded attempt was assumed
   expensive. It is not. The 651 s means making the seam-only split correct on
-  heavily trimmed geometry, which is a real piece of work and not a scheduling
-  change.
+  heavily trimmed geometry — and **that is now disproved rather than merely
+  hard** (G21): the sewn subset has to grow until no edge straddles it, which is
+  the whole tile, at the unsplit sew's own cost. `stitch`'s repair is the price
+  of a correct shell on this part, not an unfixed inefficiency.
 
 The general lesson is one this file keeps re-learning: a stage timer that lumps
 six phases together tells you the stage is slow and nothing about which proposal

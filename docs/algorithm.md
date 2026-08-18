@@ -959,6 +959,35 @@ into `assemble`. `SewStats.repaired_components` reports how many times this
 fires, logged in the run summary; it is 0 on every committed scenario, since
 none is large enough to tile (`MIN_PIECES_TO_TILE`) in the first place.
 
+**That count must exclude degenerate edges, and did not until it was measured.**
+An edge with no extent is a parametric artefact whose one owning face uses it
+once by construction — `shell_defects` below has always skipped them for that
+reason, and records exactly 10 on this part. `free_edges` counted them, so a
+*correct* unsplit sew of the rehearsal's dominant component read 73,994 against
+the 73,984 expected: the check fired whatever round 2 did, and could never have
+reported a correct split as correct. `free_edges` now applies the same
+`BRep_Tool.Degenerated_s` test `shell_defects` does, which is where the two
+counts should have agreed all along (§11's rule that a gate is only as
+trustworthy as the quantity it compares, in the one place both quantities were
+already in the file).
+
+**What the repair costs on this part is structural, and the one proposed fix is
+disproved.** `SewStats` records `(component, want, got_split, got_unsplit)` for
+every repaired component — free, since the unsplit sew has to run before either
+number is known — and the rehearsal reports `expected 73984, seam-only split
+gave 192692, full unsplit sew gives 73994` (the last of those is the 10
+degenerate edges above, and reads 73984 once they are excluded). So the split
+genuinely fails here, by a factor of 2.6 rather than by a rounding error, and
+the repair earns its 545 s. The fix docs/specification.md §10 proposed —
+carry a seam face's straddling neighbours into the sewn subset — was measured by
+G21 and **cannot work**: a subset with no straddling edge is a union of
+connected components of the tile's face-adjacency graph, and a tile's round-1
+result is one connected shell, so the closure of "add my straddling neighbours"
+is the tile itself (23,546 faces → 23,523, in 8 hops) and costs what the
+unsplit sew costs (523.20 s against 520.89 s). Every hop short of the fixpoint
+leaves a fresh frontier of exactly the edges it exists to remove. There is no
+lever left in this stage; see docs/specification.md §11.
+
 **A hierarchical tree reduction was considered for round 2 itself — sewing
 tile results together pairwise across levels instead of in one call — and
 rejected on paper, without being built.** G6 already showed round 2's cost
@@ -1029,10 +1058,54 @@ quadrature noise to allow for.
 
 It runs before `interface_rings` so the interior adopts corrected vertices rather
 than a copy needing the same fix again, and it examines only faces the analyzer
-already rejects, so a sound boundary layer pays one validity check per face.
+already rejects, so a sound boundary layer pays nothing beyond finding that out.
 Faces it does not account for are counted and logged rather than failed on: §9's
 validity gate is already the gate for that, and failing twice for one cause only
 obscures which check found it.
+
+**Finding that out is the stage's own cost, and it is a batch scan that
+proposes rather than a serial one that decides.** Asking one analyzer per face
+measured **44.6 s** of the `cc=5, t=1` rehearsal's `stitch` across 301,505
+faces, all of it on the master (docs/specification.md §10), to find 19. So
+`occ.invalid_faces` packs each window of faces into a `TopoDS_Compound`, runs a
+single `BRepCheck_Analyzer` over it with `theIsParallel` on — OCCT's own native
+threads, the same flag §9's validity gate uses — and then **re-checks every
+candidate alone**, which is the predicate the repair is calibrated against.
+Measured as a controlled pair on the rehearsal: **44.1 s → 22.6 s**, with the
+set of faces repaired unchanged and the output byte-identical.
+
+**Why a compound rather than the solid.** §10 had rejected the version of this
+that runs one analyzer over the assembled *solid*, because `IsValid(subshape)`
+there is the **in-context** overload — the very difference G12 used to diagnose
+rung 2 above. A compound of loose faces has no shell and no solid in it, and
+G22 confirmed that face for face over a 17,308-face corpus with the four real
+committed faults mixed in: zero disagreements. The confirmation stage is kept
+anyway, because the one case that corpus cannot exercise is the one where the
+two could plausibly differ — its faults are loose faces, while a sewn layer's
+have neighbours, and a compound analyzer holds one result per subshape shared
+between the faces using it. Confirming tens of candidates costs nothing beside
+scanning hundreds of thousands, and whatever they disagree about can only run
+one way: the batch scan records at least the statuses the standalone one does,
+so it can over-report and cannot hide a fault.
+
+**What did go wrong is worth more than either.** The first version scanned
+every face up front and then repaired, and the rehearsal reported 19 faces
+corrected and **15 "still invalid"** where the per-face loop had always
+reported none — on a run whose validity gate then passed all 14 solids, which
+is what identified them as phantoms. The cause is not the predicate but *when*
+it is evaluated: both rungs widen tolerances on vertices and edges that
+neighbouring faces share, and widening is monotonically permissive, so
+repairing one face can make the next one valid before the loop reaches it. The
+serial loop asked at the moment it arrived at each face and so never saw them;
+a scan-then-repair pass asks before any repair has happened. `fix_vertex_tolerances`
+therefore re-checks each candidate as it reaches it, which restores the
+original set exactly — and cannot fail the other way, since no repair here
+invalidates a face.
+
+The scan is chunked at `FACE_SCAN_CHUNK` (20,000) faces because the analyzer
+holds ~14 kB per face while it is alive — one call over the rehearsal's faces
+would hold ~4.2 GB where `stitch` already carries ~3 GB — and chunking costs
+nothing measurable at any window from 1,000 faces upward.
 
 Assembly is then `BRep_Builder.Add` into one shell per component, and
 watertightness is proved rather than assumed: **every edge used exactly twice,
@@ -1416,11 +1489,12 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10). Guarded by an exact area bar and a structural one, never by volume — OCCT cannot integrate the volume of the unrepaired piece, because the pinhole is exactly the free boundary its precondition excludes (§7, G19) |
-| Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is one validity check per boundary face on a sound layer (§8, G11, G12) |
+| Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is finding the faces to repair, on a sound layer (§8, G11, G12) |
+| That scan run as a parallel batch filter over a compound (§8) | The second stage to use OCCT's own threads rather than this project's process pool, and for the same two reasons as `validate`: it returns a verdict rather than geometry, and the call has a flag. **44.1 s → 22.6 s** in a controlled pair, same 19 faces repaired, output byte-identical; chunked at 20,000 faces because the analyzer holds ~14 kB per face. The predicate has to be re-evaluated per face *as the repair reaches it*, not once up front: repairs widen shared tolerances, so a neighbour can be fixed for free, and asking too early counted 15 such faces as unrepaired |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
-| Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; identical to a full round 2 at every prototype scale tried (§8, G8), but not on real, heavily trimmed production geometry (§8) — a per-component free-edge check against `want_rings` catches and repairs the mismatch there, at the cost of the saving only for the repaired components |
+| Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; identical to a full round 2 at every prototype scale tried (§8, G8), but not on real, heavily trimmed production geometry, where the rehearsal measures 192,692 free edges against the 73,984 a correct sew leaves (§8) — a per-component free-edge check against `want_rings`, degenerate edges excluded, catches and repairs that, at the cost of the saving only for the repaired components. **The repair's cost is structural**: making the split correct means growing the sewn subset until it has no straddling edge, and that closure is the whole tile (G21) |
 | One shared `WorkerPool` for the whole run | `spawn`'s process-creation cost is paid once per run rather than once per stage; classification, boundary trim, boundary-sew round 1, boundary-sew round 2 and unification all dispatch through it (§5.4, §8, §9, `latticegen2.parallel`). Built before `classify` rather than after it so that stage can use it too — which also means `boundary` now starts with warm workers instead of paying their first import, measured at −12.6 % on `dense-lattice`. Validity is the one parallel stage that does *not* use it, and §9 says why |
 | Same-domain unification across the shared pool | Measured single-threaded at 24 % (17 m 17 s) of the `cc=5, t=1` rehearsal; G7 measured OCP holding the GIL around the call, so this is the same process-pool-plus-`.brep` mechanism the rest of the pipeline uses, not threads (§9, specification.md §10 path 1) |
 | Validity via OCCT's own thread pool, on the master (§9) | The one heavy call with a `theIsParallel` flag, and the one heavy stage returning a scalar rather than geometry — so G17's GIL result does not bind OCCT's native threads and G15's identity result has nothing to attach to. 1.60× at 3.43 cores, verdict identical on valid solids and on all four real invalid faces (G18). Replaces path 4's per-solid process dispatch, which cannot coexist with it under `--cores` (`W` processes × `W` threads) and never reached the dominant solid that sets the floor; dropping it also deletes a 464 MB round trip |
@@ -1497,7 +1571,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind that budget: logical core count (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity, pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8) |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |

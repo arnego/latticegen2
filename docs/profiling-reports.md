@@ -15,7 +15,7 @@ method that produced it is stated.
 ## How these were produced
 
 ```
-python tools/profile_run.py --out run.csv -- python src/main.py -i test/TD_HX_rehearsal_test.step -cc 5 -t 1 -o out.step --cores 6 --ram 20 -v
+python tools/profile_run.py --out run.csv -- python src/main.py -i test/TD_HX_rehearsal_test.step -cc 5 -t 1 -o out.step --cores 6 -v
 ```
 
 ```
@@ -26,8 +26,15 @@ python tools/profile_report.py run.csv out.log --cores 6
 every 2 s; `profile_report.py` joins those samples to the stage boundaries in
 the `.log`. **Cores used** is the number to read: 1.00 is one core fully busy,
 6.00 is the whole machine. `profile_run.py` needs `psutil` for sampling the
-process tree; `psutil` is a runtime dependency of the tool itself, so it is
-already present by any of README.md's routes (docs/testing.md).
+process tree; that is a development-only dependency of `tools/`, installed
+separately (`python -m pip install psutil`) — it is not a runtime dependency of
+latticegen2 and does not ship in a bundle (docs/testing.md,
+docs/specification.md §11).
+
+Entries dated before 2026-08-17 quote a command line carrying `--ram`, which
+was a real flag when they were run and has since been removed
+(docs/specification.md §11). They are left as they were: they are records of
+what was run, not instructions.
 
 Machine for every entry below: Windows 11, 6-core CPU, 32 GB RAM,
 Python 3.11.13, OCP 7.9.3.1.1 (OCCT 7.9.3), NumPy 2.4.6.
@@ -390,3 +397,111 @@ read-only, and `set_thread_budget(6)` is a no-op when OCCT's default on this
 machine is already 6. It sits inside what docs/algorithm.md §9 describes as
 same-domain unification's own representation choice. Flagged so a future run can
 confirm it is variance rather than drift.
+
+## What changed between the previous entry and the next
+
+Two sessions' worth. `--ram` was removed (specification.md §11) and three guards
+that refused valid input were fixed, neither of which touches per-stage cost.
+Then the pair below, which closes specification.md §10:
+
+* `occ.fix_vertex_tolerances` finds the faces it repairs with one parallel
+  `BRepCheck_Analyzer` per 20,000-face window instead of one per face
+  (docs/algorithm.md §8, G22). This is the only change expected to move a
+  number, and it moves one *phase* of `stitch`, not a stage.
+* `weld.free_edges` no longer counts degenerate edges, which corrects the
+  round-2 check's own arithmetic. It changes what the log *says*, not what the
+  run does on this part — the repair fires either way here.
+* `_sew_round_two` records `(component, want, got_split, got_unsplit)` when it
+  repairs, computed from a sew that had to run regardless.
+
+## 2026-08-18 — `7e82e2a` (before), controlled pair
+
+```
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 0% | 0% | 0.00 | 233 MB | 233 MB | 1 | 0 MB | 0 MB |
+| tessellate | 3.0s | 91% | 91% | 0.91 | 274 MB | 274 MB | 1 | 0 MB | 0 MB |
+| classify | 42.0s | 443% | 533% | 4.43 | 1,790 MB | 1,853 MB | 7 | 333 MB | 4 MB |
+| boundary | 786.0s | 486% | 543% | 4.86 | 1,808 MB | 2,255 MB | 7 | 181 MB | 156 MB |
+| connect | 12.0s | 97% | 100% | 0.97 | 2,323 MB | 2,330 MB | 7 | 0 MB | 0 MB |
+| stitch | 656.0s | 108% | 532% | 1.08 | 3,220 MB | 3,387 MB | 7 | 382 MB | 356 MB |
+| instance | 45.0s | 97% | 99% | 0.97 | 3,727 MB | 4,192 MB | 7 | 0 MB | 0 MB |
+| assemble | 23.0s | 96% | 100% | 0.96 | 3,961 MB | 3,961 MB | 7 | 0 MB | 0 MB |
+| simplify | 1,129.0s | 97% | 103% | 0.97 | 6,611 MB | 7,472 MB | 7 | 940 MB | 940 MB |
+| validate | 111.0s | 164% | 540% | 1.64 | 9,700 MB | 14,362 MB | 7 | 0 MB | 0 MB |
+| export | 340.0s | 96% | 100% | 0.96 | 11,999 MB | 19,742 MB | 7 | 2,007 MB | 2,007 MB |
+
+total to last stage : 3,148.0s (52.5 min)
+peak tree RSS       : 19,742 MB
+```
+
+Run log: 52m 43.0s, 14 valid solids, 584,028 faces, 2,517,853 edges, 2.00 GB.
+`stitch` phases: `round1 45.3s, split 2.8s, round2 14.7s, repair 542.0s,
+retolerance 44.1s, rings 6.7s`.
+
+## 2026-08-18 — the branch (after), same machine, 1 h 47 m later
+
+```
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| tessellate | 3.0s | 48% | 95% | 0.48 | 250 MB | 267 MB | 1 | 1 MB | 0 MB |
+| classify | 43.0s | 438% | 526% | 4.38 | 1,806 MB | 1,850 MB | 7 | 282 MB | 4 MB |
+| boundary | 798.0s | 480% | 542% | 4.80 | 1,806 MB | 2,122 MB | 7 | 148 MB | 156 MB |
+| connect | 13.0s | 96% | 98% | 0.96 | 2,320 MB | 2,336 MB | 7 | 0 MB | 0 MB |
+| stitch | 652.0s | 112% | 527% | 1.12 | 3,233 MB | 3,813 MB | 7 | 382 MB | 352 MB |
+| instance | 46.0s | 96% | 101% | 0.96 | 3,775 MB | 4,190 MB | 7 | 0 MB | 0 MB |
+| assemble | 22.0s | 97% | 99% | 0.97 | 3,951 MB | 3,954 MB | 7 | 0 MB | 0 MB |
+| simplify | 1,148.0s | 97% | 107% | 0.97 | 7,022 MB | 7,485 MB | 7 | 940 MB | 940 MB |
+| validate | 112.0s | 160% | 524% | 1.60 | 10,358 MB | 15,078 MB | 7 | 0 MB | 0 MB |
+| export | 339.0s | 95% | 101% | 0.95 | 11,720 MB | 19,050 MB | 7 | 2,007 MB | 4,056 MB |
+
+total to last stage : 3,176.0s (52.9 min)
+peak tree RSS       : 19,050 MB
+```
+
+Run log: 53m 11.3s, 14 valid solids, and **the same output byte for byte** —
+584,028 faces, 2,517,853 edges, 2,148,818,507 bytes, identical to the before
+run's file size and every reported figure. `stitch` phases: `round1 44.3s,
+split 2.8s, round2 14.3s, repair 559.1s, retolerance 22.6s, rings 8.6s`.
+
+## Reading the pair
+
+**Read the phase, not the stage.** The only thing this pair changes is one
+phase of `stitch`:
+
+| | before | after | |
+|---|---|---|---|
+| `retolerance` | 44.1 s | **22.6 s** | **−48.8 %** |
+| `stitch` | 656 s | 652 s | −0.6 % |
+| whole run | 52m 43s | 53m 11s | +0.9 % |
+
+The stage moves by less than its own repair phase varies between runs (542.0 s
+against 559.1 s, +3.2 %, on identical code paths and identical input), and the
+whole run is inside ordinary variance. **That is the honest result**: 21.5 s
+off a 3,175-second run is 0.7 %, real but invisible at stage granularity, and
+the only reason it is measurable at all is that `stitch` reports its phases
+separately. A pair like this one is worth running anyway, and this one paid for
+itself twice over — see below.
+
+The untouched stages agree to within 1.5 % (`boundary` +1.5 %, `simplify`
++1.7 %, `classify` +2.4 %, `validate` +0.9 %, `export` −0.3 %), which is what
+makes the phase delta readable. `peak tree RSS` falls 3.5 % and
+`min system available` rises, both incidental.
+
+**A third run sits between these two and is not reported as a pair half.** The
+branch's first version scanned every face up front and then repaired, and its
+run reported 19 faces corrected with **15 "still invalid"** where the serial
+scan had always reported none — while its validity gate passed all 14 solids,
+which is what identified them as phantoms. The cause was ordering rather than
+the predicate (specification.md §11): repairs widen shared tolerances, so a
+neighbour can be fixed for free before the loop reaches it. The run above is
+after that fix, and reports the original 19 with no residual.
+
+**Two things this pair establishes that the timings do not.** The evidence line
+`component 0: expected 73984 free edge(s), seam-only split gave 192682, full
+unsplit sew gives 73984` says the seam-only split is genuinely wrong on this
+part by a factor of 2.6 — and that the unsplit sew now meets the expectation
+exactly, where before the degenerate-edge fix it read 73,994 and could not.

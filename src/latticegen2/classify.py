@@ -933,6 +933,14 @@ def classify_slice(
     return node_class
 
 
+# One entry per (mesh, cc, t) a worker process is asked about — in practice
+# exactly one for a whole run, since `_classify_parallel` stages the mesh once
+# and the parameters are fixed. Module scope is what makes it survive between
+# jobs: `WorkerPool` dispatches with `imap(chunksize=1)`, so a worker is called
+# once per slice and holds no other state across those calls.
+_WORKER_INDEX: dict[tuple[str, float, float], tuple[TriMesh, "_ClassifyIndex"]] = {}
+
+
 def _worker_classify(job):
     """Classify one strided slice of the candidate set in a worker process.
 
@@ -946,14 +954,31 @@ def _worker_classify(job):
     are a pure function of ``(cc, t)`` and the mesh, so this is duplicated work
     — but it is duplicated *in parallel*, and the alternative is pickling three
     ray-caster bucket dictionaries per job.
+
+    **Per worker, which means the rebuild has to be cached across jobs.**
+    ``_classify_parallel`` dispatches ``workers * 4`` slices, so without
+    ``_WORKER_INDEX`` each worker rebuilt the mesh and its three indices once
+    per slice — four times over, not once — and the sentence above was a claim
+    about a cost the code was actually paying four times. Reuse is sound because
+    :class:`_ClassifyIndex` is read-only once constructed: it is a function of
+    ``lp`` and the mesh alone, which is the same property that makes the sweep
+    divisible in the first place. The cached slice result is bit-identical
+    either way, so this is wall clock only — measured at 0.37 s per rebuild
+    against a 122.6 s serial sweep at rehearsal scale (docs/algorithm.md §5.4).
     """
     (mesh_path, nodes_path, cc, t, offset, stride) = job
+    key = (mesh_path, cc, t)
     lp = lattice_params(cc, t)
-    mesh = load_mesh(mesh_path)
+    cached = _WORKER_INDEX.get(key)
+    if cached is None:
+        mesh = load_mesh(mesh_path)
+        cached = (mesh, _ClassifyIndex(lp, mesh))
+        _WORKER_INDEX[key] = cached
+    mesh, index = cached
     with np.load(nodes_path) as z:
         candidates = z["candidates"]
 
-    node_class = classify_slice(lp, mesh, candidates[offset::stride])
+    node_class = classify_slice(lp, mesh, candidates[offset::stride], index=index)
 
     from .runlog import peak_rss_bytes
 

@@ -444,7 +444,13 @@ nodes, which lie on a shell. Slabs divide that cost very unevenly; a stride of
 `W * 4` spreads the shell across every batch.
 
 The mesh-derived indices are rebuilt per worker rather than shipped, since they
-are a pure function of `(cc, t)` and the mesh. Measured on
+are a pure function of `(cc, t)` and the mesh. **Per worker means memoised
+across slices**, at module scope in the worker, keyed on the staged mesh and
+`(cc, t)`: the sweep is dispatched as `W * 4` slices and the pool hands them out
+one at a time, so without that the rebuild would be paid once per *slice* —
+four times over — and this sentence would be pricing a cost the code paid four
+times. Reuse is sound for the same reason the sweep divides at all: the index
+is a function of `lp` and the mesh alone, and is read-only once built. Measured on
 `TD_HX_rehearsal_test` at `cc=5, t=1`, whose mesh is 28,654 triangles: the
 rebuild is **0.37 s**, against a **122.6 s** serial sweep over 527,425
 candidates — 6.7 % of one job's cost, paid in parallel. Measured on

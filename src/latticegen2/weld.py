@@ -398,6 +398,17 @@ def _sew_all_tiles(
     to justify one — still a real saving over one monolithic sew per component,
     since it is smaller sews that are cheap, not parallel ones.
 
+    **"No worker pool to use" has to mean an inactive pool, not a missing one.**
+    ``WorkerPool(1)`` is inert by design — :attr:`~latticegen2.parallel.WorkerPool.active`
+    is ``False`` and :meth:`~latticegen2.parallel.WorkerPool.run` refuses — and
+    `pipeline._run` builds one unconditionally, so under ``--cores 1`` this is
+    handed a pool object that exists and cannot run anything. Testing ``pool is
+    None`` alone let that case fall through to the transient-pool branch below,
+    which built a second inert pool and raised out of ``run()``: exit 4 on valid
+    input, and only on a part large enough to tile, which no committed scenario
+    reaches. Every other dispatch site in the codebase gates on ``pool.active``
+    for this reason; this one now does too.
+
     Jobs are consumed in job order, not completion order: which order round 2
     receives each component's tile results in is identical run to run
     (:func:`latticegen2.boundary.trim_boundary` relies on the same property for
@@ -420,7 +431,7 @@ def _sew_all_tiles(
     if not jobs_meta:
         return results, 0
 
-    if (pool is None and workers <= 1) or tmpdir is None or len(jobs_meta) < 2:
+    if ((pool is None or not pool.active) and workers <= 1) or tmpdir is None or len(jobs_meta) < 2:
         for group, i, tile in jobs_meta:
             results[group][i] = _sew_faces([p.faces for p in tile], tolerance)
         return results, 0

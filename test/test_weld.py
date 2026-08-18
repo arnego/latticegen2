@@ -24,6 +24,7 @@ from latticegen2.connect import lattice_interfaces
 from latticegen2.interior import build_interior_shell, extract_template_mesh
 from latticegen2.junction import build_template, is_cap_plane_face
 from latticegen2.lattice import OPPOSITE_HALF, lattice_params, neighbor_step, nodes
+from latticegen2.parallel import WorkerPool
 
 CC, T = 10.0, 1.5
 
@@ -467,6 +468,44 @@ def test_tiled_sew_across_worker_processes_matches_the_sequential_path(template,
     open_edges, misoriented, *_ = weld.shell_defects(shell_of(parallel[0]))
     assert (open_edges, misoriented) == (0, 0)
     solid = occ.make_solid(shell_of(parallel[0]))
+    assert occ.volume(solid) == pytest.approx(8 * tpl.volume, rel=1e-9)
+
+
+def test_tiled_sew_falls_back_to_sequential_when_the_shared_pool_is_inert(template, tmp_path):
+    """``--cores 1`` on a part big enough to tile: the production shape of it.
+
+    ``pipeline._run`` builds ``WorkerPool(args.workers)`` unconditionally, and
+    ``WorkerPool(1)`` is inert by design — it creates no ``mp.Pool``, so
+    ``.active`` is ``False`` and ``.run()`` refuses. So ``_sew_all_tiles`` is
+    handed a pool object that exists and cannot run anything, which is a case
+    neither ``pool is None`` nor ``pool.active`` alone describes.
+
+    Testing only ``pool is None`` let that fall through to the transient-pool
+    branch, which built a *second* inert pool and raised ``ProcessingError`` out
+    of ``run()`` — exit 4 on input the CLI accepts (``--cores`` is 1-128 per
+    specification.md §3), which docs/algorithm.md §11 rules out. It needed a
+    component past ``MIN_PIECES_TO_TILE`` to reach, so no committed scenario
+    does: ``dense-lattice`` tiles nothing, and every other test here passes
+    ``pool=None``. ``min_to_tile=1`` buys that condition at eight pieces.
+    """
+    lp, tpl, _ = template
+    pieces = _line_pieces(lp, tpl, 8)
+    groups = [0] * len(pieces)
+
+    with WorkerPool(1) as inert:
+        assert not inert.active, "WorkerPool(1) is inert — the premise of this test"
+        out, stats = weld.sew_boundary(
+            pieces, groups, workers=1, tmpdir=str(tmp_path),
+            tile_target=2, min_to_tile=1, pool=inert,
+        )
+
+    assert stats.tiles > 1, "the tiling path was actually taken"
+    assert stats.max_worker_rss == 0, "no worker ran — this is the sequential route"
+
+    # And the route still produces the shell, not merely an absence of crash.
+    open_edges, misoriented, *_ = weld.shell_defects(shell_of(out[0]))
+    assert (open_edges, misoriented) == (0, 0)
+    solid = occ.make_solid(shell_of(out[0]))
     assert occ.volume(solid) == pytest.approx(8 * tpl.volume, rel=1e-9)
 
 

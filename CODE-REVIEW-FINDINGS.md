@@ -2,10 +2,10 @@
 
 Findings from `/code-review ultra`, and their disposition.
 
-**Review target:** branch `review/v2.1.0-to-main-code` — a squashed tree of `main`
-parented on `v2.1.0` (`29f240b`), so the branch-vs-merge-base diff is exactly
-`v2.1.0..main`, minus two measurement-record paths held back to fit ultrareview's
-8,000-line budget (the full 12,555-line diff was refused):
+**Review target:** a throwaway branch `review/v2.1.0-to-main-code` — a squashed
+tree of `main` parented on `v2.1.0` (`29f240b`), so the branch-vs-merge-base
+diff was exactly `v2.1.0..main`, minus two measurement-record paths held back to
+fit ultrareview's 8,000-line budget (the full 12,555-line diff was refused):
 
 - `tools/prototypes/` — one-off gate scripts, `export-ignore`d, never shipped.
 - `docs/profiling-reports.md` — an append-only log of profile runs.
@@ -14,8 +14,9 @@ Everything shipped is included in full, at its exact `v2.1.0..main` line count:
 `src/` 2,546, `test/` 2,053, `tools/` (e2e, verify_geometry, build_release,
 smoke_bundle, profile_*) 689, `docs/` 2,404 — both normative documents,
 `algorithm.md` and `specification.md`, complete — and packaging 77. **7,769 lines
-over 43 files.** `review/v2.1.0-to-main` retains the untrimmed 12,555-line target.
-Both are review artefacts and must never be merged.
+over 43 files.** A sibling branch `review/v2.1.0-to-main` carried the untrimmed
+12,555-line target. Both were review scaffolding — they held `main`'s own tree
+and nothing unique — and both were deleted once the review returned.
 
 **Fixes land on:** `claude/code-review-v2-1-0-main-3ed6b6`, branched from `main`,
 which merges back normally.
@@ -44,8 +45,8 @@ against the code before anything was changed; both are real.
 
 | # | Severity | Site | Finding | Disposition |
 |---|---|---|---|---|
-| 1 | normal | [weld.py:423](src/latticegen2/weld.py#L423) | `_sew_all_tiles` crashes under `--cores 1` on any component large enough to tile | **fixed** |
-| 2 | nit | [classify.py:936](src/latticegen2/classify.py#L936) | `_worker_classify` rebuilt `_ClassifyIndex` per *slice* while its docstring and algorithm.md §5.4 both said per *worker* | **fixed** |
+| 1 | normal | [weld.py:434](src/latticegen2/weld.py#L434) | `_sew_all_tiles` crashes under `--cores 1` on any component large enough to tile | **fixed** |
+| 2 | nit | [classify.py:944](src/latticegen2/classify.py#L944) | `_worker_classify` rebuilt `_ClassifyIndex` per *slice* while its docstring and algorithm.md §5.4 both said per *worker* | **fixed** |
 
 ### 1 — `_sew_all_tiles` crashes under `--cores 1`
 

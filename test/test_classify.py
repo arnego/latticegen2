@@ -10,6 +10,7 @@ import os
 import numpy as np
 import pytest
 
+from latticegen2 import classify as classify_mod
 from latticegen2 import occ
 from latticegen2.classify import (
     Klass,
@@ -203,6 +204,58 @@ def test_classification_of_a_sphere_is_layered_correctly():
     assert np.all(radius[interior] < 30.0 - margin)
     # Every OUTSIDE node must be beyond the sphere.
     assert np.all(radius[outside] > 30.0 - lp.a / 2 - margin)
+
+
+def test_worker_reuses_one_classify_index_across_the_slices_it_is_given(tmp_path):
+    """Rebuilt *per worker* has to mean per worker, not per slice.
+
+    ``_classify_parallel`` dispatches ``workers * 4`` slices and the pool hands
+    them out one at a time, so a worker is called once per slice. With no cache
+    it rebuilt the mesh and its three indices on every one of those calls —
+    four times over on the default budget — while ``_worker_classify``'s own
+    docstring and docs/algorithm.md §5.4 both priced the rebuild as paid once.
+
+    Reuse is safe because :class:`~latticegen2.classify._ClassifyIndex` is a
+    function of ``lp`` and the mesh alone and is read-only once built, which is
+    the same property that makes the sweep divisible. This asserts object
+    identity rather than a timing, since the saving is wall clock only — the
+    classification is bit-identical either way, which the sibling test pins.
+    """
+    lp = lattice_params(10.0, 1.5)
+    mesh = icosphere(30.0, subdivisions=3)
+    mesh.deviation = 0.2
+    cand = candidate_nodes(lp, np.array([-30.0] * 3), np.array([30.0] * 3))
+
+    mesh_path = str(tmp_path / "mesh.npz")
+    nodes_path = str(tmp_path / "nodes.npz")
+    classify_mod.save_mesh(mesh, mesh_path)
+    np.savez(nodes_path, candidates=np.asarray(cand, dtype=np.int64))
+
+    classify_mod._WORKER_INDEX.clear()
+    try:
+        stride = 4
+        parts = [
+            classify_mod._worker_classify(
+                (mesh_path, nodes_path, lp.cc, lp.t, offset, stride)
+            )[0]
+            for offset in range(stride)
+        ]
+        assert len(classify_mod._WORKER_INDEX) == 1, "one index, not one per slice"
+        cached = classify_mod._WORKER_INDEX[(mesh_path, lp.cc, lp.t)]
+
+        # And the cache is what the slices actually ran against, not a spare
+        # copy built beside them: re-running a slice must hand back that object.
+        classify_mod._worker_classify((mesh_path, nodes_path, lp.cc, lp.t, 0, stride))
+        assert classify_mod._WORKER_INDEX[(mesh_path, lp.cc, lp.t)] is cached
+
+        # Reuse must not have changed the answer.
+        serial = classify_nodes(lp, mesh, cand).node_class
+        reassembled = np.empty(len(cand), dtype=np.int64)
+        for offset, part in enumerate(parts):
+            reassembled[offset::stride] = part
+        assert np.array_equal(serial, reassembled)
+    finally:
+        classify_mod._WORKER_INDEX.clear()
 
 
 def test_parallel_classification_is_identical_to_the_serial_sweep(tmp_path):

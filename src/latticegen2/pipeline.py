@@ -361,16 +361,15 @@ def _run_with_pool(
             f"components."
         )
         # Which of the two things the check catches actually happened — see
-        # `SewStats.repair_evidence`. Free to report, since the unsplit sew has
-        # already run, and the only way to tell a real seam-split failure from
-        # an expectation neither route meets.
+        # `SewStats.repair_evidence`. This is the only way to tell a real
+        # seam-split failure from an expectation neither route meets.
         for group, want, got_split, got_unsplit in sew_stats.repair_evidence:
             rl.always(
                 f"  component {group}: expected {want} free edge(s), seam-only "
                 f"split gave {got_split}, full unsplit sew gives {got_unsplit}"
                 + (
-                    " - the split reproduced the unsplit sew exactly, so this "
-                    "repair changed nothing"
+                    " - both routes give the same count, so the expectation is "
+                    "what this check could not meet"
                     if got_unsplit == got_split else ""
                 )
             )

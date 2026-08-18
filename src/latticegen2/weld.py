@@ -638,15 +638,20 @@ def _sew_round_two(
             if got != want:
                 out[group] = _sew_faces(face_lists[group], tolerance)
                 repaired += 1
-                # The unsplit sew has just run, so its own free-edge count is
-                # free to take — and it is the one number that says *which* of
-                # the two things this check can catch actually happened. If the
-                # unsplit result meets `want` and the split one did not, the
-                # split was wrong (G9's straddling-edge mechanism). If neither
-                # meets it, the split was not the problem and the ~11 min this
-                # repair costs at rehearsal scale bought nothing
-                # (docs/specification.md §10). Without these three numbers the
-                # log could only say a count was wrong, never which.
+                # The one number that says *which* of the two things this
+                # check can catch actually happened. If the unsplit result
+                # meets `want` and the split one did not, the split was wrong
+                # (G9's straddling-edge mechanism). If neither meets it, the
+                # split was not the problem and the ~9 min this repair costs at
+                # rehearsal scale bought nothing (docs/specification.md §10).
+                # Without these three numbers the log could only say a count
+                # was wrong, never which.
+                #
+                # The *sew* above is free — it had to run — but this recount is
+                # not: it is a second `free_edges` pass over the whole
+                # component, a few seconds at rehearsal scale. It is paid only
+                # on the path that is already re-sewing the component from
+                # scratch, which is the one place a few seconds do not matter.
                 if stats is not None:
                     stats.repair_evidence.append(
                         (group, want, got, len(free_edges(out[group])))
@@ -679,9 +684,10 @@ class SewStats:
     a different shell and the repair earned its cost. If ``got_unsplit ==
     got_split != want`` the split reproduced the unsplit sew exactly and the
     check fired on an expectation neither route can meet — the repair then
-    costs a full sew (651 s of the `cc=5, t=1` rehearsal's `stitch`) and
-    changes nothing. Both numbers are free: the unsplit sew has to run either
-    way before this can be known."""
+    costs a full sew (542-559 s of the `cc=5, t=1` rehearsal's `stitch`) and
+    changes nothing. The sew this reads is free, having had to run either way;
+    the second free-edge count over the repaired component is not, and is paid
+    only where a full re-sew is already being paid."""
     retoleranced_faces: int = 0
     """Faces made valid again by correcting a vertex recorded off its edge's
     curve (:func:`latticegen2.occ.fix_vertex_tolerances`, docs/algorithm.md §8)."""
@@ -841,11 +847,14 @@ def free_edges(faces) -> list:
     TopExp.MapShapesAndAncestors_s(
         shell, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, edge_faces
     )
+    # Use count first, degeneracy second: the shell has an order of magnitude
+    # more edges than free ones (~800k against ~74k on the rehearsal), and the
+    # cheap integer test discards all of them before any cast or kernel call.
     return [
         edge_faces.FindKey(i)
         for i in range(1, edge_faces.Extent() + 1)
-        if not BRep_Tool.Degenerated_s(TopoDS.Edge_s(edge_faces.FindKey(i)))
         if edge_faces.FindFromIndex(i).Extent() == 1
+        if not BRep_Tool.Degenerated_s(TopoDS.Edge_s(edge_faces.FindKey(i)))
     ]
 
 

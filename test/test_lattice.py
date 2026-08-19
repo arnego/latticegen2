@@ -4,6 +4,8 @@ Includes the mutual-orthogonality identity the whole instancing architecture
 depends on.
 """
 
+import os
+
 import numpy as np
 import pytest
 
@@ -156,4 +158,19 @@ def test_format_param_drops_trailing_zeros(value, expected):
 
 
 def test_part_name_uses_the_plus_convention():
-    assert part_name("/x/y/ball.step", 2.5, 0.4) == "ball+cc2.5+t0.4"
+    assert part_name("/x/y/ball.step", 2.5, 0.4) == "ball+lattice+cc2.5+t0.4"
+
+
+def test_part_name_carries_the_same_components_as_the_default_file_name():
+    """The two names differ in punctuation alone (specification.md §5)."""
+    from latticegen2.cli import resolve_output_paths
+
+    step_path, _ = resolve_output_paths("/x/y/ball.step", None, 2.5, 0.4)
+    stem = os.path.splitext(os.path.basename(step_path))[0]
+    assert stem == "ball-lattice-cc2.5t0.4"
+    assert part_name("/x/y/ball.step", 2.5, 0.4).split("+") == [
+        "ball",
+        "lattice",
+        "cc2.5",
+        "t0.4",
+    ]

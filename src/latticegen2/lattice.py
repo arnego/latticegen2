@@ -204,8 +204,15 @@ def format_param(x: float) -> str:
 
 
 def part_name(input_path: str, cc: float, t: float) -> str:
-    """STEP part name ``<input_stem>+cc<cc>+t<t>`` (specification.md §5)."""
+    """STEP part name ``<input_stem>+lattice+cc<cc>+t<t>`` (specification.md §5).
+
+    It carries the same four components as the default output file name, in the
+    same order, differing in punctuation alone: specification.md §5 fixes ``+``
+    between every component here, where the file name uses ``-`` and runs ``cc``
+    and ``t`` together — ``ball-lattice-cc20t4.step`` carries
+    ``ball+lattice+cc20+t4``.
+    """
     import os
 
     stem = os.path.splitext(os.path.basename(input_path))[0]
-    return f"{stem}+cc{format_param(cc)}+t{format_param(t)}"
+    return f"{stem}+lattice+cc{format_param(cc)}+t{format_param(t)}"

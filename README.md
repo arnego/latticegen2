@@ -197,7 +197,7 @@ unconditional.
 * **`<output>.step`** — the lattice, AP214, millimetres, exact B-rep. Usually one
   solid; more if the input geometry trims struts into genuinely disconnected
   islands (specification.md §1). The STEP header carries the part name
-  `<input_stem>+cc<cc>+t<t>` and the generation parameters.
+  `<input_stem>+lattice+cc<cc>+t<t>` and the generation parameters.
 * **`<output>.log`** — always written, with the full run header, per-stage
   timings, and the end-of-run summary. `-v` only raises *console* verbosity; it
   never changes what the log contains.

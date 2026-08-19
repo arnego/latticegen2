@@ -1324,10 +1324,12 @@ program builds itself.
 * **Export.** `STEPControl_Writer` with `write.step.schema = AP214IS`, producing an
   AP214 file per spec §5.
 * **Header rewrite.** STEP is plain text. After export, a small quote-aware pass
-  sets `FILE_NAME`'s first field to the part name `<input_stem>+cc<cc>+t<t>`
-  (spec §5's `+`-separated convention, and deliberately not the default *file*
-  name, which is `-`-separated and additionally carries `-lattice-`) with floats formatted without trailing zeros, and appends the full
-  parameter string to `FILE_DESCRIPTION`. **`FILE_SCHEMA`'s value is only ever
+  sets `FILE_NAME`'s first field to the part name
+  `<input_stem>+lattice+cc<cc>+t<t>` — spec §5's `+`-separated convention,
+  carrying the same four components as the default *file* name in the same
+  order, so the two differ in punctuation alone (`ball-lattice-cc20t4.step`
+  carries `ball+lattice+cc20+t4`) — with floats formatted without trailing
+  zeros, and appends the full parameter string to `FILE_DESCRIPTION`. **`FILE_SCHEMA`'s value is only ever
   filled in when blank, never overwritten** — that is what keeps the file a clean
   standard document rather than a hand-patched hybrid.
 * **No round-trip self-check (removed by deliberate decision).** Earlier

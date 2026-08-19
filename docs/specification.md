@@ -263,7 +263,12 @@ Since this involves computational geometry:
   
 - **Units:** mm
  
-- **Metadata to embed:** Part name as concetenated <input_file_name>+cc<cc>+t<t> and generation parameters as STEP header
+- **Metadata to embed:** Part name as concetenated <input_file_name>+lattice+cc<cc>+t<t> and generation parameters as STEP header.
+  The part name carries the same four components as the default output file
+  name (§3), in the same order, so a body opened in Solidworks or Catia is
+  recognisable as the file it came from. The two differ only in punctuation:
+  `+` between every component here, against `-` there with `cc` and `t` run
+  together (`ball-lattice-cc20t4.step` carries `ball+lattice+cc20+t4`).
 
 - **Downstream tool(s) that will open this file:** Soldiworks and Catia
 

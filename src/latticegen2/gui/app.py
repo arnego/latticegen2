@@ -67,6 +67,13 @@ class Bar(tk.Canvas):
         self._fraction = 0.0
         self._text = ""
         self._sweep = None          # None when determinate
+        #: Identifies the current sweep, so a stale rescheduled callback from a
+        #: previous one retires instead of doubling the animation's speed. A
+        #: pending `after` cannot be un-scheduled by setting `_sweep` to None:
+        #: it still fires, and if the bar has gone indeterminate again by then
+        #: it would see a live sweep and reschedule itself alongside the new
+        #: loop.
+        self._sweep_id = 0
         self.bind("<Configure>", lambda _e: self._redraw())
 
     def set(self, fraction: float | None, text: str = "") -> None:
@@ -74,18 +81,33 @@ class Bar(tk.Canvas):
         if fraction is None:
             if self._sweep is None:
                 self._sweep = 0.0
-                self._animate()
+                self._sweep_id += 1
+                self._animate(self._sweep_id)
         else:
             self._sweep = None
             self._fraction = min(max(fraction, 0.0), 1.0)
         self._redraw()
 
-    def _animate(self) -> None:
-        if self._sweep is None:
+    def clear(self) -> None:
+        """Empty the bar and stop any sweep.
+
+        What a finished run leaves behind. An indeterminate bar means "something
+        is happening and it cannot be counted", so continuing to sweep once the
+        run has ended says the opposite of the truth — and it is the one part of
+        the window still moving, which reads as a run that has not stopped.
+        """
+        self._sweep = None
+        self._sweep_id += 1
+        self._fraction = 0.0
+        self._text = ""
+        self._redraw()
+
+    def _animate(self, sweep_id: int) -> None:
+        if self._sweep is None or sweep_id != self._sweep_id:
             return
         self._sweep = (self._sweep + 0.02) % 1.0
         self._redraw()
-        self.after(40, self._animate)
+        self.after(40, self._animate, sweep_id)
 
     def _redraw(self) -> None:
         self.delete("all")
@@ -408,7 +430,14 @@ class App:
             state.elapsed = max(state.elapsed, time.monotonic() - self._started)
         self.stage_label.configure(text=state.stage_text())
         self.stage_bar.set(state.permille / 1000.0, f"{state.permille // 10}%")
-        self.sub_bar.set(state.sub_fraction, state.sub_text())
+        if state.finished:
+            # Success, cancellation and failure alike: there is no sub-stage
+            # left to report, and `sub_fraction` is `None` at this point for the
+            # same reason it is during `export` — which would otherwise leave the
+            # bar sweeping for as long as the window stayed open.
+            self.sub_bar.clear()
+        else:
+            self.sub_bar.set(state.sub_fraction, state.sub_text())
         self.resource_label.configure(text=state.resource_text())
 
     def _finish(self, run: Run) -> None:

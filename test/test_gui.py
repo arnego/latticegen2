@@ -464,3 +464,72 @@ def test_a_missing_main_script_is_a_message_rather_than_a_silent_no_op(monkeypat
     monkeypatch.setattr(runner.os.path, "isfile", lambda _p: False)
     with pytest.raises(runner.LaunchError, match="src/main.py"):
         runner.main_script()
+
+
+def test_the_sub_bar_stops_and_empties_when_a_run_ends():
+    """Success, cancellation and failure alike.
+
+    After the terminal event there is no sub-stage left, so ``sub_fraction`` is
+    ``None`` — the same value that means "sweeping" during ``export``. Left to
+    itself the bar therefore kept animating for as long as the window stayed
+    open, which is both untrue and, being the only thing still moving, reads as
+    a run that has not stopped.
+    """
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display available")
+    root.withdraw()
+    try:
+        from latticegen2.gui.app import App
+
+        for status in (progress.OK, progress.CANCELLED, progress.FAILED):
+            app = App(root)
+            app.state.apply(progress.parse_line(event(
+                progress.STAGE_BEGIN, name="export", i=11, n=12)))
+            app.state.apply(progress.parse_line(event(
+                progress.PROGRESS, stage="export", label="writing STEP",
+                done=0, total=None)))
+            app._refresh()
+            assert app.sub_bar._sweep is not None, "the sweep never started"
+
+            app.state.apply(progress.parse_line(event(
+                progress.RESULT, status=status, exit=0, reason="x",
+                output="o.step", log="o.log", tmpdir=None)))
+            app._refresh()
+            assert app.sub_bar._sweep is None, f"{status}: still sweeping"
+            assert app.sub_bar._fraction == 0.0, f"{status}: bar not empty"
+            assert app.sub_bar._text == "", f"{status}: label not cleared"
+    finally:
+        root.destroy()
+
+
+def test_going_indeterminate_twice_does_not_double_the_animation():
+    """A pending ``after`` cannot be cancelled by clearing the sweep state.
+
+    It still fires; if the bar has gone indeterminate again by then it would see
+    a live sweep, reschedule itself, and run alongside the new loop at twice the
+    speed. The generation counter is what retires it.
+    """
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display available")
+    root.withdraw()
+    try:
+        from latticegen2.gui.app import Bar
+
+        bar = Bar(root)
+        bar.set(None, "first")
+        stale = bar._sweep_id
+        bar.set(0.5, "determinate")
+        bar.set(None, "second")
+        assert bar._sweep_id != stale
+
+        before = bar._sweep
+        bar._animate(stale)          # the callback left over from the first run
+        assert bar._sweep == before, "a stale callback advanced the sweep"
+    finally:
+        root.destroy()

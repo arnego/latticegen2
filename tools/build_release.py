@@ -156,8 +156,10 @@ def stage_payload(ref: str, dest: Path):
     ).stdout
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
         tar.extractall(dest)
-    if not (dest / "src" / "main.py").exists():
-        raise SystemExit("FAILED: staged payload has no src/main.py -- check .gitattributes")
+    for required in ("src/main.py", "src/latticegen2/gui/__init__.py"):
+        if not (dest / required).exists():
+            raise SystemExit(
+                f"FAILED: staged payload has no {required} -- check .gitattributes")
 
 
 def git_metadata(ref: str) -> tuple[str, str]:
@@ -303,6 +305,24 @@ def install_runtime(stage: Path, archive: Path, wheels: Path, platform_name: str
          "--disable-pip-version-check",
          "--find-links", wheels, "-r", REQUIREMENTS])
 
+    # Prove the bundled interpreter can load everything the tool imports at
+    # module scope, tkinter included. `run` uses check=True, so a runtime built
+    # without Tcl/Tk fails the build here rather than shipping a front-end that
+    # cannot open -- and the failure names the missing module, which is the one
+    # thing an operator holding a broken bundle cannot work out for themselves.
+    #
+    # Nothing in this repository had ever verified this: `_tkinter` comes from
+    # the python-build-standalone asset, not from requirements-bundle.txt, so it
+    # is outside every check the dependency pins get. On Linux it additionally
+    # dlopens the system X11 libraries, which the bundle does not carry -- an
+    # import here is the cheapest place to find that out.
+    tk_version = subprocess.run(
+        [str(python), "-c",
+         "import tkinter, numpy, OCP.TopoDS; print(tkinter.TkVersion)"],
+        check=True, stdout=subprocess.PIPE, text=True,
+    ).stdout.strip()
+    print(f"    bundled runtime loads numpy, OCP and tkinter (Tk {tk_version})")
+
     # Strip bytecode caches. They embed the absolute build path, so leaving them
     # in would make two builds of the same commit differ, and they regenerate on
     # the target anyway.
@@ -341,6 +361,11 @@ alongside their code, under
 left in place rather than copied here, so each text stays next to what it
 covers.
 
+`TCL-TK-LICENSE.txt` covers Tcl/Tk, which the distribution bundles for the
+standard library's `tkinter` module and which latticegen2's graphical front-end
+uses. Tcl/Tk is a separate project from CPython and is not covered by the PSF
+agreement or by the appendix above.
+
 The dependencies installed into the runtime — OCCT, OCP, VTK and NumPy — are
 covered by the texts in the parent directory. See `../LICENSES.md`.
 """
@@ -373,6 +398,24 @@ def collect_runtime_licenses(runtime: Path, stage: Path, asset: str):
         # so say so loudly rather than shipping quietly.
         print("    WARNING: no LICENSE.txt in the runtime distribution; "
               "licenses/runtime/ will be incomplete -- check the archive layout")
+
+    # Tcl/Tk is redistributed too, from the moment the front-end exists. It is
+    # not a CPython component and is not covered by the PSF licence above, and
+    # it is not in requirements-bundle.txt either -- it arrives inside the
+    # interpreter distribution -- so it is the one dependency neither of this
+    # project's two existing licence mechanisms would have caught.
+    tk_licences = sorted(runtime.glob("lib/tcl*/license.terms")) + \
+        sorted(runtime.glob("tcl/tcl*/license.terms")) + \
+        sorted(runtime.glob("lib/tk*/license.terms"))
+    if tk_licences:
+        shutil.copy2(tk_licences[0], dest / "TCL-TK-LICENSE.txt")
+        print(f"    copied Tcl/Tk licence ({tk_licences[0].relative_to(runtime).as_posix()}) "
+              f"-> licenses/runtime/TCL-TK-LICENSE.txt")
+    else:
+        shutil.copy2(ROOT / "licenses" / "tcl-tk-LICENSE.txt",
+                     dest / "TCL-TK-LICENSE.txt")
+        print("    copied Tcl/Tk licence (this repository's own copy) "
+              "-> licenses/runtime/TCL-TK-LICENSE.txt")
 
     write_text(dest / "README.md",
                RUNTIME_LICENSE_README.format(

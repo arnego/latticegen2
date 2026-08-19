@@ -32,13 +32,13 @@ Run data from the script including:
 - **Runtime environment:** Windows 11 offline workstation and Linux command line
 - **Language/runtime:** **Python 3.11+**.
 - **Offline requirement:** Package must run with **zero network access**. Satisfied two ways: a published release bundle needs no network at any point (the portable flavour needs no install either), and from a checkout the dependencies are ordinary wheels installable with `pip install --no-index --find-links` — see README.md "Installation". Nothing contacts the network at run time: no package manager, license check or telemetry. The CI smoke gate proves this rather than assuming it, by installing with `--no-index` and running the extracted bundle.
-- **Packaging form:** invoked as `python src/main.py <args>`, with a thin `latticegen2.bat` (Windows) / `latticegen2.sh` (Linux) wrapper provided for convenience (implemented: [latticegen2.bat](../latticegen2.bat), [latticegen2.sh](../latticegen2.sh)). No install step is needed; `pip install .` optionally provides a `latticegen2` console script.
+- **Packaging form:** invoked as `python src/main.py <args>`, with a thin `latticegen2.bat` (Windows) / `latticegen2.sh` (Linux) wrapper provided for convenience (implemented: [latticegen2.bat](../latticegen2.bat), [latticegen2.sh](../latticegen2.sh)). No install step is needed; `pip install .` optionally provides a `latticegen2` console script. **Started with no arguments at all, and where a display exists, the launcher opens the graphical front-end instead** (§3.1); it is built on the standard library's `tkinter`, so it adds no packaged dependency, though portable bundles consequently redistribute Tcl/Tk (see [licenses/LICENSES.md](../licenses/LICENSES.md)).
 - **Distribution form:** per-platform **offline bundles**, published as GitHub release assets by [`.github/workflows/release.yml`](../.github/workflows/release.yml) on a `v*` tag, in two flavours for each of Windows and Linux x86-64:
   - *portable* — carries a relocatable CPython with every dependency installed. Extract and run: no Python on the target, no install step, no admin rights, no network.
   - *wheels* — source plus the dependency wheels and an `install` script, for a target that already has Python 3.11.
 
   Each release also publishes `SHA256SUMS.txt` for verification after transfer. Every asset is extracted and run end-to-end by a CI smoke gate before publication. Procedure: [release.md](release.md). Bundle contents are `git archive`-derived, so they contain committed files only, filtered by `.gitattributes`.
-- **No single-file standalone executable is produced.** PyInstaller was evaluated and rejected: `boundary.py` uses `multiprocessing` with the `spawn` start method and the codebase has no `freeze_support()` call, which on Windows makes a frozen build re-launch its own launcher; OCP/OCCT is awkward to freeze (hidden imports, DLL discovery); and freezing dissolves the LGPL-2.1 relinking argument in [licenses/LICENSES.md](../licenses/LICENSES.md), which depends on OCCT remaining a stock, replaceable shared library. The portable bundle delivers the same "extract and run" property without those costs.
+- **No single-file standalone executable is produced.** PyInstaller was evaluated and rejected: `boundary.py` uses `multiprocessing` with the `spawn` start method and the codebase has no `freeze_support()` call, which on Windows makes a frozen build re-launch its own launcher (the graphical front-end does not weaken this argument — it runs the pipeline as a *child* of `src/main.py`, precisely so `spawn`'s re-import contract is untouched); OCP/OCCT is awkward to freeze (hidden imports, DLL discovery); and freezing dissolves the LGPL-2.1 relinking argument in [licenses/LICENSES.md](../licenses/LICENSES.md), which depends on OCCT remaining a stock, replaceable shared library. The portable bundle delivers the same "extract and run" property without those costs.
 - **Target machine specs / limits:** Main development system: 32 GB RAM, 6 core CPU, Nvidia RTX 3080 GPU, disk space for intermediate files.
 CPU cores may optionally be provided as an input parameter, as a *budget*. Without `--cores` the worker count is the machine's logical core count, since boundary-junction jobs are constant-size and independent. See §3. (A companion `--ram` budget existed through v2.x; it was removed as accepted-but-unenforced dead weight — see §11.)
 - **Allowed third-party libraries:** Must be compatible with the target OS/arch. License text must be obtained and put into /licenses folder, and @/licenses/LICENSES.md must be updated with the cross reference between the library used and the corresponding license text file valid for that library.
@@ -59,6 +59,7 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | -cc | float | required | mm | 0.4 - 50 | NA | Distance between the bottom nodes of two adjacent cells |
 | -t | float | required  | mm | 0.4 - 20 | NA | Side length of the diamond rod profile. Must be smaller than the cell edge `a = cc/√2`; that is the only cross-constraint. |
 | -v --verbose | flag | optional | NA | NA | disabled | Enable verbose console diagnostics while always writing a full `.log` file. |
+| --gui | flag | optional | NA | NA | NA | Open the graphical front-end (§3.1) instead of running. Implied when the launcher is started with **no arguments at all** and a display is available. |
 | --cores | int | optional | count | 1 - 128 | logical cores on the machine | Maximum CPU cores this run may use. One worker process per core, honoured exactly — the master needs none reserved for it, being blocked waiting on results for effectively the whole boundary stage. Since workers always run at below-normal priority, this exists to further protect the response time of the system for other tasks. |
 
 `--cores` is an optional **budget** and resolves to a concrete figure either
@@ -95,6 +96,113 @@ Upon cancellation by the user (Ctrl+C), the script shall shut down gracefully ra
 **Logging:**
 
 A log file should be produced every run with the same name as the output file which is generated from the input file or provided by the -o flag. The log file should end with `.log` and should not include .step (that is only the last name for the geometry file.  
+
+**Logging:**
+
+A log file should be produced every run with the same name as the output file which is generated from the input file or provided by the -o flag. The log file should end with `.log` and should not include .step (that is only the last name for the geometry file.
+
+---
+
+## 3.1 Graphical front-end
+
+**What it is.** Clicking `latticegen2.bat` / `latticegen2.sh` with no arguments
+opens a small window that collects the same parameters §3 lists, runs the same
+`src/main.py`, and shows the run's progress while it goes. **It adds no
+capability the command line lacks**, and any argument on the command line keeps
+today's behaviour exactly — so nothing scripted changes.
+
+Implemented in [`src/latticegen2/gui/`](../src/latticegen2/gui/); the event
+stream it reads is [`src/latticegen2/progress.py`](../src/latticegen2/progress.py)
+and docs/algorithm.md §10.
+
+**Why it exists.** A production part takes the better part of an hour
+(docs/profiling-reports.md) and the tool could not say where it was. Peak memory
+and the per-stage timings were only readable after the fact, from the `.log`.
+
+**The window.** Fixed width, and it grows only while a run is in flight, so it
+can sit in a corner of the screen.
+
+* **Input** — a file, chosen with a browse dialog.
+* **Output** — a **folder**. The filename is derived from the input stem and the
+  parameters exactly as §3's default rule says, shown read-only beneath the
+  field, and recomputed as the input, `cc` or `t` change.
+* **cc**, **t**, **cores** — spin controls bounded by the same constants
+  `cli.parse_args` enforces, defaulting `cores` to the machine's logical count.
+* **?** — the parameter reference, which is `cli.USAGE` verbatim plus a
+  description of what the tool produces. There is one description of the
+  parameters, so the window and `--help` cannot disagree.
+* **Start!** / **Exit**.
+
+Every field is validated by calling `cli.parse_args` and `cli.preflight_checks`
+on the command line the window is about to run — not by a second copy of those
+rules. `Start!` is disabled while anything is invalid and the parser's own
+message is shown, so `t < cc/√2` is a greyed-out button rather than a failed run.
+
+**While a run is in flight** the fields go inactive but stay readable, `Start!`
+becomes `Stop!`, and two bars appear:
+
+* the **top** bar names the running stage and fills according to a fixed share
+  per stage, taken from the 2026-08-18 controlled pair in
+  docs/profiling-reports.md and declared in
+  [`gui/weights.py`](../src/latticegen2/gui/weights.py);
+* the **second** bar shows work within the stage — `boundary trim: 9,776 /
+  19,552` — with the text drawn over it.
+
+Beneath them, one line of resource data: peak memory and elapsed time. Peak
+memory is genuinely all that is measured continuously (§3's summary list), and
+the line says only that rather than padding itself out.
+
+**Where a stage has no countable work — `export`'s single writer call, or
+`simplify` while its one dominant solid is unified — the second bar sweeps and
+says so, and the top bar holds.** Neither invents a fraction. The alternative,
+filling on a timer, produces a number that measures nothing and sits at 100 % of
+a stage that has not finished.
+
+**The weights are one part's shape on one machine**, and a small part is
+boundary- and export-dominated, so the bar will visibly jump there. That is
+accepted: a fixed weighting is monotone and never claims a stage finished before
+it did. Read the bar as how far through the work, never as an estimate of time
+remaining.
+
+**Stop is exactly Ctrl+C.** It causes the same graceful shutdown §3 already
+specifies — workers stopped in order, one `CANCELLED` line, exit 130, and the
+temp folder **left in place**, whose location the window then shows. It is not
+instantaneous: the interrupt is delivered between bytecodes, so inside a long
+kernel call it lands when that call returns, and the button says `Cancelling…`
+rather than pretending otherwise. If the run has not stopped within a short
+grace period the window force-stops the whole process tree, which on Windows
+matters — killing the master alone would orphan every worker.
+
+**When a run ends** the window reports success or failure, offers **Open export
+folder**, re-enables the inputs and returns `Stop!` to `Start!`, ready for
+another run with the same or different parameters. A failure shows the same
+single reason line the command line prints (§7).
+
+**Zero arguments open a window only where a window can exist.** On a machine
+with no display a bare invocation still exits 2 with usage, exactly as it always
+has, so scripts and CI are unaffected. `--gui` given explicitly always tries and
+reports one line if it cannot.
+
+**Two things deliberately absent from §3's table**, because they are transport
+rather than parameters:
+
+* `--progress-stream` makes a run report itself as machine-readable events on
+  stdout. The window sets it on the child it launches; it changes nothing about
+  the geometry, and `tools/e2e.py`'s `progress-stream` scenario proves that by
+  running the same case with and without it and comparing the bytes.
+* A **cancel sentinel file**, `<output-stem>.cancel`, is how Stop reaches the
+  run. Neither of the obvious channels works: a windowed process has no console
+  and so cannot send Ctrl+Break, and giving the child a pipe for stdin was
+  measured stalling the worker pool outright (docs/algorithm.md §10).
+
+**Toolkit.** `tkinter`, from the standard library — no new packaged dependency.
+Portable bundles consequently redistribute Tcl/Tk, which
+`tools/build_release.py` proves is present by importing it at build time and
+`tools/smoke_bundle.py` re-checks in the extracted archive. See
+[licenses/LICENSES.md](../licenses/LICENSES.md). The **wheels** flavour and a
+source checkout use the operator's own interpreter, where on Debian and Ubuntu
+`tkinter` is the separate `python3-tk` package; without it the command line is
+unaffected and only the front-end is unavailable.
 
 ---
 
@@ -211,6 +319,12 @@ For every scenario the harness must verify, without human intervention:
 
 - Invalid/out-of-range parameters should be rejected before any computation starts.
 - Read and write failures should be reported and result in a hard fail. Existing files can be overwritten.
+- The graphical front-end (§3.1) reports a failure with the same single reason
+  line, in the window. A front-end that cannot *start* — no display, or an
+  interpreter without `tkinter` — reports itself on stderr, or in a dialog box
+  when there is no stderr to print to, which under `pythonw.exe` there is not.
+  Without that, a broken interpreter would be a double-click that does nothing
+  at all.
 
 ---
 

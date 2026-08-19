@@ -52,6 +52,35 @@ fi
 # would mean an unexplained pause following a shutdown the spec asks to be clean.
 # Everything else can be an interpreter that never started: 1, 2, and the shell's
 # own 126/127 for something it could not execute.
+# No arguments at all means the graphical front-end (specification.md §3.1),
+# but only where a window can exist: on a headless machine a bare invocation
+# still exits 2 with usage, so nothing scripted changes meaning. `--gui`
+# explicitly always tries, and reports one line if it cannot.
+#
+# The dependency probe runs *first* here, unlike the command line's, which
+# probes only after a non-zero exit: this exec's, so there is no exit code to
+# come back and inspect. tkinter is named because the front-end imports it at
+# module scope (docs/algorithm.md §10).
+if [ $# -eq 0 ] && { [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; }; then
+    if "$PY" -c "import numpy, OCP.TopoDS, tkinter" >/dev/null 2>&1; then
+        exec "$PY" "$DIR/src/main.py" --gui
+    fi
+    {
+        echo
+        echo "FAILED: the interpreter below cannot load latticegen2's dependencies,"
+        echo "        so the graphical front-end cannot start."
+        echo
+        echo "  interpreter: $PY"
+        echo
+        "$PY" -c "import numpy, OCP.TopoDS, tkinter"
+        echo
+        echo "  On Debian and Ubuntu, tkinter is the separate python3-tk package."
+        echo "  See README.md \"Installation\". A release bundle carries its own"
+        echo "  interpreter and needs none of this."
+    } >&2
+    exit 1
+fi
+
 set +e
 "$PY" "$DIR/src/main.py" "$@"
 rc=$?

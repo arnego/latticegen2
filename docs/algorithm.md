@@ -1354,6 +1354,47 @@ program builds itself.
 * Log path: `<output-stem>.log`, derived the same way as the output path, never
   `<output>.step.log`. Always written in full regardless of `-v`; `-v` only raises
   *console* verbosity.
+* **A second, optional output channel: the progress event stream.** Under
+  `--progress-stream` the same run additionally reports itself as one JSON object
+  per line on stdout, for the graphical front-end (specification.md §3.1). It is
+  defined once in [`src/latticegen2/progress.py`](../src/latticegen2/progress.py)
+  — seven event types, each declaring exactly the fields it carries, so the
+  consumer indexes rather than probes.
+
+  **The guarantee is that watching a run does not change it.** The `.log` gets
+  the same bytes either way and so does the `.step`;
+  `test/test_runlog_events.py` pins the first and `tools/e2e.py`'s
+  `progress-stream` scenario the second, by running one committed scenario both
+  ways and comparing. That matters more than it sounds, because the emission
+  reaches into `RunLog.line` and into `WorkerPool.run`'s dispatch loop — the loop
+  every parallel stage goes through.
+
+  Three details are load-bearing. Stdout is **pure** NDJSON, with console text
+  carried inside it as `log` events rather than printed alongside: OCCT writes to
+  file descriptor 1 below `sys.stdout`, so a mixed stream could not be parsed
+  reliably. Every line is emitted with a flag saying whether `-v` would have
+  shown it, which makes verbosity a filter the reader can change *during* a run.
+  And `stage_begin` **emits without logging** — a reader has to be told that
+  `simplify` is what has been running for the last nineteen minutes, but nothing
+  may be added to the `.log` for the front-end's benefit.
+* **A run can be cancelled by a sentinel file**, `<output-stem>.cancel`, which
+  `latticegen2.gui` writes for its Stop button. The watcher removes it and calls
+  `_thread.interrupt_main`, so the run takes the ordinary `KeyboardInterrupt`
+  path below: exit 130, temp folder kept, one `CANCELLED` line. A sentinel
+  already present when the run starts is deleted rather than obeyed — it is left
+  over from a window that closed before it could tidy up, and honouring it would
+  kill a fresh run for a reason nothing could explain.
+
+  **Both obvious channels were tried and neither works.** A windowed parent has
+  no console, and `GenerateConsoleCtrlEvent` can only signal process groups on
+  the caller's console, so a GUI cannot send Ctrl+Break at all. And giving the
+  child an anonymous pipe for stdin **stalls the worker pool**: measured on the
+  development machine, `classify` took 0.2 s with stdin on the null device and
+  never completed with a pipe — with and without `CREATE_NO_WINDOW`, and whether
+  or not the parent kept its end open, which is what identifies file descriptor 0
+  *being a pipe* as the problem rather than anything about how it is used. A file
+  has neither difficulty and needs no flag, being derived from the log path both
+  sides already agree on.
 * Content: run header (all parameters, start timestamp), one line per stage with
   its wall-clock duration, template/mesh/classification statistics, boundary-trim
   progress, the interface tally (stitched caps, plus counts and sample world
@@ -1389,7 +1430,15 @@ program builds itself.
   would otherwise read as this tool rejecting a parameter.
 
   So `latticegen2.bat` / `latticegen2.sh` re-check the interpreter **after** a
-  non-zero exit, never before, so a healthy run pays nothing for it. The probe
+  non-zero exit, never before, so a healthy run pays nothing for it.
+
+  **In GUI mode the probe runs first instead, and it must.** The window is
+  launched detached, under `pythonw.exe`, so there is no exit code left to come
+  back and inspect and no stderr for a native import abort to print to. Without
+  probing up front, a broken interpreter is a double-click that does nothing
+  whatsoever. The probe there also names `tkinter` alongside `numpy` and
+  `OCP.TopoDS`, for the reason given below: it is a module-scope import of the
+  front-end, so an interpreter without it cannot start the window at all. The probe
   is scoped further, because it costs ~1.2 s: codes 3, 4, 5, 6 and 130 above are
   produced only by the pipeline's own error paths, which proves the tool ran, so
   those return immediately. Probing them would be pure delay — and after a
@@ -1412,7 +1461,11 @@ program builds itself.
   to start or it is not; splitting that decision per-module is what makes the
   diagnostic unreliable. (`psutil` used to be a third name here, imported by
   `latticegen2.sysinfo` for the `--ram` budget; both are gone now —
-  specification.md §11.)
+  specification.md §11.) **`tkinter` is a fourth name, but only in GUI mode**:
+  `latticegen2.gui.app` imports it at module scope, while every command-line
+  invocation loads none of that package — `__main__` defers the import into the
+  branch that needs it, which is also what keeps `spawn`'s re-imported children
+  free of it.
 * If a failure occurs after `temp/<ts>/` has been created it is left in place for
   post-mortem analysis (spec §4.4), and the message says where.
 
@@ -1515,6 +1568,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Deviation samples binned once against inflated triangle AABBs | One vectorised `searchsorted` replaces a 27-cell query per sample; on the 26 k-triangle heat exchanger that was most of the stage (§5.1) |
 | Centroid/AABB bounds before the exact point-triangle test | A neighbourhood holds tens of triangles and two can be nearest; the cheap bounds discard the rest without exact work |
 | Measured rather than assumed mesh deviation | Correctness safety net, not a speed lever (§5.1) |
+| Progress emitted at stage and batch boundaries only (§10) | `O(1)` per event and never inside an inner loop, so the front-end costs the pipeline nothing measurable. The one place that needed care is the *sequential* boundary path, which calls its progress callback once per junction — 19,552 times on the rehearsal — so `RunLog.substage` rate-limits, while always emitting a stage's final count |
 
 Alternatives evaluated and rejected:
 
@@ -1584,8 +1638,10 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/boundary.py`](../src/latticegen2/boundary.py) | §7 (single-operand trim, pinhole-wire repair and its guard, cap tagging, worker processes), §7.1 (interface resolution) |
 | [`src/latticegen2/connect.py`](../src/latticegen2/connect.py) | §8 (junction graph, components, floating-body rule) — kernel-free |
 | [`src/latticegen2/weld.py`](../src/latticegen2/weld.py) | §8 (boundary sew — tiled round 1, seam-only round 2 — interface-ring lookup, assembly and its watertightness proof) |
-| [`src/latticegen2/parallel.py`](../src/latticegen2/parallel.py) | §5.4, §8, §9, §12 (the shared `WorkerPool`, `.brep` IPC helpers) — used by `classify.py`, `boundary.py`, `weld.py` and `pipeline.py` |
+| [`src/latticegen2/parallel.py`](../src/latticegen2/parallel.py) | §5.4, §8, §9, §12 (the shared `WorkerPool`, `.brep` IPC helpers, and the `on_result` observer every parallel stage's progress is reported through) — used by `classify.py`, `boundary.py`, `weld.py` and `pipeline.py` |
 | [`src/latticegen2/stepout.py`](../src/latticegen2/stepout.py) | §9 (header rewrite) |
-| [`src/latticegen2/runlog.py`](../src/latticegen2/runlog.py) | §10 (logging, stage timings, summary) |
+| [`src/latticegen2/runlog.py`](../src/latticegen2/runlog.py) | §10 (logging, stage timings, summary, the declared stage order, and the progress events every stage emits through it) |
+| [`src/latticegen2/progress.py`](../src/latticegen2/progress.py) | §10 (the NDJSON event schema, its emitter and its reader, plus the cancel-sentinel path both processes derive) |
+| [`src/latticegen2/gui/`](../src/latticegen2/gui/) | specification.md §3.1 (the window, the subprocess runner and the stage weights) — imports no geometry module and no OCP |
 | [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration), §5.4 (dispatching the classification sweep), §9 (parallel unification, and the master-side validity gate) |
 | [`src/latticegen2/__main__.py`](../src/latticegen2/__main__.py) | Entry point, failure reporting, exit codes |

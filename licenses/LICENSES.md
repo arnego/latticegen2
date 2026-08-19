@@ -9,6 +9,14 @@ mismatch between the two is a release blocker: the license texts here are only
 meaningful if they describe the bytes actually shipped. See
 [docs/release.md](../docs/release.md).
 
+**One row cannot be checked that way, and it is worth knowing which.** Tcl/Tk is
+not a wheel: it arrives inside the python-build-standalone interpreter, so it is
+outside `requirements-bundle.txt` and outside every check the dependency pins
+get. What stands in for that is the build-time import gate in
+`tools/build_release.py` — it loads `tkinter` in the freshly populated runtime
+and prints the Tk version into `BUNDLE-INFO.txt`, so the version recorded in a
+bundle is one that was actually observed rather than one that was assumed.
+
 | Library | Version used | Role | License | Text |
 |---|---|---|---|---|
 | **Open CASCADE Technology (OCCT)** | 7.9.3 | The geometry kernel. STEP read/write, boolean intersection, sewing, meshing, B-rep validity checking. Reached through OCP; not vendored separately — the shared libraries ship inside the `cadquery-ocp` wheel. | LGPL-2.1 (with the Open CASCADE exception) | [occt-LICENSE_LGPL_21.txt](occt-LICENSE_LGPL_21.txt) |
@@ -16,6 +24,7 @@ meaningful if they describe the bytes actually shipped. See
 | **OCP proxy** (`cadquery-ocp-proxy`) | 7.9.3.1.1 | A 3 kB shim package `cadquery-ocp` requires; carries no binaries of its own. | Apache-2.0 | [ocp-LICENSE_Apache_20.txt](ocp-LICENSE_Apache_20.txt) |
 | **VTK** | 9.6.2 | **Not used by latticegen2.** Present only because `cadquery-ocp` requires it and the OCP extension module links against its shared libraries — see the note below. | BSD-3-Clause | [vtk-LICENSE.txt](vtk-LICENSE.txt) |
 | **NumPy** | 2.4.6 | Vectorised array maths for classification, spatial indexing and the lattice basis. | BSD-3-Clause | [numpy-LICENSE.txt](numpy-LICENSE.txt) |
+| **Tcl/Tk** | 8.6 (as built into the runtime) | The graphical front-end's toolkit, reached through the standard library's `tkinter`. **Portable bundles only** — see the note below. | BSD-style (Tcl/Tk licence terms) | [tcl-tk-LICENSE.txt](tcl-tk-LICENSE.txt) |
 
 ## Why VTK is redistributed despite being unused
 
@@ -46,9 +55,18 @@ under the PSF License Agreement plus the third-party components it embeds, such
 as OpenSSL, zlib and libffi — are copied verbatim into `licenses/runtime/` by
 `tools/build_release.py` at build time.
 
+That distribution also carries **Tcl/Tk**, which the graphical front-end
+reaches through the standard library's `tkinter`. It is a separate project from
+CPython and is *not* covered by the PSF agreement or by CPython's incorporated-
+software appendix, so its own terms are listed in the table above and copied
+into `licenses/runtime/TCL-TK-LICENSE.txt` alongside the interpreter's.
+
 The **wheels** bundles and a plain source checkout bundle no interpreter. There,
 Python remains a runtime prerequisite covered by the PSF License Agreement that
-ships with whatever interpreter the operator installed.
+ships with whatever interpreter the operator installed — and `tkinter` likewise
+comes from that interpreter. On Debian and Ubuntu it is the separate
+`python3-tk` package; without it the command line is unaffected and only the
+front-end is unavailable.
 
 ## LGPL compliance note
 

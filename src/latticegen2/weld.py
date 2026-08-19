@@ -377,6 +377,7 @@ def _sew_all_tiles(
     workers: int,
     tmpdir: str | None,
     pool: WorkerPool | None = None,
+    report=None,
 ) -> tuple[dict[int, list[list]], int]:
     """Round 1 for every tiled component in ``plan``, in **one** worker pool.
 
@@ -432,8 +433,10 @@ def _sew_all_tiles(
         return results, 0
 
     if ((pool is None or not pool.active) and workers <= 1) or tmpdir is None or len(jobs_meta) < 2:
-        for group, i, tile in jobs_meta:
+        for done, (group, i, tile) in enumerate(jobs_meta, 1):
             results[group][i] = _sew_faces([p.faces for p in tile], tolerance)
+            if report is not None:
+                report("sewing tiles", done, len(jobs_meta))
         return results, 0
 
     jobs = []
@@ -444,7 +447,11 @@ def _sew_all_tiles(
         jobs.append((in_path, out_path, tolerance))
 
     def _run(p: WorkerPool):
-        raw, max_rss = p.run(_worker_sew_tile, jobs)
+        raw, max_rss = p.run(
+            _worker_sew_tile, jobs,
+            on_result=None if report is None else
+            (lambda done, total: report("sewing tiles", done, total)),
+        )
         for (group, i, _tile), (out_path, _rss) in zip(jobs_meta, raw):
             results[group][i] = occ.faces(_read_brep(out_path))
         return results, max_rss
@@ -526,6 +533,7 @@ def _sew_round_two(
     pool: WorkerPool | None,
     expected_rings: dict[int, int] | None = None,
     stats: "SewStats | None" = None,
+    report=None,
 ) -> tuple[dict[int, list], int, int]:
     """Sew each component's round-1 result (or its own pieces, if untiled)
     into that component's final boundary-layer shell.
@@ -594,6 +602,8 @@ def _sew_round_two(
     # yet-sewn faces, which have no round-1 free-edge structure to exploit, so
     # it is sewn exactly as before this existed.
     t0 = time.perf_counter()
+    if report is not None:
+        report("splitting seam faces", 0, None)
     seam_face_lists: dict[int, list[list]] = {}
     interior_faces: dict[int, list] = {}
     for group in groups:
@@ -605,6 +615,8 @@ def _sew_round_two(
     if stats is not None:
         stats.t_split = time.perf_counter() - t0
     t0 = time.perf_counter()
+    if report is not None:
+        report("boundary sew round 2", 0, None)
 
     def _finish(sewn: dict[int, list]) -> dict[int, list]:
         return {g: sewn[g] + interior_faces[g] for g in groups}
@@ -647,6 +659,11 @@ def _sew_round_two(
             want = 4 * expected_rings.get(group, 0)
             got = len(free_edges(out[group]))
             if got != want:
+                # 85 % of `stitch` on the rehearsal and the single longest phase
+                # in the pipeline outside `simplify`, so it gets its own label
+                # rather than sitting silently under round 2's.
+                if report is not None:
+                    report(f"re-sewing component {group} (seam split rejected)", 0, None)
                 out[group] = _sew_faces(face_lists[group], tolerance)
                 repaired += 1
                 # The one number that says *which* of the two things this
@@ -744,6 +761,7 @@ def sew_boundary(
     min_to_tile: int = MIN_PIECES_TO_TILE,
     pool: WorkerPool | None = None,
     want_rings: dict[tuple[NodeKey, int], int] | None = None,
+    report=None,
 ) -> tuple[dict[int, list], SewStats]:
     """Sew each component's boundary pieces to each other, returning their faces.
 
@@ -807,12 +825,14 @@ def sew_boundary(
             ring_counts[group] = ring_counts.get(group, 0) + 1
 
     t0 = time.perf_counter()
-    tile_results, max_rss1 = _sew_all_tiles(plan, SEW_TOLERANCE, workers, tmpdir, pool=pool)
+    tile_results, max_rss1 = _sew_all_tiles(
+        plan, SEW_TOLERANCE, workers, tmpdir, pool=pool, report=report
+    )
     stats.t_round1 = time.perf_counter() - t0
 
     out, max_rss2, repaired = _sew_round_two(
         by_group, plan, tile_results, SEW_TOLERANCE, workers, tmpdir, pool,
-        expected_rings=ring_counts, stats=stats,
+        expected_rings=ring_counts, stats=stats, report=report,
     )
     stats.max_worker_rss = max(max_rss1, max_rss2)
     stats.repaired_components = repaired
@@ -824,6 +844,12 @@ def sew_boundary(
     # before the interface rings are read means the interior adopts the
     # corrected vertices rather than a copy that would have to be fixed twice.
     t0 = time.perf_counter()
+    # Indeterminate: the scan is chunked internally and finds a handful of faces
+    # out of hundreds of thousands, so there is no meaningful fraction to show —
+    # only that this is what the stage is doing (44.1 s of the rehearsal's
+    # `stitch`, docs/profiling-reports.md).
+    if report is not None:
+        report("correcting vertex tolerances", 0, None)
     for group_faces in out.values():
         fixed, residual = occ.fix_vertex_tolerances(group_faces)
         stats.retoleranced_faces += fixed

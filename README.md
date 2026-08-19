@@ -23,8 +23,9 @@ adjacent cells and `-t` the strut profile's side length.
 | Python | 3.11 or newer | Runtime | PSF |
 | [OCP](https://github.com/CadQuery/OCP) (`cadquery-ocp`) | 7.7+ | Python bindings for the Open CASCADE (OCCT) geometry kernel — STEP I/O, booleans, sewing, meshing, exact validity checking | Apache-2.0 (OCP), LGPL-2.1 (OCCT) |
 | NumPy | 1.24+ | Vectorised classification and indexing | BSD-3-Clause |
+| `tkinter` | stdlib | The graphical front-end only. Ships with Python; on Debian and Ubuntu it is the separate `python3-tk` package, and the command line works without it | PSF (Tcl/Tk: BSD-style) |
 
-Nothing else. License texts are in [`licenses/`](licenses/), cross-referenced in
+Nothing else to install. License texts are in [`licenses/`](licenses/), cross-referenced in
 [`licenses/LICENSES.md`](licenses/LICENSES.md).
 
 **Nothing contacts the network at runtime.** Installation does, once — unless
@@ -105,11 +106,51 @@ instead, `python -m pip install .` provides a `latticegen2` entry point.
 
 ## Usage
 
+### The window
+
+**Start the launcher with no arguments** — double-click `latticegen2.bat`, or run
+`./latticegen2.sh` — and a small window opens:
+
+```bash
+latticegen2.bat            # Windows
+./latticegen2.sh           # Linux
+```
+
+Pick the input STEP file and an output folder, set `cc`, `t` and the core budget,
+and press **Start!**. The output filename is derived from the input and the
+parameters and is shown as you type; the parameters are checked live, so an
+invalid combination greys the button out and says why rather than failing a run
+minutes later.
+
+While a run is going, two bars show which pipeline stage is running and how far
+into it — `boundary trim: 9,776 / 19,552` — with peak memory and elapsed time
+beneath them. **Stop!** cancels the run exactly as Ctrl+C would: workers are shut
+down in order, the temp folder is kept for analysis and the window says where it
+is. When the run finishes, **Open export folder** takes you to the result and the
+inputs re-enable for another run.
+
+The window is deliberately small and plain, so it can sit in a corner of the
+screen for the hour a large part takes. It adds nothing the command line cannot
+do; it is the same `src/main.py`, run as a child process. Full behaviour is in
+[docs/specification.md](docs/specification.md) §3.1.
+
+It uses `tkinter` from the Python standard library. A release bundle carries
+everything it needs. On a source checkout, Debian and Ubuntu put `tkinter` in a
+separate `python3-tk` package — without it the command line works exactly as
+usual and only the window is unavailable.
+
+### The command line
+
+**Any argument at all** gives the command line, unchanged:
+
 ```bash
 latticegen2.bat -i part.step -cc 10 -t 1.5 -v          # Windows
 ./latticegen2.sh -i part.step -cc 10 -t 1.5 -v         # Linux
 python src/main.py -i part.step -cc 10 -t 1.5 -v       # directly
 ```
+
+On a machine with no display, starting with no arguments still prints usage and
+exits 2, as it always has.
 
 Set `LATTICEGEN2_PYTHON` if the interpreter you want is not the default `python`.
 The launchers otherwise fall through to whatever `python` resolves to on PATH,
@@ -268,6 +309,7 @@ explains how to profile one.
 | Path | Contents |
 |---|---|
 | `src/latticegen2/` | The package |
+| `src/latticegen2/gui/` | The graphical front-end. Imports no geometry module — it runs `src/main.py` as a child process |
 | `src/main.py` | Runnable entry point for a bare checkout |
 | `test/` | pytest suite and the STEP test assets |
 | `tools/` | `e2e.py`, `verify_geometry.py`, and `prototypes/` (standalone benchmarks for the design's load-bearing assumptions) |

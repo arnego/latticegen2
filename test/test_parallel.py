@@ -123,3 +123,41 @@ def test_a_job_actually_runs_in_a_different_process():
         results, _ = pool.run(_os_pid, [None, None])
     pids = {pid for pid, _rss in results}
     assert os.getpid() not in pids
+
+
+# --- the progress hook (docs/algorithm.md §12) -------------------------------
+
+
+def test_on_result_fires_once_per_job_with_a_rising_count():
+    seen = []
+    jobs = [(i, 0) for i in range(8)]
+    with WorkerPool(4) as pool:
+        pool.run(_times_two_with_rss, jobs, on_result=lambda d, t: seen.append((d, t)))
+    assert seen == [(i, 8) for i in range(1, 9)]
+
+
+def test_on_result_does_not_change_what_run_returns():
+    """The hook is an observer, and this is the assertion that says so.
+
+    Every parallel stage dispatches through this loop, so a callback that
+    perturbed ordering or results would change the output of the whole tool —
+    the one thing docs/algorithm.md §11 forbids an optimization from doing. The
+    check is against a control run rather than against an expected literal,
+    because it is the *difference* that matters.
+    """
+    jobs = [(v, v) for v in [3, 1, 4, 1, 5, 9, 2, 6]]
+    with WorkerPool(4) as pool:
+        control, control_rss = pool.run(_times_two_with_rss, jobs)
+        hooked, hooked_rss = pool.run(_times_two_with_rss, jobs, on_result=lambda d, t: None)
+        sorted_hooked, _ = pool.run(
+            _times_two_with_rss, jobs, sort_by=lambda j: j[0], on_result=lambda d, t: None
+        )
+    assert hooked == control == sorted_hooked
+    assert hooked_rss == control_rss
+
+
+def test_no_on_result_is_the_unchanged_path():
+    jobs = [(i, 0) for i in range(4)]
+    with WorkerPool(2) as pool:
+        results, _ = pool.run(_times_two_with_rss, jobs, on_result=None)
+    assert results == [(i * 2, 0) for i in range(4)]

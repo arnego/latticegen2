@@ -15,6 +15,8 @@ import pytest
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut
 from OCP.TopTools import TopTools_ListOfShape
 
+from OCP.BRepTools import BRepTools
+
 from latticegen2 import occ, weld
 from latticegen2.boundary import (
     BoundaryPiece,
@@ -25,11 +27,13 @@ from latticegen2.boundary import (
     finalize_pieces,
     fuse_disagreeing_pairs,
     resolve_interfaces,
+    trim_boundary,
     trim_junction,
 )
 from latticegen2.connect import build_components
 from latticegen2.errors import ProcessingError
 from latticegen2.junction import build_template, is_cap_plane_face
+from latticegen2.parallel import WorkerPool
 from latticegen2.lattice import (
     HALF_STRUTS,
     OPPOSITE_HALF,
@@ -613,3 +617,77 @@ def test_a_repair_that_moved_geometry_is_a_named_failure(lp, monkeypatch):
     monkeypatch.setattr(occ, "remove_pinhole_wires", lambda shape, tol: (smaller, 1))
     with pytest.raises(ProcessingError, match="changed its surface area"):
         trim_junction(lp, tpl, np.zeros(3), box)
+
+
+# --- the trim reports progress while it runs, not after ---------------------
+
+
+def _trim_a_grid(lp, tmp_path, workers, progress):
+    """Trim nine junctions against a containing box, with or without a pool."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    tpl = build_template(lp)
+    box = occ.prism(
+        occ.polygon_face(np.array([[-9.0, -9.0, -9.0], [9.0, -9.0, -9.0],
+                                   [9.0, 9.0, -9.0], [-9.0, 9.0, -9.0]])),
+        np.array([0.0, 0.0, 18.0]),
+    )
+    body_path = str(tmp_path / "input.brep")
+    BRepTools.Write_s(box, body_path)
+    grid = nodes(*[(i, j, 0) for i in range(-1, 2) for j in range(-1, 2)])
+    args = (lp, tpl, grid, box, body_path, str(tmp_path))
+    if workers > 1:
+        with WorkerPool(workers) as pool:
+            result = trim_boundary(*args, workers=workers, progress=progress, pool=pool)
+    else:
+        result = trim_boundary(*args, workers=1, progress=progress)
+    return result, len(grid)
+
+
+def test_progress_counts_junctions_on_the_sequential_path(lp, tmp_path):
+    ticks = []
+    _result, total = _trim_a_grid(
+        lp, tmp_path / "serial", 1, lambda done, tot: ticks.append((done, tot))
+    )
+    assert ticks == [(i, total) for i in range(1, total + 1)]
+
+
+def test_progress_counts_junctions_on_the_parallel_path_too(lp, tmp_path):
+    ticks = []
+    result, total = _trim_a_grid(
+        lp, tmp_path / "parallel", 2, lambda done, tot: ticks.append((done, tot))
+    )
+    assert ticks[-1] == (total, total)
+    assert [d for d, _ in ticks] == sorted(d for d, _ in ticks)
+    assert all(1 <= d <= total and tot == total for d, tot in ticks)
+    assert len(result.pieces) == total, "every junction is inside the box"
+
+
+def test_the_parallel_path_reports_from_the_dispatch_loop(lp, tmp_path, monkeypatch):
+    """The regression this hook exists for.
+
+    Progress used to be reported from ``_consume``, which runs only *after*
+    ``pool.run`` has completely returned — so a 13-minute stage emitted its whole
+    counter in the final millisecond, which is no use to a bar. Pinned by the
+    mechanism rather than by timing: the ticks must come from ``on_result``,
+    which :func:`test_parallel.test_on_result_fires_once_per_job_with_a_rising_count`
+    separately pins as firing inside the dispatch loop.
+    """
+    seen = {}
+    real_run = WorkerPool.run
+
+    def spy(self, worker_fn, jobs, **kwargs):
+        seen["on_result"] = kwargs.get("on_result")
+        return real_run(self, worker_fn, jobs, **kwargs)
+
+    monkeypatch.setattr(WorkerPool, "run", spy)
+    _trim_a_grid(lp, tmp_path / "spy", 2, lambda done, tot: None)
+    assert seen["on_result"] is not None
+
+
+def test_the_pieces_are_the_same_whether_or_not_anyone_is_watching(lp, tmp_path):
+    """Progress is an observer: it may not change what the stage produces."""
+    watched, _ = _trim_a_grid(lp, tmp_path / "watched", 2, lambda d, t: None)
+    unwatched, _ = _trim_a_grid(lp, tmp_path / "unwatched", 2, None)
+    assert [p.node for p in watched.pieces] == [p.node for p in unwatched.pieces]
+    assert [p.volume for p in watched.pieces] == [p.volume for p in unwatched.pieces]
+    assert watched.n_empty == unwatched.n_empty

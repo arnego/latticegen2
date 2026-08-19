@@ -145,6 +145,40 @@ def run_install(bundle: Path) -> int:
     return 0
 
 
+def check_front_end_can_start(bundle: Path) -> int:
+    """The bundle's own interpreter must be able to import ``tkinter``.
+
+    Import only, and no window: this has to pass on a headless CI runner, and
+    what it is actually checking is that the *bundle* carries Tcl/Tk rather than
+    that a display exists.
+
+    It is here because `tkinter` is the one dependency neither of this project's
+    other two mechanisms can see. It is not in `requirements-bundle.txt` — it
+    arrives inside the python-build-standalone interpreter — and the generation
+    below exercises only the command line, which never imports it. Without this,
+    a runtime built without Tcl/Tk would pass every gate and ship a front-end
+    that cannot open (docs/release.md).
+    """
+    launcher_dir = bundle / "runtime"
+    python = launcher_dir / ("python.exe" if os.name == "nt" else "bin/python3")
+    if not python.exists():
+        # A wheels bundle carries no interpreter, so there is nothing here that
+        # this project is responsible for; `install.sh`/`install.bat` warn the
+        # operator instead.
+        print("  [skip] no bundled runtime (wheels flavour): tkinter is the "
+              "operator's own interpreter's business")
+        return 0
+    result = subprocess.run(
+        [str(python), "-c", "import tkinter; print(tkinter.TkVersion)"],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        print(result.stderr[-2000:], file=sys.stderr)
+        return fail("the bundled runtime cannot import tkinter, so the "
+                    "graphical front-end would not open")
+    print(f"  [ok]   bundled runtime imports tkinter (Tk {result.stdout.strip()})")
+    return 0
+
+
 def run_generation(bundle: Path, outdir: Path) -> tuple[int, Path | None]:
     launcher = bundle / ("latticegen2.bat" if os.name == "nt" else "latticegen2.sh")
     output = outdir / "smoke.step"
@@ -239,6 +273,8 @@ def smoke(platform: str, flavour: str, dist: Path, workdir: Path) -> int:
 
     outdir = workdir / f"out-{flavour}"
     outdir.mkdir(parents=True, exist_ok=True)
+    problems += check_front_end_can_start(bundle)
+
     gen_problems, step = run_generation(bundle, outdir)
     problems += gen_problems
     if step is not None:

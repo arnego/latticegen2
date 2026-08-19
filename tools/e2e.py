@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,8 @@ sys.path.insert(0, HERE)
 
 import verify_geometry as vg  # noqa: E402
 
-from latticegen2 import occ  # noqa: E402
+from latticegen2 import occ, progress  # noqa: E402
+from latticegen2.runlog import STAGES  # noqa: E402
 
 PYTHON = os.environ.get("LATTICEGEN2_PYTHON", sys.executable)
 MAIN = os.path.join(ROOT, "src", "main.py")
@@ -212,6 +214,99 @@ def scenario_dense_lattice(outdir: str) -> Report:
     return rep
 
 
+def _mask_volatile(text: str) -> str:
+    """Blank the two timestamps a STEP header carries, and nothing else."""
+    text = re.sub(r"'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d'", "'<ts>'", text)
+    return re.sub(r"generated=\d{4}-\d\d-\d\d \d\d:\d\d:\d\d", "generated=<ts>", text)
+
+
+def scenario_progress_stream(outdir: str) -> Report:
+    """The gate protecting the whole progress-event design (docs/algorithm.md §10).
+
+    Watching a run must not change it. The event stream reaches into
+    :class:`~latticegen2.runlog.RunLog` and into
+    :meth:`~latticegen2.parallel.WorkerPool.run`'s dispatch loop, which is the
+    loop every parallel stage goes through — so "additive" is a claim about the
+    hot path of the entire pipeline, and the only way to hold it is to run the
+    same scenario both ways and compare the bytes.
+
+    Cheap enough to run on every invocation: ``smoke-fast`` is ~7 s, so this
+    doubles one of the four scenarios rather than adding a new class of cost.
+    """
+    rep = Report("progress-stream")
+    print(f"=== {rep.name} ===", flush=True)
+    # Same basename in two directories, so the only thing that differs about
+    # the two invocations is the flag under test.
+    quiet_dir = os.path.join(outdir, "progress-quiet")
+    loud_dir = os.path.join(outdir, "progress-loud")
+    os.makedirs(quiet_dir, exist_ok=True)
+    os.makedirs(loud_dir, exist_ok=True)
+    plain = os.path.join(quiet_dir, "progress.step")
+    streamed = os.path.join(loud_dir, "progress.step")
+    base = ["-i", BALL, "-cc", "20", "-t", "4", "--cores", "4"]
+
+    quiet, _ = run_generator([*base, "-o", plain])
+    loud, _ = run_generator([*base, "-o", streamed, "--progress-stream"])
+
+    rep.check("both runs exit 0", quiet.returncode == 0 and loud.returncode == 0,
+              f"{quiet.returncode}/{loud.returncode} {loud.stderr.strip()[-200:]}")
+    if quiet.returncode != 0 or loud.returncode != 0:
+        return rep
+
+    # 1. The output is the same file.
+    left = _mask_volatile(open(plain, encoding="utf-8", errors="replace").read())
+    right = _mask_volatile(open(streamed, encoding="utf-8", errors="replace").read())
+    rep.check("STEP identical outside the header timestamp", left == right,
+              f"{os.path.getsize(plain)} vs {os.path.getsize(streamed)} bytes")
+
+    # 2. The log is the same log. Only the front-end's channel may differ.
+    def log_body(step_path: str, own_dir: str) -> str:
+        """The log with everything that legitimately varies between two runs
+        blanked: clock times, elapsed times, measured memory, and the run's own
+        directory. What survives is every count, every geometric figure and the
+        order they appear in — which is precisely what an observer may not
+        change.
+        """
+        with open(os.path.splitext(step_path)[0] + ".log", encoding="utf-8") as fh:
+            body = fh.read()
+        body = re.sub(r"^\[\d\d:\d\d:\d\d\] ", "", body, flags=re.M)
+        body = re.sub(r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d", "<ts>", body)
+        body = re.sub(r"\d{8}-\d{6}", "<stamp>", body)
+        body = re.sub(r"\d+(\.\d+)?s\b", "<dur>", body)
+        body = re.sub(r"\d+(\.\d+)? [KMGT]?B\b", "<size>", body)
+        # `stitch` reports its six phase timings as bare seconds under keys
+        # ending `_s`, which the duration pattern above cannot reach.
+        body = re.sub(r"(_s: )[\d.]+", r"\1<dur>", body)
+        return body.replace(own_dir, "<outdir>")
+
+    rep.check(".log identical outside clock, memory and path",
+              log_body(plain, quiet_dir) == log_body(streamed, loud_dir))
+
+    # 3. And the stream it produced is actually usable — otherwise the two
+    #    checks above would also pass if the flag did nothing at all.
+    events, junk = [], []
+    for line in loud.stdout.splitlines():
+        if not line.strip():
+            continue
+        parsed = progress.parse_line(line)
+        (events if parsed is not None else junk).append(parsed or line)
+
+    kinds = {e["ev"] for e in events}
+    rep.check("stdout is pure NDJSON", not junk, f"{len(junk)} unparsed: {junk[:2]}")
+    rep.check("every stage is announced and closed",
+              sum(e["ev"] == "stage_begin" for e in events) == len(STAGES)
+              and sum(e["ev"] == "stage_end" for e in events) == len(STAGES),
+              f"{sum(e['ev'] == 'stage_begin' for e in events)} begun")
+    rep.check("the run reports itself finished",
+              [e for e in events if e["ev"] == "result"][-1:] != []
+              and events[-1]["ev"] == "result" and events[-1]["status"] == "ok")
+    rep.check("sub-stage progress arrives", "progress" in kinds,
+              f"{sum(e['ev'] == 'progress' for e in events)} tick(s)")
+    rep.check("the quiet run printed no events", "@@" not in quiet.stdout
+              and not any(progress.parse_line(l) for l in quiet.stdout.splitlines()))
+    return rep
+
+
 def scenario_invalid_input(outdir: str) -> Report:
     rep = Report("invalid-input")
     print(f"=== {rep.name} ===", flush=True)
@@ -230,6 +325,7 @@ def scenario_invalid_input(outdir: str) -> Report:
 SCENARIOS = {
     "smoke-fast": scenario_smoke_fast,
     "invalid-input": scenario_invalid_input,
+    "progress-stream": scenario_progress_stream,
     "smoke-verified": scenario_smoke_verified,
     "dense-lattice": scenario_dense_lattice,
 }

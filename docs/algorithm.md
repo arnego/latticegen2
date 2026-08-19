@@ -1325,8 +1325,8 @@ program builds itself.
   AP214 file per spec §5.
 * **Header rewrite.** STEP is plain text. After export, a small quote-aware pass
   sets `FILE_NAME`'s first field to the part name `<input_stem>+cc<cc>+t<t>`
-  (spec §5's `+`-separated convention, distinct from the `-`-separated default
-  *file* name) with floats formatted without trailing zeros, and appends the full
+  (spec §5's `+`-separated convention, and deliberately not the default *file*
+  name, which is `-`-separated and additionally carries `-lattice-`) with floats formatted without trailing zeros, and appends the full
   parameter string to `FILE_DESCRIPTION`. **`FILE_SCHEMA`'s value is only ever
   filled in when blank, never overwritten** — that is what keeps the file a clean
   standard document rather than a hand-patched hybrid.

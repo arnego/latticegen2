@@ -157,8 +157,8 @@ def test_budget_ranges_are_validated():
 
 def test_default_output_path_is_derived_from_the_input():
     step, log = resolve_output_paths(os.path.join("dir", "ball.step"), None, 20.0, 4.0)
-    assert os.path.basename(step) == "ball-cc20t4.step"
-    assert os.path.basename(log) == "ball-cc20t4.log"
+    assert os.path.basename(step) == "ball-lattice-cc20t4.step"
+    assert os.path.basename(log) == "ball-lattice-cc20t4.log"
     assert os.path.dirname(step) == "dir"
 
 

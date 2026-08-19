@@ -30,6 +30,35 @@ def event(ev, **fields):
     return json.dumps(payload)
 
 
+@pytest.fixture(scope="module")
+def tk_root():
+    """**One** withdrawn Tk root, shared by every test in this file.
+
+    Module scope is the point, not an optimization. Creating and destroying a
+    root per test made these tests skip *intermittently* — roughly one run in
+    three — with a `TclError` reading "tk wasn't installed properly", which the
+    old per-test guard turned into "no display available". There was a display
+    and Tk was fine; repeatedly tearing a root down and standing another up in
+    one interpreter simply is not reliable, and adding an `update()` after
+    `destroy()` did not make it so. A test that quietly skips is a test that is
+    not running, which is worse than one that fails.
+
+    Widgets from earlier tests are left in place rather than cleared: the root
+    is withdrawn so nothing is drawn, each test only inspects the objects it
+    built itself, and destroying a widget with a pending `after` — the
+    indeterminate bar always has one — just produces Tk callback noise on
+    stderr.
+    """
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:  # a genuinely headless machine
+        pytest.skip(f"tkinter cannot open a window here: {exc}")
+    root.withdraw()
+    yield root
+    root.destroy()
+
+
 # --- the weight table --------------------------------------------------------
 
 
@@ -228,9 +257,9 @@ def test_the_child_argv_is_one_the_parser_accepts(tmp_path):
 
 
 @pytest.mark.parametrize("cc,t,expected", [
-    (20.0, 4.0, "part-cc20t4.step"),
-    (10.0, 1.5, "part-cc10t1.5.step"),
-    (12.0, 2.5, "part-cc12t2.5.step"),
+    (20.0, 4.0, "part-lattice-cc20t4.step"),
+    (10.0, 1.5, "part-lattice-cc10t1.5.step"),
+    (12.0, 2.5, "part-lattice-cc12t2.5.step"),
 ])
 def test_the_derived_filename_is_the_cli_default(tmp_path, cc, t, expected):
     """The output name the window shows has to be the one the run will write.
@@ -248,34 +277,26 @@ def test_the_derived_filename_is_the_cli_default(tmp_path, cc, t, expected):
 # --- the window itself, minimally ---------------------------------------------
 
 
-def test_the_window_builds_and_validates_with_the_parser(tmp_path):
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("no display available")
-    root.withdraw()
-    try:
-        from latticegen2.gui.app import App
+def test_the_window_builds_and_validates_with_the_parser(tmp_path, tk_root):
+    root = tk_root
+    from latticegen2.gui.app import App
 
-        step = tmp_path / "part.step"
-        step.write_text("dummy")
-        app = App(root)
-        app.input_var.set(str(step))
-        app.cc_var.set("20")
-        app.t_var.set("4")
-        root.update()
-        assert app.derived_var.get().endswith("part-cc20t4.step")
-        assert "disabled" not in app.start.state()
+    step = tmp_path / "part.step"
+    step.write_text("dummy")
+    app = App(root)
+    app.input_var.set(str(step))
+    app.cc_var.set("20")
+    app.t_var.set("4")
+    root.update()
+    assert app.derived_var.get().endswith("part-lattice-cc20t4.step")
+    assert "disabled" not in app.start.state()
 
-        # The one cross-parameter rule, enforced by `parse_args` rather than by
-        # a copy of it living here.
-        app.t_var.set("18")
-        root.update()
-        assert "must be smaller than the cube edge" in app.message_var.get()
-        assert "disabled" in app.start.state()
-    finally:
-        root.destroy()
+    # The one cross-parameter rule, enforced by `parse_args` rather than by
+    # a copy of it living here.
+    app.t_var.set("18")
+    root.update()
+    assert "must be smaller than the cube edge" in app.message_var.get()
+    assert "disabled" in app.start.state()
 
 
 # --- the cancel channel (docs/algorithm.md §10) ------------------------------
@@ -288,8 +309,8 @@ def test_the_cancel_sentinel_sits_beside_the_log():
     processes would have to agree about it on top of already agreeing about the
     log path.
     """
-    assert progress.cancel_sentinel_path("/p/part-cc10t1.5.log") == \
-        "/p/part-cc10t1.5.cancel"
+    assert progress.cancel_sentinel_path("/p/part-lattice-cc10t1.5.log") == \
+        "/p/part-lattice-cc10t1.5.cancel"
 
 
 def test_a_stale_sentinel_is_removed_rather_than_obeyed(tmp_path, monkeypatch):
@@ -337,7 +358,7 @@ def test_writing_the_sentinel_interrupts_the_run(tmp_path, monkeypatch):
 # --- what the code review found (all three anchored here) --------------------
 
 
-def test_the_run_is_not_finished_until_both_streams_reach_eof(tmp_path, monkeypatch):
+def test_the_run_is_not_finished_until_both_streams_reach_eof(tmp_path, tk_root):
     """A successful run must never be reported as a failure.
 
     The child's exit code is available the instant it dies, while its pipes can
@@ -346,52 +367,44 @@ def test_the_run_is_not_finished_until_both_streams_reach_eof(tmp_path, monkeypa
     terminal `result` event, and a run that wrote its STEP correctly showed a
     red banner reading "the run ended with exit code 0".
     """
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("no display available")
-    root.withdraw()
-    try:
-        from latticegen2.gui.app import App
+    root = tk_root
+    from latticegen2.gui.app import App
 
-        app = App(root)
+    app = App(root)
 
-        class DeadChild:
-            """Exited, but with its result still in flight behind one reader."""
+    class DeadChild:
+        """Exited, but with its result still in flight behind one reader."""
 
-            running = False
-            cancel_path = str(tmp_path / "x.cancel")
-            stderr_lines: list = []
+        running = False
+        cancel_path = str(tmp_path / "x.cancel")
+        stderr_lines: list = []
 
-            def __init__(self):
-                import queue
+        def __init__(self):
+            import queue
 
-                self.events = queue.Queue()
+            self.events = queue.Queue()
 
-            def returncode(self):
-                return 0
+        def returncode(self):
+            return 0
 
-            def clear_cancel(self):
-                pass
+        def clear_cancel(self):
+            pass
 
-        app.run = DeadChild()
-        app._closed_seen = 1          # only stdout has ended so far
-        app._drain()
-        assert app.run is not None, "finished while a reader was still live"
+    app.run = DeadChild()
+    app._closed_seen = 1          # only stdout has ended so far
+    app._drain()
+    assert app.run is not None, "finished while a reader was still live"
 
-        app.run.events.put(("event", progress.parse_line(event(
-            progress.RESULT, status=progress.OK, exit=0, reason=None,
-            output="out.step", log="out.log", tmpdir=None))))
-        app.run.events.put(("closed", None))
-        app._drain()
-        assert app.run is None
-        assert app.state.status == progress.OK
-    finally:
-        root.destroy()
+    app.run.events.put(("event", progress.parse_line(event(
+        progress.RESULT, status=progress.OK, exit=0, reason=None,
+        output="out.step", log="out.log", tmpdir=None))))
+    app.run.events.put(("closed", None))
+    app._drain()
+    assert app.run is None
+    assert app.state.status == progress.OK
 
 
-def test_force_stop_is_scheduled_on_the_wall_clock(tmp_path, monkeypatch):
+def test_force_stop_is_scheduled_on_the_wall_clock(tmp_path, monkeypatch, tk_root):
     """The grace period has to expire even when the child says nothing.
 
     It was computed from `state.elapsed`, which only advances when an event
@@ -399,57 +412,49 @@ def test_force_stop_is_scheduled_on_the_wall_clock(tmp_path, monkeypatch):
     reason Stop is not instant, the deadline could never be reached and the
     window would sit on "Cancelling..." forever.
     """
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("no display available")
-    root.withdraw()
-    try:
-        from latticegen2.gui.app import App
-        from latticegen2.gui.runner import GRACE_SECONDS
+    root = tk_root
+    from latticegen2.gui.app import App
+    from latticegen2.gui.runner import GRACE_SECONDS
 
-        app = App(root)
+    app = App(root)
 
-        class SilentChild:
-            running = True
-            cancel_path = str(tmp_path / "x.cancel")
-            stderr_lines: list = []
-            killed = False
+    class SilentChild:
+        running = True
+        cancel_path = str(tmp_path / "x.cancel")
+        stderr_lines: list = []
+        killed = False
 
-            def __init__(self):
-                import queue
+        def __init__(self):
+            import queue
 
-                self.events = queue.Queue()
+            self.events = queue.Queue()
 
-            def cancel(self):
-                pass
+        def cancel(self):
+            pass
 
-            def force_stop(self):
-                self.killed = True
+        def force_stop(self):
+            self.killed = True
 
-            def returncode(self):
-                return None
+        def returncode(self):
+            return None
 
-        app.run = SilentChild()
-        app.state.elapsed = 0.0        # nothing has been reported, and won't be
-        app._on_stop()
-        assert app._force_at is not None
+    app.run = SilentChild()
+    app.state.elapsed = 0.0        # nothing has been reported, and won't be
+    app._on_stop()
+    assert app._force_at is not None
 
-        # Capture the real clock first: `latticegen2.gui.app.time` is the same
-        # module object as `time`, so a lambda calling through it after the
-        # patch would call itself.
-        import time as _time
+    # Capture the real clock first: `latticegen2.gui.app.time` is the same
+    # module object as `time`, so a lambda calling through it after the
+    # patch would call itself.
+    import time as _time
 
-        real_monotonic = _time.monotonic
-        monkeypatch.setattr(
-            _time, "monotonic",
-            lambda: real_monotonic() + GRACE_SECONDS + 1,
-        )
-        app._drain()
-        assert app.run.killed, "the grace period never expired"
-    finally:
-        root.destroy()
+    real_monotonic = _time.monotonic
+    monkeypatch.setattr(
+        _time, "monotonic",
+        lambda: real_monotonic() + GRACE_SECONDS + 1,
+    )
+    app._drain()
+    assert app.run.killed, "the grace period never expired"
 
 
 def test_a_missing_main_script_is_a_message_rather_than_a_silent_no_op(monkeypatch):
@@ -466,7 +471,7 @@ def test_a_missing_main_script_is_a_message_rather_than_a_silent_no_op(monkeypat
         runner.main_script()
 
 
-def test_the_sub_bar_stops_and_empties_when_a_run_ends():
+def test_the_sub_bar_stops_and_empties_when_a_run_ends(tk_root):
     """Success, cancellation and failure alike.
 
     After the terminal event there is no sub-stage left, so ``sub_fraction`` is
@@ -475,61 +480,45 @@ def test_the_sub_bar_stops_and_empties_when_a_run_ends():
     open, which is both untrue and, being the only thing still moving, reads as
     a run that has not stopped.
     """
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("no display available")
-    root.withdraw()
-    try:
-        from latticegen2.gui.app import App
+    root = tk_root
+    from latticegen2.gui.app import App
 
-        for status in (progress.OK, progress.CANCELLED, progress.FAILED):
-            app = App(root)
-            app.state.apply(progress.parse_line(event(
-                progress.STAGE_BEGIN, name="export", i=11, n=12)))
-            app.state.apply(progress.parse_line(event(
-                progress.PROGRESS, stage="export", label="writing STEP",
-                done=0, total=None)))
-            app._refresh()
-            assert app.sub_bar._sweep is not None, "the sweep never started"
+    for status in (progress.OK, progress.CANCELLED, progress.FAILED):
+        app = App(root)
+        app.state.apply(progress.parse_line(event(
+            progress.STAGE_BEGIN, name="export", i=11, n=12)))
+        app.state.apply(progress.parse_line(event(
+            progress.PROGRESS, stage="export", label="writing STEP",
+            done=0, total=None)))
+        app._refresh()
+        assert app.sub_bar._sweep is not None, "the sweep never started"
 
-            app.state.apply(progress.parse_line(event(
-                progress.RESULT, status=status, exit=0, reason="x",
-                output="o.step", log="o.log", tmpdir=None)))
-            app._refresh()
-            assert app.sub_bar._sweep is None, f"{status}: still sweeping"
-            assert app.sub_bar._fraction == 0.0, f"{status}: bar not empty"
-            assert app.sub_bar._text == "", f"{status}: label not cleared"
-    finally:
-        root.destroy()
+        app.state.apply(progress.parse_line(event(
+            progress.RESULT, status=status, exit=0, reason="x",
+            output="o.step", log="o.log", tmpdir=None)))
+        app._refresh()
+        assert app.sub_bar._sweep is None, f"{status}: still sweeping"
+        assert app.sub_bar._fraction == 0.0, f"{status}: bar not empty"
+        assert app.sub_bar._text == "", f"{status}: label not cleared"
 
 
-def test_going_indeterminate_twice_does_not_double_the_animation():
+def test_going_indeterminate_twice_does_not_double_the_animation(tk_root):
     """A pending ``after`` cannot be cancelled by clearing the sweep state.
 
     It still fires; if the bar has gone indeterminate again by then it would see
     a live sweep, reschedule itself, and run alongside the new loop at twice the
     speed. The generation counter is what retires it.
     """
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("no display available")
-    root.withdraw()
-    try:
-        from latticegen2.gui.app import Bar
+    root = tk_root
+    from latticegen2.gui.app import Bar
 
-        bar = Bar(root)
-        bar.set(None, "first")
-        stale = bar._sweep_id
-        bar.set(0.5, "determinate")
-        bar.set(None, "second")
-        assert bar._sweep_id != stale
+    bar = Bar(root)
+    bar.set(None, "first")
+    stale = bar._sweep_id
+    bar.set(0.5, "determinate")
+    bar.set(None, "second")
+    assert bar._sweep_id != stale
 
-        before = bar._sweep
-        bar._animate(stale)          # the callback left over from the first run
-        assert bar._sweep == before, "a stale callback advanced the sweep"
-    finally:
-        root.destroy()
+    before = bar._sweep
+    bar._animate(stale)          # the callback left over from the first run
+    assert bar._sweep == before, "a stale callback advanced the sweep"

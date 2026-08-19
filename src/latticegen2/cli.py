@@ -57,7 +57,8 @@ Required:
                         must be smaller than the cell edge a = cc/sqrt(2)
 
 Optional:
-  -o, --output <path>   Output .step path (default: <input_stem>-cc<cc>t<t>.step)
+  -o, --output <path>   Output .step path
+                        (default: <input_stem>-lattice-cc<cc>t<t>.step)
   --cores <n>           Maximum cores to use (1-128), one worker process per
                         core. Default: this machine's logical core count.
   -v, --verbose         Verbose console output (a full .log is always written)
@@ -180,9 +181,11 @@ def default_workers(cores: int | None) -> int:
 def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: float):
     """``(step_path, log_path)`` per specification.md §3.
 
-    Default name is ``<input_stem>-cc<cc>t<t>.step`` beside the input. The log
-    always shares the output's stem with a ``.log`` extension — never
-    ``<output>.step.log``.
+    Default name is ``<input_stem>-lattice-cc<cc>t<t>.step`` beside the input.
+    The ``-lattice-`` marks the file as this tool's output rather than another
+    revision of the input, which matters because the default writes it into the
+    input's own folder. The log always shares the output's stem with a ``.log``
+    extension — never ``<output>.step.log``.
 
     ``-o`` names a *file*. A directory is rejected rather than quietly turned
     into one: ``-o .\\`` used to append the extension to nothing and write
@@ -195,7 +198,8 @@ def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: 
         stem = os.path.splitext(os.path.basename(input_path))[0]
         directory = os.path.dirname(input_path) or "."
         step_path = os.path.join(
-            directory, f"{stem}-cc{format_param(cc)}t{format_param(t)}.step"
+            directory,
+            f"{stem}-lattice-cc{format_param(cc)}t{format_param(t)}.step",
         )
     else:
         # The validated string is the one used. Trailing space is stripped
@@ -238,7 +242,7 @@ def _checked_output(output_arg: str) -> str:
     raise ParamError(
         f'-o/--output must name the output .step file, not a directory '
         f'(got "{output_arg}"). Give a filename, or omit -o to write '
-        f'<input_stem>-cc<cc>t<t>.step beside the input.'
+        f'<input_stem>-lattice-cc<cc>t<t>.step beside the input.'
     )
 
 
@@ -324,7 +328,7 @@ def preflight_checks(args: Args) -> None:
         raise ParamError(
             f"-o/--output must name the output .step file, but {args.output} is "
             f"an existing directory. Give a filename inside it, or omit -o to "
-            f"write <input_stem>-cc<cc>t<t>.step beside the input."
+            f"write <input_stem>-lattice-cc<cc>t<t>.step beside the input."
         )
     if not os.path.isfile(args.input):
         raise InputGeometryError(f"Input STEP file not found: {args.input}")

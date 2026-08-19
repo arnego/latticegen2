@@ -162,7 +162,9 @@ class WorkerPool:
         return False
 
     def run(
-        self, worker_fn: Callable, jobs: list, *, rss_index: int = -1, sort_by: Callable | None = None
+        self, worker_fn: Callable, jobs: list, *, rss_index: int = -1,
+        sort_by: Callable | None = None,
+        on_result: Callable[[int, int], None] | None = None,
     ) -> tuple[list, int]:
         """Run ``worker_fn`` over ``jobs``, folding each result's peak-RSS.
 
@@ -193,6 +195,24 @@ class WorkerPool:
         instead. The returned list is always back in ``jobs``' own order
         regardless of ``sort_by`` — only *dispatch* order changes, per this
         method's own ordering guarantee above.
+
+        ``on_result``, if given, is called ``(completed, total)`` once per
+        finished job, from inside the loop below. It is what lets a stage report
+        progress *while* it runs rather than after it: every parallel stage in
+        the pipeline dispatches through this one loop, so one hook here serves
+        classification, boundary trimming, boundary-sew round 1 and same-domain
+        unification alike (docs/algorithm.md §12).
+
+        **It is an observer and nothing else, and the ordering guarantee above
+        is what makes that safe.** It receives two integers, is called after the
+        result has been stored, and cannot reach ``results``. In particular
+        ``imap`` stays *ordered* with ``chunksize=1``: switching to
+        ``imap_unordered`` would make progress arrive sooner and would break the
+        byte-reproducibility this method exists to provide, so it must not be
+        done for the front-end's benefit. One consequence to keep in mind at the
+        call site: the count is a *completion count*, not job identity — a slow
+        early job holds back the ticks for every job behind it, and a caller
+        using ``sort_by`` cannot infer *which* jobs are done.
         """
         if not self.active:
             raise ProcessingError(
@@ -208,7 +228,11 @@ class WorkerPool:
 
         results: list = [None] * len(jobs)
         max_rss = 0
+        completed = 0
         for i, out in zip(order, self._pool.imap(worker_fn, dispatch, chunksize=1)):
             results[i] = out
             max_rss = max(max_rss, out[rss_index])
+            completed += 1
+            if on_result is not None:
+                on_result(completed, len(jobs))
         return results, max_rss

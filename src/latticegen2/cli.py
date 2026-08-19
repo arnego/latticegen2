@@ -33,6 +33,17 @@ from . import sysinfo
 from .errors import InputGeometryError, OutputError, ParamError
 from .lattice import format_param
 
+#: The ranges specification.md §3's flag table declares, as data.
+#:
+#: Read by :func:`parse_args` below and by :mod:`latticegen2.gui`, which puts
+#: them on its spin controls. Two copies of a bound is one copy too many: the
+#: GUI would go on accepting a value the parser had started refusing, and the
+#: user would meet the difference as a rejected run rather than as a greyed-out
+#: field.
+CC_RANGE = (0.4, 50.0)
+T_RANGE = (0.4, 20.0)
+CORES_RANGE = (1, 128)
+
 USAGE = """\
 latticegen2 - generate a diamond-strut lattice filling an input STEP volume
 
@@ -46,7 +57,8 @@ Required:
                         must be smaller than the cell edge a = cc/sqrt(2)
 
 Optional:
-  -o, --output <path>   Output .step path (default: <input_stem>-cc<cc>t<t>.step)
+  -o, --output <path>   Output .step path
+                        (default: <input_stem>-lattice-cc<cc>t<t>.step)
   --cores <n>           Maximum cores to use (1-128), one worker process per
                         core. Default: this machine's logical core count.
   -v, --verbose         Verbose console output (a full .log is always written)
@@ -76,8 +88,24 @@ class Args:
     happened to detect six.
     """
 
+    progress_stream: bool = False
+    """Report the run as machine-readable events on stdout (``--progress-stream``).
+
+    An internal transport, set by :mod:`latticegen2.gui` on the child it
+    launches, and deliberately **absent from** :data:`USAGE` and from
+    specification.md §3's flag table: those describe the parameters a person
+    chooses, and this one changes no parameter of the geometry. It is documented
+    in specification.md §3.1 instead, with the rest of the front-end.
+    """
+
     def as_dict(self) -> dict:
-        """The parameter block the run header and summary report."""
+        """The parameter block the run header and summary report.
+
+        ``progress_stream`` is deliberately not among them: it changes how the
+        run is *watched*, not what it computes, and a log whose parameter block
+        differed depending on whether a window was open would be misleading in
+        exactly the place operators compare two runs.
+        """
         return {
             "input": self.input,
             "output": self.output,
@@ -153,9 +181,11 @@ def default_workers(cores: int | None) -> int:
 def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: float):
     """``(step_path, log_path)`` per specification.md §3.
 
-    Default name is ``<input_stem>-cc<cc>t<t>.step`` beside the input. The log
-    always shares the output's stem with a ``.log`` extension — never
-    ``<output>.step.log``.
+    Default name is ``<input_stem>-lattice-cc<cc>t<t>.step`` beside the input.
+    The ``-lattice-`` marks the file as this tool's output rather than another
+    revision of the input, which matters because the default writes it into the
+    input's own folder. The log always shares the output's stem with a ``.log``
+    extension — never ``<output>.step.log``.
 
     ``-o`` names a *file*. A directory is rejected rather than quietly turned
     into one: ``-o .\\`` used to append the extension to nothing and write
@@ -168,7 +198,8 @@ def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: 
         stem = os.path.splitext(os.path.basename(input_path))[0]
         directory = os.path.dirname(input_path) or "."
         step_path = os.path.join(
-            directory, f"{stem}-cc{format_param(cc)}t{format_param(t)}.step"
+            directory,
+            f"{stem}-lattice-cc{format_param(cc)}t{format_param(t)}.step",
         )
     else:
         # The validated string is the one used. Trailing space is stripped
@@ -211,7 +242,7 @@ def _checked_output(output_arg: str) -> str:
     raise ParamError(
         f'-o/--output must name the output .step file, not a directory '
         f'(got "{output_arg}"). Give a filename, or omit -o to write '
-        f'<input_stem>-cc<cc>t<t>.step beside the input.'
+        f'<input_stem>-lattice-cc<cc>t<t>.step beside the input.'
     )
 
 
@@ -225,6 +256,7 @@ def parse_args(argv: list[str]) -> Args:
     input_path = output = None
     cc = t = cores = None
     verbose = False
+    progress_stream = False
 
     i = 0
     while i < len(argv):
@@ -245,6 +277,9 @@ def parse_args(argv: list[str]) -> Args:
         elif a in ("-v", "--verbose"):
             verbose = True
             i += 1
+        elif a == "--progress-stream":
+            progress_stream = True
+            i += 1
         elif a in ("-h", "--help"):
             raise HelpRequested()
         else:
@@ -257,10 +292,10 @@ def parse_args(argv: list[str]) -> Args:
     if t is None:
         raise ParamError("-t is required.\n\n" + USAGE)
 
-    _in_range("-cc", cc, 0.4, 50.0)
-    _in_range("-t", t, 0.4, 20.0)
+    _in_range("-cc", cc, *CC_RANGE)
+    _in_range("-t", t, *T_RANGE)
     if cores is not None:
-        _in_range("--cores", cores, 1, 128)
+        _in_range("--cores", cores, *CORES_RANGE)
 
     a_edge = cc / (2.0 ** 0.5)
     if t >= a_edge:
@@ -283,6 +318,7 @@ def parse_args(argv: list[str]) -> Args:
         workers=default_workers(cores),
         verbose=verbose,
         cores=cores,
+        progress_stream=progress_stream,
     )
 
 
@@ -292,7 +328,7 @@ def preflight_checks(args: Args) -> None:
         raise ParamError(
             f"-o/--output must name the output .step file, but {args.output} is "
             f"an existing directory. Give a filename inside it, or omit -o to "
-            f"write <input_stem>-cc<cc>t<t>.step beside the input."
+            f"write <input_stem>-lattice-cc<cc>t<t>.step beside the input."
         )
     if not os.path.isfile(args.input):
         raise InputGeometryError(f"Input STEP file not found: {args.input}")

@@ -1,6 +1,18 @@
 # Release Manual
 
 How to get from a working `main` to published, downloadable offline bundles.
+
+> **New in 3.0.0:** portable bundles now redistribute Tcl/Tk, because the
+> graphical front-end (specification.md §3.1) uses the standard library's
+> `tkinter`. Two gates cover it and both are automatic. `tools/build_release.py`
+> imports `tkinter` in the freshly populated runtime, so a
+> python-build-standalone asset built without Tcl/Tk fails the build rather than
+> shipping a front-end that cannot open; `tools/smoke_bundle.py` re-checks the
+> same import in the *extracted* archive. The licence text is
+> `licenses/tcl-tk-LICENSE.txt`, copied into `licenses/runtime/` at build time.
+> Tcl/Tk is **not** in `requirements-bundle.txt` — it arrives inside the
+> interpreter — so those two gates are what stands in for the pin-versus-licence
+> cross-check every other dependency gets.
 This is the developer's procedure; the operator-facing instructions live inside
 each bundle as `README-OFFLINE.md`.
 

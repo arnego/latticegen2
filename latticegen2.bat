@@ -16,6 +16,29 @@ if not "%LATTICEGEN2_PYTHON%"=="" set "PY=%LATTICEGEN2_PYTHON%"
 if "%PY%"=="" if exist "%~dp0runtime\python.exe" set "PY=%~dp0runtime\python.exe"
 if "%PY%"=="" if exist "%~dp0.venv\Scripts\python.exe" set "PY=%~dp0.venv\Scripts\python.exe"
 if "%PY%"=="" set "PY=python"
+REM No arguments at all means the graphical front-end (specification.md S3.1).
+REM Any argument keeps the command line exactly as it has always been.
+if not "%~1"=="" goto :cli
+
+REM GUI mode probes for the dependencies FIRST, where the command line probes
+REM only after a failure. Two reasons it cannot wait: the window is launched
+REM detached, so there is no exit code left to inspect afterwards, and it runs
+REM under pythonw.exe, which has no stderr for a native import abort to print
+REM to. Without this, a broken interpreter is a double-click that does nothing
+REM whatsoever. tkinter is named alongside the other two because the front-end
+REM imports it at module scope (docs/algorithm.md S10).
+"%PY%" -c "import numpy, OCP.TopoDS, tkinter" >nul 2>&1
+if %ERRORLEVEL% NEQ 0 goto :depfail
+
+REM pythonw.exe so no console window sits behind the window for the whole run,
+REM and `start` because cmd.exe *waits* for a directly-invoked GUI-subsystem
+REM process -- which would keep this console open and defeat the point.
+set "PYW=%PY:python.exe=pythonw.exe%"
+if not exist "%PYW%" set "PYW=pythonw"
+start "" "%PYW%" "%~dp0src\main.py" --gui
+exit /b 0
+
+:cli
 REM Always launch src/main.py rather than the installed console script: boundary
 REM workers use multiprocessing "spawn", which re-imports this __main__ module in
 REM each child, and main.py is what puts src/ on sys.path for them.
@@ -45,6 +68,7 @@ REM negative code) would read as success and suppress the diagnostic.
 "%PY%" -c "import numpy, OCP.TopoDS" >nul 2>&1
 if %ERRORLEVEL% EQU 0 exit /b %RC%
 
+:depfail
 REM `>&2 echo text` rather than `echo text >&2`: the redirect has to lead, or the
 REM space before it is echoed as trailing whitespace on every line.
 >&2 echo.

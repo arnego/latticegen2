@@ -469,6 +469,16 @@ split 2.8s, round2 14.3s, repair 559.1s, retolerance 22.6s, rings 8.6s`.
 
 ## Reading the pair
 
+**These two tables have a downstream consumer.** The stage weights the
+graphical front-end's progress bar uses
+([`src/latticegen2/gui/weights.py`](../src/latticegen2/gui/weights.py)) are the
+per-mille shares of the mean of these two columns — this pair specifically,
+because its untouched stages agree to within 1.5 %, which is what makes
+averaging them legitimate. If this part is ever re-profiled, that table is
+what needs updating with it; a test pins that its keys match
+`runlog.STAGES` and that it sums to 1000, but nothing can tell it the numbers
+have gone stale.
+
 **Read the phase, not the stage.** The only thing this pair changes is one
 phase of `stitch`:
 

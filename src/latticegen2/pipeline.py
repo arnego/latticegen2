@@ -66,11 +66,17 @@ def run_pipeline(args: Args, rl: RunLog) -> dict:
     (specification.md §4.4, §7).
     """
     tmpdir = _make_tmpdir(args.output)
+    rl.tmpdir = tmpdir
     try:
-        return _run(args, rl, tmpdir)
+        stats = _run(args, rl, tmpdir)
     except BaseException:
         rl.always(f"Intermediate files kept for analysis in: {tmpdir}")
         raise
+    # Cleared only on the success path, and only after `_run` has actually
+    # removed it, so the attribute means "there is a folder there" rather than
+    # "there was one".
+    rl.tmpdir = None
+    return stats
 
 
 def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
@@ -144,7 +150,8 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         with Timer(rl, "classify"):
             candidates = candidate_nodes(lp, lo, hi)
             classification = classify_nodes(
-                lp, mesh, candidates, tmpdir=tmpdir, pool=pool
+                lp, mesh, candidates, tmpdir=tmpdir, pool=pool,
+                report=rl.substage,
             )
         counts = classification.counts()
         rl.line(
@@ -206,6 +213,10 @@ def _run_with_pool(
         reported = [0]
 
         def progress(done: int, total: int) -> None:
+            # Two consumers with different appetites. The front-end wants every
+            # tick it can get and is rate-limited by `RunLog.substage` itself;
+            # the log wants ten lines for the whole stage, whatever its size.
+            rl.substage("boundary trim", done, total)
             step = max(1, total // 10)
             if done >= total or done - reported[0] >= step:
                 reported[0] = done
@@ -309,8 +320,9 @@ def _run_with_pool(
         boundary_faces, sew_stats = weld.sew_boundary(
             kept.pieces, kept.piece_groups,
             workers=args.workers, tmpdir=tmpdir,
-            pool=pool, want_rings=want_rings,
+            pool=pool, want_rings=want_rings, report=rl.substage,
         )
+        rl.substage("locating interface rings", 0, None)
         t_rings = _dt.datetime.now()
         rings = weld.interface_rings(lp, tmesh, boundary_faces, want_rings)
         t_rings = (_dt.datetime.now() - t_rings).total_seconds()
@@ -393,6 +405,7 @@ def _run_with_pool(
         stats["still_invalid_faces"] = sew_stats.still_invalid_faces
 
     with Timer(rl, "instance"):
+        rl.substage("building the interior shell", 0, None)
         interior = build_interior_shell(
             lp, tpl, tmesh, kept.interior_nodes, iface.interfaces,
             groups=kept.interior_groups, adopted=rings,
@@ -406,6 +419,7 @@ def _run_with_pool(
     )
 
     with Timer(rl, "assemble"):
+        rl.substage("assembling shells", 0, None)
         shells = weld.assemble(interior.shells, boundary_faces)
         result_solids, _ = weld.close_shells(shells)
     rl.line(f"assembled {len(result_solids)} watertight solid(s)")
@@ -418,7 +432,9 @@ def _run_with_pool(
         )
 
     with Timer(rl, "simplify"):
-        result_solids, simplify_stats = _unify(result_solids, pool=pool, tmpdir=tmpdir)
+        result_solids, simplify_stats = _unify(
+            result_solids, pool=pool, tmpdir=tmpdir, report=rl.substage
+        )
     rl.line(
         f"same-domain unification: {simplify_stats['faces_before']} -> "
         f"{simplify_stats['output_faces']} faces, {simplify_stats['edges_before']} -> "
@@ -442,7 +458,7 @@ def _run_with_pool(
     stats["unmerged_solids"] = simplify_stats["unmerged_solids"]
 
     with Timer(rl, "validate"):
-        invalid, total_volume = _validate(result_solids)
+        invalid, total_volume = _validate(result_solids, report=rl.substage)
     if invalid:
         raise ProcessingError(
             f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
@@ -454,6 +470,10 @@ def _run_with_pool(
 
     name = part_name(args.input, args.cc, args.t)
     with Timer(rl, "export"):
+        # One opaque `STEPControl_Writer` call over the whole result, so there is
+        # nothing to count — 10.7 % of the rehearsal's clock with no fraction to
+        # offer. Saying so beats inventing one (docs/algorithm.md §10).
+        rl.substage("writing STEP", 0, None)
         shape = result_solids[0] if len(result_solids) == 1 else occ.compound(result_solids)
         occ.write_step(shape, args.output, name)
         rewrite_step_header(
@@ -602,7 +622,7 @@ def _check_unify_result(pre_volume: float, post_volume: float, n_produced: int) 
     return drift
 
 
-def _unify_serial(solids: list[TopoDS_Shape]):
+def _unify_serial(solids: list[TopoDS_Shape], report=None):
     """Compact each solid's B-rep on the master, one at a time.
 
     Each solid is unified on its own rather than as one compound: it keeps a
@@ -613,7 +633,9 @@ def _unify_serial(solids: list[TopoDS_Shape]):
     worst_drift = 0.0
     skipped = 0
     out: list[TopoDS_Shape] = []
-    for solid in solids:
+    for done, solid in enumerate(solids):
+        if report is not None:
+            report("unifying solids", done, len(solids))
         f, e = occ.count_subshapes(solid)
         faces_before += f
         edges_before += e
@@ -676,7 +698,7 @@ def _worker_unify(job):
     )
 
 
-def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str):
+def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str, report=None):
     """Compact each solid's B-rep across the shared worker pool.
 
     Dispatch, guards and the log-facing stats are identical to
@@ -696,6 +718,12 @@ def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str):
         # start once an unrelated small job frees a worker (WorkerPool.run).
         sizes[in_path] = occ.count_subshapes(solid)[0]
 
+    # Deliberately reported as a *label* with no fraction. Jobs are dispatched
+    # largest-first precisely because the solids are wildly unequal — the
+    # rehearsal's 14 are one dominant body plus 13 scraps — so "3 of 14 done"
+    # after fifteen minutes would be a number that actively misleads.
+    if report is not None:
+        report(f"unifying {len(jobs)} solid(s), largest first", 0, None)
     results, max_rss = pool.run(_worker_unify, jobs, sort_by=lambda job: sizes[job[0]])
 
     faces_before = edges_before = 0
@@ -724,7 +752,8 @@ def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str):
     }
 
 
-def _unify(solids: list[TopoDS_Shape], *, pool: WorkerPool | None = None, tmpdir: str | None = None):
+def _unify(solids: list[TopoDS_Shape], *, pool: WorkerPool | None = None,
+           tmpdir: str | None = None, report=None):
     """Compact every result solid's B-rep, verifying the geometry is unchanged.
 
     Dispatched across ``pool`` when one is active and there is more than one
@@ -736,11 +765,11 @@ def _unify(solids: list[TopoDS_Shape], *, pool: WorkerPool | None = None, tmpdir
     — not threads, which showed no real speedup.
     """
     if pool is not None and pool.active and tmpdir is not None and len(solids) >= 2:
-        return _unify_parallel(solids, pool, tmpdir)
-    return _unify_serial(solids)
+        return _unify_parallel(solids, pool, tmpdir, report=report)
+    return _unify_serial(solids, report=report)
 
 
-def _validate(solids: list[TopoDS_Shape]) -> tuple[list[int], float]:
+def _validate(solids: list[TopoDS_Shape], report=None) -> tuple[list[int], float]:
     """Run ``BRepCheck_Analyzer`` and sum the volume of every result solid.
 
     **On the master, in one process, with OCCT's own threads** — not dispatched
@@ -773,7 +802,14 @@ def _validate(solids: list[TopoDS_Shape]) -> tuple[list[int], float]:
 
     Returns the indices of any invalid solids and the total volume.
     """
-    invalid = [i for i, s in enumerate(solids) if not occ.is_valid(s)]
+    invalid = []
+    for i, solid in enumerate(solids):
+        if report is not None:
+            report("checking solids", i, len(solids))
+        if not occ.is_valid(solid):
+            invalid.append(i)
+    if report is not None:
+        report("checking solids", len(solids), len(solids))
     total_volume = sum(occ.volume(s) for s in solids)
     return invalid, total_volume
 

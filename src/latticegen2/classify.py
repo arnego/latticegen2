@@ -993,6 +993,7 @@ def _classify_parallel(
     candidates: np.ndarray,
     pool: WorkerPool,
     tmpdir: str,
+    report=None,
 ) -> tuple[np.ndarray, int]:
     """Spread :func:`classify_slice` across the run's shared worker pool.
 
@@ -1020,7 +1021,11 @@ def _classify_parallel(
     jobs = [
         (mesh_path, nodes_path, lp.cc, lp.t, offset, stride) for offset in range(stride)
     ]
-    results, max_rss = pool.run(_worker_classify, jobs)
+    results, max_rss = pool.run(
+        _worker_classify, jobs,
+        on_result=None if report is None else
+        (lambda done, total: report("node slices", done, total)),
+    )
 
     node_class = np.empty(len(candidates), dtype=np.int64)
     for offset, (part, _rss) in enumerate(results):
@@ -1035,6 +1040,7 @@ def classify_nodes(
     *,
     tmpdir: str | None = None,
     pool: WorkerPool | None = None,
+    report=None,
 ) -> Classification:
     """Classify every candidate node as INTERIOR, BOUNDARY or OUTSIDE.
 
@@ -1047,9 +1053,17 @@ def classify_nodes(
     reason rather than a measured one: :func:`classify_slice` is pure NumPy, so
     the GIL finding behind every other stage's process pool (G7, G17) does not
     even arise, and neither does G15 — nothing here is topology.
+
+    ``report``, if given, is called ``(label, done, total)`` as the stage advances,
+    for the graphical front-end (docs/algorithm.md §10). It is an observer: it
+    receives no geometry, returns nothing, and every path here behaves the same
+    whether or not one is supplied. ``total=None`` means the work has no
+    countable unit.
     """
     if pool is not None and pool.active and tmpdir is not None and len(candidates) > 0:
-        node_class, max_rss = _classify_parallel(lp, mesh, candidates, pool, tmpdir)
+        node_class, max_rss = _classify_parallel(
+            lp, mesh, candidates, pool, tmpdir, report=report
+        )
     else:
         node_class, max_rss = classify_slice(lp, mesh, candidates), 0
 

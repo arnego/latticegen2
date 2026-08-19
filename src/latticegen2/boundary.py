@@ -36,6 +36,7 @@ and small metadata cross the process boundary, never geometry.
 
 from __future__ import annotations
 
+import itertools
 import os
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -723,23 +724,34 @@ def trim_boundary(
         for bi, nb in enumerate(batches)
     ]
 
+    # Junctions finished once the first `k` batches are done. Reporting
+    # junctions rather than batches is what makes the parallel path's counter
+    # mean the same thing as the sequential path's, and the cumulative sum is
+    # precomputed because the tick below runs inside the dispatch loop.
+    cumulative = list(itertools.accumulate(len(b) for b in batches))
+
+    def _tick(completed: int, _jobs: int) -> None:
+        # Called by `WorkerPool.run` as each batch lands, rather than from
+        # `_consume` below, which runs only after the entire pool has finished:
+        # reported from there, a 13-minute stage emitted its whole counter in
+        # the final millisecond, which is no use to a progress bar. The sequence
+        # of `(done, total)` pairs is identical either way — this stage passes
+        # no `sort_by`, so ordered `imap` yields batch `k` only once batches
+        # `0..k` are all complete, which is the same arithmetic `_consume` did.
+        if progress is not None:
+            progress(cumulative[completed - 1], len(boundary_nodes))
+
     def _consume(results) -> None:
-        done = 0
         # Ordered results, not completion order: `result.pieces` — and therefore
         # the shape list handed to sewing — is identical run to run. Sewing
         # resolves near-coincident vertices in the order it receives them, so an
         # arbitrary completion order would let two runs of the same command
         # produce byte-different output.
-        for batch_index, (path, meta, n_empty, pinholes, rss) in enumerate(results):
+        for path, meta, n_empty, pinholes, rss in results:
             result.n_pinhole_junctions += pinholes[0]
             result.n_pinhole_wires += pinholes[1]
             result.n_empty += n_empty
             result.max_worker_rss = max(result.max_worker_rss, rss)
-            # Report junctions, the same unit the sequential path reports, rather
-            # than batches — results are ordered, so batch i is the i'th job.
-            done += len(batches[batch_index])
-            if progress is not None:
-                progress(done, len(boundary_nodes))
             if path is None:
                 continue
             shape = _read_brep(path)
@@ -755,11 +767,11 @@ def trim_boundary(
                 )
 
     if pool is not None:
-        results, _ = pool.run(_worker_trim, jobs)
+        results, _ = pool.run(_worker_trim, jobs, on_result=_tick)
         _consume(results)
     else:
         with WorkerPool(workers) as owned:
-            results, _ = owned.run(_worker_trim, jobs)
+            results, _ = owned.run(_worker_trim, jobs, on_result=_tick)
         _consume(results)
     return result
 

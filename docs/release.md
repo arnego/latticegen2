@@ -154,6 +154,13 @@ git push origin main --follow-tags
 The workflow refuses to build if the tag disagrees with `__version__`, so a
 mistyped tag costs you a re-tag rather than a mislabelled release.
 
+**Creating the release from GitHub's web UI instead is fine.** That page makes
+the release and the tag together, so the workflow finds the release already
+there when it goes to publish; it uploads the assets into it and fills in the
+generated notes rather than failing. It used to fail — `gh release create` will
+not touch an existing release — which threw away a complete, smoke-tested build
+over how the tag happened to be created.
+
 ## 5. Reading a failure
 
 Every step is a gate. None of them should be worked around.
@@ -164,7 +171,7 @@ Every step is a gate. None of them should be worked around.
 | *Install and run unit tests* | A real regression. Fix it; do not release. |
 | *Build bundles* | Usually a wheel or interpreter that could not be downloaded, or a pin that no longer exists on PyPI. Check `requirements-bundle.txt` and `PBS_RELEASE` in `tools/build_release.py`. |
 | *Smoke-test the built bundles* | **The bundle is broken.** This is the gate doing its job — it extracts the archive and runs a real generation. Never publish past it. |
-| *publish* | Token permissions, or the release/tag already exists. |
+| *publish* | Token permissions. A release that already exists is **not** a failure any more — the step uploads into it and generates the notes if it has none, so tagging from GitHub's own "Draft a new release" page works. |
 
 ## 6. After the release appears
 

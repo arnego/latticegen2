@@ -111,7 +111,32 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF#refs/tags/}" \
-            --title "latticegen2 ${GITHUB_REF#refs/tags/v}" \
-            --generate-notes \
-            dist/*
+          tag="${GITHUB_REF#refs/tags/}"
+
+          # `gh release create` refuses outright when a release for the tag
+          # already exists ("a release with the same tag name already exists"),
+          # and by this point the bundles are built, smoke-tested and staged --
+          # so failing here throws away a good build for a reason that has
+          # nothing to do with it. A release can pre-exist perfectly innocently:
+          # GitHub's own "Draft a new release" page creates the release and the
+          # tag together, so tagging from the web UI always lands here, as does
+          # re-running this job after a later step failed. Upload into it.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; uploading assets into it."
+            gh release upload "$tag" dist/* --clobber
+
+            # An existing release usually has no body, and release.md 6.1 builds
+            # the operator-facing notes on top of the generated one. Generate it
+            # here so that stays true however the release came to exist. Only
+            # when empty: a body someone has already written is never touched.
+            if [ -z "$(gh release view "$tag" --json body --jq .body)" ]; then
+              gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+                -f tag_name="$tag" --jq .body > generated-notes.md
+              gh release edit "$tag" --notes-file generated-notes.md
+            fi
+          else
+            gh release create "$tag" \
+              --title "latticegen2 ${GITHUB_REF#refs/tags/v}" \
+              --generate-notes \
+              dist/*
+          fi

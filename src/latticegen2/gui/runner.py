@@ -49,6 +49,10 @@ def child_python() -> str:
     return exe
 
 
+class LaunchError(RuntimeError):
+    """The child could not be started. Carries a line fit to show the user."""
+
+
 def main_script() -> str:
     """``src/main.py``, resolved from this package's own location.
 
@@ -59,7 +63,20 @@ def main_script() -> str:
     invocation of this tool runs.
     """
     here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(here, "main.py")
+    path = os.path.join(here, "main.py")
+    if not os.path.isfile(path):
+        # Reachable, and worth naming rather than letting `Popen` raise a bare
+        # FileNotFoundError into a Tk callback where nothing would show it: a
+        # `pip install .` puts this package under site-packages, where there is
+        # no `src/` above it, and `pyproject.toml`'s console script reaches the
+        # window with no arguments.
+        raise LaunchError(
+            f"cannot find {path}. The graphical front-end runs the pipeline from "
+            f"a checkout or a release bundle; an installed package has no "
+            f"src/main.py beside it. Use the launcher in the bundle, or run the "
+            f"command line instead."
+        )
+    return path
 
 
 def build_argv(*, input_path: str, output_path: str, cc: str, t: str,

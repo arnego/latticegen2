@@ -332,3 +332,135 @@ def test_writing_the_sentinel_interrupts_the_run(tmp_path, monkeypatch):
     assert interrupted, "Stop did not reach the run"
     # Consumed as it is acted on, so it cannot linger into the next run.
     assert not (tmp_path / "part.cancel").exists()
+
+
+# --- what the code review found (all three anchored here) --------------------
+
+
+def test_the_run_is_not_finished_until_both_streams_reach_eof(tmp_path, monkeypatch):
+    """A successful run must never be reported as a failure.
+
+    The child's exit code is available the instant it dies, while its pipes can
+    still hold buffered lines and a reader thread can be between its read and
+    its `put`. Finishing on "the queue is empty" alone therefore raced the
+    terminal `result` event, and a run that wrote its STEP correctly showed a
+    red banner reading "the run ended with exit code 0".
+    """
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display available")
+    root.withdraw()
+    try:
+        from latticegen2.gui.app import App
+
+        app = App(root)
+
+        class DeadChild:
+            """Exited, but with its result still in flight behind one reader."""
+
+            running = False
+            cancel_path = str(tmp_path / "x.cancel")
+            stderr_lines: list = []
+
+            def __init__(self):
+                import queue
+
+                self.events = queue.Queue()
+
+            def returncode(self):
+                return 0
+
+            def clear_cancel(self):
+                pass
+
+        app.run = DeadChild()
+        app._closed_seen = 1          # only stdout has ended so far
+        app._drain()
+        assert app.run is not None, "finished while a reader was still live"
+
+        app.run.events.put(("event", progress.parse_line(event(
+            progress.RESULT, status=progress.OK, exit=0, reason=None,
+            output="out.step", log="out.log", tmpdir=None))))
+        app.run.events.put(("closed", None))
+        app._drain()
+        assert app.run is None
+        assert app.state.status == progress.OK
+    finally:
+        root.destroy()
+
+
+def test_force_stop_is_scheduled_on_the_wall_clock(tmp_path, monkeypatch):
+    """The grace period has to expire even when the child says nothing.
+
+    It was computed from `state.elapsed`, which only advances when an event
+    arrives — so during the long GIL-holding kernel call that is the whole
+    reason Stop is not instant, the deadline could never be reached and the
+    window would sit on "Cancelling..." forever.
+    """
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display available")
+    root.withdraw()
+    try:
+        from latticegen2.gui.app import App
+        from latticegen2.gui.runner import GRACE_SECONDS
+
+        app = App(root)
+
+        class SilentChild:
+            running = True
+            cancel_path = str(tmp_path / "x.cancel")
+            stderr_lines: list = []
+            killed = False
+
+            def __init__(self):
+                import queue
+
+                self.events = queue.Queue()
+
+            def cancel(self):
+                pass
+
+            def force_stop(self):
+                self.killed = True
+
+            def returncode(self):
+                return None
+
+        app.run = SilentChild()
+        app.state.elapsed = 0.0        # nothing has been reported, and won't be
+        app._on_stop()
+        assert app._force_at is not None
+
+        # Capture the real clock first: `latticegen2.gui.app.time` is the same
+        # module object as `time`, so a lambda calling through it after the
+        # patch would call itself.
+        import time as _time
+
+        real_monotonic = _time.monotonic
+        monkeypatch.setattr(
+            _time, "monotonic",
+            lambda: real_monotonic() + GRACE_SECONDS + 1,
+        )
+        app._drain()
+        assert app.run.killed, "the grace period never expired"
+    finally:
+        root.destroy()
+
+
+def test_a_missing_main_script_is_a_message_rather_than_a_silent_no_op(monkeypatch):
+    """`pip install .` puts this package where there is no `src/` above it.
+
+    The console script then reaches the window with no arguments, and `Popen`
+    would raise `FileNotFoundError` into a Tk callback — where a windowed
+    process has nowhere to print it, so pressing Start did nothing at all.
+    """
+    from latticegen2.gui import runner
+
+    monkeypatch.setattr(runner.os.path, "isfile", lambda _p: False)
+    with pytest.raises(runner.LaunchError, match="src/main.py"):
+        runner.main_script()

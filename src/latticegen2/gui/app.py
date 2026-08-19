@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -32,7 +33,7 @@ from ..cli import (
 from ..errors import LatticeGenError
 from ..sysinfo import logical_core_count
 from .model import RunState
-from .runner import GRACE_SECONDS, Run, build_argv
+from .runner import GRACE_SECONDS, LaunchError, Run, build_argv
 
 POLL_MS = 100
 BAR_HEIGHT = 16
@@ -111,7 +112,16 @@ class App:
         self.root = root
         self.run: Run | None = None
         self.state = RunState()
+        #: Wall-clock deadline for force-stopping, and the run's own start.
+        #: **Wall clock, not the event stream.** Both were derived from
+        #: `state.elapsed` at first, which only advances when the child emits
+        #: something — so the grace period could not expire during a long silent
+        #: kernel call, which is precisely the case it exists for, and the
+        #: elapsed display froze for the whole of `simplify`.
         self._force_at: float | None = None
+        self._started: float | None = None
+        #: How many of the child's two streams have reached end of file.
+        self._closed_seen = 0
 
         root.title(f"latticegen2 {__version__}")
         root.resizable(False, False)
@@ -301,15 +311,24 @@ class App:
             return
 
         self.state = RunState()
-        self.run = Run(
-            build_argv(
-                input_path=args.input, output_path=output,
-                cc=self.cc_var.get().strip(), t=self.t_var.get().strip(),
-                cores=int(self.cores_var.get().strip()),
-            ),
-            log_path=os.path.splitext(output)[0] + ".log",
-        )
+        try:
+            self.run = Run(
+                build_argv(
+                    input_path=args.input, output_path=output,
+                    cc=self.cc_var.get().strip(), t=self.t_var.get().strip(),
+                    cores=int(self.cores_var.get().strip()),
+                ),
+                log_path=os.path.splitext(output)[0] + ".log",
+            )
+        except (LaunchError, OSError) as exc:
+            # Anything that stops the child existing at all. Without this the
+            # exception escapes into the Tk callback, where a windowed process
+            # has nowhere to print it: the button would simply do nothing.
+            self.message_var.set(str(exc))
+            return
         self._force_at = None
+        self._started = time.monotonic()
+        self._closed_seen = 0
         self.start.configure(text="Stop!")
         for widget in self.fields:
             widget.state(["disabled"])
@@ -322,7 +341,7 @@ class App:
         if self.run is None or not self.run.running:
             return
         self.run.cancel()
-        self._force_at = self.state.elapsed + GRACE_SECONDS
+        self._force_at = time.monotonic() + GRACE_SECONDS
         self.start.state(["disabled"])
         self.start.configure(text="Cancelling…")
         # Said plainly rather than hidden: the interrupt is checked between
@@ -361,18 +380,32 @@ class App:
                     self.state.apply(payload)
                 elif kind in ("raw", "stderr"):
                     self.state.lines.append((payload, True))
+                elif kind == "closed":
+                    self._closed_seen += 1
             if drained or run.running:
                 self._refresh()
-            if self._force_at is not None and self.state.elapsed > self._force_at \
+            if self._force_at is not None and time.monotonic() > self._force_at \
                     and run.running:
                 run.force_stop()
                 self._force_at = None
-            if not run.running and run.events.empty():
+            # **Both streams must have reached EOF, not merely "the queue looks
+            # empty".** The child's exit code is available the instant it dies,
+            # while the pipes can still hold buffered lines and a reader thread
+            # can be between its read and its `put` — so finishing on an empty
+            # queue alone can miss the terminal `result` event and report a
+            # perfectly good run as a failure.
+            if not run.running and self._closed_seen >= 2 and run.events.empty():
                 self._finish(run)
         self.root.after(POLL_MS, self._drain)
 
     def _refresh(self) -> None:
         state = self.state
+        if self.run is not None and self._started is not None:
+            # Advanced here rather than only from events, so the clock keeps
+            # moving through a stage that reports nothing for nineteen minutes.
+            # `max` so the summary's own authoritative duration still wins at
+            # the end.
+            state.elapsed = max(state.elapsed, time.monotonic() - self._started)
         self.stage_label.configure(text=state.stage_text())
         self.stage_bar.set(state.permille / 1000.0, f"{state.permille // 10}%")
         self.sub_bar.set(state.sub_fraction, state.sub_text())
@@ -390,6 +423,7 @@ class App:
         run.clear_cancel()
         self.run = None
         self._force_at = None
+        self._started = None
         self.start.state(["!disabled"])
         self.start.configure(text="Start!")
         for widget in self.fields:

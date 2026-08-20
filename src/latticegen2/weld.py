@@ -590,6 +590,19 @@ def _sew_round_two(
     on the unsplit tile results (the behaviour before the split existed) makes
     that failure mode unreachable, at the cost of the split's saving only for
     the components where it was actually wrong.
+
+    **A count still wrong after the unsplit sew is a hard failure, not a third
+    thing to note and carry on from.** The unsplit sew is what the component
+    was sewn with before :func:`_split_seam_interior` existed, so the split is
+    not the cause and there is no further route to try. What is left is a hole
+    in the boundary layer itself, and only the boundary layer could have closed
+    it: :func:`build_interior_shell` adopts ``want_rings`` and nothing else, so
+    an unaccounted free edge is a hole the interior will not fill and
+    :func:`shell_defects` reports as an edge used by one face — one `instance`
+    stage later, naming assembly rather than the sew. Reported on a v3.0.0 part
+    at 17 and 14 edges over two runs, in both cases exactly the excess this
+    recount had already measured and logged before the run went on to spend a
+    minute building an interior for a layer that could never close.
     """
     groups = list(by_group.keys())
     face_lists = {
@@ -657,7 +670,8 @@ def _sew_round_two(
             if plan[group] is None:
                 continue  # never split, so there is nothing the split could have broken
             want = 4 * expected_rings.get(group, 0)
-            got = len(free_edges(out[group]))
+            split_free = free_edges(out[group])
+            got = len(split_free)
             if got != want:
                 # 85 % of `stitch` on the rehearsal and the single longest phase
                 # in the pipeline outside `simplify`, so it gets its own label
@@ -680,9 +694,38 @@ def _sew_round_two(
                 # component, a few seconds at rehearsal scale. It is paid only
                 # on the path that is already re-sewing the component from
                 # scratch, which is the one place a few seconds do not matter.
+                after = free_edges(out[group])
                 if stats is not None:
                     stats.repair_evidence.append(
-                        (group, want, got, len(free_edges(out[group])))
+                        (group, want, got, len(after), edge_positions(split_free))
+                    )
+                if len(after) != want:
+                    # The unsplit sew is what this component looked like before
+                    # `_split_seam_interior` existed, so a count still wrong here
+                    # is not the split's doing and re-sewing again cannot help.
+                    # It is a hole in the boundary layer itself, and the layer is
+                    # the only thing that can close it: the interior is built on
+                    # `want_rings` alone, so it adopts these edges nowhere and
+                    # `assemble` will report them as edges used by one face —
+                    # 1 m 00 s of `instance` later, pointing at assembly rather
+                    # than at the sew. Fail here instead, and print the same
+                    # rounded midpoints `shell_defects` prints, so the two
+                    # reports name the same edges (docs/algorithm.md §8: a
+                    # watertightness invariant discovered in seconds beats the
+                    # same invariant discovered later with no indication of
+                    # where).
+                    raise ProcessingError(
+                        f"The sewn boundary layer of component {group} presents "
+                        f"{len(after)} free edge(s) where its {expected_rings.get(group, 0)} "
+                        f"interior interface(s) account for exactly {want}. The "
+                        f"seam-only split gave {got} and is not the cause: this "
+                        f"count is from the full unsplit sew, which is what this "
+                        f"component was sewn with before the split existed. "
+                        f"{len(after) - want:+d} edge(s) are unaccounted for, and "
+                        f"each is a hole nothing will fill - the interior adopts "
+                        f"only the {expected_rings.get(group, 0)} interface(s) it "
+                        f"was told about. Sample positions: "
+                        f"{[p.tolist() for p in edge_positions(after)]}"
                     )
     if stats is not None:
         stats.t_repair = time.perf_counter() - t0
@@ -704,18 +747,26 @@ class SewStats:
     check). Zero on every committed scenario; the check exists for real, heavily
     trimmed geometry where it has measured nonzero (docs/specification.md §10)."""
     repair_evidence: list = field(default_factory=list)
-    """``(component, want, got_split, got_unsplit)`` for every repaired component.
+    """``(component, want, got_split, got_unsplit, sample positions)`` for every
+    repaired component.
 
     Recorded because :attr:`repaired_components` alone cannot distinguish the
-    two things the check catches, and they call for opposite responses. If
-    ``got_unsplit == want != got_split`` the seam-only split really did produce
-    a different shell and the repair earned its cost. If ``got_unsplit ==
-    got_split != want`` the split reproduced the unsplit sew exactly and the
-    check fired on an expectation neither route can meet — the repair then
-    costs a full sew (542-559 s of the `cc=5, t=1` rehearsal's `stitch`) and
-    changes nothing. The sew this reads is free, having had to run either way;
-    the second free-edge count over the repaired component is not, and is paid
-    only where a full re-sew is already being paid."""
+    two things the check catches, and they call for opposite responses — but
+    only one of the two now reaches this list. ``got_unsplit == want !=
+    got_split`` means the seam-only split really did produce a different shell
+    and the repair earned its cost, which is what a run gets here. The other
+    case, ``got_unsplit != want``, is a hole in the boundary layer that no
+    re-sew can close, and :func:`_sew_round_two` raises on it rather than
+    letting it reach `assemble` an `instance` stage later.
+
+    The positions are the *split's* free edges, which is the set the successful
+    repair discarded — the one thing about a real seam-split failure that the
+    counts alone cannot locate. They cost nothing: the edges are already in
+    hand from the count that fired the check.
+
+    The sew this reads is free, having had to run either way; the second
+    free-edge count over the repaired component is not, and is paid only where
+    a full re-sew is already being paid."""
     retoleranced_faces: int = 0
     """Faces made valid again by correcting a vertex recorded off its edge's
     curve (:func:`latticegen2.occ.fix_vertex_tolerances`, docs/algorithm.md §8)."""
@@ -893,6 +944,21 @@ def free_edges(faces) -> list:
         if edge_faces.FindFromIndex(i).Extent() == 1
         if not BRep_Tool.Degenerated_s(TopoDS.Edge_s(edge_faces.FindKey(i)))
     ]
+
+
+def edge_positions(edges, limit: int = 10) -> list:
+    """Midpoints of up to ``limit`` of ``edges``, rounded, for a message.
+
+    The same reduction :func:`shell_defects` applies to its own samples, so a
+    free edge reported by `stitch` and the same edge reported by `assemble`
+    print as the same number and can be matched by eye across two log lines.
+    """
+    out: list = []
+    for edge in edges[:limit]:
+        pts = [_pnt(v) for v in occ._explore(edge, TopAbs_ShapeEnum.TopAbs_VERTEX)]
+        if pts:
+            out.append(np.round(sum(pts) / len(pts), 3))
+    return out
 
 
 def _corner(p: np.ndarray) -> tuple:

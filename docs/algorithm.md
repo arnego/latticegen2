@@ -965,6 +965,25 @@ into `assemble`. `SewStats.repaired_components` reports how many times this
 fires, logged in the run summary; it is 0 on every committed scenario, since
 none is large enough to tile (`MIN_PIECES_TO_TILE`) in the first place.
 
+**A count still wrong after that unsplit re-sew is a hard failure (exit 4), and
+was not until a v3.0.0 report showed why it has to be.** The unsplit sew is
+what the component was sewn with before the split existed, so the split is not
+the cause and no further route remains; what is left is a hole in the boundary
+layer itself, which only the boundary layer could have closed — §6's instancing
+adopts `want_rings` and nothing else, so an unaccounted free edge is a hole the
+interior will not fill. Two runs of a heat-exchanger part at `cc=5, t=1` and
+`cc=7, t=1.4` reported `full unsplit sew gives 105477` against an expected
+105460, and `38170` against `38156`; both were allowed through, and both then
+failed `assemble` with **exactly** the excess — 17 and 14 edges used by one
+face — one `instance` stage and a minute later, in a message naming assembly
+rather than the sew. The invariant was measured at `stitch` and discarded
+there. Failing on it is the same principle §8 already applies to an interface
+registered from one side with no partner on the other: a watertightness
+invariant discovered in seconds beats the same invariant discovered later with
+no indication of where. Both the failure and the surviving repair line now
+print the free edges' world positions, rounded exactly as `shell_defects`
+rounds its own, so the two reports name the same edges.
+
 **That count must exclude degenerate edges, and did not until it was measured.**
 An edge with no extent is a parametric artefact whose one owning face uses it
 once by construction — `shell_defects` below has always skipped them for that

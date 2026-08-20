@@ -21,6 +21,7 @@ from OCP.TopoDS import TopoDS, TopoDS_Shell
 from latticegen2 import occ, weld
 from latticegen2.boundary import BoundaryPiece, trim_junction
 from latticegen2.connect import lattice_interfaces
+from latticegen2.errors import ProcessingError
 from latticegen2.interior import build_interior_shell, extract_template_mesh
 from latticegen2.junction import build_template, is_cap_plane_face
 from latticegen2.lattice import OPPOSITE_HALF, lattice_params, neighbor_step, nodes
@@ -438,6 +439,39 @@ def test_round_two_repairs_a_component_the_seam_split_got_wrong(template, monkey
     assert (open_edges, misoriented) == (0, 0), "the repaired component must still close"
     solid = occ.make_solid(shell_of(out[0]))
     assert occ.volume(solid) == pytest.approx(12 * tpl.volume, rel=1e-9)
+
+
+def test_a_hole_the_unsplit_sew_cannot_close_fails_in_stitch_not_in_assemble(template):
+    """A free-edge count still wrong after the full unsplit sew is a hard failure.
+
+    The unsplit sew is what a component was sewn with before
+    :func:`weld._split_seam_interior` existed, so a count still wrong there is
+    not the split's doing and no further re-sew can help. It is a hole in the
+    boundary layer itself, and the interior cannot close it: it adopts the rings
+    it was told about and nothing else. Left to carry on, the run spends a whole
+    `instance` stage building an interior for a layer that can never close, then
+    fails in `assemble` naming assembly rather than the sew — which is exactly
+    what a v3.0.0 report of this showed, at 17 and 14 edges over two runs, in
+    both cases precisely the excess `_sew_round_two` had already measured.
+
+    The hole is made by deleting one ordinary face from one piece, which is the
+    production symptom rather than a wrong expectation: the geometry really is
+    short of a face and every route to sewing it produces the same free edges.
+    """
+    lp, tpl, _ = template
+    pieces = _line_pieces(lp, tpl, 12)
+    # Not an end piece and not a cap: an interior piece's lateral face, whose
+    # removal leaves a hole with no partner anywhere in the chain.
+    del pieces[5].faces[0]
+    groups = [0] * len(pieces)
+
+    with pytest.raises(ProcessingError) as excinfo:
+        weld.sew_boundary(pieces, groups, tile_target=3, min_to_tile=1, want_rings={})
+
+    message = str(excinfo.value)
+    assert "free edge(s)" in message
+    assert "unsplit sew" in message,         "the message must say the split is not the cause, or it misdirects the reader"
+    assert "Sample positions" in message and "[" in message.split("Sample positions")[1],         "positions are the whole point: counts alone cannot locate a hole in a part"
 
 
 def test_tiled_sew_across_worker_processes_matches_the_sequential_path(template, tmp_path):

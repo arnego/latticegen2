@@ -372,19 +372,22 @@ def _run_with_pool(
             f"full unsplit sew; the output is unaffected, only slower for those "
             f"components."
         )
-        # Which of the two things the check catches actually happened — see
-        # `SewStats.repair_evidence`. This is the only way to tell a real
-        # seam-split failure from an expectation neither route meets.
-        for group, want, got_split, got_unsplit in sew_stats.repair_evidence:
+        # What the repair discarded, and where — see `SewStats.repair_evidence`.
+        # The counts say the split was wrong; only the positions say where, and
+        # without them a report of this can be acted on no further than "the
+        # split failed on a part I do not have".
+        for group, want, got_split, got_unsplit, where in sew_stats.repair_evidence:
             rl.always(
                 f"  component {group}: expected {want} free edge(s), seam-only "
                 f"split gave {got_split}, full unsplit sew gives {got_unsplit}"
-                + (
-                    " - both routes give the same count, so the expectation is "
-                    "what this check could not meet"
-                    if got_unsplit == got_split else ""
-                )
             )
+            if where:
+                rl.always(
+                    f"  component {group}: sample positions of the "
+                    f"{got_split} edge(s) the split left free: "
+                    f"{[p.tolist() for p in where]}"
+                    + (" ..." if got_split > len(where) else "")
+                )
     if sew_stats.retoleranced_faces or sew_stats.still_invalid_faces:
         rl.always(
             f"vertex tolerances corrected on {sew_stats.retoleranced_faces} sewn "

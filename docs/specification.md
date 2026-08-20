@@ -353,7 +353,61 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-*Nothing open.*
+### `assemble` fails on holes `stitch` already measured — half fixed, root cause open
+
+**Reported 2026-08-20** against v3.0.0, as two runs of a heat-exchanger part
+that is *not* `TD_HX_rehearsal_test.step` (larger, and one variant carries
+internal channels). Both die at `assemble`:
+
+| | run 1, `cc=5 t=1` | run 2, `cc=7 t=1.4` |
+|---|---|---|
+| `stitch` expected free edges | 105,460 | 38,156 |
+| seam-only split gave | 269,791 (rejected, correctly) | 99,818 (rejected, correctly) |
+| **full unsplit sew gave** | **105,477** (+17) | **38,170** (+14) |
+| `assemble` failed with | **17 edges on 1 face** | **14 edges on 1 face** |
+
+**Done: the run no longer carries on past that.** The excess after the *unsplit*
+sew is exactly the count that later kills `assemble`, and `_sew_round_two`
+measured it, logged it, and returned anyway — so the run spent a whole
+`instance` stage (1 m 00 s) building an interior for a boundary layer that could
+never close, then reported the failure against assembly rather than the sew.
+That is now a hard failure at `stitch`, with the free edges' world positions in
+the message, and the surviving repair line prints the positions of the edges the
+split left free. See docs/algorithm.md §8, `test_weld.py::test_a_hole_the_unsplit_sew_cannot_close_fails_in_stitch_not_in_assemble`.
+
+**Open: why the boundary layer has those holes at all.** Not the seam split —
+that is the 269,791/99,818 figure, caught and discarded as designed (G9, G21).
+Not the interior either: `interior shell: ... 105460 open edges` matches
+`want_rings` exactly in both runs. The holes are in the sewn boundary layer
+after a correct full sew.
+
+**Where to start.** The failing edge positions sit on the caps the same run
+logged as declined-unpaired:
+
+    declined (633,-99,-75)h5 @ [2078.461, -60.0, 936.93]
+    failing  [2079.348,-59.537,937.856]  [2078.836,-59.527,937.482]
+             [2079.042,-61.34,936.566]   [2078.836,-61.34,936.42]
+
+    declined (629,-97,-86)h0 @ [2079.904, -27.5, 910.394]
+    failing  [2078.836,-27.572,910.415]  [2078.909,-27.572,910.467]
+             [2078.836,-27.821,909.165]  [2079.247,-28.006,909.682]
+
+Same pattern in run 2. That contradicts two claims this codebase makes about
+the case: the note `pipeline._log_interfaces` prints for it ("the output stays
+watertight") and `_sew_round_two`'s reasoning that `want` is exact because a
+declined cap keeps its own face. Two mechanisms are live in both runs and the
+log cannot separate them — the `unpaired` decline path itself, and
+`boundary._fuse_group`'s `_owning_cap` re-tagging (4 and 5 fused clusters
+respectively), where a mis-assigned cap key produces this signature exactly.
+Note `TD_HX_rehearsal_test` at `cc=5, t=1` declines 3 unpaired caps and stays
+watertight, so being unpaired is not by itself sufficient.
+
+**Blocked on the input.** `TD HX LatticeGen3.0 Test.stp`, or the smaller
+`LatticeGen3.0 Test_2.stp` which fails identically. Not the temp folder. Per
+docs/testing.md this defect family must be diagnosed on the geometry that
+actually fails: G10 is the case where a synthetic reproduction matching the
+symptom to four significant figures passed a full measurement gate while
+repairing an entirely different defect.
 
 ---
 

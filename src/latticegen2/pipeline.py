@@ -241,6 +241,17 @@ def _run_with_pool(
         )
         stats["pinhole_wires_removed"] = boundary.n_pinhole_wires
         stats["pinhole_junctions_repaired"] = boundary.n_pinhole_junctions
+    if boundary.n_retrimmed_junctions:
+        # `always`, not `line`: this one records the kernel contradicting
+        # itself about a junction it was asked to trim, and a run where that
+        # happens should say so without -v (docs/algorithm.md §7.2).
+        rl.always(
+            f"note: {boundary.n_retrimmed_junctions} junction(s)' intersection "
+            f"with the input body came back untrimmed and were redone per "
+            f"half-strut (docs/algorithm.md §7.2). Without that repair each "
+            f"would have left a whole junction's material outside the body."
+        )
+        stats["retrimmed_junctions"] = boundary.n_retrimmed_junctions
     stats["workers"] = args.workers
     if boundary.max_worker_rss:
         # Folded into the run's high-water mark as well as reported separately:
@@ -320,7 +331,9 @@ def _run_with_pool(
         boundary_faces, sew_stats = weld.sew_boundary(
             kept.pieces, kept.piece_groups,
             workers=args.workers, tmpdir=tmpdir,
-            pool=pool, want_rings=want_rings, report=rl.substage,
+            pool=pool, want_rings=want_rings, lp=lp,
+            max_vertex_tol=occ.SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION * lp.t,
+            report=rl.substage,
         )
         rl.substage("locating interface rings", 0, None)
         t_rings = _dt.datetime.now()
@@ -443,8 +456,14 @@ def _run_with_pool(
         f"{simplify_stats['output_faces']} faces, {simplify_stats['edges_before']} -> "
         f"{simplify_stats['output_edges']} edges "
         f"({100 * (1 - simplify_stats['output_faces'] / max(simplify_stats['faces_before'], 1)):.0f}% fewer); "
-        f"volume drift {simplify_stats['volume_drift']:.2e} "
-        f"(tolerance {UNIFY_VOLUME_TOL:g})"
+        f"volume drift {simplify_stats['volume_drift']:.2e}"
+        + (
+            f" (past the {UNIFY_VOLUME_TOL:g} pre-filter; the boundary "
+            f"displacement it implies was measured and is within "
+            f"{UNIFY_MAX_DISPLACEMENT:g} mm)"
+            if simplify_stats["volume_drift"] > UNIFY_VOLUME_TOL
+            else f" (within the {UNIFY_VOLUME_TOL:g} pre-filter)"
+        )
     )
     if simplify_stats["unmerged_solids"]:
         rl.always(
@@ -503,7 +522,18 @@ def _run_with_pool(
 
 
 UNIFY_VOLUME_TOL = 1e-4
-"""Relative tolerance on the volume that same-domain unification must preserve.
+"""Relative volume drift above which unification is measured properly.
+
+**A pre-filter, not the bar.** It decides only whether it is worth paying for
+the surface area needed to express the drift as a boundary displacement, which
+is what :data:`UNIFY_MAX_DISPLACEMENT` then judges. Everything below is the
+calibration history of the figure, and it is kept because it is what
+established that the drift is a re-description rather than movement -- but
+the reason this stayed at 1e-4 rather than being loosened again the next time a
+part exceeded it is that loosening it was always the wrong response to a
+quantity biased by solid size (:func:`_check_unify_result`).
+
+Relative tolerance on the volume that same-domain unification must preserve.
 
 Unification re-describes the boundary rather than moving it, and the drift is
 what that re-description costs: on purely planar geometry, where the volume is
@@ -542,6 +572,30 @@ not the same surface distorts the boundary, which shows up as an invalid solid
 long before it shows up as a volume this close to unchanged. Every run logs the
 observed drift, so the margin this bar actually has is visible rather than
 assumed.
+"""
+
+
+UNIFY_MAX_DISPLACEMENT = 1e-3
+"""Millimetres. How far same-domain unification may move a solid's boundary.
+
+The quantity :data:`UNIFY_VOLUME_TOL` was always a proxy for, now measured
+directly as ``|dV| / surface area`` — see :func:`_check_unify_result` for why
+the proxy is biased by solid size and for the pair of solids that showed it,
+90x apart in relative drift and both sound.
+
+Calibrated against what the kernel itself records. Worst displacement measured
+anywhere: **2.494e-04 mm**, on `SpiralTest.step`'s 4.17 mm^3 island at
+``cc=5, t=1``, whose merged edges carry recorded tolerances of 2.1e-02 mm — so
+the movement is 85x inside OCCT's own idea of where that surface is. The
+rehearsal's 181 mm^3 island at ``cc=12, t=2.5`` measures 6.96e-06 mm, and
+`SpiralTest`'s own dominant body 2.752e-06 mm. This bar clears the worst of
+them by 4x, sits at or below the 8.7e-04 to 1.5e-03 mm tolerances OCCT records
+on the rehearsal's merged faces (docs/algorithm.md §8, G12), and is 400x below
+the smallest legal strut (``t = 0.4`` mm, specification.md §3).
+
+The stronger guards are unchanged and are still the ones that would catch a
+merge across genuinely different surfaces: the solid-count check beside this
+one, and ``BRepCheck_Analyzer`` at `validate`.
 """
 
 
@@ -599,15 +653,48 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
         return merged, True
 
 
-def _check_unify_result(pre_volume: float, post_volume: float, n_produced: int) -> float:
+def _check_unify_result(
+    pre_volume: float, post_volume: float, n_produced: int, area_of=None
+) -> float:
     """The two guards every unified solid must clear, wherever it ran.
 
     Both guards are load-bearing regardless of which stage produced the
     numbers (docs/algorithm.md §9): the solid-count check also protects the
-    junction-graph cross-check that precedes assembly, and the volume-drift
-    bar is what actually catches a merge across faces that were not genuinely
-    the same surface. Shared by the serial and parallel paths so the bars —
-    and their error text — cannot drift apart between them.
+    junction-graph cross-check that precedes assembly, and the volume bar is
+    what actually catches a merge across faces that were not genuinely the same
+    surface. Shared by the serial and parallel paths so the bars — and their
+    error text — cannot drift apart between them.
+
+    **The volume bar is a two-stage test, and only the second stage decides.**
+    Relative drift is cheap — both volumes have already been measured — but it
+    is not the quantity this guard is about: a merge that moves the boundary by
+    a given distance changes a small solid's volume by a much larger *fraction*
+    than a big one's, so a relative bar is biased by size rather than by the
+    thing it is trying to detect. Measured on one `SpiralTest.step` run, whose
+    two solids were unified by the same code in the same call:
+
+    ======================  ===============  ==============
+    solid                   relative drift   displacement
+    ======================  ===============  ==============
+    27,864 mm^3, 64k faces  1.013e-05        2.752e-06 mm
+    4.17 mm^3, 53 faces     1.837e-03        2.494e-04 mm
+    ======================  ===============  ==============
+
+    Ninety times apart in the first column, and both far inside the 2.1e-02 mm
+    tolerances OCCT itself records on the edges it was merging. The small one
+    failed a 1e-4 relative bar; its exact symmetric difference against the
+    un-unified solid, cut both ways, is **0 mm^3**, and their intersection
+    measures the un-unified volume to twelve decimals — the same region, read
+    by a quadrature that re-describing the boundary changed.
+
+    So drift is used only as a **pre-filter**, and a solid that trips it is then
+    judged on ``|dV| / area``, a displacement in millimetres, which is what
+    docs/algorithm.md §9 already argued was the honest reading. ``area_of`` is a
+    callable rather than a number because measuring it is expensive — 7.7 s on
+    the 64k-face solid above, which at rehearsal scale would put ~70 s on every
+    run for a guard that almost never fires. Called only on the path that was
+    about to raise, it costs nothing the rest of the time. Without it the
+    pre-filter alone decides, which is the old behaviour.
     """
     if n_produced != 1:
         raise ProcessingError(
@@ -616,12 +703,17 @@ def _check_unify_result(pre_volume: float, post_volume: float, n_produced: int) 
         )
     drift = abs(post_volume - pre_volume) / max(abs(pre_volume), 1.0)
     if drift > UNIFY_VOLUME_TOL:
-        raise ProcessingError(
-            f"Same-domain unification changed a solid's volume from "
-            f"{pre_volume:.6f} to {post_volume:.6f} mm^3 ({drift:.2e} relative, "
-            f"tolerance {UNIFY_VOLUME_TOL:g}). Faces that are not genuinely the "
-            f"same surface were merged, so the boundary moved."
-        )
+        area = area_of() if area_of is not None else 0.0
+        displacement = abs(post_volume - pre_volume) / area if area > 0.0 else float("inf")
+        if displacement > UNIFY_MAX_DISPLACEMENT:
+            raise ProcessingError(
+                f"Same-domain unification changed a solid's volume from "
+                f"{pre_volume:.6f} to {post_volume:.6f} mm^3 ({drift:.2e} relative), "
+                f"which over its {area:.4f} mm^2 of surface is a boundary "
+                f"displacement of {displacement:.3e} mm against a tolerance of "
+                f"{UNIFY_MAX_DISPLACEMENT:g} mm. Faces that are not genuinely the "
+                f"same surface were merged, so the boundary moved."
+            )
     return drift
 
 
@@ -649,7 +741,10 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
             skipped += 1
         produced = occ.solids(merged)
         post_volume = occ.volume(produced[0]) if len(produced) == 1 else float("nan")
-        worst_drift = max(worst_drift, _check_unify_result(pre_volume, post_volume, len(produced)))
+        worst_drift = max(worst_drift, _check_unify_result(
+            pre_volume, post_volume, len(produced),
+            area_of=lambda: occ.area(produced[0]) if len(produced) == 1 else 0.0,
+        ))
 
         f, e = occ.count_subshapes(produced[0])
         faces_after += f
@@ -739,7 +834,13 @@ def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str, r
         edges_before += eb
         if not ran:
             skipped += 1
-        worst_drift = max(worst_drift, _check_unify_result(pre_volume, post_volume, n_produced))
+        # Read back only if the pre-filter trips: the shape is loaded a few
+        # lines below anyway on the path that does not, so this costs a second
+        # read solely on the path that is already about to fail.
+        worst_drift = max(worst_drift, _check_unify_result(
+            pre_volume, post_volume, n_produced,
+            area_of=lambda path=out_path: occ.area(_read_brep(path)),
+        ))
         faces_after += fa
         edges_after += ea
         out.append(_read_brep(out_path))

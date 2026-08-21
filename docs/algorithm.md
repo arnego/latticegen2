@@ -786,6 +786,68 @@ distributed over worker processes with small-IPC discipline: the input body goes
 to disk once as a `.brep` and workers read it directly; only file paths and small
 plain metadata cross the process boundary.
 
+### 7.2 An intersection that returns its own operand
+
+`BRepAlgoAPI_Common(junction, body)` can return the junction **untrimmed**,
+reporting `IsDone`, leaving a whole junction's material outside the input body.
+Measured on `SpiralTest.step` at `cc=5, t=1`: **8 junctions of 2,073**, each
+coming back at exactly the template's 8.606602 mm³, putting lattice material up
+to **1.29 mm** outside a body every one of them was supposed to be trimmed
+against.
+
+**Established against four independent tests, because a boolean cannot be used
+to check a boolean here.** The obvious cross-check — `BRepAlgoAPI_Cut(junction,
+body)` — returns 0 mm³, agreeing that the junction is wholly inside, and it is
+wrong in exactly the same way. What settles it is that OCCT's own
+`BRepClass3d_SolidClassifier`, ray parity over the body's tessellation at 12k,
+35k and 129k triangles, `BRepExtrema_DistShapeShape` (0.13 to 1.29 mm, so not a
+tie), and a **well-conditioned** sphere∩body intersection all put those
+junctions outside. This is docs/testing.md's `material_outside` lesson in a new
+place: on geometry whose faces lie on the body's surface, a boolean's answer is
+evidence about the boolean.
+
+**It is specific to the fused junction operand, and none of the usual knobs
+reach it.** At the same nodes, spheres and boxes of the same scale trim
+correctly, so the kernel is not simply broken in that region. The input solid
+is `BRepCheck_Analyzer`-valid, one closed shell. Baking the `Moved()` location
+into real coordinates changes nothing, and neither does `SetFuzzyValue` at
+1e-7 through 1e-2, nor swapping the operands.
+
+**The repair re-derives the trim from operands the same call handles
+correctly**: the six half-strut prisms, each convex where `J` is not, trimmed
+separately and fused back with one local `BRepAlgoAPI_Fuse`. That is a third
+general boolean in this pipeline, alongside §3.2's template fuse and §7.1's
+disagreeing-cap repair, and it is on the same footing as §7.1's — it runs only
+where the kernel has already contradicted itself.
+
+| node | fused trim | per-half-strut repair |
+|---|---|---|
+| (3,6,3) | 8.606602 (whole) | **2.477128** |
+| (6,2,4) | 8.606602 | **3.694974** |
+| (6,1,4) | 8.606602 | **7.668692** |
+| (4,6,5) | 8.606602 | **7.471461** |
+
+**The detector is self-validating, which is what makes it safe to run on a
+result the kernel says is fine.** It fires whenever the intersection returns a
+single solid at the junction's own volume — which includes the perfectly
+legitimate case of a junction wholly inside the body — and the re-trim then
+decides: if every half-strut comes back whole, the original result stands
+untouched. So a false positive costs a check and never a different answer, and
+the repair needs no independent opinion about which side of the surface the
+junction is on, which is precisely the question the kernel just got wrong.
+Measured on this part: the check fires on **9.2 %** of boundary junctions and
+the repair changes **0.4 %** of them, for about **+11 %** on a stage that is
+worker-parallel anyway.
+
+`BoundaryResult.n_retrimmed_junctions` reports the count, logged without `-v`
+because a run where the kernel contradicts itself should say so.
+
+**One consequence reaches §8, and it is why `unweldable` now checks
+boundary-to-boundary caps.** A rebuilt junction's caps are geometrically
+identical to what its neighbours expect — measured within 1e-15 mm, four orders
+inside `SEW_TOLERANCE` — but they can be *subdivided* differently, and sewing
+pairs edges rather than regions. See §8.
+
 ---
 
 ## 8. Connectivity, the floating-body rule, and stitching
@@ -821,6 +883,28 @@ Removals are logged as **one aggregate line** (count, total volume, min/max, up 
 20 sample volumes), never one line per body. A line per body turns a run that
 drops many of them into a multi-thousand-line tail that buries the rest of the
 log, for no information the aggregate does not already carry.
+
+**An interface's two sides must correspond edge for edge, and that is checked
+on every cap rather than only the interior's.** `weld.unweldable` declines an
+interface whose two rings do not match up, before the caps are dropped, so a
+rejection costs an extra solid rather than a hole (§11). It used to check only
+interior-to-boundary caps, on the reasoning that boundary-to-boundary caps are
+*sewn* rather than adopted and the sew would reconcile whatever two independent
+booleans produced.
+
+**That reasoning is false, and the case that disproves it passes every other
+check.** At the cap between nodes (3,6,5) and (4,6,5) of `SpiralTest.step` at
+`cc=5, t=1`, both sides present the **whole** quad — 1.000000 mm² to six
+decimals, so §7.1's area agreement is satisfied exactly — and the two rings
+carry **six edges against four**, because one junction was trimmed directly and
+the other rebuilt per half-strut (§7.2). Sewing pairs free edges; against a
+ring subdivided differently there is no pairing to find, and both sides having
+given up their caps, six edges were left welded to nothing. `assemble` reports
+that as six holes, which is the failure this check exists to make unreachable.
+
+Extending it changes nothing where correspondence genuinely holds: both
+committed golden samples come back at 0 mm³ with unchanged solid counts and
+file sizes, and this part declines exactly **one** cap.
 
 **Stitching.** The interior shell and the surviving trimmed boundary pieces are
 then sewn together. Two cross-checks follow:
@@ -1061,11 +1145,26 @@ edge does nothing at any factor up to 5× (G12).
 So rung 2 widens that vertex, asking OCCT's own predicate whether the result is
 enough rather than re-deriving the rule OCCT applies. It is bounded twice — at
 `SELF_INTERSECT_TOL_GROWTH` (4×) times the tolerance the kernel itself recorded,
-and at `SELF_INTERSECT_MAX_VERTEX_TOL` (4e-3 mm, a hundredfold below the CLI's
-smallest legal strut) — so its failure mode is a face left for `validate` to
-report, never an unbounded tolerance. Widening is also monotonically
-*permissive*: every check that reads a vertex tolerance is a "within tolerance"
-test, so a neighbouring face sharing the vertex can only become more valid.
+and absolutely at `SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION` (a tenth) of the
+run's own `t` — so its failure mode is a face left for `validate` to report,
+never an unbounded tolerance. Widening is also monotonically *permissive*:
+every check that reads a vertex tolerance is a "within tolerance" test, so a
+neighbouring face sharing the vertex can only become more valid.
+
+**The absolute bound is a fraction of `t` because a fixed one was silently an
+off switch.** It was 4e-3 mm, a hundredfold below the CLI's smallest legal
+strut and 3.7× the most G12 ever needed — sound for the rehearsal, whose
+vertices carry 8.7e-04 to 1.5e-03 mm. `SpiralTest.step` at `cc=5, t=1` is a
+swept B-spline, and the boolean records **6.573e-02 mm** on the shared vertex
+of its falsely self-intersecting wire: sixteen times that cap, so the first
+candidate step was refused, nothing grew, and the run reported the face as
+residual **without having tried it**. A bound that can sit below the value it
+bounds is not a bound on growth. The repair itself was never wrong — one
+1.25× step clears the face with its area bit-identical, exactly as on the
+rehearsal's four — so the relative bound is what governs in every case
+measured, and the absolute one only has to stop forbidding what the kernel
+itself already recorded. A tenth of `t` gives 0.04 mm at `t = 0.4` and 0.1 mm
+at `t = 1`, clearing the 8.216e-02 mm the spiral needs with 22 % to spare.
 
 **Neither rung moves geometry, and that is the property that makes this safe on
 a shell `assemble` has already proven watertight.** No `TopoDS_Edge` or
@@ -1209,8 +1308,11 @@ program builds itself.
   It is a **representation** change and must never become a geometry change, so
   two guards bracket it, both hard failures: the solid count must be unchanged
   (a change would also invalidate the junction-graph cross-check that precedes
-  it), and each solid's volume must be preserved to `UNIFY_VOLUME_TOL` (1e-4
-  relative). That bar is calibrated, not guessed: on purely planar geometry,
+  it), and each solid's boundary must not move by more than
+  `UNIFY_MAX_DISPLACEMENT` (1e-3 mm), tested as `|ΔV| / surface area` and
+  reached only through a `UNIFY_VOLUME_TOL` (1e-4 relative) pre-filter on the
+  volume — see below for why the relative figure cannot be the bar itself.
+  That pre-filter is calibrated, not guessed: on purely planar geometry,
   where the volume is known analytically, the drift is 1.9e-15 — exact; it only
   appears on boundary solids carrying curved trimmed faces, at 2.4e-7 on
   `dense-lattice`. Every run logs the observed drift so the margin is visible
@@ -1236,6 +1338,36 @@ program builds itself.
   same volume and area to 0.1 % — drifts 29x less, which is why no tighter bar
   is defensible: the magnitude belongs to the merge the kernel happened to
   perform, not to the geometry, so it cannot be predicted from the part.
+
+  **So the bar is now the displacement itself, and 1e-4 relative is only the
+  pre-filter that decides whether to measure it.** Loosening the relative
+  figure a second time was the wrong response to the same evidence: the
+  paragraph above already establishes that displacement is the honest quantity,
+  and a relative-volume bar is biased by the *size* of the solid rather than by
+  the movement it is supposed to detect. `SpiralTest.step` at `cc=5, t=1` shows
+  both readings on two solids unified by the same call in the same stage:
+
+  | solid | relative drift | displacement |
+  |---|---|---|
+  | 27,864 mm³, 64,363 faces | 1.013e-05 (passes) | 2.752e-06 mm |
+  | 4.17 mm³, 53 faces | **1.837e-03 (fails)** | 2.494e-04 mm |
+
+  Ninety times apart in the first column and both far inside the **2.1e-02 mm**
+  tolerances OCCT records on the very edges it merged. The small one is sound
+  by the strongest test available: cut both ways against the un-unified solid
+  the symmetric difference is **0 mm³**, their intersection measures the
+  un-unified volume to twelve decimals, and both are `BRepCheck_Analyzer`-valid
+  once §8's rung 2 has run. `UNIFY_MAX_DISPLACEMENT` is **1e-3 mm** — 4× the
+  worst displacement measured anywhere, at or below the face tolerances above,
+  and 400× below the smallest legal strut.
+
+  **Measuring it is expensive and is therefore paid only where it decides
+  something.** `BRepGProp` surface area on that 64,363-face solid takes 7.7 s
+  against 2.9 s for its volume, so measuring every solid's area would add ~70 s
+  to every rehearsal-scale run for a guard that almost never fires. The area is
+  requested through a callable that `_check_unify_result` invokes only after
+  the relative pre-filter has tripped — the same "pay for the exact measurement
+  only on the path that was about to fail" shape as §8's free-edge recount.
 
   Each solid is unified independently rather than as one compound, which keeps
   the count guard exact and is what let this stage become the first item on
@@ -1574,6 +1706,8 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Full-strut lateral faces built merged (§6) | Removes the volume-scaling half of same-domain unification's job instead of dividing it: interior faces −33 % on `dense-lattice` and **−44.8 % at rehearsal scale** (705,000 → 389,492), shrinking `instance` (−43.8 %), `assemble` (−31.9 %), `simplify` (−12.4 %) and `validate` (−7.4 %) together, for an identical output. Whole-run effect is part-shaped: −19 % on `dense-lattice`, −6.5 % on the rehearsal, where `boundary` and `stitch` are 43 % of the clock and untouched |
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
+| A COMMON that returns its operand is re-derived per half-strut (§7.2) | Correctness, not speed. The kernel can return a junction untrimmed while reporting `IsDone`, leaving material up to 1.29 mm outside the body — 8 of 2,073 junctions on `SpiralTest`, and **not** detectable with another boolean, since `Cut` agrees with `Common`. The detector is self-validating: it fires on any result equal to the operand, and the re-trim keeps the original whenever every half-strut really is whole. 9.2 % reach the check, 0.4 % are changed, ~+11 % on a worker-parallel stage |
+| Interface correspondence checked on boundary-to-boundary caps too (§8) | Correctness. Sewing pairs edges, so two rings describing the same quad with six edges against four cannot close — and the area test §7.1 applies passes such a cap exactly. Declining costs an extra solid, never a hole; both golden samples unchanged |
 | Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10). Guarded by an exact area bar and a structural one, never by volume — OCCT cannot integrate the volume of the unrepaired piece, because the pinhole is exactly the free boundary its precondition excludes (§7, G19) |
 | Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is finding the faces to repair, on a sound layer (§8, G11, G12) |
 | That scan run as a parallel batch filter over a compound (§8) | The second stage to use OCCT's own threads rather than this project's process pool, and for the same two reasons as `validate`: it returns a verdict rather than geometry, and the call has a flag. **44.1 s → 22.6 s** in a controlled pair, same 19 faces repaired, output byte-identical; chunked at 20,000 faces because the analyzer holds ~14 kB per face. The predicate has to be re-evaluated per face *as the repair reaches it*, not once up front: repairs widen shared tolerances, so a neighbour can be fixed for free, and asking too early counted 15 such faces as unrepaired |

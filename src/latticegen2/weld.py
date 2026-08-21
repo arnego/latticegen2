@@ -72,7 +72,8 @@ from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape, TopTools_Ind
 
 from . import occ
 from .errors import ProcessingError
-from .lattice import OPPOSITE_HALF, LatticeParams, neighbor_step
+from .lattice import OPPOSITE_HALF, LatticeParams, half_strut_offset, neighbor_step
+from .lattice import node as lattice_node
 from .parallel import WorkerPool
 from .parallel import compound_children as _compound_children
 from .parallel import read_brep as _read_brep
@@ -234,17 +235,32 @@ def unweldable(
     pieces,
     interfaces: set[tuple[NodeKey, int]],
 ) -> list[tuple[NodeKey, int]]:
-    """Interior interfaces whose boundary side is not the whole cap quad.
+    """Interfaces whose two sides do not correspond edge for edge.
 
-    Only interior-to-boundary caps are checked. Those are the ones the interior
-    will be built onto, so their rings have to be exactly the template quad —
-    §5.3(b) says they always are, and this is where that stops being an
-    assumption. Boundary-to-boundary caps are sewn rather than adopted, so they
-    need no correspondence of their own; interior-to-interior caps share one
-    index already.
+    Interior-to-boundary caps are the ones the interior is *built onto*, so
+    their rings have to be exactly the template quad — §5.3(b) says they always
+    are, and this is where that stops being an assumption. Interior-to-interior
+    caps share one index already and need no check.
 
-    Run *before* the caps are dropped, so a rejection costs an extra solid rather
-    than a hole.
+    **Boundary-to-boundary caps are checked too, and the comment that used to
+    stand here said they need not be.** The reasoning was that they are sewn
+    rather than adopted, so the sew would reconcile whatever the two booleans
+    produced. It does not: sewing pairs free edges, and where one side presents
+    a ring of six edges against the other's four there is no pairing to find.
+    Measured on `SpiralTest.step` at cc=5, t=1, at the cap between nodes
+    (3,6,5) and (4,6,5) — both sides present the *whole* quad, 1.000000 mm² to
+    six decimals, so the area agreement `resolve_interfaces` tests passes
+    cleanly — and the two rings are subdivided differently because one junction
+    was trimmed directly and the other rebuilt per half-strut (§7.2). Both
+    sides gave up their caps and six edges were left with nothing to weld to,
+    which `assemble` would have reported as six holes.
+
+    Declining costs an extra solid at worst and never a hole
+    (docs/algorithm.md §11), which is the trade this whole function exists to
+    make.
+
+    Run *before* the caps are dropped, so a rejection costs that extra solid
+    rather than a hole.
     """
     caps_at: dict[tuple[NodeKey, int], list] = {}
     for piece in pieces:
@@ -254,12 +270,17 @@ def unweldable(
     steps = [tuple(int(x) for x in neighbor_step(h)) for h in range(6)]
     rejected = []
     for node, h in interfaces:
-        if node not in interior_set:
-            continue
         other = (_neighbour(node, steps[h]), OPPOSITE_HALF[h])
-        if other[0] in interior_set:
-            continue
-        expected = template_cap_ring(lp, tmesh, node, h)
+        if node in interior_set:
+            if other[0] in interior_set:
+                continue  # one index, both sides: nothing to correspond
+            expected = template_cap_ring(lp, tmesh, node, h)
+        elif other[0] in interior_set:
+            continue  # decided from the interior side, once
+        elif h >= 3:
+            continue  # boundary-to-boundary: decide each pair once
+        else:
+            expected = ring_of_faces(caps_at.get((node, h), []))
         if match_rings(expected, ring_of_faces(caps_at.get(other, []))) is None:
             rejected.append((node, h))
     return rejected
@@ -532,6 +553,8 @@ def _sew_round_two(
     tmpdir: str | None,
     pool: WorkerPool | None,
     expected_rings: dict[int, int] | None = None,
+    ring_centres: dict[int, np.ndarray] | None = None,
+    ring_radius: float = 1.0,
     stats: "SewStats | None" = None,
     report=None,
 ) -> tuple[dict[int, list], int, int]:
@@ -714,6 +737,13 @@ def _sew_round_two(
                     # watertightness invariant discovered in seconds beats the
                     # same invariant discovered later with no indication of
                     # where).
+                    # Report the edges that are *not* at an expected interface,
+                    # never a sample of all of them: the overwhelming majority
+                    # of free edges here are the interface rings that are meant
+                    # to be free, so naming ten of those points at the wrong
+                    # place and reads as though the interfaces were the fault.
+                    stray = _edges_away_from(after, ring_centres, group, ring_radius)
+                    where = edge_positions(stray if stray else after)
                     raise ProcessingError(
                         f"The sewn boundary layer of component {group} presents "
                         f"{len(after)} free edge(s) where its {expected_rings.get(group, 0)} "
@@ -724,8 +754,16 @@ def _sew_round_two(
                         f"{len(after) - want:+d} edge(s) are unaccounted for, and "
                         f"each is a hole nothing will fill - the interior adopts "
                         f"only the {expected_rings.get(group, 0)} interface(s) it "
-                        f"was told about. Sample positions: "
-                        f"{[p.tolist() for p in edge_positions(after)]}"
+                        f"was told about. "
+                        + (
+                            f"{len(stray)} free edge(s) lie away from any expected "
+                            f"interface; positions: {[p.tolist() for p in where]}"
+                            if stray else
+                            f"Every free edge sits at an expected interface, so the "
+                            f"excess is a duplicated or unwelded edge at one of "
+                            f"them rather than a hole somewhere else; positions "
+                            f"(of all free edges): {[p.tolist() for p in where]}"
+                        )
                     )
     if stats is not None:
         stats.t_repair = time.perf_counter() - t0
@@ -812,6 +850,8 @@ def sew_boundary(
     min_to_tile: int = MIN_PIECES_TO_TILE,
     pool: WorkerPool | None = None,
     want_rings: dict[tuple[NodeKey, int], int] | None = None,
+    lp: LatticeParams | None = None,
+    max_vertex_tol: float = occ.SELF_INTERSECT_MAX_VERTEX_TOL,
     report=None,
 ) -> tuple[dict[int, list], SewStats]:
     """Sew each component's boundary pieces to each other, returning their faces.
@@ -870,10 +910,22 @@ def sew_boundary(
             stats.tiles += len(tiles)
 
     ring_counts: dict[int, int] | None = None
+    ring_centres: dict[int, np.ndarray] | None = None
     if want_rings is not None:
         ring_counts = {}
         for group in want_rings.values():
             ring_counts[group] = ring_counts.get(group, 0) + 1
+        # Where each expected ring *is*, so a count that comes out wrong can say
+        # which edges it could not account for instead of naming ten arbitrary
+        # free edges -- of which the overwhelming majority are the interface
+        # rings that are supposed to be there.
+        if lp is not None:
+            per_group: dict[int, list] = {}
+            for (node, h), group in want_rings.items():
+                per_group.setdefault(group, []).append(
+                    lattice_node(lp, np.array(node)) + half_strut_offset(lp, h)
+                )
+            ring_centres = {g: np.array(v) for g, v in per_group.items()}
 
     t0 = time.perf_counter()
     tile_results, max_rss1 = _sew_all_tiles(
@@ -883,7 +935,9 @@ def sew_boundary(
 
     out, max_rss2, repaired = _sew_round_two(
         by_group, plan, tile_results, SEW_TOLERANCE, workers, tmpdir, pool,
-        expected_rings=ring_counts, stats=stats, report=report,
+        expected_rings=ring_counts, ring_centres=ring_centres,
+        ring_radius=(lp.t if lp is not None else 1.0),
+        stats=stats, report=report,
     )
     stats.max_worker_rss = max(max_rss1, max_rss2)
     stats.repaired_components = repaired
@@ -902,7 +956,7 @@ def sew_boundary(
     if report is not None:
         report("correcting vertex tolerances", 0, None)
     for group_faces in out.values():
-        fixed, residual = occ.fix_vertex_tolerances(group_faces)
+        fixed, residual = occ.fix_vertex_tolerances(group_faces, max_vertex_tol)
         stats.retoleranced_faces += fixed
         stats.still_invalid_faces += residual
     stats.t_retolerance = time.perf_counter() - t0
@@ -944,6 +998,31 @@ def free_edges(faces) -> list:
         if edge_faces.FindFromIndex(i).Extent() == 1
         if not BRep_Tool.Degenerated_s(TopoDS.Edge_s(edge_faces.FindKey(i)))
     ]
+
+
+def _edges_away_from(edges, centres, group, radius) -> list:
+    """Those of ``edges`` not lying at one of component ``group``'s expected
+    interface cap centres.
+
+    A cap quad has side ``t``, so every edge of one lies within ``t`` of its
+    centre while the nearest *other* cap centre is a full cell away. ``radius``
+    is set to ``t`` by the caller, which separates "at an interface" from
+    "somewhere else entirely" with an order of magnitude to spare -- it does
+    not have to decide *which* interface. Returns nothing when no centres are
+    known, leaving the caller to print what it has.
+    """
+    if centres is None or group not in centres or len(centres[group]) == 0:
+        return []
+    here = centres[group]
+    out = []
+    for edge in edges:
+        pts = [_pnt(v) for v in occ._explore(edge, TopAbs_ShapeEnum.TopAbs_VERTEX)]
+        if not pts:
+            continue
+        mid = sum(pts) / len(pts)
+        if np.min(np.linalg.norm(here - mid, axis=1)) > radius:
+            out.append(edge)
+    return out
 
 
 def edge_positions(edges, limit: int = 10) -> list:

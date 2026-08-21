@@ -19,6 +19,7 @@ from OCP.BRepTools import BRepTools
 
 from latticegen2 import occ, weld
 from latticegen2.boundary import (
+    UNTRIMMED_VOLUME_REL_TOL,
     BoundaryPiece,
     CAP_AREA_REL_TOL,
     PINHOLE_WIRE_TOL,
@@ -93,7 +94,7 @@ def test_trim_tags_every_cap_plane_face_and_keeps_it(lp):
                                    [9.0, 9.0, -9.0], [-9.0, 9.0, -9.0]])),
         np.array([0.0, 0.0, 18.0]),
     )
-    trimmed, n_pinholes = trim_junction(lp, tpl, np.zeros(3), box)
+    trimmed, n_pinholes, _retrimmed = trim_junction(lp, tpl, np.zeros(3), box)
     assert len(trimmed) == 1
     assert n_pinholes == 0, "a junction wholly inside a box has no grazing pinholes"
     faces, tags, volume = trimmed[0]
@@ -449,7 +450,7 @@ def test_trim_junction_removes_the_pinholes_and_closes_the_piece(pinhole_case):
     lp5, tpl, body, pos = pinhole_case
     raw = raw_trim(tpl, pos, body)
 
-    pieces, n_pinholes = trim_junction(lp5, tpl, pos, body)
+    pieces, n_pinholes, _retrimmed = trim_junction(lp5, tpl, pos, body)
 
     assert n_pinholes == 2
     assert len(pieces) == 1
@@ -691,3 +692,92 @@ def test_the_pieces_are_the_same_whether_or_not_anyone_is_watching(lp, tmp_path)
     assert [p.node for p in watched.pieces] == [p.node for p in unwatched.pieces]
     assert [p.volume for p in watched.pieces] == [p.volume for p in unwatched.pieces]
     assert watched.n_empty == unwatched.n_empty
+
+
+# --- An intersection that returns its own operand (docs/algorithm.md §7.2) ----
+#
+# On `SpiralTest.step` at cc=5, t=1, `BRepAlgoAPI_Common(junction, body)`
+# returns the junction *untrimmed* for some boundary nodes -- exactly the
+# template volume, with `IsDone` true -- leaving up to 1.29 mm of lattice
+# material outside the input body. Established against four independent tests
+# that agree the region is outside (OCCT's solid classifier, ray parity at
+# three mesh densities, `BRepExtrema` distance, and a well-conditioned
+# sphere/body intersection), while the boolean on the junction operand is the
+# lone dissenter. It is specific to the fused junction: spheres and boxes of
+# the same scale at the same node trim correctly.
+#
+# Real geometry rather than a synthetic stand-in, for the reason docs/testing.md
+# gives: nothing synthetic suggested this was possible, and the repair is only
+# worth having against the case that actually provokes it.
+
+SPIRAL_UNTRIMMED_NODES = [(3, 6, 3), (6, 2, 4), (6, 1, 4), (4, 6, 5)]
+SPIRAL_TRIMMED_NODES = [(1, 5, 2), (5, 2, 4), (3, 5, 3)]
+
+
+@pytest.fixture(scope="module")
+def spiral_case():
+    lp = lattice_params(5.0, 1.0)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    body = occ.read_step(os.path.join(here, "test", "SpiralTest.step"))
+    return lp, build_template(lp), body
+
+
+@pytest.mark.parametrize("key", SPIRAL_UNTRIMMED_NODES)
+def test_the_untrimmed_intersection_fixture_really_returns_its_operand(spiral_case, key):
+    """Guard on the guard: without the repair these come back whole, so the
+    test below is measuring the repair and not some unrelated difference."""
+    lp, tpl, body = spiral_case
+    pos = lattice_node(lp, np.array(key))
+    raw = raw_trim(tpl, pos, body)
+
+    assert occ.volume(raw) == pytest.approx(tpl.volume, rel=UNTRIMMED_VOLUME_REL_TOL), \
+        "the unrepaired intersection returns the untrimmed junction"
+
+
+@pytest.mark.parametrize("key", SPIRAL_UNTRIMMED_NODES)
+def test_a_junction_the_kernel_left_untrimmed_is_redone_per_half_strut(spiral_case, key):
+    lp, tpl, body = spiral_case
+    pos = lattice_node(lp, np.array(key))
+
+    result = trim_junction(lp, tpl, pos, body)
+
+    assert result.retrimmed, "the untrimmed result must be detected and redone"
+    volume = sum(v for _f, _t, v in result.pieces)
+    assert volume < tpl.volume * (1 - 1e-6), \
+        "the repaired junction must be smaller than the whole template"
+    assert volume > 0.0
+
+
+@pytest.mark.parametrize("key", SPIRAL_TRIMMED_NODES)
+def test_a_junction_the_kernel_trimmed_correctly_is_left_alone(spiral_case, key):
+    """The repair must not fire where nothing is wrong, and must not change the
+    answer where it does not fire."""
+    lp, tpl, body = spiral_case
+    pos = lattice_node(lp, np.array(key))
+    raw = raw_trim(tpl, pos, body)
+
+    result = trim_junction(lp, tpl, pos, body)
+
+    assert not result.retrimmed
+    assert sum(v for _f, _t, v in result.pieces) == pytest.approx(
+        occ.volume(raw), rel=1e-9
+    )
+
+
+def test_a_junction_wholly_inside_the_body_is_checked_but_kept(lp):
+    """The detector fires on any result equal to the operand, which includes
+    the legitimate case of a junction entirely inside the body -- measured at
+    9.2 % of `SpiralTest`'s boundary junctions against 0.4 % genuinely wrong.
+    There the re-trim finds every half-strut whole and clears the original,
+    so the cost is a check and the answer is unchanged."""
+    tpl = build_template(lp)
+    box = occ.prism(
+        occ.polygon_face(np.array([[-9.0, -9.0, -9.0], [9.0, -9.0, -9.0],
+                                   [9.0, 9.0, -9.0], [-9.0, 9.0, -9.0]])),
+        np.array([0.0, 0.0, 18.0]),
+    )
+
+    result = trim_junction(lp, tpl, np.zeros(3), box)
+
+    assert not result.retrimmed, "a cleared check must not report a repair"
+    assert sum(v for _f, _t, v in result.pieces) == pytest.approx(tpl.volume, rel=1e-9)

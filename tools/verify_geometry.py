@@ -364,17 +364,30 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
         return {"sampled": 0, "outside": None, "cleared_at_mm": None}
     pts = np.unique(np.array(pts), axis=0)
 
+    # Each tolerance re-tests only what the previous one called OUT, which is
+    # exact rather than an approximation: `Perform(p, tol)` calls a point ON
+    # rather than OUT once it is within `tol` of the boundary, so raising the
+    # tolerance can only ever turn OUT into ON, never the reverse. The OUT set
+    # therefore shrinks monotonically along CONTAINMENT_SWEEP, and a point the
+    # tightest tolerance already accepts cannot be reported by a looser one.
+    #
+    # Testing every point at every tolerance instead costs up to 5x for
+    # nothing, and that is not academic at lattice scale: this is the check
+    # that runs precisely where the exact cut was skipped, i.e. on the largest
+    # solids, and one pass over them is already minutes.
     classifier = BRepClass3d_SolidClassifier(body)
     counts: dict[float, int] = {}
     cleared = None
+    candidates = pts
     for tol in CONTAINMENT_SWEEP:
-        n = 0
-        for p in pts:
+        still = []
+        for p in candidates:
             classifier.Perform(gp_Pnt(*p), tol)
             if classifier.State() == TopAbs_State.TopAbs_OUT:
-                n += 1
-        counts[tol] = n
-        if n == 0:
+                still.append(p)
+        counts[tol] = len(still)
+        candidates = still
+        if not still:
             cleared = tol
             break
     return {
@@ -384,6 +397,34 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
         "cleared_at_mm": cleared,
         "contained": cleared is not None and cleared <= CONTAINMENT_TOL,
     }
+
+
+CUT_MAX_FACES = 25_000
+"""Above this many faces, a solid's containment is not put to a boolean at all.
+
+The per-solid cut below is the exact test and is preferred wherever it works,
+but "wherever it works" has a measured ceiling and this is it. Three data
+points, all on real output:
+
+* `dense-lattice`, **15,966** faces — measures exactly 0 mm^3, in seconds.
+* `TD_HX_rehearsal_test` at `cc=12, t=2.5`, **43,530** faces — ran to
+  completion and reported the *entire* solid outside (354,733 mm^3), which is
+  what the contradiction test below exists to catch.
+* `SpiralTest` at `cc=5, t=1`, **45,897** faces — did not finish: 17 minutes of
+  CPU and a 14.5 GB working set before it was stopped.
+
+So past this scale the cut is not merely untrustworthy, it is not affordable
+either, and attempting it buys nothing: the answer would be discarded by the
+contradiction test and replaced by :func:`surface_points_outside` regardless.
+Skipping straight to that check reaches the same verdict in seconds. The bar
+sits between the scale that works and the scale that does not, and every
+committed scenario except `spiral-stress` stays below it.
+
+**This does not weaken the guarantee, it relabels it.** A skipped solid is
+reported as *unmeasured* with its containment evidence attached, exactly like
+one whose cut was contradicted — never as a pass. What would weaken the
+guarantee is a number nobody can afford to check.
+"""
 
 
 def material_outside(candidate_path: str, input_path: str) -> dict:
@@ -423,6 +464,11 @@ def material_outside(candidate_path: str, input_path: str) -> dict:
     with the containment figures attached — labelled weaker, the way
     :func:`golden_sample_agreement` already is. A real defect survives this,
     because real material outside the body shows up in both tests.
+
+    **A solid past :data:`CUT_MAX_FACES` skips the cut entirely** and goes
+    straight to the containment evidence, reported as unmeasured with
+    ``reason`` of ``"not attempted"`` rather than ``"contradicted"``. See that
+    constant for the measurements behind the bar.
     """
     body = occ.read_step(input_path)
     solids = occ.solids(occ.read_step(candidate_path))
@@ -431,15 +477,23 @@ def material_outside(candidate_path: str, input_path: str) -> dict:
     per_solid = []
     for i, solid in enumerate(solids):
         own = occ.volume(solid)
-        cut = _cut_volume(solid, body)
-        trustworthy = cut == cut and cut <= own * 1e-9      # exactly zero, in effect
+        faces = occ.count_subshapes(solid)[0]
+        if faces > CUT_MAX_FACES:
+            cut = float("nan")
+            trustworthy = False
+            reason = "not attempted"
+        else:
+            cut = _cut_volume(solid, body)
+            trustworthy = cut == cut and cut <= own * 1e-9  # exactly zero, in effect
+            reason = "contradicted"
         if not trustworthy:
             evidence = surface_points_outside(solid, body)
             unmeasured.append({
                 "solid": i,
-                "faces": occ.count_subshapes(solid)[0],
+                "faces": faces,
                 "volume_mm3": own,
                 "cut_claimed_mm3": cut,
+                "reason": reason,
                 "containment": evidence,
             })
         else:

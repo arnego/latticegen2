@@ -158,6 +158,13 @@ class BoundaryResult:
     Logged as one aggregate line rather than one per junction, the same way the
     floating-body rule reports its removals: a part dense in grazing trims can
     produce many, and a line each would bury the rest of the log."""
+    n_retrimmed_junctions: int = 0
+    """Junctions whose fused intersection came back untrimmed and had to be
+    redone per half-strut (docs/algorithm.md §7.2).
+
+    Aggregated for the same reason the pinhole count is: a part that provokes
+    it once tends to provoke it repeatedly, and one line each would bury the
+    log. Zero on every committed scenario except `spiral-stress`."""
     max_worker_rss: int = 0
     """Highest peak RSS reported by any worker process.
 
@@ -224,6 +231,90 @@ class TrimResult(NamedTuple):
     """``(faces, tags, volume)`` per connected solid the intersection left."""
     n_pinholes_removed: int
     """Zero-area pinhole wires dropped across all of them (docs/algorithm.md §7)."""
+    retrimmed: bool = False
+    """Whether the fused junction's intersection had to be redone per half-strut
+    (:func:`_retrim_per_half`, docs/algorithm.md §7.2)."""
+
+
+# How close to the untrimmed junction's own volume an intersection result has to
+# be before it is treated as "the kernel returned its operand unchanged". The
+# failing case comes back re-partitioned rather than byte-identical -- measured
+# 5.7e-08 mm^3 from the template's own figure on `SpiralTest`, a relative
+# 6.6e-09 -- so this has to sit above quadrature noise while staying far below
+# any real trim. It is not load-bearing either way: anything inside it is
+# re-derived per half-strut, and a junction that really is whole comes back
+# whole and keeps its original result.
+UNTRIMMED_VOLUME_REL_TOL = 1e-6
+
+
+def _retrim_per_half(
+    lp: LatticeParams,
+    tpl: JunctionTemplate,
+    node_pos: np.ndarray,
+    body: TopoDS_Shape,
+) -> TopoDS_Shape | None:
+    """Redo one junction's trim on its six half-struts, or ``None`` to keep the
+    original.
+
+    ``None`` means the check cleared the original result: every half-strut came
+    back whole, so the junction really is wholly inside the body and an
+    intersection returning it unchanged was right.
+
+    Otherwise the surviving half-strut intersections are fused back into one
+    solid and returned. That fuse is a general boolean, which this pipeline
+    otherwise performs only twice (docs/algorithm.md §3.2's template fuse and
+    §7.1's disagreeing-cap repair) — it is affordable here for the same reason
+    as §7.1's: it runs only where the kernel has already contradicted itself,
+    measured at 9.2 % of boundary junctions reaching the check and 0.4 %
+    actually needing the repair.
+    """
+    loc = occ.translation(node_pos)
+    kept = []
+    whole = True
+    for h in range(6):
+        algo = BRepAlgoAPI_Common()
+        args = TopTools_ListOfShape()
+        args.Append(tpl.half_solids[h].Moved(loc))
+        tools = TopTools_ListOfShape()
+        tools.Append(body)
+        algo.SetArguments(args)
+        algo.SetTools(tools)
+        algo.Build()
+        if not algo.IsDone():
+            raise ProcessingError(
+                f"Re-trimming half-strut {h} of the junction at "
+                f"{tuple(node_pos)} failed. The fused junction's own "
+                f"intersection had already returned it untrimmed, so there is "
+                f"no result left to fall back on."
+            )
+        solids = occ.solids(algo.Shape())
+        got = sum(occ.volume(sd) for sd in solids)
+        want = occ.volume(tpl.half_solids[h])
+        if abs(got - want) > UNTRIMMED_VOLUME_REL_TOL * want:
+            whole = False
+        kept.extend(solids)
+    if whole:
+        return None  # genuinely wholly inside: the original result stands
+    if not kept:
+        return occ.compound([])
+    if len(kept) == 1:
+        return kept[0]
+    fuse = BRepAlgoAPI_Fuse()
+    args = TopTools_ListOfShape()
+    args.Append(kept[0])
+    tools = TopTools_ListOfShape()
+    for sd in kept[1:]:
+        tools.Append(sd)
+    fuse.SetArguments(args)
+    fuse.SetTools(tools)
+    fuse.Build()
+    if not fuse.IsDone():
+        raise ProcessingError(
+            f"Could not fuse the re-trimmed half-struts of the junction at "
+            f"{tuple(node_pos)} back into one solid."
+        )
+    fuse.SimplifyResult()
+    return fuse.Shape()
 
 
 def trim_junction(
@@ -264,16 +355,44 @@ def trim_junction(
             f"Boundary intersection failed for junction at {tuple(node_pos)}."
         )
 
+    result = algo.Shape()
+    trimmed = occ.solids(result)
+
+    # **The kernel can return this intersection's own operand, untrimmed.**
+    # Measured on `SpiralTest.step` at cc=5, t=1: three junctions come back at
+    # exactly the template volume with `IsDone` true, leaving lattice material
+    # up to 1.29 mm outside the input body. It is specific to the *fused*
+    # junction operand -- spheres and boxes of the same scale at the same node
+    # trim correctly, the input solid is `BRepCheck_Analyzer`-valid, and
+    # neither a fuzzy value, swapped operands nor baking the location away
+    # changes it (docs/algorithm.md §7.2). Whatever the cause, a result equal
+    # to the operand is the one case that can be checked cheaply and redone, so
+    # it is.
+    #
+    # This does not decide whether the junction is inside the body -- that is
+    # what the kernel just got wrong, so asking it again the same way would be
+    # worthless. `_retrim_per_half` re-derives the answer from operands the
+    # same call handles correctly, and clears the original result whenever the
+    # junction really is wholly inside.
+    retrimmed = False
+    if len(trimmed) == 1 and abs(
+        occ.volume(trimmed[0]) - tpl.volume
+    ) <= UNTRIMMED_VOLUME_REL_TOL * tpl.volume:
+        repaired = _retrim_per_half(lp, tpl, node_pos, body)
+        if repaired is not None:
+            trimmed = occ.solids(repaired)
+            retrimmed = True
+
     out = []
     n_pinholes = 0
-    for solid in occ.solids(algo.Shape()):
+    for solid in trimmed:
         cleaned, removed = _remove_pinholes(node_pos, solid)
         n_pinholes += removed
         faces = occ.faces(cleaned)
         tags = [is_cap_plane_face(lp, f, node_pos) for f in faces]
         tags = [-1 if h is None else h for h in tags]
         out.append((faces, tags, occ.volume(cleaned)))
-    return TrimResult(out, n_pinholes)
+    return TrimResult(out, n_pinholes, retrimmed)
 
 
 def _remove_pinholes(node_pos: np.ndarray, solid):
@@ -633,8 +752,11 @@ def _worker_trim(job):
     n_empty = 0
     n_pinhole_junctions = 0
     n_pinhole_wires = 0
+    n_retrimmed = 0
     for i in range(len(node_batch)):
-        results, n_pinholes = trim_junction(lp, tpl, positions[i], body)
+        results, n_pinholes, retrimmed = trim_junction(lp, tpl, positions[i], body)
+        if retrimmed:
+            n_retrimmed += 1
         if n_pinholes:
             n_pinhole_junctions += 1
             n_pinhole_wires += n_pinholes
@@ -649,7 +771,7 @@ def _worker_trim(job):
     from .runlog import peak_rss_bytes
 
     rss = peak_rss_bytes()
-    pinholes = (n_pinhole_junctions, n_pinhole_wires)
+    pinholes = (n_pinhole_junctions, n_pinhole_wires, n_retrimmed)
     # `rss` stays last: WorkerPool.run reads it positionally at rss_index=-1, a
     # convention shared by every worker function in this codebase.
     if bundles:
@@ -702,7 +824,11 @@ def trim_boundary(
     if workers <= 1:
         positions = nodes(lp, boundary_nodes)
         for i in range(len(boundary_nodes)):
-            trimmed, n_pinholes = trim_junction(lp, tpl, positions[i], body)
+            trimmed, n_pinholes, retrimmed = trim_junction(
+                lp, tpl, positions[i], body
+            )
+            if retrimmed:
+                result.n_retrimmed_junctions += 1
             if n_pinholes:
                 result.n_pinhole_junctions += 1
                 result.n_pinhole_wires += n_pinholes
@@ -750,6 +876,7 @@ def trim_boundary(
         for path, meta, n_empty, pinholes, rss in results:
             result.n_pinhole_junctions += pinholes[0]
             result.n_pinhole_wires += pinholes[1]
+            result.n_retrimmed_junctions += pinholes[2]
             result.n_empty += n_empty
             result.max_worker_rss = max(result.max_worker_rss, rss)
             if path is None:

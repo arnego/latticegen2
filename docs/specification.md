@@ -316,7 +316,16 @@ List concrete parameter sets that must be run automatically (at minimum: one sma
 case, one large/dense case, one edge case at parameter boundaries, one expected-failure
 case for invalid input).
 
-All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
+All are implemented in [`tools/e2e.py`](../tools/e2e.py).
+
+**`spiral-stress` is a stress case, not a size case.** At 2,073 boundary
+junctions it is a fraction of `dense-lattice`, but its swept B-spline surface
+makes the boolean fit trim curves carrying recorded tolerances two orders above
+anything the other parts produce — 2.1e-02 mm on edges, 6.6e-02 mm on a vertex,
+against the rehearsal's 8.7e-04 to 1.5e-03 mm. Two guards calibrated on the
+tighter parts refused it (§11). It is also the only committed scenario whose
+dominant component **tiles**, so it is the only one exercising the boundary
+sew's round-2 seam split, its repair, and the free-edge check gating both.
 
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
@@ -324,6 +333,7 @@ All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
 | dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
+| spiral-stress | -i test/SpiralTest.step -cc 5 -t 1 --cores 6 | valid STEP, generation < 20 minutes. **No golden sample yet** — to be committed after manual inspection of the first passing output. |
 
 ### 6.2 Automated pass/fail checks
 For every scenario the harness must verify, without human intervention:
@@ -386,6 +396,105 @@ assumed by default. Delete each line once resolved.*
 that found them. Each item should carry enough context (what's broken, where, why, and
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
+
+### `SpiralTest.step`: four defects, each exposed by fixing the one before
+
+**Added as a committed scenario 2026-08-20**, at the user's request, and it
+earned its place immediately: a part a fraction of `dense-lattice`'s size that
+found four generator defects and three harness ones. What links all four is
+one property — its swept B-spline surface makes the boolean fit trim curves
+carrying recorded tolerances **two orders above** anything the other committed
+parts produce (2.1e-02 mm on edges, 6.6e-02 mm on a vertex, against the
+rehearsal's 8.7e-04 to 1.5e-03 mm). Every bar calibrated on the older parts met
+input it had never seen.
+
+**1. Rung 2's absolute cap was an off switch** (docs/algorithm.md §8).
+`SELF_INTERSECT_MAX_VERTEX_TOL` was a fixed 4e-3 mm; the failing wire's shared
+vertex was recorded by OCCT itself at 6.573e-02 mm, sixteen times that. The
+first candidate step was refused, nothing grew, and the run reported the face
+as residual *without having tried*. A bound that can sit below the value it
+bounds is not a bound. Now a tenth of the run's own `t`; the repair itself was
+never wrong and still needs only 1.25x.
+
+**2. The unification volume guard compared a size-biased quantity**
+(docs/algorithm.md §9). Two solids unified by the same call in the same stage:
+27,864 mm³ drifting 1.013e-05 relative, and 4.17 mm³ drifting 1.837e-03 —
+ninety times apart, and **both** far inside the 2.1e-02 mm tolerances OCCT
+records on the edges being merged. The small one failed a 1e-4 bar while its
+exact symmetric difference against the un-unified solid, cut both ways, is
+0 mm³. Loosening the relative figure a third time would have been the wrong
+response to the same evidence: the guard now decides on displacement,
+`|ΔV| / area`, with relative drift kept only as a cheap pre-filter, because
+measuring area costs 7.7 s on a 64k-face solid and would otherwise be paid on
+every run for a guard that almost never fires.
+
+**3. The intersection returned its own operand** (docs/algorithm.md §7.2). The
+serious one: 8 junctions came back untrimmed, leaving material up to 1.29 mm
+outside the input body. Established against four independent tests because
+`BRepAlgoAPI_Cut` agrees with `Common` and both are wrong. Repaired by
+re-trimming the six convex half-struts and fusing them, behind a
+self-validating detector.
+
+**4. Boundary-to-boundary caps whose rings do not correspond**
+(docs/algorithm.md §8). Exposed by fixing 3: a cap where both sides present the
+whole quad to six decimals but with six edges against four. `weld.unweldable`
+now checks those caps too, having previously assumed the sew would reconcile
+them.
+
+**Harness defects found on the way**, all in `tools/`:
+
+* `material_outside`'s per-solid cut ran **17 minutes and 14.5 GB** on the
+  45,897-face output without finishing — the ill-conditioned case
+  docs/testing.md already documents at 43,530 faces, now bounded by
+  `CUT_MAX_FACES`. Above it the cut is skipped and the solid reported
+  *unmeasured* with containment evidence, never as a pass.
+* `surface_points_outside` re-tested every sampled point at all five
+  tolerances. Raising the tolerance can only turn OUT into ON, so the OUT set
+  shrinks monotonically and each tolerance need only re-test what the previous
+  one rejected — exact, and up to 5x off a check whose single pass is ~31
+  minutes at this scale.
+* **The `stitch` free-edge failure added earlier the same day named the wrong
+  edges.** It sampled ten of *all* free edges, of which 8,444 of 8,450 were the
+  interface rings that are supposed to be free, so it pointed at innocent
+  geometry — and cost a probe chasing those coordinates. It now reports the
+  edges lying away from any expected interface, which localised defect 4 to a
+  single cap on the next run.
+
+**OPEN: the scenario does not pass, and is committed knowingly red.** Defect 3
+is *reduced, not closed*. All three parameter sets now produce watertight,
+`BRepCheck_Analyzer`-valid solids — and all three still leave material outside
+the input body:
+
+| run | sampled points outside | worst protrusion |
+|---|---|---|
+| `cc=5, t=1` | 1 of 2,000 | 0.239 mm at [3.8126, -6.6036, 32.2166] |
+| `cc=7, t=1.4` | 2 of 2,000 | 0.771 mm |
+| `cc=4, t=0.8` | 4 of 2,000 | 0.380 mm |
+
+The cc=5 point is confirmed by the well-conditioned arbiter: a sphere there has
+**zero** intersection with the body.
+
+**Why §7.2's repair cannot close it.** That repair rests on the per-half-strut
+intersection being trustworthy where the fused one is not, which holds for the
+whole-junction failures it was built for. The residual is a different shape —
+both routes agree with each other and both are wrong:
+
+    cc=5, node (6,4,6):  fused 8.3772  | per-half 10.3772 of 10.6066
+    cc=7, node (8,2,6):  fused 3.9504  | per-half  3.9504 of 29.1045
+
+There is no third construction to fall back on, so this needs a mechanism found
+first, not another operand tried. **Note the trap this sits in:** the pipeline's
+own gates pass all three runs, because watertight and valid say nothing about
+containment — that reading was made twice during this session before the
+boolean-free sample caught it. §6.2's material-outside check is the only thing
+that sees this, and at ~31 minutes on this output it is slow to iterate against.
+
+**The lesson that recurs, and this is the fifth chapter to record it:** the
+first convincing explanation was wrong three separate times here — the fat
+tolerances looked like a third calibration mistake and were not, `Cut` looked
+like a sound cross-check and was not, and the re-trimmed caps looked like they
+would fail to weld and matched to 1e-15. What settled each was a measurement
+that did not share machinery with the thing under test.
 
 ### `assemble` fails on holes `stitch` already measured — half fixed, root cause open
 

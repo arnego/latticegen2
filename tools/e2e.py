@@ -35,6 +35,8 @@ BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
 BALL_GOLDEN = os.path.join(TESTDIR, "80mm-test-ball-cc20t4-golden-sample.step")
 CYLINDER_GOLDEN = os.path.join(TESTDIR, "test-cylinder-cc10t1.5-golden-sample.step")
+SPIRAL = os.path.join(TESTDIR, "SpiralTest.step")
+SPIRAL_GOLDEN = os.path.join(TESTDIR, "SpiralTest-cc5t1-golden-sample.step")
 
 
 class Report:
@@ -113,10 +115,16 @@ def outside_check(rep: Report, output: str, input_path: str, t: float) -> None:
               f"{measured:.6g} mm^3 over {n_ok} of {result['solids']} solid(s)")
     for item in result["unmeasured"]:
         ev = item["containment"]
-        print(f"  [NOTE] solid {item['solid']} ({item['faces']} faces): the cut claimed "
-              f"{item['cut_claimed_mm3']:.6g} mm^3 of its own {item['volume_mm3']:.6g} mm^3 "
-              f"lies outside, which a boolean-free containment check contradicts; "
-              f"falling back to that check")
+        if item.get("reason") == "not attempted":
+            print(f"  [NOTE] solid {item['solid']} ({item['faces']} faces): past "
+                  f"{vg.CUT_MAX_FACES} faces the exact cut is neither affordable nor "
+                  f"trustworthy on this input, so it was not attempted; using the "
+                  f"boolean-free containment check instead")
+        else:
+            print(f"  [NOTE] solid {item['solid']} ({item['faces']} faces): the cut claimed "
+                  f"{item['cut_claimed_mm3']:.6g} mm^3 of its own {item['volume_mm3']:.6g} mm^3 "
+                  f"lies outside, which a boolean-free containment check contradicts; "
+                  f"falling back to that check")
         rep.check(f"solid {item['solid']} is contained in the input "
                   f"(weaker than the exact cut)",
                   bool(ev.get("contained")),
@@ -211,6 +219,50 @@ def scenario_dense_lattice(outdir: str) -> Report:
     if proc.returncode == 0:
         geometry_checks(rep, out, CYLINDER, 10.0, 1.5)
         golden_check(rep, out, CYLINDER_GOLDEN, 10.0, 1.5)
+    return rep
+
+
+def scenario_spiral_stress(outdir: str) -> Report:
+    """A part whose trims are fat where every other committed scenario's are tight.
+
+    `SpiralTest.step` is a stress case rather than a size case: at 2,073
+    boundary junctions it is a fraction of `dense-lattice`, but its swept
+    B-spline surface makes the boolean fit trim curves that carry recorded
+    tolerances two orders above the rehearsal's — 2.1e-02 mm on edges,
+    6.6e-02 mm on a vertex, against 8.7e-04 to 1.5e-03 mm there. Two guards
+    calibrated on the tighter parts refused it, both of them comparing a
+    quantity that does not scale the way the part does (docs/specification.md
+    §11); it is committed so neither can regress unnoticed.
+
+    It is also the only committed scenario whose dominant component **tiles**
+    (8 tiles), so it is the only one that exercises the boundary sew's
+    round-2 seam split, its repair, and the free-edge check that gates both.
+
+    **This scenario is currently expected to FAIL its containment check**, and
+    is committed that way deliberately (docs/specification.md §10). All three
+    parameter sets tried produce watertight, valid solids and all three still
+    leave a little material outside the input body -- 0.239 mm at `cc=5, t=1`.
+    The remaining cause is an intersection failure where both constructions
+    available to the trim agree with each other and both are wrong, so it needs
+    a mechanism rather than another attempt. Everything else here passes.
+
+    **No golden sample yet.** The first passing output is to be inspected by
+    hand before one is committed, so :func:`golden_check` skips and says so.
+    Every other §6.2 check applies in full, including the two that make a
+    golden sample less load-bearing than it sounds: exact B-rep validity on
+    every solid, and no material outside the input body.
+    """
+    rep = Report("spiral-stress")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "spiral-stress.step")
+    proc, elapsed = run_generator(
+        ["-i", SPIRAL, "-cc", "5", "-t", "1", "-o", out, "--cores", "6"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+    rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        geometry_checks(rep, out, SPIRAL, 5.0, 1.0)
+        golden_check(rep, out, SPIRAL_GOLDEN, 5.0, 1.0)
     return rep
 
 
@@ -328,6 +380,7 @@ SCENARIOS = {
     "progress-stream": scenario_progress_stream,
     "smoke-verified": scenario_smoke_verified,
     "dense-lattice": scenario_dense_lattice,
+    "spiral-stress": scenario_spiral_stress,
 }
 
 

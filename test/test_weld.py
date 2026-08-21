@@ -471,7 +471,7 @@ def test_a_hole_the_unsplit_sew_cannot_close_fails_in_stitch_not_in_assemble(tem
     message = str(excinfo.value)
     assert "free edge(s)" in message
     assert "unsplit sew" in message,         "the message must say the split is not the cause, or it misdirects the reader"
-    assert "Sample positions" in message and "[" in message.split("Sample positions")[1],         "positions are the whole point: counts alone cannot locate a hole in a part"
+    assert "position" in message and "[[" in message,         "positions are the whole point: counts alone cannot locate a hole in a part"
 
 
 def test_tiled_sew_across_worker_processes_matches_the_sequential_path(template, tmp_path):
@@ -755,6 +755,96 @@ def test_widening_a_vertex_is_monotonically_permissive(name):
 
     assert occ.is_valid(face)
     assert occ.area(face) == before
+
+
+# --- ...and the same rung on a part whose trims are fat ----------------------
+#
+# `SpiralTest.step` at cc=5, t=1 carries the same false self-intersection, but
+# its swept B-spline surface makes the boolean record tolerances two orders
+# above the rehearsal's: the shared vertex below starts at 6.573e-02 mm, where
+# the rehearsal's four are 8.7e-04 to 1.5e-03 mm (G12). That is *sixteen times*
+# the fixed absolute cap the rung used to carry -- so the first candidate step
+# was refused, nothing grew, and the run reported the face as residual without
+# ever having tried it. A bound that can sit below the value it is bounding is
+# not a bound, and this is the part that showed it.
+
+FAT_VERTEX_FACE = "self-intersecting-wire-fat-vertex.brep"
+SPIRAL_MAX_VERTEX_TOL = occ.SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION * 1.0  # t = 1 mm
+
+
+def test_the_fat_vertex_fixture_is_the_same_fault_at_a_different_scale():
+    """Guard on the guard, exactly as for the two rehearsal fixtures: the same
+    mechanism, so the repair below is not passing for some unrelated reason."""
+    from OCP.BRep import BRep_Tool
+
+    face = load_face(FAT_VERTEX_FACE)
+    assert not occ.is_valid(face)
+    assert all(occ.is_valid(e) for e in occ._explore(face, TopAbs_ShapeEnum.TopAbs_EDGE))
+    assert all(occ.is_valid(v) for v in occ._explore(face, TopAbs_ShapeEnum.TopAbs_VERTEX))
+    pair = occ._self_intersecting_pair(face)
+    assert pair is not None, "the fault is a self-intersecting wire"
+    shared = occ._shared_vertices(*pair)
+    assert shared, "the reported pair is adjacent in the wire"
+    assert BRep_Tool.Tolerance_s(shared[0]) > occ.SELF_INTERSECT_MAX_VERTEX_TOL, (
+        "the point of this fixture: the kernel's own recorded tolerance is "
+        "already above the fixed cap, so a fixed cap can never widen it"
+    )
+
+
+def test_the_fixed_cap_silently_disables_the_rung_on_a_fat_vertex():
+    """The defect itself, pinned so it cannot come back as a default.
+
+    Not a raise and not a wrong repair -- a repair that reports "still invalid"
+    having done nothing, which is how it reached a released version.
+    """
+    face = load_face(FAT_VERTEX_FACE)
+    before = occ.area(face)
+
+    assert occ.fix_vertex_tolerances([face]) == (0, 1)
+
+    assert not occ.is_valid(face)
+    assert occ.area(face) == before
+
+
+def test_a_cap_scaled_to_the_run_repairs_the_fat_vertex():
+    face = load_face(FAT_VERTEX_FACE)
+    before = occ.area(face)
+
+    repaired, still_invalid = occ.fix_vertex_tolerances([face], SPIRAL_MAX_VERTEX_TOL)
+
+    assert (repaired, still_invalid) == (1, 0)
+    assert occ.is_valid(face)
+    assert occ.area(face) == before
+
+
+def test_the_fat_vertex_repair_stays_inside_both_bounds():
+    """One 1.25x step is all it needs, so the *relative* bound is what governs
+    here too -- the scaled absolute one only has to stop forbidding it."""
+    from OCP.BRep import BRep_Tool
+
+    face = load_face(FAT_VERTEX_FACE)
+    a, b = occ._self_intersecting_pair(face)
+    shared = occ._shared_vertices(a, b)
+    start = {v.TShape(): BRep_Tool.Tolerance_s(v) for v in shared}
+
+    occ.fix_vertex_tolerances([face], SPIRAL_MAX_VERTEX_TOL)
+
+    for v in shared:
+        grown = BRep_Tool.Tolerance_s(v)
+        assert grown >= start[v.TShape()], "UpdateVertex never lowers a tolerance"
+        assert grown <= start[v.TShape()] * occ.SELF_INTERSECT_TOL_GROWTH
+        assert grown <= SPIRAL_MAX_VERTEX_TOL
+
+
+def test_the_fat_vertex_repair_replaces_no_topology():
+    face = load_face(FAT_VERTEX_FACE)
+    before = {e.TShape() for e in occ._explore(face, TopAbs_ShapeEnum.TopAbs_EDGE)}
+    verts = {v.TShape() for v in occ._explore(face, TopAbs_ShapeEnum.TopAbs_VERTEX)}
+
+    occ.fix_vertex_tolerances([face], SPIRAL_MAX_VERTEX_TOL)
+
+    assert {e.TShape() for e in occ._explore(face, TopAbs_ShapeEnum.TopAbs_EDGE)} == before
+    assert {v.TShape() for v in occ._explore(face, TopAbs_ShapeEnum.TopAbs_VERTEX)} == verts
 
 
 def test_a_capped_widening_leaves_the_face_for_validate(monkeypatch):

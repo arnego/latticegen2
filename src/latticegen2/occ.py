@@ -362,12 +362,32 @@ def unify_same_domain(
 # `cc=5, t=1` rehearsal faces: 1.05x, 1.05x, 1.25x, 1.10x (G12).
 SELF_INTERSECT_TOL_GROWTH = 4.0
 
-# ...and never above this in absolute terms, whatever the kernel recorded.
-# The CLI's smallest legal strut is ``t = 0.4`` mm (specification.md §3), so
-# this sits a hundredfold below the smallest feature any legal run can produce
-# and needs no knowledge of the run's actual parameters. Measured need: at most
-# 1.093e-03 mm (G12), so this clears it by 3.7x.
+# ...and never above this in absolute terms, whatever the kernel recorded. The
+# CLI's smallest legal strut is ``t = 0.4`` mm (specification.md §3), so this
+# sits a hundredfold below the smallest feature any legal run can produce.
 SELF_INTERSECT_MAX_VERTEX_TOL = 4e-3
+
+# ...except that a *fixed* absolute cap is only right for the part it was
+# calibrated on, and this one was calibrated on `TD_HX_rehearsal_test`, whose
+# vertices carry tolerances of 8.7e-04 to 1.5e-03 mm (G12). A vertex whose
+# recorded tolerance already **exceeds** the cap cannot be widened at all: the
+# first candidate step is refused, nothing grows, and the repair reports the
+# face as residual without having tried. That is not a bound on growth, it is
+# an off switch, and it fired the first time a part with fatter trims arrived.
+# On `SpiralTest.step` at ``cc=5, t=1`` the falsely self-intersecting wire's
+# shared vertex carries **6.573e-02 mm** — sixteen times the cap — and needs
+# exactly one 1.25x step to clear, which the relative bound above allows
+# comfortably and this one forbade outright.
+#
+# So the absolute cap scales with the run's own smallest real feature instead
+# of with one part's measurements. A tenth of ``t`` reproduces the same order
+# as the fixed figure at small ``t`` while admitting what the kernel itself
+# records at larger ``t``: 0.04 mm at ``t = 0.4``, 0.1 mm at ``t = 1`` (the
+# 8.216e-02 mm the spiral needs, with 22 % to spare). The relative bound stays
+# the one that actually governs — every case measured needs 1.05x to 1.25x,
+# far inside 4x — and this remains the backstop against a kernel-recorded
+# tolerance that is itself absurd.
+SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION = 0.1
 
 # Geometric step used to search for the smallest widening that satisfies OCCT's
 # own predicate. A search rather than a formula because the predicate is
@@ -398,11 +418,18 @@ def _self_intersecting_pair(
     return None
 
 
-def _widen_self_intersection_vertices(face: TopoDS_Face) -> bool:
+def _widen_self_intersection_vertices(
+    face: TopoDS_Face, max_vertex_tol: float = SELF_INTERSECT_MAX_VERTEX_TOL
+) -> bool:
     """Widen the shared vertex of a falsely self-intersecting adjacent pair.
 
     Returns whether anything was widened. Moves no geometry: it only raises a
     recorded tolerance, and ``BRep_Builder.UpdateVertex`` never lowers one.
+
+    ``max_vertex_tol`` is the absolute ceiling, which the caller derives from
+    the run's own ``t`` (:data:`SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION`) rather
+    than taking a fixed figure calibrated on one part — see that constant for
+    the case where a fixed one silently disabled this rung.
     """
     builder = BRep_Builder()
     as_built: dict = {}
@@ -416,9 +443,7 @@ def _widen_self_intersection_vertices(face: TopoDS_Face) -> bool:
             key = vertex.TShape()
             start = as_built.setdefault(key, BRep_Tool.Tolerance_s(vertex))
             want = BRep_Tool.Tolerance_s(vertex) * SELF_INTERSECT_TOL_STEP
-            if want > min(
-                start * SELF_INTERSECT_TOL_GROWTH, SELF_INTERSECT_MAX_VERTEX_TOL
-            ):
+            if want > min(start * SELF_INTERSECT_TOL_GROWTH, max_vertex_tol):
                 continue  # capped: leave it for the caller to count as residual
             builder.UpdateVertex(vertex, want)
             grew = touched = True
@@ -426,10 +451,19 @@ def _widen_self_intersection_vertices(face: TopoDS_Face) -> bool:
             return touched
 
 
-def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
+def fix_vertex_tolerances(
+    faces: Iterable[TopoDS_Face],
+    max_vertex_tol: float = SELF_INTERSECT_MAX_VERTEX_TOL,
+) -> tuple[int, int]:
     """Correct vertex tolerances the boundary sew leaves wrong.
 
     Returns ``(repaired, still_invalid)`` counted in faces.
+
+    ``max_vertex_tol`` bounds rung 2's widening absolutely. Callers inside the
+    pipeline pass :data:`SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION` times the
+    run's ``t``; the default is the fixed figure, which is right only for
+    parts whose recorded tolerances are of the rehearsal's order and is kept
+    so a caller with no lattice in hand still gets a bound.
 
     Two faults, both of them a *recorded tolerance* being wrong rather than any
     geometry being wrong, and both repaired the same way: by correcting the
@@ -477,10 +511,9 @@ def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
     So this rung widens that vertex, and asks OCCT's own predicate whether the
     result is enough rather than re-deriving the rule OCCT applies. The search
     is bounded twice — at :data:`SELF_INTERSECT_TOL_GROWTH` times the tolerance
-    the kernel itself recorded, and at
-    :data:`SELF_INTERSECT_MAX_VERTEX_TOL` absolutely — so its failure mode is a
-    face left in ``still_invalid`` for ``validate`` to report, never an
-    unbounded tolerance. Widening is also monotonically *permissive*: every
+    the kernel itself recorded, and at ``max_vertex_tol`` absolutely — so its
+    failure mode is a face left in ``still_invalid`` for ``validate`` to
+    report, never an unbounded tolerance. Widening is also monotonically *permissive*: every
     check that reads a vertex tolerance (the contextual vertex check, this
     self-intersection check) is a "within tolerance" test, so a neighbouring
     face sharing the vertex can only become more valid, never less.
@@ -530,7 +563,7 @@ def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
             fixer.FixVertexTolerance(edge, face)
             touched = True
         if not BRepCheck_Analyzer(face).IsValid():
-            touched |= _widen_self_intersection_vertices(face)
+            touched |= _widen_self_intersection_vertices(face, max_vertex_tol)
         if not touched:
             still_invalid += 1
             continue

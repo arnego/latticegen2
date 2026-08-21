@@ -34,8 +34,8 @@ header rewrite.
 | `test_connect.py` | The junction graph and the floating-body rule's three outcomes | no |
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
-| `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell. Also the two properties the round-2 check rests on: that the batch validity scan behind that repair returns exactly what the per-face predicate does, and that `free_edges` does not count a degenerate edge as a hole | yes |
-| `test_boundary.py` | The symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7) and the two guards on it, tested against the **real** failing junctions in `TD_HX_rehearsal_test.step` rather than synthetic stand-ins — both the `cc=5, t=1` junction the repair was built for and the `cc=12, t=2.5` one whose repair a relative-volume bar wrongly refused (G19) — see the note below | yes |
+| `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell, and `SpiralTest`'s own fat-tolerance face, where a *fixed* absolute cap disabled rung 2 outright. Also that a boundary layer still short of its expected free edges after the unsplit sew fails in `stitch` rather than in `assemble`, and the two properties the round-2 check rests on: that the batch validity scan behind the repair returns exactly what the per-face predicate does, and that `free_edges` does not count a degenerate edge as a hole | yes |
+| `test_boundary.py` | The per-half-strut re-trim behind docs/algorithm.md §7.2, against the four real `SpiralTest.step` junctions whose intersection returns them untrimmed — including that a correctly trimmed junction is left bit-for-bit alone and that a junction wholly inside is checked and kept. Also the symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7) and the two guards on it, tested against the **real** failing junctions in `TD_HX_rehearsal_test.step` rather than synthetic stand-ins — both the `cc=5, t=1` junction the repair was built for and the `cc=12, t=2.5` one whose repair a relative-volume bar wrongly refused (G19) — see the note below | yes |
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6. Also that the strided parallel sweep (docs/algorithm.md §5.4) returns *identical* classes to the serial one, across a real process boundary — identical rather than equivalent, because stride arithmetic invites off-by-ones that a tolerance would hide | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
 | `test_pipeline.py` | Same-domain unification's fallback ladder — a kernel that refuses to merge must yield a larger file, never a failed run | yes |
@@ -113,6 +113,16 @@ and, on the ninth, 1 of 55,513 surface points outside at 1e-06 mm and none at
 1e-05 mm — so nothing was actually wrong with the geometry; the check simply
 could not say so.
 
+**`spiral-stress` is the slow one, and deliberately in the default set.** Its
+generation is ~7 minutes, and the containment check that replaces the exact cut
+on its 45,897-face solid is a further ~31 minutes: 43,935 surface points at
+~43 ms each against a swept B-spline body. `--only` exists for iterating on the
+others. It is kept in the set because it is the only committed part whose
+kernel-recorded tolerances reach 1e-02 mm, the only one whose dominant
+component tiles, and the only one that has ever exercised docs/algorithm.md
+§7.2 — four generator defects came out of it in one session
+(docs/specification.md §10).
+
 Two things follow for anyone extending this file. A boolean-based check needs a
 scale at which it is known to work, and `dense-lattice`'s 15,966 faces is not
 evidence about 43,530. And a check whose failure mode is a *plausible number*
@@ -149,6 +159,16 @@ defect the repair missed, but a valid repair a *guard* refused. Its wire is
 shorter than either of the first junction's and it shifts the volume OCCT
 reports seven orders further (G19), which is exactly the kind of thing no
 synthetic case would have suggested was possible.
+
+`test_weld.py`'s `self-intersecting-wire-fat-vertex.brep` is the third instance
+of the same policy, and the clearest. It is one 0.0053 mm² face lifted straight
+out of a failed `SpiralTest.step` run, and the only thing distinguishing it
+from the two rehearsal faces beside it is a number: the shared vertex OCCT
+recorded at **6.573e-02 mm**, sixteen times the fixed cap rung 2 used to carry,
+where the rehearsal's are 8.7e-04 to 1.5e-03 mm. The repair logic was correct
+and unchanged; only the bound was wrong, and no amount of testing against the
+rehearsal's faces could have shown that, because a bound is only exercised by
+input that reaches it.
 
 So where the geometry that actually fails is committed to the repo, test against
 it. A synthetic case proves the code does what you think; only the real one
@@ -208,6 +228,7 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 | Scenario | Total | Dominant stages |
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
+| `SpiralTest`, `cc=5 t=1` | ~7 min generation | boundary trim (6 min) |
 | test cylinder, `cc=10 t=1.5` | ~40 s | simplify, boundary trim, stitch |
 | `TD_HX_rehearsal_test`, `cc=5 t=1` | 51.7 min, 19.3 GB peak, 2.00 GB output | simplify, boundary trim, stitch, validate |
 

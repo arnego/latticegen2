@@ -649,6 +649,11 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], stats: dict) -> 
     where: list[tuple[float, float, float]] = []
     culprit = -1
     per_solid = []
+    # Timed on its own rather than left inside `validate`'s total. This project
+    # has already learned once that a stage timer covering several phases prices
+    # the stage and says nothing about any one of them (docs/testing.md, the six
+    # `stitch` timers that retired a proposal on their first run).
+    started = _dt.datetime.now()
     for i, solid in enumerate(solids):
         cos = occ.curve_on_surface_deviations(solid)
         pairs += cos.pairs
@@ -661,6 +666,8 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], stats: dict) -> 
         if cos.loose_area_fraction > fraction:
             fraction, culprit = cos.loose_area_fraction, i
             where = list(cos.where)
+    elapsed = (_dt.datetime.now() - started).total_seconds()
+    stats["export_truth_s"] = round(elapsed, 2)
     stats["worst_pcurve_deviation_mm"] = f"{worst:.3e}"
     stats["worst_pcurve_ratio"] = f"{ratio:.3e}"
     stats["loose_area_fraction"] = f"{fraction:.3e}"
@@ -673,7 +680,8 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], stats: dict) -> 
         f"{worst:.4e} mm over {pairs} edge/face pair(s), worst against its own "
         f"feature {ratio:.3e} on a {worst_area:.6f} mm^2 face at "
         f"[{where_worst[0]:.3f}, {where_worst[1]:.3f}, {where_worst[2]:.3f}]; "
-        f"{over} pair(s) deviate by more than their own recorded tolerance"
+        f"{over} pair(s) deviate by more than their own recorded tolerance "
+        f"[{elapsed:.1f}s]"
     )
     # Per solid as well as in aggregate, because the aggregate is a maximum and
     # the whole point of this quantity is that it is a property of one *body*.

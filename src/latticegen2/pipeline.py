@@ -514,11 +514,6 @@ def _run_with_pool(
     stats["output_edges"] = simplify_stats["output_edges"]
     stats["unmerged_solids"] = simplify_stats["unmerged_solids"]
 
-    result_solids, degenerate = _drop_degenerate_islands(rl, result_solids, tmpdir)
-    if degenerate:
-        stats["degenerate_bodies_dropped"] = len(degenerate)
-        stats["degenerate_volume_mm3"] = round(sum(v for v, _c in degenerate), 6)
-
     with Timer(rl, "validate"):
         invalid, total_volume = _validate(result_solids, report=rl.substage)
     if invalid:
@@ -615,23 +610,6 @@ assumed.
 """
 
 
-DEGENERATE_ISLAND_MAX_VOLUME = 5.0
-"""Cubic millimetres. The largest floating body that may be dropped for being
-geometrically degenerate (specification.md §5).
-
-**Deliberately a fixed figure rather than a multiple of ``t`` or ``cc``**, per
-the user's decision, and the reason is that it bounds *damage* rather than
-describing geometry: whatever the parameters, no more than this much material
-can ever silently leave the output by this route. A rule that scaled with the
-lattice would quietly permit dropping a body a hundred times this size at
-``t = 20``, which is not what "a degenerate speck" means to anyone inspecting
-the part.
-
-The case it was sized against is `SpiralTest.step` at ``cc=5, t=1``, whose one
-degenerate island measures **4.17 mm³**.
-"""
-
-
 UNIFY_MAX_DISPLACEMENT = 1e-3
 """Millimetres. How far same-domain unification may move a solid's boundary.
 
@@ -708,72 +686,6 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
         return occ.unify_same_domain(merged, unify_edges=True, unify_faces=False), True
     except Standard_Failure:
         return merged, True
-
-
-def _drop_degenerate_islands(rl: RunLog, solids: list, tmpdir: str):
-    """Discard floating bodies whose geometry is degenerate beyond repair.
-
-    Returns ``(kept, dropped)`` where ``dropped`` is ``(volume, centroid)`` per
-    discarded body. specification.md §5: a body qualifies only when **all three**
-    hold — it is a floating island, it is under
-    :data:`DEGENERATE_ISLAND_MAX_VOLUME`, and its geometry is invalid in a way
-    no repair clears. A merely small island is kept, and so is a merely
-    imperfect large one.
-
-    **Every solid here is already a separate body**, so "floating island" adds
-    no test of its own — `assemble` builds one solid per connected component of
-    the junction graph (docs/algorithm.md §8). The last solid is never dropped:
-    emptying the output is a failure, not a degradation.
-
-    The fault check is exact and is asked only of bodies under the volume bar,
-    which is what keeps it affordable — it is a whole-solid OCCT analysis, the
-    class of call this project has measured at 14.5 GB on a 45,825-face lattice
-    and which is milliseconds on a 36-face speck.
-
-    The warning is unconditional. A run that silently deletes material the user
-    asked for would be indefensible however small the piece, so this prints
-    without ``-v`` and carries the position to inspect.
-    """
-    if len(solids) < 2:
-        return solids, []
-    kept, dropped = [], []
-    for solid in solids:
-        volume = occ.volume(solid)
-        if volume >= DEGENERATE_ISLAND_MAX_VOLUME:
-            kept.append(solid)
-            continue
-        # **Both before and after a STEP round trip**, because they disagree and
-        # the second is the one that ships. This island reports 0 faults as
-        # built and 29 once written and read back, the round trip having
-        # regenerated its pcurves (docs/algorithm.md §9). Checking only the
-        # in-memory solid found nothing at all on the first run of this code.
-        faults = occ.geometry_faults(solid)
-        probe = os.path.join(tmpdir, "degenerate_probe.step")
-        shipped = occ.faults_after_step_roundtrip(solid, probe)
-        rl.line(
-            f"small body of {volume:.4f} mm^3 examined for degeneracy: "
-            f"{faults} exact fault(s) as built, {shipped} after a STEP round trip"
-        )
-        if not faults and not shipped:
-            kept.append(solid)
-            continue
-        repaired = occ.try_repair_geometry(solid)
-        if repaired is not None and not occ.faults_after_step_roundtrip(repaired, probe):
-            rl.line(f"small body of {volume:.4f} mm^3 repaired rather than dropped")
-            kept.append(repaired)
-            continue
-        dropped.append((volume, occ.solid_centroid(solid)))
-    if not kept:
-        # Every body was degenerate. Emptying the output is a failure rather
-        # than a degradation, so nothing is dropped and `validate` decides.
-        return solids, []
-    for volume, centre in dropped:
-        rl.always(
-            f"WARNING: a degenerate body of size {volume:.4f} mm^3 has been "
-            f"dropped from position [{centre[0]:.3f}, {centre[1]:.3f}, "
-            f"{centre[2]:.3f}]"
-        )
-    return kept, dropped
 
 
 def _check_unify_result(

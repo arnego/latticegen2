@@ -80,40 +80,13 @@ def geometry_checks(rep: Report, output: str, input_path: str, cc: float, t: flo
     rep.check("bounding box within input + (cc+t)",
               vg.bounding_box_within(output, input_path, cc + t))
 
-    # Both mesh checks are approximations of properties the B-rep states
-    # exactly, so a disagreement is settled by the exact instrument rather than
-    # by the tessellation -- the same "contradict, never trust" shape as
-    # `outside_check` above. Neither path can turn a real fault into a pass:
-    # the exact tests are strictly stronger where they are available, and where
-    # they are not the mesh verdict stands.
     mesh = vg.mesh_of(output, cc, t)
     manifold_ok, bad_edges = vg.manifold_check(mesh)
-    if manifold_ok:
-        rep.check("mesh is a closed manifold", True, f"{len(mesh.tris)} triangles")
-    else:
-        open_edges, miso = vg.brep_defects(output)
-        rep.check("output is a closed orientable solid (exact, on the B-rep)",
-                  open_edges == 0 and miso == 0,
-                  f"{open_edges} edge(s) not used twice, {miso} misoriented")
-        print(f"  [NOTE] the tessellation has {bad_edges} non-manifold edge(s) over "
-              f"{len(mesh.tris)} triangles, which the exact B-rep check "
-              f"{'contradicts' if open_edges == 0 and miso == 0 else 'confirms'}")
-
+    rep.check("mesh is a closed manifold", manifold_ok,
+              f"{len(mesh.tris)} triangles" + ("" if manifold_ok else f", {bad_edges} bad edges"))
     no_cross, pairs = vg.self_intersection_check(mesh)
-    if no_cross:
-        rep.check("no self-intersections", True, "0 crossing pairs")
-    else:
-        faulty, checked, skipped = vg.exact_self_intersection(output)
-        if skipped:
-            rep.check("no self-intersections", False,
-                      f"{len(pairs)}+ crossing pairs in the mesh; {skipped} solid(s) "
-                      f"too large for the exact check to contradict it")
-        else:
-            rep.check("no self-intersections (exact, on the B-rep)", faulty == 0,
-                      f"{faulty} of {checked} solid(s) self-intersect")
-            print(f"  [NOTE] the tessellation reported {len(pairs)}+ crossing pair(s), "
-                  f"which the exact check over {checked} solid(s) "
-                  f"{'contradicts' if faulty == 0 else 'confirms'}")
+    rep.check("no self-intersections", no_cross,
+              "0 crossing pairs" if no_cross else f"{len(pairs)}+ crossing pairs")
 
 
 def outside_check(rep: Report, output: str, input_path: str, t: float) -> None:
@@ -264,6 +237,14 @@ def scenario_spiral_stress(outdir: str) -> Report:
     It is also the only committed scenario whose dominant component **tiles**
     (8 tiles), so it is the only one that exercises the boundary sew's
     round-2 seam split, its repair, and the free-edge check that gates both.
+
+    **This scenario is currently expected to FAIL its containment check**, and
+    is committed that way deliberately (docs/specification.md §10). All three
+    parameter sets tried produce watertight, valid solids and all three still
+    leave a little material outside the input body -- 0.239 mm at `cc=5, t=1`.
+    The remaining cause is an intersection failure where both constructions
+    available to the trim agree with each other and both are wrong, so it needs
+    a mechanism rather than another attempt. Everything else here passes.
 
     **No golden sample yet.** The first passing output is to be inspected by
     hand before one is committed, so :func:`golden_check` skips and says so.

@@ -1482,45 +1482,6 @@ program builds itself.
   identifies edges as the whole of the difference. A gate is only as good as the
   part it was measured on — the same lesson as §5.1's, in a different place.
 
-* **Degenerate floating bodies are dropped, and the user is told.** Between
-  unification and the validity gate, every solid under
-  `DEGENERATE_ISLAND_MAX_VOLUME` (**5 mm³**, a fixed constant — specification.md
-  §5 explains why it must not scale with the parameters) is asked for exact
-  faults with `BOPAlgo_ArgumentAnalyzer` — **twice: as built, and again after a
-  STEP round trip of that one body**. A body clean both ways is kept untouched.
-  A faulty body is *repaired* if `ShapeFix_Shape` can return one valid solid
-  that has no faults and survives the round trip at the same volume; only if
-  that fails is it discarded, with an unconditional warning naming its volume
-  and centroid. The last solid is never dropped — emptying the output is a
-  failure, not a degradation.
-
-  **The round trip is not belt-and-braces, it is where the defect lives, and
-  checking only the built solid found nothing at all.** `SpiralTest.step` at
-  `cc=5, t=1` produces a 4.17 mm³ island that reports **0 faults as the
-  pipeline builds it** and **29 `InvalidCurveOnSurface` after being written to
-  STEP and read back** — pcurves the round trip regenerated up to 2.118e-02 mm
-  from their own 3D curves, which is exactly the tolerance those edges then
-  record. On faces of ~0.05 mm² that tolerance is the size of the feature, and
-  nothing tessellates it consistently: 9 non-manifold edges and 4 apparent
-  self-crossings in its 135 triangles, against a main body of 105,628 triangles
-  with none. So the generator's geometry is sound and the *file the user
-  receives* is not, which is the only version that matters.
-
-  It also explains why OCCT's repairs looked useless when they were first
-  tried: they were being asked to fix damage that does not exist until export.
-  Measured on the exported body, `ShapeFix_Shape` returns it bit-identical and
-  `BRepLib::SameParameter` makes it `BRepCheck_Analyzer`-invalid.
-
-  One body at a time, so this costs a small temporary file rather than a
-  re-read of the whole output — re-importing a 2 GB result was removed from
-  this pipeline for costing 22 minutes (below).
-
-  **The check is affordable only because of the volume bar.** It is a
-  whole-solid pairwise analysis: milliseconds on a 36-face speck, and **still
-  running after 10 minutes** on the 45,825-face lattice beside it. Asking it of
-  every solid regardless of size would be the same mistake `CUT_MAX_FACES`
-  exists to prevent (docs/testing.md).
-
 * **Validity gate.** Every output solid is checked with OCCT's
   `BRepCheck_Analyzer` before export. This is an *exact* B-rep check rather than a
   mesh-based approximation of one, which matters because mesh-based

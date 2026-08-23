@@ -73,8 +73,8 @@ python src/main.py -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke.step -v
 | STEP written and non-empty | filesystem |
 | Parses back successfully | `STEPControl_Reader` round trip |
 | **Exact B-rep validity** | `BRepCheck_Analyzer` on every solid |
-| Closed manifold | every mesh edge used by exactly 2 triangles; a failure is contradicted against **exact B-rep closure** (`weld.shell_defects`), which is what the mesh test approximates |
-| No self-intersections | `triangles_properly_cross` — plane-straddle pre-check, then edge piercing; a failure is contradicted against OCCT's exact `SelfInterMode` where the solid is under `SELF_INTERSECT_MAX_FACES`, and stands where it is not |
+| Closed manifold | every mesh edge used by exactly 2 triangles |
+| No self-intersections | `triangles_properly_cross` — plane-straddle pre-check, then edge piercing |
 | No material outside the input body | boolean cut of output against input **per solid**, volume ≈ 0; a non-zero remainder is contradicted against a boolean-free containment check and reported as unmeasured if the two disagree (see below) |
 | Bounding box within input + (cc+t) | direct comparison |
 | Runtime budget | wall clock: 10 min for `smoke-fast` and `dense-lattice`, 20 min for `smoke-verified` |

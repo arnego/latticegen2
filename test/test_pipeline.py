@@ -16,6 +16,7 @@ from latticegen2 import occ
 from latticegen2.errors import ProcessingError
 from latticegen2.parallel import WorkerPool
 from latticegen2.pipeline import (
+    UNIFY_MAX_DISPLACEMENT,
     UNIFY_VOLUME_TOL,
     _check_unify_result,
     _unify,
@@ -146,6 +147,61 @@ def test_check_unify_result_accepts_drift_within_tolerance():
 
 
 def test_check_unify_result_rejects_drift_beyond_tolerance():
+    post = 100.0 * (1 + 2 * UNIFY_VOLUME_TOL)
+    with pytest.raises(ProcessingError, match="changed a solid's volume"):
+        _check_unify_result(100.0, post, 1)
+
+
+# --- and the second stage of it ---------------------------------------------
+#
+# Relative drift is only the pre-filter. What decides is the displacement it
+# implies over the solid's own surface, because the same boundary movement
+# shows up as a far larger *fraction* of a small solid's volume than of a big
+# one's -- so the relative figure is biased by size rather than by the thing
+# the guard is looking for. The two solids below are the real pair from one
+# `SpiralTest.step` run, unified by the same call in the same stage.
+
+
+def test_check_unify_result_accepts_a_small_solid_whose_boundary_barely_moved():
+    """The regression: `SpiralTest`'s 4.17 mm^3 island, at 1.8e-03 relative.
+
+    Refused outright by the relative bar, and sound -- the exact symmetric
+    difference against the un-unified solid is 0 mm^3 both ways, and the merged
+    edges carry recorded tolerances of 2.1e-02 mm, 85x the movement implied
+    here. Its displacement is 2.494e-04 mm.
+    """
+    pre, post, area = 4.170537957, 4.162877342, 30.7213
+    drift = _check_unify_result(pre, post, 1, area_of=lambda: area)
+    assert drift > UNIFY_VOLUME_TOL, "the pre-filter must still trip, or nothing is tested"
+    assert abs(pre - post) / area < UNIFY_MAX_DISPLACEMENT
+
+
+def test_check_unify_result_still_rejects_a_boundary_that_really_moved():
+    """Same solid, same area, a drift an order past what displacement allows."""
+    pre, area = 4.170537957, 30.7213
+    post = pre - 10 * UNIFY_MAX_DISPLACEMENT * area
+    with pytest.raises(ProcessingError, match="boundary displacement"):
+        _check_unify_result(pre, post, 1, area_of=lambda: area)
+
+
+def test_check_unify_result_does_not_measure_area_unless_the_pre_filter_trips():
+    """The whole reason `area_of` is a callable: 7.7 s on a 64k-face solid.
+
+    Measuring it on every solid would put ~70 s on every rehearsal-scale run
+    for a guard that almost never fires.
+    """
+    calls = []
+
+    def area_of():
+        calls.append(1)
+        return 30.7213
+
+    _check_unify_result(100.0, 100.0 * (1 + 0.5 * UNIFY_VOLUME_TOL), 1, area_of=area_of)
+    assert calls == [], "a solid inside the pre-filter must not pay for its area"
+
+
+def test_check_unify_result_without_an_area_falls_back_to_the_pre_filter():
+    """A caller with no shape in hand keeps the old, stricter behaviour."""
     post = 100.0 * (1 + 2 * UNIFY_VOLUME_TOL)
     with pytest.raises(ProcessingError, match="changed a solid's volume"):
         _check_unify_result(100.0, post, 1)

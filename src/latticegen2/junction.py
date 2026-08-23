@@ -67,6 +67,15 @@ class JunctionTemplate:
     """The six cap quads, indexed by half-strut id (``lattice.HALF_STRUTS``)."""
     cap_centers: np.ndarray
     """``(6, 3)`` local cap-quad centres, indexed by half-strut id."""
+    half_solids: list[TopoDS_Shape]
+    """The six unfused half-strut prisms at the origin, by half-strut id.
+
+    Kept because they are the operands :func:`latticegen2.boundary.trim_junction`
+    falls back to when the kernel's intersection of the *fused* junction against
+    the input body silently returns it untrimmed (docs/algorithm.md §7.2). Each
+    is convex where ``J`` is not, and the same intersection succeeds on them.
+    They cost nothing to keep: ``build_template`` has already built them.
+    """
     volume: float
     """Exact volume of ``J`` in mm³ — the basis of the interior volume identity."""
     n_faces: int
@@ -193,6 +202,7 @@ def build_template(lp: LatticeParams, tol: float = 1e-7) -> JunctionTemplate:
         open_shell=shell,
         cap_faces=cap_faces,
         cap_centers=cap_centers,
+        half_solids=halves,
         volume=occ.volume(solid),
         n_faces=len(all_faces),
         cap_area_error=area_err,

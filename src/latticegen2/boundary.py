@@ -43,9 +43,13 @@ from typing import NamedTuple
 
 import numpy as np
 from OCP.BRep import BRep_Builder
+from OCP.BRep import BRep_Tool
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Fuse
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
 from OCP.BRepTools import BRepTools
-from OCP.TopoDS import TopoDS_Shape, TopoDS_Shell
+from OCP.TopAbs import TopAbs_ShapeEnum
+from OCP.TopoDS import TopoDS, TopoDS_Shape, TopoDS_Shell
+from OCP.gp import gp_Pnt
 from OCP.TopTools import TopTools_ListOfShape
 
 from . import occ
@@ -169,6 +173,24 @@ class BoundaryResult:
     Logged as one aggregate line rather than one per junction, the same way the
     floating-body rule reports its removals: a part dense in grazing trims can
     produce many, and a line each would bury the rest of the log."""
+    n_retrimmed_junctions: int = 0
+    """Junctions whose fused intersection came back untrimmed and had to be
+    redone per half-strut (docs/algorithm.md §7.2).
+
+    Aggregated for the same reason the pinhole count is: a part that provokes
+    it once tends to provoke it repeatedly, and one line each would bury the
+    log. Zero on every committed scenario except `spiral-stress`."""
+    n_localized_junctions: int = 0
+    """Junctions re-trimmed against a locally cut block of the body because the
+    whole-body intersection left material outside it (docs/algorithm.md §7.2)."""
+    n_dropped_junctions: int = 0
+    """Junctions discarded because no intersection kept them inside the body
+    (docs/algorithm.md §7.2, :attr:`TrimResult.dropped`)."""
+    worst_outside_mm: float = 0.0
+    """Furthest outside the body any *discarded* junction reached. Nothing in
+    the output reaches outside at all: specification.md §1 requires the lattice
+    to fit exactly within the input, so what could not be trimmed was dropped."""
+    worst_outside_node: tuple | None = None
     max_worker_rss: int = 0
     """Highest peak RSS reported by any worker process.
 
@@ -252,6 +274,193 @@ class TrimResult(NamedTuple):
     those tuples are what every caller and test in this codebase destructures
     and the reading is not part of the geometry they describe. Alignment is by
     construction: both lists are appended to once per solid, in one loop."""
+    retrimmed: bool = False
+    """Whether the fused junction's intersection had to be redone per half-strut
+    (:func:`_retrim_per_half`, docs/algorithm.md §7.2)."""
+    localized: bool = False
+    """Whether the trim had to be redone against a locally cut block of the body
+    (:func:`_retrim_against_local_block`, docs/algorithm.md §7.2)."""
+    outside_mm: float = 0.0
+    """How far the junction reached outside the body when it was given up, or
+    zero. Non-zero implies :attr:`dropped`."""
+    dropped: bool = False
+    """Whether this junction was discarded because no intersection available to
+    this stage would keep it inside the body (docs/algorithm.md §7.2).
+
+    **Discarding is the safe direction and failing the run is not.**
+    specification.md §1 requires the lattice to fit *exactly* within the input,
+    so geometry that reaches outside it cannot be shipped; but a junction that
+    contributes nothing costs a fraction of the lattice, while a hard failure
+    costs the whole part. It is structurally the same as the junctions whose
+    intersection is legitimately empty — of which this part already has 215 —
+    so the neighbours' caps simply stay closed and the output stays watertight.
+    Reported loudly, never silently: a run that has to do this should say so.
+    """
+
+
+LOCAL_BLOCK_CELLS = 1.0
+"""Half-size of the block cut out of the input body before re-trimming, in cells.
+
+The block has to be **tight**. Measured on `SpiralTest.step`, against Monte
+Carlo ground truth: at one cell the re-trim lands within 1.2 sigma of the truth
+at every junction tried, and from four cells outward it reproduces the wrong
+answer the whole-body intersection gave. Two cells works at some junctions and
+not others. There is no margin to widen here and no version of this that shares
+one block across a worker's batch — that idea is what the measurement killed.
+
+A junction reaches ``a/2``, so one cell either side of the node contains it with
+room to spare.
+"""
+
+
+# How close to the untrimmed junction's own volume an intersection result has to
+# be before it is treated as "the kernel returned its operand unchanged". The
+# failing case comes back re-partitioned rather than byte-identical -- measured
+# 5.7e-08 mm^3 from the template's own figure on `SpiralTest`, a relative
+# 6.6e-09 -- so this has to sit above quadrature noise while staying far below
+# any real trim. It is not load-bearing either way: anything inside it is
+# re-derived per half-strut, and a junction that really is whole comes back
+# whole and keeps its original result.
+UNTRIMMED_VOLUME_REL_TOL = 1e-6
+
+
+def _piece_vertices(pieces) -> np.ndarray:
+    """Every distinct vertex position across a trim's pieces."""
+    pts = []
+    for faces, _tags, _vol in pieces:
+        for face in faces:
+            for v in occ._explore(face, TopAbs_ShapeEnum.TopAbs_VERTEX):
+                p = BRep_Tool.Pnt_s(TopoDS.Vertex_s(v))
+                pts.append((p.X(), p.Y(), p.Z()))
+    if not pts:
+        return np.empty((0, 3))
+    return np.unique(np.array(pts), axis=0)
+
+
+def _retrim_against_local_block(
+    lp: LatticeParams,
+    tpl: JunctionTemplate,
+    node_pos: np.ndarray,
+    body: TopoDS_Shape,
+) -> TopoDS_Shape | None:
+    """Re-trim one junction against a block cut out of the body around it.
+
+    The residual case §7.2's per-half-strut repair cannot reach: the fused
+    intersection and the six half-strut ones **agree with each other** and are
+    both wrong, so there is no second construction left to compare against and
+    no way to grade either with another boolean against the same body.
+
+    What does work is giving the kernel a smaller tool. A box/body intersection
+    is well conditioned at exactly the nodes where the junction/body one is not
+    — measured — so the body is cut down to a :data:`LOCAL_BLOCK_CELLS` block
+    around the node first and the junction is intersected with that. Checked
+    against Monte Carlo ground truth built from point classification alone:
+
+    ==================  ==============  ====================  ==============
+    junction            whole body      truth (Monte Carlo)   local block
+    ==================  ==============  ====================  ==============
+    cc=5, (6,4,6)       8.3772 (5 s.d.) 8.010 +/- 0.074       **8.0662**
+    cc=7, (2,4,2)       23.6165 (whole) 11.513 +/- 0.398      **11.0446**
+    ==================  ==============  ====================  ==============
+
+    Returns ``None`` if the block cannot be cut, leaving the caller to report
+    the junction rather than silently keeping geometry that reaches outside.
+    """
+    half = LOCAL_BLOCK_CELLS * lp.a
+    lo = node_pos - half
+    box = BRepPrimAPI_MakeBox(gp_Pnt(*lo), 2 * half, 2 * half, 2 * half).Shape()
+
+    cut = BRepAlgoAPI_Common()
+    args = TopTools_ListOfShape()
+    args.Append(box)
+    tools = TopTools_ListOfShape()
+    tools.Append(body)
+    cut.SetArguments(args)
+    cut.SetTools(tools)
+    cut.Build()
+    if not cut.IsDone() or not occ.solids(cut.Shape()):
+        return None
+    local = cut.Shape()
+
+    algo = BRepAlgoAPI_Common()
+    args = TopTools_ListOfShape()
+    args.Append(tpl.solid.Moved(occ.translation(node_pos)))
+    tools = TopTools_ListOfShape()
+    tools.Append(local)
+    algo.SetArguments(args)
+    algo.SetTools(tools)
+    algo.Build()
+    return algo.Shape() if algo.IsDone() else None
+
+
+def _retrim_per_half(
+    lp: LatticeParams,
+    tpl: JunctionTemplate,
+    node_pos: np.ndarray,
+    body: TopoDS_Shape,
+) -> TopoDS_Shape | None:
+    """Redo one junction's trim on its six half-struts, or ``None`` to keep the
+    original.
+
+    ``None`` means the check cleared the original result: every half-strut came
+    back whole, so the junction really is wholly inside the body and an
+    intersection returning it unchanged was right.
+
+    Otherwise the surviving half-strut intersections are fused back into one
+    solid and returned. That fuse is a general boolean, which this pipeline
+    otherwise performs only twice (docs/algorithm.md §3.2's template fuse and
+    §7.1's disagreeing-cap repair) — it is affordable here for the same reason
+    as §7.1's: it runs only where the kernel has already contradicted itself,
+    measured at 9.2 % of boundary junctions reaching the check and 0.4 %
+    actually needing the repair.
+    """
+    loc = occ.translation(node_pos)
+    kept = []
+    whole = True
+    for h in range(6):
+        algo = BRepAlgoAPI_Common()
+        args = TopTools_ListOfShape()
+        args.Append(tpl.half_solids[h].Moved(loc))
+        tools = TopTools_ListOfShape()
+        tools.Append(body)
+        algo.SetArguments(args)
+        algo.SetTools(tools)
+        algo.Build()
+        if not algo.IsDone():
+            raise ProcessingError(
+                f"Re-trimming half-strut {h} of the junction at "
+                f"{tuple(node_pos)} failed. The fused junction's own "
+                f"intersection had already returned it untrimmed, so there is "
+                f"no result left to fall back on."
+            )
+        solids = occ.solids(algo.Shape())
+        got = sum(occ.volume(sd) for sd in solids)
+        want = occ.volume(tpl.half_solids[h])
+        if abs(got - want) > UNTRIMMED_VOLUME_REL_TOL * want:
+            whole = False
+        kept.extend(solids)
+    if whole:
+        return None  # genuinely wholly inside: the original result stands
+    if not kept:
+        return occ.compound([])
+    if len(kept) == 1:
+        return kept[0]
+    fuse = BRepAlgoAPI_Fuse()
+    args = TopTools_ListOfShape()
+    args.Append(kept[0])
+    tools = TopTools_ListOfShape()
+    for sd in kept[1:]:
+        tools.Append(sd)
+    fuse.SetArguments(args)
+    fuse.SetTools(tools)
+    fuse.Build()
+    if not fuse.IsDone():
+        raise ProcessingError(
+            f"Could not fuse the re-trimmed half-struts of the junction at "
+            f"{tuple(node_pos)} back into one solid."
+        )
+    fuse.SimplifyResult()
+    return fuse.Shape()
 
 
 def trim_junction(
@@ -259,6 +468,7 @@ def trim_junction(
     tpl: JunctionTemplate,
     node_pos: np.ndarray,
     body: TopoDS_Shape,
+    probe=None,
 ) -> TrimResult:
     """Intersect one instanced junction with the body and tag its cap faces.
 
@@ -292,24 +502,86 @@ def trim_junction(
             f"Boundary intersection failed for junction at {tuple(node_pos)}."
         )
 
-    out = []
-    tolerances = []
-    n_pinholes = 0
-    for solid in occ.solids(algo.Shape()):
-        cleaned, removed = _remove_pinholes(node_pos, solid)
-        n_pinholes += removed
-        faces = occ.faces(cleaned)
-        tags = [is_cap_plane_face(lp, f, node_pos) for f in faces]
-        tags = [-1 if h is None else h for h in tags]
-        out.append((faces, tags, occ.volume(cleaned)))
-        # Measured here rather than on the assembled output, over the face list
-        # this pass already holds: it costs one area and one centroid on the
-        # single worst face, it runs in the worker for free alongside the trim
-        # that produced the geometry, and it is the last point at which this
-        # piece can still be reported by the junction it came from
-        # (docs/algorithm.md §7.3).
-        tolerances.append(occ.tolerance_feature_ratio(faces))
-    return TrimResult(out, n_pinholes, tolerances)
+    result = algo.Shape()
+    trimmed = occ.solids(result)
+
+    # **The kernel can return this intersection's own operand, untrimmed.**
+    # Measured on `SpiralTest.step` at cc=5, t=1: three junctions come back at
+    # exactly the template volume with `IsDone` true, leaving lattice material
+    # up to 1.29 mm outside the input body. It is specific to the *fused*
+    # junction operand -- spheres and boxes of the same scale at the same node
+    # trim correctly, the input solid is `BRepCheck_Analyzer`-valid, and
+    # neither a fuzzy value, swapped operands nor baking the location away
+    # changes it (docs/algorithm.md §7.2). Whatever the cause, a result equal
+    # to the operand is the one case that can be checked cheaply and redone, so
+    # it is.
+    #
+    # This does not decide whether the junction is inside the body -- that is
+    # what the kernel just got wrong, so asking it again the same way would be
+    # worthless. `_retrim_per_half` re-derives the answer from operands the
+    # same call handles correctly, and clears the original result whenever the
+    # junction really is wholly inside.
+    retrimmed = False
+    if len(trimmed) == 1 and abs(
+        occ.volume(trimmed[0]) - tpl.volume
+    ) <= UNTRIMMED_VOLUME_REL_TOL * tpl.volume:
+        repaired = _retrim_per_half(lp, tpl, node_pos, body)
+        if repaired is not None:
+            trimmed = occ.solids(repaired)
+            retrimmed = True
+
+    def finish(solids):
+        pieces = []
+        tolerances = []
+        n_pinholes = 0
+        for solid in solids:
+            cleaned, removed = _remove_pinholes(node_pos, solid)
+            n_pinholes += removed
+            faces = occ.faces(cleaned)
+            tags = [is_cap_plane_face(lp, f, node_pos) for f in faces]
+            tags = [-1 if h is None else h for h in tags]
+            pieces.append((faces, tags, occ.volume(cleaned)))
+            # Measured here rather than on the assembled output, over the face
+            # list this pass already holds: it costs one area and one centroid
+            # on the single worst face, it runs in the worker for free
+            # alongside the trim that produced the geometry, and it is the last
+            # point at which this piece can still be reported by the junction
+            # it came from (docs/algorithm.md §7.3).
+            tolerances.append(occ.tolerance_feature_ratio(faces))
+        return pieces, tolerances, n_pinholes
+
+    out, tolerances, n_pinholes = finish(trimmed)
+
+    # **Whether the trim left material outside the body is asked directly, and
+    # not of a boolean.** §7.2's per-half-strut repair covers the case where
+    # the fused intersection returns its operand; it cannot cover the case
+    # where the fused and per-half results *agree with each other* and are both
+    # wrong, because it has nothing left to compare against. `probe` answers it
+    # from the classification mesh instead — ray parity plus a distance bar,
+    # sharing no machinery with the kernel that produced the error — at a few
+    # milliseconds per junction, so every junction can be asked.
+    localized = False
+    outside_mm = 0.0
+    if probe is not None and out:
+        outside_mm = probe.worst_outside(_piece_vertices(out))
+        if outside_mm > 0.0:
+            repaired = _retrim_against_local_block(lp, tpl, node_pos, body)
+            if repaired is not None:
+                solids = occ.solids(repaired)
+                candidate, cand_tol, n_ph = finish(solids)
+                # Kept only if it is actually better: the block is a smaller
+                # tool for the same kernel, not a different kind of answer, so
+                # it is checked by the same probe rather than assumed to work.
+                still = probe.worst_outside(_piece_vertices(candidate)) if candidate else 0.0
+                if still < outside_mm:
+                    out, tolerances, n_pinholes = candidate, cand_tol, n_ph
+                    outside_mm = still
+                    localized = True
+        if outside_mm > 0.0:
+            # Nothing this stage can do trims it correctly, so it does not go
+            # into the output at all. See `TrimResult.dropped`.
+            return TrimResult([], 0, [], retrimmed, localized, outside_mm, True)
+    return TrimResult(out, n_pinholes, tolerances, retrimmed, localized, outside_mm)
 
 
 def _remove_pinholes(node_pos: np.ndarray, solid):
@@ -654,6 +926,28 @@ def fuse_disagreeing_pairs(
 # --- Worker-process plumbing ------------------------------------------------
 
 
+_PROBE_CACHE: dict = {}
+
+
+def _worker_probe(mesh_path: str | None, margin: float):
+    """The staged classification mesh, as an :class:`~latticegen2.classify.OutsideProbe`.
+
+    Memoised at module scope in the worker, exactly as `classify` memoises its
+    own index and for the same reason: the pool hands a worker one batch at a
+    time, so without this the mesh would be re-read and its ray-casting index
+    rebuilt once per batch rather than once per process.
+    """
+    if mesh_path is None:
+        return None
+    got = _PROBE_CACHE.get(mesh_path)
+    if got is None:
+        from .classify import OutsideProbe, load_mesh
+
+        got = OutsideProbe(load_mesh(mesh_path), margin)
+        _PROBE_CACHE[mesh_path] = got
+    return got
+
+
 def _worker_trim(job):
     """Trim one batch of boundary junctions in a worker process.
 
@@ -666,10 +960,11 @@ def _worker_trim(job):
     worker process by :class:`latticegen2.parallel.WorkerPool`'s own initializer
     rather than once per job.
     """
-    (body_path, cc, t, node_batch, out_path) = job
+    (body_path, cc, t, node_batch, out_path, mesh_path, margin) = job
     lp = lattice_params(cc, t)
     tpl = build_template(lp)
     body = _read_brep(body_path)
+    probe = _worker_probe(mesh_path, margin)
 
     node_batch = np.asarray(node_batch, dtype=np.int64)
     positions = nodes(lp, node_batch)
@@ -679,9 +974,23 @@ def _worker_trim(job):
     n_empty = 0
     n_pinhole_junctions = 0
     n_pinhole_wires = 0
+    n_retrimmed = 0
+    n_localized = 0
+    n_dropped = 0
+    worst_outside = 0.0
+    worst_node = None
     for i in range(len(node_batch)):
-        trimmed = trim_junction(lp, tpl, positions[i], body)
-        results, n_pinholes = trimmed.pieces, trimmed.n_pinholes_removed
+        trim = trim_junction(lp, tpl, positions[i], body, probe)
+        results, n_pinholes = trim.pieces, trim.n_pinholes_removed
+        if trim.retrimmed:
+            n_retrimmed += 1
+        if trim.localized:
+            n_localized += 1
+        if trim.dropped:
+            n_dropped += 1
+            if trim.outside_mm > worst_outside:
+                worst_outside = trim.outside_mm
+                worst_node = tuple(int(x) for x in node_batch[i])
         if n_pinholes:
             n_pinhole_junctions += 1
             n_pinhole_wires += n_pinholes
@@ -689,14 +998,15 @@ def _worker_trim(job):
             n_empty += 1
             continue
         node = (int(node_batch[i][0]), int(node_batch[i][1]), int(node_batch[i][2]))
-        for (faces, tags, vol), tf in zip(results, trimmed.tolerances):
+        for (faces, tags, vol), tf in zip(results, trim.tolerances):
             bundles.append(occ.compound(faces))
             meta.append((node, tags, vol, tuple(tf)))
 
     from .runlog import peak_rss_bytes
 
     rss = peak_rss_bytes()
-    pinholes = (n_pinhole_junctions, n_pinhole_wires)
+    pinholes = (n_pinhole_junctions, n_pinhole_wires, n_retrimmed,
+                n_localized, worst_outside, worst_node, n_dropped)
     # `rss` stays last: WorkerPool.run reads it positionally at rss_index=-1, a
     # convention shared by every worker function in this codebase.
     if bundles:
@@ -750,6 +1060,8 @@ def trim_boundary(
     workers: int,
     progress=None,
     pool: WorkerPool | None = None,
+    mesh_path: str | None = None,
+    outside_margin: float = 0.0,
 ) -> BoundaryResult:
     """Trim every boundary junction, sequentially or across worker processes.
 
@@ -765,10 +1077,21 @@ def trim_boundary(
     if len(boundary_nodes) == 0:
         return result
 
+    probe = _worker_probe(mesh_path, outside_margin)
+
     if workers <= 1:
         positions = nodes(lp, boundary_nodes)
         for i in range(len(boundary_nodes)):
-            trim = trim_junction(lp, tpl, positions[i], body)
+            trim = trim_junction(lp, tpl, positions[i], body, probe)
+            if trim.retrimmed:
+                result.n_retrimmed_junctions += 1
+            if trim.localized:
+                result.n_localized_junctions += 1
+            if trim.dropped:
+                result.n_dropped_junctions += 1
+                if trim.outside_mm > result.worst_outside_mm:
+                    result.worst_outside_mm = trim.outside_mm
+                    result.worst_outside_node = tuple(int(x) for x in boundary_nodes[i])
             if trim.n_pinholes_removed:
                 result.n_pinhole_junctions += 1
                 result.n_pinhole_wires += trim.n_pinholes_removed
@@ -786,7 +1109,8 @@ def trim_boundary(
 
     batches = _split_batches(boundary_nodes, workers)
     jobs = [
-        (body_path, lp.cc, lp.t, nb.tolist(), os.path.join(tmpdir, f"boundary_{bi}.brep"))
+        (body_path, lp.cc, lp.t, nb.tolist(),
+         os.path.join(tmpdir, f"boundary_{bi}.brep"), mesh_path, outside_margin)
         for bi, nb in enumerate(batches)
     ]
 
@@ -816,6 +1140,12 @@ def trim_boundary(
         for path, meta, n_empty, pinholes, rss in results:
             result.n_pinhole_junctions += pinholes[0]
             result.n_pinhole_wires += pinholes[1]
+            result.n_retrimmed_junctions += pinholes[2]
+            result.n_localized_junctions += pinholes[3]
+            result.n_dropped_junctions += pinholes[6]
+            if pinholes[4] > result.worst_outside_mm:
+                result.worst_outside_mm = pinholes[4]
+                result.worst_outside_node = pinholes[5]
             result.n_empty += n_empty
             result.max_worker_rss = max(result.max_worker_rss, rss)
             if path is None:

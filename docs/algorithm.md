@@ -842,6 +842,66 @@ worker-parallel anyway.
 `BoundaryResult.n_retrimmed_junctions` reports the count, logged without `-v`
 because a run where the kernel contradicts itself should say so.
 
+#### The residual: when every intersection agrees and all of them are wrong
+
+The repair above rests on the per-half-strut intersection being trustworthy
+where the fused one is not. That holds for the whole-junction failures it was
+built for and **not** for what remained: junctions where the fused result and
+the six half-strut ones agree with each other and are both wrong, leaving
+nothing to compare against and no boolean that can grade either.
+
+    cc=5, node (6,4,6):  fused 8.3772  | per-half 10.3772 of 10.6066
+    cc=7, node (8,2,6):  fused 3.9504  | per-half  3.9504 of 29.1045
+
+Closing it took a check that does not use the kernel and a repair that gives
+the kernel less to chew on.
+
+**The check — `classify.OutsideProbe`.** Ray parity over the classification
+mesh, plus a distance bar, asked of every trimmed junction's vertices. Both
+halves are load-bearing: a trimmed junction's vertices lie *on* the input
+surface by construction and parity there is a coin flip, so parity alone flags
+sound junctions exactly as readily as broken ones — measured, 2 of 38 vertices
+either way. Distance separates them by two orders: **0.004 to 0.007 mm** on
+sound junctions against **0.47 to 0.69 mm** on protruding ones. The bar is
+twice the mesh's own *measured* deviation, for §5.1's reason: below `d` the
+mesh cannot tell the sides apart at all. Exact point-triangle distances are
+computed only for the handful parity rejects, so this costs milliseconds per
+junction and every junction can be asked.
+
+**The repair — a local block.** A box of `LOCAL_BLOCK_CELLS` around the node is
+intersected with the body first, and the junction is intersected with *that*.
+A box/body intersection is well conditioned at exactly the nodes where the
+junction/body one is not. Against Monte Carlo ground truth built from point
+classification alone, node (6,4,6) goes from 8.3772 (5 sigma out) to
+**8.0662**, against a truth of 8.010 ± 0.074. The result is re-probed rather
+than trusted: it is the same kernel with a smaller tool, not a different kind
+of answer, so it is kept only when it is measurably better.
+
+**Where nothing works, the junction is dropped.** On `SpiralTest` at
+`cc=5, t=1` one junction of 2,073 — (3,13,5) — resists both: it is almost
+entirely inside (truth 8.301 ± 0.281 against a trim of 8.6009, within 1.1
+sigma) while two of its vertices reach 0.32 and 0.53 mm outside. A thin sliver
+of negligible volume, which is why no volume-based check would ever see it, and
+the local block returns byte-identical geometry. Since specification.md §1 is
+"fits exactly within the user's boundary geometry", that cannot ship — and a
+hard failure would cost the whole part to save 0.03 % of the lattice, so the
+junction is discarded instead and reported by name. It is structurally the same
+as the 215 junctions whose intersection is legitimately empty: the neighbours'
+caps stay closed and the output stays watertight.
+
+**Measured across three parameter sets on that part**, each verified at ~4,000
+surface points with every candidate cross-checked by a sphere/body
+intersection:
+
+| run | localized | dropped | points outside |
+|---|---|---|---|
+| `cc=5, t=1` | 10 | 1 | **0** (was 0.239 mm) |
+| `cc=7, t=1.4` | 4 | 0 | **0** (was 0.771 mm) |
+| `cc=4, t=0.8` | 13 | 0 | **0** (was 0.380 mm) |
+
+Probing every junction costs about **+24 %** on `boundary`, which is
+worker-parallel.
+
 **One consequence reaches §8, and it is why `unweldable` now checks
 boundary-to-boundary caps.** A rebuilt junction's caps are geometrically
 identical to what its neighbours expect — measured within 1e-15 mm, four orders
@@ -1421,6 +1481,45 @@ program builds itself.
   (57.28 → 57.57 s). The face count was identical throughout, which is what
   identifies edges as the whole of the difference. A gate is only as good as the
   part it was measured on — the same lesson as §5.1's, in a different place.
+
+* **Degenerate floating bodies are dropped, and the user is told.** Between
+  unification and the validity gate, every solid under
+  `DEGENERATE_ISLAND_MAX_VOLUME` (**5 mm³**, a fixed constant — specification.md
+  §5 explains why it must not scale with the parameters) is asked for exact
+  faults with `BOPAlgo_ArgumentAnalyzer` — **twice: as built, and again after a
+  STEP round trip of that one body**. A body clean both ways is kept untouched.
+  A faulty body is *repaired* if `ShapeFix_Shape` can return one valid solid
+  that has no faults and survives the round trip at the same volume; only if
+  that fails is it discarded, with an unconditional warning naming its volume
+  and centroid. The last solid is never dropped — emptying the output is a
+  failure, not a degradation.
+
+  **The round trip is not belt-and-braces, it is where the defect lives, and
+  checking only the built solid found nothing at all.** `SpiralTest.step` at
+  `cc=5, t=1` produces a 4.17 mm³ island that reports **0 faults as the
+  pipeline builds it** and **29 `InvalidCurveOnSurface` after being written to
+  STEP and read back** — pcurves the round trip regenerated up to 2.118e-02 mm
+  from their own 3D curves, which is exactly the tolerance those edges then
+  record. On faces of ~0.05 mm² that tolerance is the size of the feature, and
+  nothing tessellates it consistently: 9 non-manifold edges and 4 apparent
+  self-crossings in its 135 triangles, against a main body of 105,628 triangles
+  with none. So the generator's geometry is sound and the *file the user
+  receives* is not, which is the only version that matters.
+
+  It also explains why OCCT's repairs looked useless when they were first
+  tried: they were being asked to fix damage that does not exist until export.
+  Measured on the exported body, `ShapeFix_Shape` returns it bit-identical and
+  `BRepLib::SameParameter` makes it `BRepCheck_Analyzer`-invalid.
+
+  One body at a time, so this costs a small temporary file rather than a
+  re-read of the whole output — re-importing a 2 GB result was removed from
+  this pipeline for costing 22 minutes (below).
+
+  **The check is affordable only because of the volume bar.** It is a
+  whole-solid pairwise analysis: milliseconds on a 36-face speck, and **still
+  running after 10 minutes** on the 45,825-face lattice beside it. Asking it of
+  every solid regardless of size would be the same mistake `CUT_MAX_FACES`
+  exists to prevent (docs/testing.md).
 
 * **Validity gate.** Every output solid is checked with OCCT's
   `BRepCheck_Analyzer` before export. This is an *exact* B-rep check rather than a

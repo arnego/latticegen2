@@ -18,6 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import numpy as np
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
+from OCP.BRepExtrema import BRepExtrema_DistShapeShape
 from OCP.TopTools import TopTools_ListOfShape
 
 from latticegen2 import occ
@@ -49,6 +51,68 @@ def mesh_of(path: str, cc: float, t: float) -> TriMesh:
         raise RuntimeError(f"No triangles produced for {path}")
     v, f = _weld(np.vstack(verts), np.vstack(tris))
     return TriMesh(verts=v, tris=f)
+
+
+SELF_INTERSECT_MAX_FACES = 5_000
+"""Above this many faces, a solid's self-intersection is not put to the exact
+check, and the mesh verdict stands.
+
+`BOPAlgo_ArgumentAnalyzer`'s ``SelfInterMode`` is exact where the mesh test is
+an approximation, so it is the better instrument wherever it can be afforded --
+but it is a whole-solid pairwise analysis and does not scale. Measured on
+`SpiralTest`'s 45,825-face lattice: **still running after 10 minutes**, under a
+6 GB ceiling that it never approached, so this is a time limit rather than a
+memory one. On the 36-face island beside it, milliseconds.
+
+The bar sits far below the first scale that is known to be unaffordable and far
+above the specks the mesh test actually misjudges."""
+
+
+def brep_defects(path: str):
+    """``(open_edges, misoriented)`` summed over a STEP file's solids.
+
+    The **exact** statement of what `manifold_check` approximates: a closed
+    orientable surface uses every edge exactly twice, once each way, and that
+    is a property of the B-rep rather than of any tessellation of it. Where the
+    two disagree the B-rep is right, which is not a matter of preference --
+    `manifold_check` is reading a triangulation that the mesher derived from
+    this same B-rep, and can only ever be as good as that derivation.
+    """
+    from latticegen2 import weld
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopoDS import TopoDS
+
+    open_edges = miso = 0
+    for solid in occ.solids(occ.read_step(path)):
+        for shell in occ._explore(solid, TopAbs_ShapeEnum.TopAbs_SHELL):
+            o, m, _where, _by_use = weld.shell_defects(TopoDS.Shell_s(shell))
+            open_edges += o
+            miso += m
+    return open_edges, miso
+
+
+def exact_self_intersection(path: str):
+    """``(faulty_solids, checked, skipped)`` by OCCT's own exact analyzer.
+
+    ``faulty_solids`` counts solids it positively reports as self-intersecting;
+    ``skipped`` counts those past :data:`SELF_INTERSECT_MAX_FACES`, which it was
+    not asked about at all. A skipped solid is never reported as clean.
+    """
+    from OCP.BOPAlgo import BOPAlgo_ArgumentAnalyzer
+
+    faulty = checked = skipped = 0
+    for solid in occ.solids(occ.read_step(path)):
+        if occ.count_subshapes(solid)[0] > SELF_INTERSECT_MAX_FACES:
+            skipped += 1
+            continue
+        analyzer = BOPAlgo_ArgumentAnalyzer()
+        analyzer.SetShape1(solid)
+        analyzer.SelfInterMode = True
+        analyzer.Perform()
+        checked += 1
+        if analyzer.HasFaulty():
+            faulty += 1
+    return faulty, checked, skipped
 
 
 def manifold_check(mesh: TriMesh):
@@ -390,6 +454,31 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
         if not still:
             cleared = tol
             break
+
+    # **Every survivor is then measured, because the tolerance argument does
+    # not reliably settle a tie and this is where that shows.** A lattice
+    # trimmed from a body has most of its surface lying exactly *on* that body,
+    # and `BRepClass3d_SolidClassifier` has been measured calling such points
+    # OUT at every tolerance from 1e-6 to 2.5e-2 while `BRepExtrema` puts them
+    # 1e-9 mm from the surface. Sweeping a tolerance it does not honour cannot
+    # separate those from real protrusions; distance can, and is exact.
+    #
+    # Paid only for the points the sweep could not clear -- 125 of 44,149 on
+    # `SpiralTest`'s output -- so it costs nothing on a part with none.
+    if candidates:
+        measured = []
+        for p in candidates:
+            vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*p)).Vertex()
+            probe = BRepExtrema_DistShapeShape(vertex, body)
+            probe.Perform()
+            if probe.IsDone() and probe.Value() > CONTAINMENT_TOL:
+                measured.append((probe.Value(), p))
+        counts["measured_outside"] = len(measured)
+        if not measured:
+            cleared = CONTAINMENT_TOL
+        else:
+            worst = max(d for d, _p in measured)
+            counts["worst_mm"] = worst
     return {
         "sampled": int(len(pts)),
         "outside": counts[CONTAINMENT_SWEEP[0]],

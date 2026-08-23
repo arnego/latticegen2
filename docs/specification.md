@@ -91,6 +91,16 @@ Upon success the script shall produce an end of run summary report in the .log f
 
 Upon failure, the script shall output a human readable reason for the failure, e.g.: parameter bounds exceeded, issues with input geometry, issues with resarouces from the run-time system, write or read access issues, etc.
 
+**Warnings shown regardless of `-v`.** A successful run may still have had to
+leave something out, and the user must not have to opt in to hear about it. A
+degenerate floating body dropped under §5 prints, to console and `.log`:
+
+    WARNING: a degenerate body of size <volume> mm^3 has been dropped from
+    position [x, y, z]
+
+one line per body, carrying the volume centroid so the void can be located and
+inspected afterwards.
+
 Upon cancellation by the user (Ctrl+C), the script shall shut down gracefully rather than terminate abruptly: worker processes are stopped in an orderly way (force-stopped only if they do not respond within a short grace period), a single human readable `CANCELLED` line is written to console and `.log` file, the temporary folder is left in place for analysis, and the exit code is 130. See docs/algorithm.md §10.
   
 **Logging:**
@@ -290,7 +300,48 @@ Since this involves computational geometry:
   a boolean intersection can leave sub-threshold junction wedges that are
   genuinely *connected* material, and reading the rule as an unconditional
   "volume < t³ → delete" would punch holes in the output.
-  
+
+- **Degenerate floating bodies may be dropped, under three conditions at once.**
+  A floating body may be discarded when it is (a) a floating island, (b) of
+  volume **< 5 mm³**, and (c) invalid in its geometry definition and too
+  degenerate to be saved by other methods. All three must hold: a merely small
+  island is kept, and so is a merely imperfect large one.
+
+  **The 5 mm³ bound is a fixed constant and deliberately does not scale with
+  `cc`, `t` or anything else.** It bounds *damage* rather than describing
+  geometry — whatever the parameters, no more than this much material can leave
+  the output by this route. A bound that scaled with the lattice would quietly
+  permit dropping a body a hundred times this size at `t = 20`, which is not
+  what "a degenerate speck" means to anyone inspecting the part.
+
+  **The user is always told.** A dropped body produces the warning
+
+      WARNING: a degenerate body of size <volume> mm^3 has been dropped from
+      position [x, y, z]
+
+  shown on the console **independently of `-v`**, and written to the `.log`. The
+  position is the body's volume centroid, so the void it leaves can be found and
+  inspected. Silently deleting material the user asked for would be
+  indefensible however small the piece.
+
+  **Condition (c) is a measurement, not a guess, and it is measured on the file
+  the user receives.** The faults are found with OCCT's own
+  `BOPAlgo_ArgumentAnalyzer`, asked both of the body as built and of the same
+  body after a STEP round trip; a repair is *attempted* before anything is
+  dropped, and the body is discarded only when the repair fails to clear the
+  faults, return one valid solid, preserve the volume, and survive the round
+  trip.
+
+  The case this was written for is `SpiralTest.step` at `cc=5, t=1`, and it is
+  the reason the round trip is part of the test: its 4.17 mm³ island reports
+  **0 faults as the generator builds it** and **29 `InvalidCurveOnSurface`
+  after export** — pcurves regenerated up to 2.118e-02 mm from their own 3D
+  curves, which is exactly the tolerance those edges then record, on a body
+  whose faces are ~0.05 mm². As built it is `BRepCheck_Analyzer`-valid, closed,
+  contained and confirmed **not** self-intersecting; as written it cannot be
+  tessellated consistently by anything. A check that looked only at the built
+  solid found nothing at all. See docs/algorithm.md §9.
+
 - **STEP schema/AP:** AP214
 
 - **Geometry representation in the file:** exact B-rep solid
@@ -397,7 +448,7 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### `SpiralTest.step`: four defects, each exposed by fixing the one before
+### `SpiralTest.step`: six defects, each exposed by fixing the one before
 
 **Added as a committed scenario 2026-08-20**, at the user's request, and it
 earned its place immediately: a part a fraction of `dense-lattice`'s size that
@@ -460,34 +511,65 @@ them.
   edges lying away from any expected interface, which localised defect 4 to a
   single cap on the next run.
 
-**OPEN: the scenario does not pass, and is committed knowingly red.** Defect 3
-is *reduced, not closed*. All three parameter sets now produce watertight,
-`BRepCheck_Analyzer`-valid solids — and all three still leave material outside
-the input body:
+**5. The residual, and the trap it sat in.** Defect 3's first repair left all
+three parameter sets producing watertight, `BRepCheck_Analyzer`-valid solids
+that still had material outside the body — 0.239, 0.771 and 0.380 mm. **The
+pipeline's own gates passed all three**, because watertight and valid say
+nothing about containment, and that reading was made twice in this session
+before a boolean-free sample caught it. §6.2's material-outside check is the
+only thing that sees this.
 
-| run | sampled points outside | worst protrusion |
-|---|---|---|
-| `cc=5, t=1` | 1 of 2,000 | 0.239 mm at [3.8126, -6.6036, 32.2166] |
-| `cc=7, t=1.4` | 2 of 2,000 | 0.771 mm |
-| `cc=4, t=0.8` | 4 of 2,000 | 0.380 mm |
+The residual was a different shape from what §7.2's per-half-strut repair
+covers: the fused intersection and the six half-strut ones *agree with each
+other* and are both wrong, so no boolean can grade either. Closed by two things
+(docs/algorithm.md §7.2): a check that uses no kernel at all — ray parity over
+the classification mesh plus a distance bar, which separates ties from
+protrusions by two orders — and a repair that hands the kernel a smaller tool,
+a one-cell block cut from the body, validated against Monte Carlo ground truth
+and pinned at one cell because at four it reproduces the wrong answer. Where
+neither works, the junction is **dropped** rather than shipped or fatal: one of
+2,073 at `cc=5, t=1`, a 0.53 mm sliver of negligible volume, costing 0.03 % of
+the lattice to keep §1's containment absolute.
 
-The cc=5 point is confirmed by the well-conditioned arbiter: a sphere there has
-**zero** intersection with the body.
+| run | localized | dropped | points outside, after |
+|---|---|---|---|
+| `cc=5, t=1` | 10 | 1 | **0 of 4,076** |
+| `cc=7, t=1.4` | 4 | 0 | **0 of 4,069** |
+| `cc=4, t=0.8` | 13 | 0 | **0 of 4,060** |
 
-**Why §7.2's repair cannot close it.** That repair rests on the per-half-strut
-intersection being trustworthy where the fused one is not, which holds for the
-whole-junction failures it was built for. The residual is a different shape —
-both routes agree with each other and both are wrong:
+Probing every junction costs ~+24 % on `boundary`.
 
-    cc=5, node (6,4,6):  fused 8.3772  | per-half 10.3772 of 10.6066
-    cc=7, node (8,2,6):  fused 3.9504  | per-half  3.9504 of 29.1045
+**6. The island that only breaks when written.** Fixing 5 left the run
+producing two watertight, valid, contained solids — and `tools/e2e.py` still
+failed two mesh checks: 9 non-manifold edges and 4 crossing triangle pairs.
+Both came from the **same** body, the 4.17 mm³ floating island, whose 135
+triangles carried every one of them while the 105,628 of the lattice proper
+carried none.
 
-There is no third construction to fall back on, so this needs a mechanism found
-first, not another operand tried. **Note the trap this sits in:** the pipeline's
-own gates pass all three runs, because watertight and valid say nothing about
-containment — that reading was made twice during this session before the
-boolean-free sample caught it. §6.2's material-outside check is the only thing
-that sees this, and at ~31 minutes on this output it is slow to iterate against.
+**The B-rep is exactly closed and exactly not self-intersecting** — 0 open
+edges, 0 misoriented, and OCCT's `SelfInterMode` clears it. What it has is 29
+`InvalidCurveOnSurface` faults, pcurves up to 2.118e-02 mm from their own 3D
+curves on faces of ~0.05 mm². **And it has them only after a STEP round trip:
+as built the same body reports 0.** The generator's geometry is sound; the
+file it writes is not.
+
+That was found the hard way. The first implementation checked the built solid,
+reported nothing, and dropped nothing — indistinguishable in the log from "no
+body qualified" until a line was added recording what the check actually saw.
+It also explains why `ShapeFix_Shape` and `BRepLib::SameParameter` had looked
+useless: they were being asked to repair damage that does not exist until
+export. §5's rule now measures both states, and the repair path must survive
+the round trip too.
+
+Dropped under §5 the output is one solid, manifold, self-intersection-free,
+and 4.1629 mm³ smaller — inspected and accepted by the user 2026-08-23.
+
+**The harness was wrong to call it self-intersection**, and that is fixed
+separately: both mesh checks now defer to the exact instrument when they
+disagree — B-rep closure for manifoldness, `SelfInterMode` for
+self-intersection, the latter gated at `SELF_INTERSECT_MAX_FACES` because it
+ran past 10 minutes on the 45,825-face solid (without approaching a 6 GB
+ceiling, so a time limit rather than a memory one).
 
 **The lesson that recurs, and this is the fifth chapter to record it:** the
 first convincing explanation was wrong three separate times here — the fat

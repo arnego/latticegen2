@@ -824,6 +824,59 @@ class PointInside:
         return votes >= 2
 
 
+class OutsideProbe:
+    """How far outside the body a point lies, judged without a boolean.
+
+    Ray parity decides which side of the surface a point is on and the distance
+    to the mesh decides whether that verdict means anything. Both halves are
+    needed. A trimmed junction's vertices lie *on* the input surface by
+    construction, and parity at a point on the mesh is a coin flip — measured
+    on `SpiralTest.step`, a perfectly sound junction has 2 of its 38 vertices
+    called outside, exactly as many as a broken one. What separates them is
+    distance: the sound one's furthest "outside" vertex is 0.0065 mm from the
+    surface and the broken one's is 0.6949 mm.
+
+    So this exists to answer one question the kernel cannot be asked here —
+    *did the trim leave material outside the body?* — for the case where the
+    intersection and its obvious cross-check agree with each other and are both
+    wrong (docs/algorithm.md §7.2). It shares no machinery with either: no
+    boolean, no solid classifier, just the classification mesh the run already
+    built.
+
+    ``margin`` is the bar a distance has to clear to count, and the caller sets
+    it from the mesh's own **measured** deviation rather than a constant, for
+    the reason §5.1 gives about `d`: below that the mesh cannot tell inside
+    from outside at all.
+    """
+
+    def __init__(self, mesh: TriMesh, margin: float):
+        self._inside = PointInside(mesh)
+        self._tris = mesh.triangle_points
+        self.margin = float(margin)
+
+    def worst_outside(self, points: np.ndarray) -> float:
+        """Distance from the surface of the furthest point genuinely outside.
+
+        ``0.0`` when nothing is outside by more than :attr:`margin`. Exact
+        point-triangle distances are computed only for the handful of points
+        parity rejects, never for all of them, which is what keeps this at
+        milliseconds per junction.
+        """
+        points = np.asarray(points, dtype=float)
+        if len(points) == 0:
+            return 0.0
+        out = ~self._inside(points)
+        if not out.any():
+            return 0.0
+        a, b, c = self._tris
+        worst = 0.0
+        for p in points[out]:
+            d = float(_point_triangle_dist(p, a, b, c).min())
+            if d > worst:
+                worst = d
+        return worst if worst > self.margin else 0.0
+
+
 # --- Top-level classification -----------------------------------------------
 
 

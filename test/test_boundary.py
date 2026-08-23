@@ -94,7 +94,7 @@ def test_trim_tags_every_cap_plane_face_and_keeps_it(lp):
                                    [9.0, 9.0, -9.0], [-9.0, 9.0, -9.0]])),
         np.array([0.0, 0.0, 18.0]),
     )
-    trimmed, n_pinholes, _retrimmed = trim_junction(lp, tpl, np.zeros(3), box)
+    trimmed, n_pinholes, *_rest = trim_junction(lp, tpl, np.zeros(3), box)
     assert len(trimmed) == 1
     assert n_pinholes == 0, "a junction wholly inside a box has no grazing pinholes"
     faces, tags, volume = trimmed[0]
@@ -450,7 +450,7 @@ def test_trim_junction_removes_the_pinholes_and_closes_the_piece(pinhole_case):
     lp5, tpl, body, pos = pinhole_case
     raw = raw_trim(tpl, pos, body)
 
-    pieces, n_pinholes, _retrimmed = trim_junction(lp5, tpl, pos, body)
+    pieces, n_pinholes, *_rest = trim_junction(lp5, tpl, pos, body)
 
     assert n_pinholes == 2
     assert len(pieces) == 1
@@ -781,3 +781,90 @@ def test_a_junction_wholly_inside_the_body_is_checked_but_kept(lp):
 
     assert not result.retrimmed, "a cleared check must not report a repair"
     assert sum(v for _f, _t, v in result.pieces) == pytest.approx(tpl.volume, rel=1e-9)
+
+
+# --- when every intersection agrees and all of them are wrong ----------------
+#
+# §7.2's per-half-strut repair needs the half-strut intersection to be sound
+# where the fused one is not. On these junctions it is not: both agree and both
+# leave material outside the body. What settles it is a check that uses no
+# kernel at all (`classify.OutsideProbe`) and a repair that gives the kernel a
+# smaller tool (a one-cell block cut from the body). Real junctions again --
+# nothing synthetic produces an intersection that is wrong and self-consistent.
+
+SPIRAL_LOCALIZED_NODE = (6, 4, 6)
+"""Trims to 8.3772 against the whole body, 5 sigma above a Monte Carlo truth of
+8.010 +/- 0.074; the local block gives 8.0662."""
+
+SPIRAL_UNTRIMMABLE_NODE = (3, 13, 5)
+"""Almost entirely inside -- truth 8.301 +/- 0.281 against a trim of 8.6009 --
+with two vertices 0.32 and 0.53 mm outside. A sliver no volume-based check can
+see, and the local block returns byte-identical geometry."""
+
+
+@pytest.fixture(scope="module")
+def spiral_probe(spiral_case):
+    from latticegen2.classify import OutsideProbe, tessellate_surface
+
+    lp, _tpl, body = spiral_case
+    mesh = tessellate_surface(body, lp)
+    return OutsideProbe(mesh, 2.0 * mesh.deviation)
+
+
+def test_material_outside_is_found_without_asking_a_boolean(spiral_case, spiral_probe):
+    """The check has to fire on the broken junction and stay quiet on a sound
+    one. Both halves matter: parity alone flags 2 of 38 vertices on *either*,
+    because a trimmed vertex lies on the surface where parity is a coin flip."""
+    lp, tpl, body = spiral_case
+    bad = raw_trim(tpl, lattice_node(lp, np.array(SPIRAL_LOCALIZED_NODE)), body)
+    good = raw_trim(tpl, lattice_node(lp, np.array((3, 5, 3))), body)
+
+    from latticegen2.boundary import _piece_vertices
+
+    def verts(shape):
+        return _piece_vertices([(occ.faces(s), [], 0.0) for s in occ.solids(shape)])
+
+    assert spiral_probe.worst_outside(verts(bad)) > 0.2, \
+        "the junction that protrudes must be seen"
+    assert spiral_probe.worst_outside(verts(good)) == 0.0, \
+        "a sound junction's vertices sit on the surface and must not be flagged"
+
+
+def test_a_local_block_trims_what_the_whole_body_did_not(spiral_case, spiral_probe):
+    lp, tpl, body = spiral_case
+    pos = lattice_node(lp, np.array(SPIRAL_LOCALIZED_NODE))
+
+    result = trim_junction(lp, tpl, pos, body, spiral_probe)
+
+    assert result.localized, "the local block must be used here"
+    assert not result.dropped
+    assert result.outside_mm == 0.0, "and it must leave nothing outside"
+    volume = sum(v for _f, _t, v in result.pieces)
+    # Monte Carlo truth 8.010 +/- 0.074; the whole-body trim gives 8.3772.
+    assert 7.9 < volume < 8.2, f"expected roughly the true volume, got {volume}"
+
+
+def test_a_junction_no_intersection_can_contain_is_dropped(spiral_case, spiral_probe):
+    """Discarded, not shipped and not fatal: §1's containment is absolute, but
+    failing the run would cost the whole part to save one junction of 2,073."""
+    lp, tpl, body = spiral_case
+    pos = lattice_node(lp, np.array(SPIRAL_UNTRIMMABLE_NODE))
+
+    result = trim_junction(lp, tpl, pos, body, spiral_probe)
+
+    assert result.dropped
+    assert result.pieces == [], "nothing of it may reach the output"
+    assert result.outside_mm > 0.5, "and the reason is recorded, in millimetres"
+
+
+def test_the_probe_leaves_a_sound_junction_completely_alone(spiral_case, spiral_probe):
+    lp, tpl, body = spiral_case
+    pos = lattice_node(lp, np.array((3, 5, 3)))
+
+    with_probe = trim_junction(lp, tpl, pos, body, spiral_probe)
+    without = trim_junction(lp, tpl, pos, body)
+
+    assert not with_probe.localized and not with_probe.dropped
+    assert sum(v for _f, _t, v in with_probe.pieces) == pytest.approx(
+        sum(v for _f, _t, v in without.pieces), rel=1e-12
+    )

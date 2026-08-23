@@ -216,6 +216,21 @@ unconditional.
   timings, and the end-of-run summary. `-v` only raises *console* verbosity; it
   never changes what the log contains.
 
+**A run can stop because a body cannot be written faithfully**, and this is
+exit 4 rather than a body quietly missing from the output. STEP AP214 declares
+one modelling tolerance for a whole file where an OCCT B-rep carries one per
+vertex, edge and face, so a solid can be valid in the generator and not in the
+file. Every output solid is measured for it before export — how much of its
+surface is described more loosely than its own feature size — and the run
+refuses rather than shipping or discarding. The message names the face and its
+position, the `connect` stage above names the junctions the body was built
+from, and the temporary folder is kept. See docs/algorithm.md §7.3 and §9.
+
+The check writes each solid, reads it back and tessellates it, so on a large
+part it is not cheap — `export_truth_s` in the run summary reports what it
+cost. It is deliberately not bounded by size: a body nobody looks at is exactly
+where an unwritable description would do the most damage.
+
 ### Exit codes
 
 | Code | Meaning |

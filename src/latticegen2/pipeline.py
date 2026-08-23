@@ -241,6 +241,7 @@ def _run_with_pool(
         )
         stats["pinhole_wires_removed"] = boundary.n_pinhole_wires
         stats["pinhole_junctions_repaired"] = boundary.n_pinhole_junctions
+    _report_tolerance_ratio(rl, boundary, stats)
     stats["workers"] = args.workers
     if boundary.max_worker_rss:
         # Folded into the run's high-water mark as well as reported separately:
@@ -288,6 +289,7 @@ def _run_with_pool(
         threshold = lp.t ** 3
         dropped = comps.dropped(threshold)
         keep_labels = set(comps.volumes) - dropped
+        _check_component_tolerance(rl, comps, keep_labels, boundary.pieces, stats)
     if n_fused:
         rl.always(
             f"note: {n_fused} disagreeing cap cluster(s) repaired with a local "
@@ -459,11 +461,16 @@ def _run_with_pool(
 
     with Timer(rl, "validate"):
         invalid, total_volume = _validate(result_solids, report=rl.substage)
-    if invalid:
-        raise ProcessingError(
-            f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
-            f"BRepCheck_Analyzer validity check."
-        )
+        if invalid:
+            # The established gate speaks first. A body that is already invalid
+            # here needs no argument about what the file would do with it, and
+            # reporting the export check instead would name the second-order
+            # symptom of a fault BRepCheck has already found.
+            raise ProcessingError(
+                f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
+                f"BRepCheck_Analyzer validity check."
+            )
+        _check_export_truth(rl, result_solids, tmpdir, stats)
     rl.line(f"validity: all {len(result_solids)} solid(s) pass BRepCheck_Analyzer")
     stats["solids_written"] = len(result_solids)
     stats["lattice_volume_mm3"] = round(total_volume, 4)
@@ -497,6 +504,212 @@ def _run_with_pool(
     stats["output"] = args.output
     shutil.rmtree(tmpdir, ignore_errors=True)
     return stats
+
+
+def _report_tolerance_ratio(rl: RunLog, boundary, stats: dict) -> None:
+    """Report which trims lean hardest on their own recorded tolerance.
+
+    Reported, never failed on — :data:`latticegen2.occ.TOLERANCE_FEATURE_RATIO_WARN`
+    says why, with the measurement. The quantity is
+    :func:`latticegen2.occ.tolerance_feature_ratio` and docs/algorithm.md §7.3
+    explains why it is taken here, in the worker, where the junction still has
+    a name.
+    """
+    worst_pieces = boundary.worst_tolerance_pieces()
+    if not worst_pieces:
+        return
+    worst = worst_pieces[0]
+    tol, face_area, where = worst.tolerance_evidence
+    flagged = sum(
+        1 for p in boundary.pieces
+        if p.tolerance_ratio > occ.TOLERANCE_FEATURE_RATIO_WARN
+    )
+    stats["worst_tolerance_ratio"] = f"{worst.tolerance_ratio:.3e}"
+    stats["tolerance_ratio_flagged"] = flagged
+    rl.line(
+        f"tolerance vs feature size: worst {worst.tolerance_ratio:.3e} at junction "
+        f"{worst.node} ({tol:.4e} mm recorded on a {face_area:.6f} mm^2 face at "
+        f"[{where[0]:.3f}, {where[1]:.3f}, {where[2]:.3f}]); {flagged} of "
+        f"{len(boundary.pieces)} piece(s) above {occ.TOLERANCE_FEATURE_RATIO_WARN:g}"
+    )
+    for piece in worst_pieces[1:]:
+        t, a, w = piece.tolerance_evidence
+        rl.line(
+            f"  next: {piece.tolerance_ratio:.3e} at {piece.node} "
+            f"({t:.4e} mm on {a:.6f} mm^2 at [{w[0]:.3f}, {w[1]:.3f}, {w[2]:.3f}])"
+        )
+
+
+def _check_component_tolerance(rl: RunLog, comps, keep_labels, pieces, stats: dict) -> None:
+    """Name the bodies whose *whole* description leans on tolerance.
+
+    The sharp predicate, and the reason both halves of §7.3 exist. A grazing
+    trim with a fat recorded tolerance is common and usually harmless: welded
+    into a body of tens of thousands of mm³ it is one small region described
+    loosely, and the exported solid is sound. The same trim alone in a small
+    floating component is a body whose *entire* description is that loose — and
+    that is the body §9's export cannot write faithfully.
+
+    **What separates them is the fraction, not the worst reading, and the first
+    version of this got that wrong.** On `SpiralTest.step` at ``cc=5, t=1``, 79
+    of 2,404 pieces clear the warning bar and *both* surviving components
+    contain one — the dominant body holds the single worst junction in the whole
+    part (4.041e-01 at ``(-4, -8, 2)``). With 2,348 boundary junctions in it, a
+    body that large is almost certain to contain a bad one, so a maximum says
+    nothing about the body. How much *of* the body is described that way does:
+
+    ======================  =========  ==========  ==========
+    component               volume     flagged     fraction
+    ======================  =========  ==========  ==========
+    0, the lattice proper   27,864 mm³  82 / 2,348  **3.5 %**
+    14, the island          4.17 mm³    2 / 6       **33.3 %**
+    ======================  =========  ==========  ==========
+
+    **Both figures are reported and neither is a bar.** That is one part, and a
+    two-junction component reaches 100 % trivially — every such component here
+    is already below ``t^3`` and dropped by §8 before this runs. A tenfold
+    separation on a single measurement is a ranking, not a calibration, and
+    dressing it up as a threshold would be the mistake docs/specification.md §11
+    records four times over.
+
+    So this predicts and :func:`_check_export_truth` decides. What it buys is
+    the report arriving at `connect`, about 40 s into a part that takes eight
+    minutes, naming junctions of a body the run has not yet built.
+    """
+    worst_at_node: dict = {}
+    for p in pieces:
+        node = tuple(p.node)
+        if p.tolerance_ratio > worst_at_node.get(node, (0.0,))[0]:
+            worst_at_node[node] = (p.tolerance_ratio, p.tolerance_evidence)
+
+    flagged = []
+    for cid in sorted(keep_labels):
+        readings = []
+        for vid in comps.members[cid]:
+            vertex = comps.vertices[vid]
+            if vertex.is_interior:
+                continue        # built by index, exactly; no boolean, no slack
+            hit = worst_at_node.get(tuple(vertex.node))
+            if hit is not None:
+                readings.append((hit[0], tuple(vertex.node), hit[1]))
+        if not readings:
+            continue
+        ratio, node, evidence = max(readings)
+        above = sum(1 for r, _n, _e in readings
+                    if r > occ.TOLERANCE_FEATURE_RATIO_WARN)
+        if above:
+            flagged.append((cid, comps.volumes[cid], above, len(readings),
+                            ratio, node, evidence))
+
+    stats["tolerance_flagged_components"] = len(flagged)
+    if not flagged:
+        return
+    rl.always(
+        f"note: {len(flagged)} output body/bodies contain junctions whose trim "
+        f"needed a tolerance comparable to the feature it bounds "
+        f"(docs/algorithm.md §7.3). Read the percentage, not the worst reading: "
+        f"a large body will contain one, a body largely made of them is where an "
+        f"unwritable output comes from. The export-truth gate at `validate` "
+        f"decides:"
+    )
+    for cid, volume, above, total, ratio, node, (tol, face_area, where) in flagged:
+        rl.always(
+            f"  body {cid}: {volume:.4f} mm^3, {above} of {total} boundary "
+            f"junction(s) above the bar ({100.0 * above / max(total, 1):.1f}% of "
+            f"the body); worst {ratio:.3e} at {node} ({tol:.4e} mm on a "
+            f"{face_area:.6f} mm^2 face at [{where[0]:.3f}, {where[1]:.3f}, "
+            f"{where[2]:.3f}])"
+        )
+
+
+def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
+                        stats: dict) -> None:
+    """Can each output body survive being written to STEP? Measured, per body.
+
+    `BRepCheck_Analyzer` asks whether a shape agrees with itself to within the
+    tolerances **recorded in this process**. STEP AP214 cannot carry those: one
+    ``UNCERTAINTY_MEASURE_WITH_UNIT`` per file, against one per vertex, edge and
+    face in the B-rep. So a solid can pass every gate this pipeline has and
+    still not describe, in the file, what it describes here — and the pipeline's
+    own repairs manufacture exactly that geometry, docs/algorithm.md S8's second
+    rung being a widened vertex tolerance whose safety rests on moving nothing.
+
+    **The instrument is a tessellation of the exported body**, not a proxy for
+    one (:func:`latticegen2.occ.exported_mesh_defects`), and three cheaper
+    proxies were tried and disproved against ground truth on 16 real bodies
+    before settling here: a fault count after the round trip false-positives on
+    two sound rehearsal solids, and so does the share of a body's surface
+    described more loosely than its own feature size. Both would refuse, or
+    delete, geometry from a part that has been inspected and accepted. Only
+    "does it still tessellate" matches what actually breaks downstream, and it
+    is the symptom that found the one genuinely unwritable body this project has
+    produced.
+
+    **Every solid is measured, with no size bound, and that is the expensive
+    decision on this branch.** An earlier revision skipped solids above a face
+    count and reported them *unmeasured* — honest, but it put the dominant body
+    of every production part outside the only detector with a clean record,
+    which is precisely where an unwritable description would do the most damage.
+    Per the user's decision the cost is accepted instead. docs/algorithm.md S9
+    removed a whole-output re-import for costing 22 minutes, and this is that
+    cost returning knowingly, for a correctness check rather than for a count of
+    solids. The rehearsal-scale figure is **not yet measured**.
+
+    The pcurve reading below is kept and logged because it is cheap, exact and
+    informative about *why* a body is fragile - but it decides nothing, and
+    :data:`latticegen2.occ.LOOSE_AREA_FRACTION_MAX` records the measurement that
+    took it out of the deciding seat.
+    """
+    started = _dt.datetime.now()
+    broken: list[tuple[int, int, int]] = []
+    worst = 0.0
+    fraction = 0.0
+    loose_faces = 0
+    pairs = 0
+    probe = os.path.join(tmpdir, "export_truth_probe.step")
+    for i, solid in enumerate(solids):
+        reading = occ.curve_on_surface_deviations(solid)
+        pairs += reading.pairs
+        loose_faces += reading.loose_faces
+        worst = max(worst, reading.worst)
+        fraction = max(fraction, reading.loose_area_fraction)
+        n_faces, _ = occ.count_subshapes(solid)
+        rl.substage("export truth", i, len(solids))
+        triangles, bad = occ.exported_mesh_defects(solid, probe)
+        rl.line(
+            f"  solid {i}: {n_faces} faces -> {triangles} triangle(s) after a "
+            f"STEP round trip, {bad} non-manifold edge(s); "
+            f"{reading.loose_area_fraction:.4e} of its surface loosely described, "
+            f"worst deviation {reading.worst:.4e} mm"
+        )
+        if bad:
+            broken.append((i, bad, triangles))
+    rl.substage("export truth", len(solids), len(solids))
+    elapsed = (_dt.datetime.now() - started).total_seconds()
+    stats["export_truth_s"] = round(elapsed, 2)
+    stats["worst_pcurve_deviation_mm"] = f"{worst:.3e}"
+    stats["loose_area_fraction"] = f"{fraction:.3e}"
+    stats["loose_faces"] = loose_faces
+    rl.line(
+        f"export truth: all {len(solids)} solid(s) round-tripped and tessellated; "
+        f"worst pcurve-vs-3D deviation {worst:.4e} mm over {pairs} edge/face "
+        f"pair(s) [{elapsed:.1f}s]"
+    )
+    if broken:
+        first, bad, triangles = broken[0]
+        raise ProcessingError(
+            f"Solid {first} does not survive being written to STEP: after a "
+            f"round trip its {triangles} triangles carry {bad} edge(s) not used "
+            f"by exactly two of them, so nothing downstream can tessellate it "
+            f"consistently"
+            + (f" ({len(broken)} solid(s) affected)" if len(broken) > 1 else "")
+            + f". STEP AP214 declares one tolerance for a whole file where this "
+            f"B-rep carries one per subshape, so a body whose validity rests on "
+            f"a locally fat tolerance is valid here and not in the file "
+            f"(docs/algorithm.md S9). The run stops rather than writing it: "
+            f"nothing has been discarded, the temporary folder is kept, and the "
+            f"`connect` stage above named the junctions this body was built from."
+        )
 
 
 UNIFY_VOLUME_TOL = 1e-4

@@ -127,6 +127,17 @@ class BoundaryPiece:
 
     node: NodeKey
     volume: float
+    tolerance_ratio: float = 0.0
+    """Worst ``edge tolerance / sqrt(face area)`` over this piece's faces.
+
+    Measured in the worker, on the piece as the boolean produced it, because
+    this is the one moment at which the junction that produced it is still
+    named. See :func:`latticegen2.occ.tolerance_feature_ratio` and
+    docs/algorithm.md §7.3."""
+    tolerance_evidence: tuple[float, float, tuple[float, float, float]] = (
+        0.0, 0.0, (0.0, 0.0, 0.0)
+    )
+    """``(tolerance, face area, face centroid)`` behind ``tolerance_ratio``."""
     faces: list = field(default_factory=list)
     """Every face of the trimmed piece that does not lie in a cap plane."""
     cap_faces: dict[tuple[NodeKey, int], list] = field(default_factory=dict)
@@ -167,6 +178,16 @@ class BoundaryResult:
     memory usage.
     """
     diagnostics: list[str] = field(default_factory=list)
+
+    def worst_tolerance_pieces(self, n: int = 5) -> list[BoundaryPiece]:
+        """The ``n`` pieces whose description leans hardest on tolerance.
+
+        Worst first. This is the source-side half of the export-truth question
+        (docs/algorithm.md §7.3): a piece near the top of this list was trimmed
+        with a slack approaching the size of the feature it bounds, and slack is
+        exactly what §9's export cannot carry.
+        """
+        return sorted(self.pieces, key=lambda p: p.tolerance_ratio, reverse=True)[:n]
 
 
 @dataclass
@@ -224,6 +245,13 @@ class TrimResult(NamedTuple):
     """``(faces, tags, volume)`` per connected solid the intersection left."""
     n_pinholes_removed: int
     """Zero-area pinhole wires dropped across all of them (docs/algorithm.md §7)."""
+    tolerances: list
+    """:class:`latticegen2.occ.ToleranceFeature` per piece, aligned with ``pieces``.
+
+    A separate list rather than a fourth field of each piece tuple, because
+    those tuples are what every caller and test in this codebase destructures
+    and the reading is not part of the geometry they describe. Alignment is by
+    construction: both lists are appended to once per solid, in one loop."""
 
 
 def trim_junction(
@@ -265,6 +293,7 @@ def trim_junction(
         )
 
     out = []
+    tolerances = []
     n_pinholes = 0
     for solid in occ.solids(algo.Shape()):
         cleaned, removed = _remove_pinholes(node_pos, solid)
@@ -273,7 +302,14 @@ def trim_junction(
         tags = [is_cap_plane_face(lp, f, node_pos) for f in faces]
         tags = [-1 if h is None else h for h in tags]
         out.append((faces, tags, occ.volume(cleaned)))
-    return TrimResult(out, n_pinholes)
+        # Measured here rather than on the assembled output, over the face list
+        # this pass already holds: it costs one area and one centroid on the
+        # single worst face, it runs in the worker for free alongside the trim
+        # that produced the geometry, and it is the last point at which this
+        # piece can still be reported by the junction it came from
+        # (docs/algorithm.md §7.3).
+        tolerances.append(occ.tolerance_feature_ratio(faces))
+    return TrimResult(out, n_pinholes, tolerances)
 
 
 def _remove_pinholes(node_pos: np.ndarray, solid):
@@ -538,8 +574,18 @@ def _fuse_group(lp: LatticeParams, group: list[BoundaryPiece]) -> BoundaryPiece:
 
     group_nodes = np.array([p.node for p in group], dtype=np.int64)
     node_positions = list(zip((p.node for p in group), nodes(lp, group_nodes)))
-    merged = BoundaryPiece(node=group[0].node, volume=occ.volume(solid))
-    for face in occ.faces(solid):
+    # Re-measured on the fused result rather than inherited from the group: the
+    # fuse rebuilds faces along the seam it closes, so the operands' readings
+    # describe geometry that no longer exists (docs/algorithm.md §7.3).
+    fused_faces = occ.faces(solid)
+    tf = occ.tolerance_feature_ratio(fused_faces)
+    merged = BoundaryPiece(
+        node=group[0].node,
+        volume=occ.volume(solid),
+        tolerance_ratio=tf.ratio,
+        tolerance_evidence=(tf.tolerance, tf.face_area, tf.where),
+    )
+    for face in fused_faces:
         tag = _owning_cap(lp, face, node_positions)
         if tag is None:
             merged.faces.append(face)
@@ -629,12 +675,13 @@ def _worker_trim(job):
     positions = nodes(lp, node_batch)
 
     bundles: list[TopoDS_Shape] = []
-    meta: list[tuple[NodeKey, list[int], float]] = []
+    meta: list[tuple[NodeKey, list[int], float, tuple]] = []
     n_empty = 0
     n_pinhole_junctions = 0
     n_pinhole_wires = 0
     for i in range(len(node_batch)):
-        results, n_pinholes = trim_junction(lp, tpl, positions[i], body)
+        trimmed = trim_junction(lp, tpl, positions[i], body)
+        results, n_pinholes = trimmed.pieces, trimmed.n_pinholes_removed
         if n_pinholes:
             n_pinhole_junctions += 1
             n_pinhole_wires += n_pinholes
@@ -642,9 +689,9 @@ def _worker_trim(job):
             n_empty += 1
             continue
         node = (int(node_batch[i][0]), int(node_batch[i][1]), int(node_batch[i][2]))
-        for faces, tags, vol in results:
+        for (faces, tags, vol), tf in zip(results, trimmed.tolerances):
             bundles.append(occ.compound(faces))
-            meta.append((node, tags, vol))
+            meta.append((node, tags, vol, tuple(tf)))
 
     from .runlog import peak_rss_bytes
 
@@ -658,14 +705,33 @@ def _worker_trim(job):
     return None, meta, n_empty, pinholes, rss
 
 
-def _piece_from(node: NodeKey, faces: list, tags: list[int], volume: float) -> BoundaryPiece:
-    """Split one trimmed solid's faces into plain faces and tagged cap faces."""
+def _piece_from(
+    node: NodeKey,
+    faces: list,
+    tags: list[int],
+    volume: float,
+    tolerance: tuple[float, float, float, tuple[float, float, float]] = (
+        0.0, 0.0, 0.0, (0.0, 0.0, 0.0)
+    ),
+) -> BoundaryPiece:
+    """Split one trimmed solid's faces into plain faces and tagged cap faces.
+
+    ``tolerance`` is :func:`latticegen2.occ.tolerance_feature_ratio`'s reading
+    for this piece, flattened to plain numbers so it crosses the worker boundary
+    under the same small-IPC discipline as the cap tags beside it.
+    """
     if len(faces) != len(tags):
         raise ProcessingError(
             f"Boundary piece at {node} has {len(faces)} faces but {len(tags)} cap "
             f"tags; the worker result and its metadata disagree."
         )
-    piece = BoundaryPiece(node=node, volume=volume)
+    ratio, tol, face_area, where = tolerance
+    piece = BoundaryPiece(
+        node=node,
+        volume=volume,
+        tolerance_ratio=float(ratio),
+        tolerance_evidence=(float(tol), float(face_area), tuple(where)),
+    )
     for face, h in zip(faces, tags):
         if h < 0:
             piece.faces.append(face)
@@ -702,16 +768,16 @@ def trim_boundary(
     if workers <= 1:
         positions = nodes(lp, boundary_nodes)
         for i in range(len(boundary_nodes)):
-            trimmed, n_pinholes = trim_junction(lp, tpl, positions[i], body)
-            if n_pinholes:
+            trim = trim_junction(lp, tpl, positions[i], body)
+            if trim.n_pinholes_removed:
                 result.n_pinhole_junctions += 1
-                result.n_pinhole_wires += n_pinholes
-            if not trimmed:
+                result.n_pinhole_wires += trim.n_pinholes_removed
+            if not trim.pieces:
                 result.n_empty += 1
             else:
                 node = tuple(int(x) for x in boundary_nodes[i])
-                for faces, tags, vol in trimmed:
-                    result.pieces.append(_piece_from(node, faces, tags, vol))
+                for (faces, tags, vol), tf in zip(trim.pieces, trim.tolerances):
+                    result.pieces.append(_piece_from(node, faces, tags, vol, tuple(tf)))
             # Reported unconditionally: a junction that produced nothing is still
             # a junction processed, and skipping it would make the counter jump.
             if progress is not None:
@@ -761,9 +827,11 @@ def trim_boundary(
                     f"Boundary worker result mismatch in {path}: {len(children)} pieces "
                     f"vs {len(meta)} metadata records."
                 )
-            for bundle, (node, tags, vol) in zip(children, meta):
+            for bundle, (node, tags, vol, tf) in zip(children, meta):
                 result.pieces.append(
-                    _piece_from(tuple(node), _compound_children(bundle), tags, vol)
+                    _piece_from(
+                        tuple(node), _compound_children(bundle), tags, vol, tuple(tf)
+                    )
                 )
 
     if pool is not None:

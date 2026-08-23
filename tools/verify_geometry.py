@@ -130,6 +130,55 @@ def brepcheck(path: str):
     return not invalid, len(sols), invalid
 
 
+LOOSE_AREA_FRACTION_MAX = occ.LOOSE_AREA_FRACTION_MAX
+"""The pipeline's own bar, re-used rather than restated.
+
+Unlike ``CUT_MAX_FACES`` and ``SELF_INTERSECT_MAX_FACES`` beside it - limits on
+what this harness can afford to measure, which are properly its own - this is a
+bar on the *product*, and the pipeline enforces it too. Two copies of a bar are
+two bars (docs/testing.md)."""
+
+
+def curve_on_surface(path: str) -> dict:
+    """Is the *shipped file* still describable, once its tolerances are gone?
+
+    The strongest form of the export-truth check, because it is asked of the
+    artefact rather than of the process that wrote it: the file is read back
+    with OCCT's own reader, tolerances and all, and every edge/face pair is
+    measured exactly (``latticegen2.occ.curve_on_surface_deviations``).
+
+    The pipeline asks the same question of the solids in memory, which is where
+    it can still name a junction. This asks it of what a reader reconstructs,
+    which is what Solidworks and Catia will see - and the two are not the same
+    shape, because STEP AP214 declares one tolerance for a whole file where the
+    B-rep carries one per subshape (docs/algorithm.md S9).
+
+    **Everything this returns is a diagnostic, not a verdict.** Three cheaper
+    quantities were tried as gates and two false-positive on sound rehearsal
+    solids (``latticegen2.occ.LOOSE_AREA_FRACTION_MAX``); what decides is
+    whether the exported body still tessellates, which ``manifold_check`` above
+    already asks of the whole file. These numbers say *why* a body is fragile
+    and rank the candidates; they do not pass or fail anything.
+    """
+    shape = occ.read_step(path)
+    worst, ratio, over, pairs = 0.0, 0.0, 0, 0
+    fraction, loose_faces = 0.0, 0
+    where, worst_area = [], 0.0
+    for solid in occ.solids(shape):
+        reading = occ.curve_on_surface_deviations(solid)
+        worst = max(worst, reading.worst)
+        over += reading.over_tolerance
+        pairs += reading.pairs
+        loose_faces += reading.loose_faces
+        if reading.ratio > ratio:
+            ratio, worst_area = reading.ratio, reading.face_area
+        if reading.loose_area_fraction > fraction:
+            fraction, where = reading.loose_area_fraction, list(reading.where)
+    return {"worst_mm": worst, "ratio": ratio, "fraction": fraction,
+            "loose_faces": loose_faces, "over": over, "pairs": pairs,
+            "where": where, "face_area": worst_area}
+
+
 def _cut_volume(a, b) -> float:
     alg = BRepAlgoAPI_Cut()
     la, lb = TopTools_ListOfShape(), TopTools_ListOfShape()

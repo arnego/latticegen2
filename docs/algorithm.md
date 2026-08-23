@@ -786,6 +786,87 @@ distributed over worker processes with small-IPC discipline: the input body goes
 to disk once as a `.brep` and workers read it directly; only file paths and small
 plain metadata cross the process boundary.
 
+### 7.3 How much of the trim is tolerance rather than geometry
+
+Every trimmed piece is also *measured*, in the worker, on the face list the trim
+has already produced: for each face, the largest tolerance recorded on any of
+its edges divided by `sqrt` of that face's exact trimmed area, worst face
+winning (`occ.tolerance_feature_ratio`). One area and one centroid on the single
+worst face, alongside the boolean that produced it.
+
+**The quantity, and why it is not a millimetre figure.** A boolean trimming a
+strut almost tangentially against a curved input surface fits an intersection
+curve it can only place to within some distance, and records that distance as
+the edge's tolerance. While the tolerance stays far below the feature it bounds,
+the description is sound. Once it approaches the feature size, the B-rep is
+"valid" only in the sense that everything agrees within a slack the size of the
+thing itself — and §9 explains why that specific geometry is the geometry the
+exported file cannot carry. An absolute bar cannot express this: 2e-03 mm is a
+defect on a 0.05 mm² face and nothing at all on a 100 mm² one, and this tool's
+legal parameters span both.
+
+`sqrt(area)` rather than a bounding-box diagonal deliberately. A long thin
+sliver has a small area and a large diagonal, so the diagonal would flatter
+exactly the shape whose thin direction is the one the tolerance swallows.
+Erring high sends a junction into a report; erring low ships it.
+
+**Measured here rather than on the output, because this is the last moment the
+junction has a name.** By `simplify` the piece is one region of a solid of tens
+of thousands of faces; here it is junction `(-6, -10, 1)`.
+
+**It reports, and does not refuse, and that is a measurement rather than
+caution.** On `SpiralTest.step` at `cc=5, t=1` the reading clears
+`TOLERANCE_FEATURE_RATIO_WARN` (1e-2) on **79 of 2,404** pieces — a family of
+grazing trims against that part's swept B-spline surface, all carrying the same
+2.120e-02 mm the boolean fits there, spread over 90 mm of the part. Most are
+then welded into the 27,864 mm³ dominant body, where one loosely described
+region is absorbed by everything around it and the exported solid is sound.
+Failing on this alone would refuse a part whose output is fine, which §11
+forbids more strongly than it asks for any gate.
+
+**What it is for is naming junctions, and combined with connectivity it is
+sharp.** The same part's 4.17 mm³ floating island is six junctions, two of which
+rank **2nd and 4th of 2,404** here — 2.907e-01 and 2.093e-01, on faces of
+0.005 and 0.010 mm². So by the end of `boundary`, five minutes into an
+eight-minute run and before the junction graph exists, the geometry that cannot
+be exported has already been pointed at.
+
+`pipeline._check_component_tolerance` is what turns that into one line per
+body. After §8's components are built it asks, per surviving component, how many
+of its *boundary* junctions clear the bar — interior ones are built by index,
+with no boolean and no slack — and reports the count, the fraction and the
+worst.
+
+**The fraction is what separates them, and the first version of this section
+claimed the maximum did.** Both surviving components contain a flagged junction:
+the dominant body holds the single worst one in the whole part (4.041e-01 at
+`(-4, -8, 2)`). With 2,348 boundary junctions in it, a body that large is almost
+certain to contain a bad one, so its maximum says nothing about it. How much of
+the body is described that way does:
+
+| component | volume | flagged | fraction |
+|---|---|---|---|
+| 0, the lattice proper | 27,864 mm³ | 82 / 2,348 | **3.5 %** |
+| 14, the island | 4.17 mm³ | 2 / 6 | **33.3 %** |
+
+**Neither figure is a bar, and the tenfold separation is one part's
+measurement.** A two-junction component reaches 100 % trivially, and every such
+component on this part is already below `t³` and dropped by §8 before this runs.
+A ranking is not a calibration, and treating it as one would be the mistake
+specification.md §11 records four times over.
+
+So this predicts and §9's export-truth gate decides. What it buys is the report
+arriving at `connect`, about 40 s into an eight-minute part, naming junctions of
+a body the run has not yet built.
+
+| body | worst piece reading |
+|---|---|
+| 80 mm ball, `cc=20 t=4` | 8.80e-06 |
+| `SpiralTest`, `cc=5 t=1`, median piece | 2.01e-05 |
+| ...p90 | 1.09e-03 |
+| ...p99 | 3.71e-02 |
+| ...worst piece | 4.04e-01 |
+
 ---
 
 ## 8. Connectivity, the floating-body rule, and stitching
@@ -1271,6 +1352,123 @@ program builds itself.
   identifies edges as the whole of the difference. A gate is only as good as the
   part it was measured on — the same lesson as §5.1's, in a different place.
 
+* **Export-truth gate — what the validity gate below structurally cannot see.**
+  `BRepCheck_Analyzer` asks whether a shape agrees with itself to within the
+  tolerances **recorded in this process**. STEP AP214 has nowhere to record
+  them: a file carries exactly one `UNCERTAINTY_MEASURE_WITH_UNIT`, in its
+  `geometric_representation_context`, against one tolerance per vertex, per edge
+  and per face in an OCCT B-rep. Export collapses N into 1 and import re-derives
+  all N from that one number. **A shape whose validity is *carried by* a
+  locally fat tolerance is valid here and is not guaranteed valid in the file
+  the user receives**, and no in-memory check can tell.
+
+  Measured directly, and pinned by `test_export_truth.py` because everything
+  here rests on it: a vertex tolerance of 6.573e-02 mm — the figure OCCT itself
+  records on `SpiralTest`'s fat vertex — written to STEP and read back comes
+  home at 1e-07. On `dense-lattice`'s dominant body, the same solid before and
+  after its own round trip:
+
+  | | worst pcurve↔3D deviation | max edge tolerance | pairs over tolerance |
+  |---|---|---|---|
+  | as built | 5.1514e-04 mm | **5.151e-04** | **0** of 62,792 |
+  | after a round trip | 1.2716e-04 mm | **1.525e-04** | **4** of 62,792 |
+
+  The tolerance that exactly covered the deviation was clamped, and the geometry
+  became inconsistent. The file had declared `2.E-07` — because OCCT's
+  `write.precision.mode` defaults to **Average**, which on a lattice is
+  pathological by construction: ~99 % of edges are exactly-built interior edges
+  at `Precision::Confusion`, so the average is ~1e-7 and the 1 % of boundary
+  trims that carry real tolerance are truncated.
+
+  **What is measured, and three cheaper things that were measured first.** The
+  question is whether a body survives being written, so the instrument answers
+  exactly that: `occ.exported_mesh_defects` writes one solid to STEP, reads it
+  back, tessellates it, and counts edges not used by exactly two triangles. That
+  is the property that makes a body useless downstream rather than a proxy for
+  it, and it is the symptom that found the one genuinely unwritable body this
+  project has produced.
+
+  Three cheaper quantities were tried as the gate before this one. `SpiralTest`
+  at `cc=5, t=1` produces two solids — the 27,864 mm³ lattice, sound, and the
+  4.17 mm³ island, not — and on that part alone two of the three look decisive:
+
+  | quantity | lattice (sound) | island (broken) |
+  |---|---|---|
+  | fault count after the round trip | 4 of 193,310 | **0** of 192 |
+  | worst face, deviation ÷ √area | **3.07e-02** | 2.45e-02 |
+  | share of surface loosely described | 5.6178e-04 | **3.9685e-01** |
+
+  A fault count is blind and the worst face is backwards, but the third
+  separates by 706×. **It then false-positives on the second part.** Every one
+  of the `TD_HX_rehearsal_test` rehearsal's fourteen solids was round-tripped
+  and tessellated as ground truth:
+
+  | body | faces | loose area | faults after RT | **bad mesh edges** |
+  |---|---|---|---|---|
+  | `SpiralTest` island | 36 | 3.97e-01 | 29 | **11** |
+  | rehearsal unify 3 | 12 | 1.76e-01 | 0 | 0 |
+  | rehearsal unify 5 | 12 | 1.76e-01 | 0 | 0 |
+  | rehearsal unify 10 | 29 | 0 | 8 | 0 |
+  | rehearsal unify 13 | 7 | 0 | 1 | 0 |
+  | rehearsal, nine others | — | 0 | 0 | 0 |
+
+  Exactly one of the sixteen is broken. The loose-area fraction refuses unify 3
+  and 5; a fault count refuses unify 10 and 13; only the last column is right
+  about all of them. Both rejected proxies would have refused — or, in the shape
+  of rule this replaces, **deleted** — geometry from a part that has been
+  inspected and accepted.
+
+  The pcurve readings are still measured and logged, because they are cheap and
+  they say *why* a body is fragile, and `LOOSE_PCURVE_RATIO` /
+  `LOOSE_AREA_FRACTION_MAX` keep the calibration history. They decide nothing,
+  and `test_export_truth.py` pins that.
+
+  **The demonstration that this gate is needed at all is on the real body, and
+  it turns on the pipeline's own repair.** As this pipeline builds it, the
+  island is `BRepCheck_Analyzer`-**invalid**: §8's rung 2 declines the fat vertex
+  and the validity gate refuses the run. Let rung 2 act on it — widen the vertex,
+  which moves no geometry — and **the body becomes valid**. Written, its 147
+  triangles still carry 11 broken edges. So the repair that makes a body pass
+  every gate this pipeline had is precisely what makes the remaining defect
+  invisible, and this check is the only thing left that sees it.
+
+  **Every solid is measured, with no size bound, and that is this section's
+  expensive decision.** An earlier revision skipped solids above a face count
+  and reported them *unmeasured* — honest, and wrong in the way that matters:
+  the dominant body of every production part fell outside the only detector
+  with a clean record, which is exactly where an unwritable description would do
+  the most damage. Per the user's decision the cost is accepted instead. This
+  section removed a whole-output re-import for costing **22 minutes**, and this
+  is that cost returning knowingly — for a correctness check this time, rather
+  than for a count of solids.
+
+  What that buys is that no body ships unexamined. What it costs at rehearsal
+  scale is **not yet measured**: the check now writes, re-reads and tessellates
+  a 583,806-face solid, where the removed re-import only re-read one. Expect
+  tens of minutes and watch the peak memory — points are interned to integers
+  and edges counted by integer key precisely so this can be attempted at that
+  size at all. `export_truth_s` in the run summary is what to read.
+
+  **Past the bar the run fails (exit 4), naming the face and its position, and
+  nothing is discarded.** Deleting material to make an export succeed is
+  "produce a wrong result", which §11 forbids; the temp folder is kept and the
+  user decides. §7.3's component reading is what has already named the junctions
+  responsible, minutes earlier.
+
+  **Three export-side levers were tried and none of them fixes this** — recorded
+  so they are not retried. `write.precision.mode` at Greatest, Least and an
+  explicit session value leaves the ball's over-tolerance count at 60–95 in
+  every mode; `write.surfacecurve.mode = Off` makes the worst deviation *worse*
+  (1.5e-06 → 6.3e-06 mm), the reader then reprojecting from the 3D curves alone;
+  and `BRepLib::SameParameter` before writing changes the round trip not at all.
+  Coordinate precision is not a factor either and is ruled out with a number:
+  the writer emits up to 14 significant digits, ~1e-11 mm at 2,000 mm
+  coordinates, six orders below the tightest tolerance in play. What OCCT *does*
+  do is mark every `surface_curve`'s `master_representation` as `.PCURVE_S1.`,
+  so where the two representations disagree the file instructs the reader to
+  believe the pcurve — which is exactly why the pcurve deviation is the quantity
+  that decides what the geometry becomes on import.
+
 * **Validity gate.** Every output solid is checked with OCCT's
   `BRepCheck_Analyzer` before export. This is an *exact* B-rep check rather than a
   mesh-based approximation of one, which matters because mesh-based
@@ -1503,7 +1701,15 @@ Because priority #1 is precision, every optimization is designed so that its
 * Connectivity is proven, not guessed (§8), so no body is ever deleted without
   proof that it is disconnected.
 * The output is checked with an exact B-rep validity test before success is
-  reported (§9). It is no longer re-read from disk afterward — that gate was
+  reported (§9) — and, beside it, with a test that validity check structurally
+  cannot perform. `BRepCheck_Analyzer` judges a shape against the tolerances
+  **this process** recorded; STEP AP214 carries one tolerance for a whole file,
+  so a body whose validity rests on a locally fat tolerance passes here and is
+  not guaranteed to survive being written. §9's export-truth gate measures the
+  quantity that decides — pcurve deviation against the feature carrying it — on
+  every solid, and **fails rather than discarding anything**. Deleting material
+  so that an export can succeed is precisely "produce a wrong result"; the run
+  stops, the temp folder is kept, and §7.3 has already named the junctions. It is no longer re-read from disk afterward — that gate was
   removed deliberately (§9) once its cost (22 m 29 s of a 73.1-minute run) was
   measured against what it bought over what `tools/e2e.py` already establishes
   in dev/CI on every committed scenario.
@@ -1558,6 +1764,8 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10). Guarded by an exact area bar and a structural one, never by volume — OCCT cannot integrate the volume of the unrepaired piece, because the pinhole is exactly the free boundary its precondition excludes (§7, G19) |
 | Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is finding the faces to repair, on a sound layer (§8, G11, G12) |
 | That scan run as a parallel batch filter over a compound (§8) | The second stage to use OCCT's own threads rather than this project's process pool, and for the same two reasons as `validate`: it returns a verdict rather than geometry, and the call has a flag. **44.1 s → 22.6 s** in a controlled pair, same 19 faces repaired, output byte-identical; chunked at 20,000 faces because the analyzer holds ~14 kB per face. The predicate has to be re-evaluated per face *as the repair reaches it*, not once up front: repairs widen shared tolerances, so a neighbour can be fixed for free, and asking too early counted 15 such faces as unrepaired |
+| Tolerance measured against feature size in the worker (§7.3) | Correctness, not speed, and a *localiser* rather than a gate. Costs one area and one centroid per trimmed piece, on the face list the trim already produced, and it is the last point at which the junction still has a name. Two of the six junctions forming `SpiralTest`'s unwritable 4.17 mm³ island rank 2nd and 4th of 2,404 pieces; combined with §8's components it names exactly one body where the piece-level reading names two dozen, at `connect` rather than at the end |
+| Export truth measured on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
@@ -1639,7 +1847,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind that budget: logical core count (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8) |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8), and the two export-truth measurements — tolerance against feature size (§7.3) and pcurve-versus-3D-curve deviation (§9) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |

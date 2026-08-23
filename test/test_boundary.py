@@ -93,9 +93,12 @@ def test_trim_tags_every_cap_plane_face_and_keeps_it(lp):
                                    [9.0, 9.0, -9.0], [-9.0, 9.0, -9.0]])),
         np.array([0.0, 0.0, 18.0]),
     )
-    trimmed, n_pinholes = trim_junction(lp, tpl, np.zeros(3), box)
+    trim = trim_junction(lp, tpl, np.zeros(3), box)
+    trimmed = trim.pieces
     assert len(trimmed) == 1
-    assert n_pinholes == 0, "a junction wholly inside a box has no grazing pinholes"
+    assert trim.n_pinholes_removed == 0, (
+        "a junction wholly inside a box has no grazing pinholes"
+    )
     faces, tags, volume = trimmed[0]
     assert len(faces) == len(tags)
     assert volume == pytest.approx(tpl.volume, rel=1e-9), "the box contains the junction whole"
@@ -449,7 +452,8 @@ def test_trim_junction_removes_the_pinholes_and_closes_the_piece(pinhole_case):
     lp5, tpl, body, pos = pinhole_case
     raw = raw_trim(tpl, pos, body)
 
-    pieces, n_pinholes = trim_junction(lp5, tpl, pos, body)
+    trim = trim_junction(lp5, tpl, pos, body)
+    pieces, n_pinholes = trim.pieces, trim.n_pinholes_removed
 
     assert n_pinholes == 2
     assert len(pieces) == 1

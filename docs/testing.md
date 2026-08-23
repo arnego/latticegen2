@@ -42,6 +42,7 @@ header rewrite.
 | `test_progress.py` | The NDJSON event schema (docs/algorithm.md §10): every event carries exactly the fields it declares, the reader returns `None` on kernel chatter and truncated lines rather than raising, and a dead consumer cannot abandon a run mid-pipeline | no |
 | `test_runlog_events.py` | **The guarantee that watching a run does not change it.** The same sequence of writes with and without an emitter produces an identical `.log`; `stage_begin` emits without logging; `substage` rate-limits without ever dropping a stage's final count | no |
 | `test_gui.py` | The front-end's testable half (specification.md §3.1): the stage weights, the reduction from an event stream to what the window shows — fed deliberately hostile input — the argv handed to the child, the cancel sentinel, and the **verbose** tick box: that unticked the pane holds only what the child wrote outside the event stream and is hidden when that is empty, that ticking it reveals the run's whole log, and that it stays enabled while a run is in flight. Several tests build widgets in one shared withdrawn Tk root, guarded by `importorskip` | no |
+| `test_export_truth.py` | What `BRepCheck_Analyzer` structurally cannot ask (docs/algorithm.md §7.3, §9). First **the premise**, pinned against the kernel: a 6.573e-02 mm vertex tolerance does not survive a STEP round trip, and AP214 declares exactly one tolerance per file — if a future OCCT ever carried per-subshape tolerance, that test is what would say so. Then the gate, against `spiral-island-unwritable.brep`, the one body this project has produced that cannot be written: **§8's rung-2 repair makes it `BRepCheck`-valid and it still tessellates into 11 broken edges**, which is the whole case for the check. Plus the control (a box survives), and a test that the three disproved proxies stay out of the deciding seat | yes |
 | `test_verify_geometry.py` | The one part of the harness whose failure mode is a plausible number rather than an exception: `material_outside`'s per-solid cut, the contradiction against a boolean-free containment check, and that a face lying *on* the input surface is a tie rather than a protrusion. The only test file that reaches into `tools/` — see the note below | yes |
 
 ## E2E verification
@@ -73,6 +74,7 @@ python src/main.py -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke.step -v
 | STEP written and non-empty | filesystem |
 | Parses back successfully | `STEPControl_Reader` round trip |
 | **Exact B-rep validity** | `BRepCheck_Analyzer` on every solid |
+| **Export fidelity, reported not gated** | `vg.curve_on_surface` re-reads the written STEP and measures, per edge/face pair, the exact pcurve-to-3D-curve distance (`GeomLib_CheckCurveOnSurface`). Printed as a `[NOTE]`, never as a pass or fail: three quantities of this kind were tried as bars and two false-positive on sound rehearsal solids (docs/algorithm.md §9). What decides is the manifold check above, which is the same question asked directly |
 | Closed manifold | every mesh edge used by exactly 2 triangles |
 | No self-intersections | `triangles_properly_cross` — plane-straddle pre-check, then edge piercing |
 | No material outside the input body | boolean cut of output against input **per solid**, volume ≈ 0; a non-zero remainder is contradicted against a boolean-free containment check and reported as unmeasured if the two disagree (see below) |
@@ -149,6 +151,16 @@ defect the repair missed, but a valid repair a *guard* refused. Its wire is
 shorter than either of the first junction's and it shifts the volume OCCT
 reports seven orders further (G19), which is exactly the kind of thing no
 synthetic case would have suggested was possible.
+
+`test/spiral-island-unwritable.brep` is the fourth, and the one whose diagnosis
+took the longest. It is 36 faces and 4.1629 mm³ lifted out of a `SpiralTest.step`
+run after `simplify`, and it is committed because *three* plausible measurements
+of it are wrong: a fault count says it is clean, its worst face scores better
+than the sound body beside it, and the share of its surface that is loosely
+described condemns two sound rehearsal solids alongside it. Only tessellating
+the exported body separates it, and only on the real geometry — nothing
+synthetic reproduces a pcurve that regenerates 2.118e-02 mm away from its own 3D
+curve on a face of 0.05 mm².
 
 So where the geometry that actually fails is committed to the repo, test against
 it. A synthetic case proves the code does what you think; only the real one

@@ -75,6 +75,18 @@ def geometry_checks(rep: Report, output: str, input_path: str, cc: float, t: flo
               "all valid" if valid else f"invalid solids: {invalid}")
 
     outside_check(rep, output, input_path, t)
+    # Reported, never gated: the manifold check above is what decides whether
+    # the shipped file survived being written, and the three cheaper quantities
+    # below were each tried as a bar and two of them false-positive on sound
+    # geometry (latticegen2.occ.LOOSE_AREA_FRACTION_MAX). They say why a body is
+    # fragile and rank the candidates; they do not pass or fail anything.
+    cos = vg.curve_on_surface(output)
+    print(f"  [NOTE] export fidelity: {100 * cos['fraction']:.4f}% of the worst "
+          f"solid's surface is described more loosely than its own feature size "
+          f"({cos['loose_faces']} face(s)); worst pcurve deviation "
+          f"{cos['worst_mm']:.3e} mm over {cos['pairs']} edge/face pair(s); "
+          f"{cos['over']} pair(s) past their own recorded tolerance")
+
     rep.check("bounding box within input + (cc+t)",
               vg.bounding_box_within(output, input_path, cc + t))
 

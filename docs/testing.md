@@ -42,6 +42,7 @@ header rewrite.
 | `test_progress.py` | The NDJSON event schema (docs/algorithm.md §10): every event carries exactly the fields it declares, the reader returns `None` on kernel chatter and truncated lines rather than raising, and a dead consumer cannot abandon a run mid-pipeline | no |
 | `test_runlog_events.py` | **The guarantee that watching a run does not change it.** The same sequence of writes with and without an emitter produces an identical `.log`; `stage_begin` emits without logging; `substage` rate-limits without ever dropping a stage's final count | no |
 | `test_gui.py` | The front-end's testable half (specification.md §3.1): the stage weights, the reduction from an event stream to what the window shows — fed deliberately hostile input — the argv handed to the child, the cancel sentinel, and the **verbose** tick box: that unticked the pane holds only what the child wrote outside the event stream and is hidden when that is empty, that ticking it reveals the run's whole log, and that it stays enabled while a run is in flight. Several tests build widgets in one shared withdrawn Tk root, guarded by `importorskip` | no |
+| `test_export_truth.py` | The two measurements that ask what `BRepCheck_Analyzer` structurally cannot (docs/algorithm.md §7.3, §9) — and, first, **the premise they rest on**, pinned directly against the kernel: a 6.573e-02 mm vertex tolerance does not survive a STEP round trip, and AP214 declares exactly one tolerance for a whole file. If a future OCCT ever did carry per-subshape tolerance, that test is what would say so, and both gates would need re-deriving | yes |
 | `test_verify_geometry.py` | The one part of the harness whose failure mode is a plausible number rather than an exception: `material_outside`'s per-solid cut, the contradiction against a boolean-free containment check, and that a face lying *on* the input surface is a tie rather than a protrusion. The only test file that reaches into `tools/` — see the note below | yes |
 
 ## E2E verification
@@ -73,6 +74,7 @@ python src/main.py -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke.step -v
 | STEP written and non-empty | filesystem |
 | Parses back successfully | `STEPControl_Reader` round trip |
 | **Exact B-rep validity** | `BRepCheck_Analyzer` on every solid |
+| **The shipped file's pcurves still match their own 3D curves** | `vg.curve_on_surface` re-reads the written STEP and measures, per edge/face pair, the exact distance between the two representations (`GeomLib_CheckCurveOnSurface`). Asked of the artefact, not of the process that wrote it — the file is the only version Solidworks and Catia see, and it is a different shape, because AP214 declares one tolerance where the B-rep carries one per subshape |
 | Closed manifold | every mesh edge used by exactly 2 triangles |
 | No self-intersections | `triangles_properly_cross` — plane-straddle pre-check, then edge piercing |
 | No material outside the input body | boolean cut of output against input **per solid**, volume ≈ 0; a non-zero remainder is contradicted against a boolean-free containment check and reported as unmeasured if the two disagree (see below) |

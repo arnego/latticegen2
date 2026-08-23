@@ -12,10 +12,11 @@ exact validity checking.
 from __future__ import annotations
 
 import os
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, NamedTuple
 
 import numpy as np
 
+from OCP.Adaptor3d import Adaptor3d_CurveOnSurface
 from OCP.BRep import BRep_Builder, BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepBndLib import BRepBndLib
@@ -32,7 +33,10 @@ from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
 from OCP.BRepTools import BRepTools, BRepTools_ReShape
 from OCP.Bnd import Bnd_Box
 from OCP.GProp import GProp_GProps
+from OCP.Geom2dAdaptor import Geom2dAdaptor_Curve
 from OCP.GeomAbs import GeomAbs_SurfaceType
+from OCP.GeomAdaptor import GeomAdaptor_Curve, GeomAdaptor_Surface
+from OCP.GeomLib import GeomLib_CheckCurveOnSurface
 from OCP.IFSelect import IFSelect_ReturnStatus
 from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_Reader, STEPControl_StepModelType, STEPControl_Writer
@@ -241,6 +245,333 @@ def invalid_faces(
             if not analyzer.IsValid(f) and not BRepCheck_Analyzer(f).IsValid()
         )
     return out
+
+
+# --- Export truth: is this shape describable outside OCCT's memory model? ---
+#
+# STEP AP214 carries exactly **one** modelling tolerance for a whole file — the
+# `UNCERTAINTY_MEASURE_WITH_UNIT` of its `geometric_representation_context` —
+# where an OCCT B-rep carries one per vertex, per edge and per face. Export
+# therefore collapses N tolerances into 1 and import re-derives all N from that
+# single number. Any face whose validity is *carried by* a locally fat tolerance
+# is valid in this process and is not guaranteed valid in the file, and nothing
+# in `BRepCheck_Analyzer` can see the difference: it asks whether the geometry
+# agrees with itself to within the tolerances **recorded here**.
+#
+# Both measurements below exist to ask the question the analyzer cannot, and
+# both are cheap, exact and local. See docs/algorithm.md §7.3 and §9.
+
+
+TOLERANCE_FEATURE_RATIO_WARN = 1e-2
+"""When a trim's recorded tolerance is worth reporting against its feature.
+
+A **warning bar, not a gate**, and the distinction is measured rather than
+cautious. On `SpiralTest.step` at ``cc=5, t=1`` this flags ~1 % of the 2,404
+boundary pieces — a family of grazing trims against the part's swept B-spline
+surface, all carrying the same 2.120e-02 mm the boolean fits there. Most of
+those junctions are then welded into the 27,864 mm³ dominant body, where a fat
+local description is absorbed by everything around it and the exported solid is
+fine. Failing on this alone would refuse a part whose output is sound, which
+docs/algorithm.md §11 forbids more strongly than it asks for any gate.
+
+What it is *for* is naming junctions. Two of the six junctions forming that
+part's 4.17 mm³ floating island rank **2nd and 4th of 2,404** here, at 2.907e-01
+and 2.093e-01 — so by the end of the boundary stage, five minutes into the run
+and before the junction graph exists, the geometry that cannot be exported has
+already been pointed at. :func:`latticegen2.pipeline._check_component_tolerance`
+combines that with the component the junction lands in, which is the sharp
+predicate; :func:`latticegen2.pipeline._check_export_truth` is what actually
+decides, on the finished solid, where the question is well posed.
+
+Worst piece measured, for scale: 80 mm ball at ``cc=20 t=4`` **8.80e-06**,
+`SpiralTest` at ``cc=5 t=1`` median **2.01e-05**, p90 **1.09e-03**, p99
+**3.71e-02**, max **4.04e-01**."""
+
+
+class ToleranceFeature(NamedTuple):
+    """The worst "tolerance as a fraction of the feature" on one shape."""
+
+    ratio: float
+    """``max edge tolerance on a face / sqrt(that face's area)``, worst face."""
+    tolerance: float
+    """The recorded edge tolerance behind ``ratio``, in mm."""
+    face_area: float
+    """That face's exact trimmed area, in mm²."""
+    where: tuple[float, float, float]
+    """That face's centroid, so the junction can be found and inspected."""
+
+
+_NO_TOLERANCE_FEATURE = ToleranceFeature(0.0, 0.0, 0.0, (0.0, 0.0, 0.0))
+
+
+def tolerance_feature_ratio(faces: Iterable[TopoDS_Face]) -> ToleranceFeature:
+    """How large the kernel's own recorded tolerance is against the feature.
+
+    For every face, the largest tolerance recorded on any of its edges divided
+    by ``sqrt`` of the face's exact trimmed area — a dimensionless reading of
+    "the kernel needed *this* much slack to describe a feature *that* big".
+    The worst face wins.
+
+    **Why this quantity, and why at the source.** A boolean trimming a strut
+    almost tangentially to a fat B-spline surface fits an intersection curve it
+    can only place to within some distance, and records that distance as the
+    edge's tolerance. While the tolerance stays far below the feature it bounds,
+    the description is sound and the file is too. Once it approaches the feature
+    size, the B-rep is only "valid" in the sense that everything is within a
+    slack the size of the thing itself — and that is precisely the geometry that
+    cannot survive §9's export, because the slack is the part STEP throws away.
+
+    Measured, worst face per solid:
+
+    ==========================================  ==========
+    body                                        ratio
+    ==========================================  ==========
+    80 mm ball, ``cc=20 t=4``, 1,338 faces      2.11e-07
+    test cylinder, ``cc=10 t=1.5``, 14,790 f    1.18e-03
+    ...its second solid, 1,176 faces            8.01e-07
+    ==========================================  ==========
+
+    ``sqrt(area)`` rather than a bounding-box diagonal deliberately: a long thin
+    sliver has a small area and a large diagonal, so the diagonal would flatter
+    exactly the shape whose thin direction is the one the tolerance swallows.
+    Erring high sends a junction down a reporting path; erring low ships it.
+
+    Degenerate edges are skipped — they have no extent, so their tolerance
+    bounds nothing — and a face of zero area contributes nothing rather than an
+    infinity, since it has no feature to compare against and §8's own machinery
+    is what deals with it.
+    """
+    worst = _NO_TOLERANCE_FEATURE
+    for face in faces:
+        tol = 0.0
+        for e in _explore(face, TopAbs_ShapeEnum.TopAbs_EDGE):
+            edge = TopoDS.Edge_s(e)
+            if BRep_Tool.Degenerated_s(edge):
+                continue
+            tol = max(tol, BRep_Tool.Tolerance_s(edge))
+        if tol <= 0.0:
+            continue
+        a = area(face)
+        if a <= 0.0:
+            continue
+        ratio = tol / (a ** 0.5)
+        if ratio > worst.ratio:
+            c = centroid(face)
+            worst = ToleranceFeature(
+                ratio, tol, a, (float(c[0]), float(c[1]), float(c[2]))
+            )
+    return worst
+
+
+class CurveOnSurface(NamedTuple):
+    """How far a shape's pcurves stray from their own 3D curves."""
+
+    worst: float
+    """Largest max-deviation over all edge/face pairs, in mm. Reported only."""
+    ratio: float
+    """That deviation against the feature carrying it, worst pair. Reported
+    only — :data:`LOOSE_AREA_FRACTION_MAX` records the measurement showing that a
+    bar on this column refuses a sound body and passes a broken one."""
+    loose_area_fraction: float
+    """**The quantity the gate reads.** Share of the shape's surface area on
+    faces that are loose at :data:`LOOSE_PCURVE_RATIO`."""
+    loose_faces: int
+    """How many faces that is."""
+    over_tolerance: int
+    """Pairs whose deviation exceeds the edge's own recorded tolerance.
+
+    OCCT's own predicate — the one ``BOPAlgo_ArgumentAnalyzer``'s
+    ``CurveOnSurfaceMode`` reports as ``InvalidCurveOnSurface`` — reproduced
+    here so the two can be compared face for face (``test_export_truth.py``).
+    Reported, never gated on: see ``ratio``."""
+    pairs: int
+    """Edge/face pairs carrying a pcurve, i.e. the pairs actually measured."""
+    where: list[tuple[float, float, float]]
+    """Sample midpoints of the offending edges, for the failure message."""
+    where_worst: tuple[float, float, float]
+    """Midpoint of the edge behind ``ratio``, so a failure names one place."""
+    face_area: float
+    """Area of the face behind ``ratio``, in mm²."""
+
+
+#: Offending edge positions reported when the gate fires. Enough to localise the
+#: region without turning one failure into a wall of coordinates — the same
+#: reasoning behind §8's sampled free-edge positions.
+CURVE_ON_SURFACE_SAMPLES = 10
+
+LOOSE_PCURVE_RATIO = 1e-3
+"""When one face counts as *loosely described*, against its own feature size.
+
+Dimensionless: a face is loose when some edge's pcurve strays further than this
+times ``sqrt`` of the face's own area from that edge's 3D curve. An absolute
+figure in millimetres cannot express this — 2e-03 mm is a defect on a
+0.05 mm² face and nothing at all on a 100 mm² one, and this tool's legal
+parameters span both.
+
+This is not a bar on its own. It is the predicate
+:data:`LOOSE_AREA_FRACTION_MAX` then measures the *extent* of."""
+
+
+LOOSE_AREA_FRACTION_MAX = 1e-2
+"""How much of a body's surface may be loosely described before it is refused.
+
+The gate :func:`latticegen2.pipeline._check_export_truth` enforces before export
+and ``tools/verify_geometry.curve_on_surface`` re-applies to the written file —
+one constant rather than two, so they cannot drift apart.
+
+**The worst face is the wrong quantity, and measurement is what settled that.**
+`SpiralTest.step` at ``cc=5, t=1`` produces exactly two output solids: the
+27,864 mm³ lattice, which exports and tessellates cleanly, and a 4.17 mm³
+floating island whose 135 triangles carry 9 non-manifold edges and 4 crossings
+against the lattice's 105,628 carrying none. By worst face the **sound** body
+scores worse:
+
+============================  ============  =============  ==============
+solid                         worst dev     worst ratio    over tolerance
+============================  ============  =============  ==============
+0, the lattice, 45,861 faces  4.90e-03 mm   **3.07e-02**   4 / 193,310
+1, the island, 36 faces       2.12e-02 mm   **2.45e-02**   0 / 192
+============================  ============  =============  ==============
+
+A bar on that column refuses the whole part, which docs/algorithm.md §11 rules
+out more firmly than it asks for any gate. What actually separates them is how
+much *of the body* is loose — a handful of sliver faces in a lattice of 45,861
+is a local blemish; the same description over a body of 36 faces is the body:
+
+===========================================  ===========  ===========  ======
+statistic                                    lattice      island       ratio
+===========================================  ===========  ===========  ======
+fraction of **area** loose at 1e-3           **5.6e-04**  **4.0e-01**  706x
+fraction of pairs loose at 1e-3              2.7e-04      4.2e-02      152x
+fraction of pairs loose at 3e-3              7.0e-05      2.6e-02      387x
+===========================================  ===========  ===========  ======
+
+Area is the one used: it is what "how much of this body" means physically, and
+it does not count a four-edged face four times. Measured end to end on the real
+run, the lattice carries 41 loose faces of 44,059 and the island 3 of 36 — so at
+**1e-2** the bar sits **18x above** the sound body and **40x below** the
+unwritable one, and the two committed scenarios measure exactly zero.
+
+Worth stating plainly: this is calibrated on the one part this project has that
+produces an unwritable body, so it is a bar with measured margin rather than a
+law. The committed scenarios sit far below it (see ``test_export_truth.py``),
+and the failure mode if it is ever wrong is a refused run with the temp folder
+kept — never material silently missing from the output."""
+
+
+def curve_on_surface_deviations(
+    shape: TopoDS_Shape, samples: int = CURVE_ON_SURFACE_SAMPLES
+) -> CurveOnSurface:
+    """Exact pcurve-versus-3D-curve deviation over every edge/face pair.
+
+    The second half of the export-truth question, and the one that is about the
+    *file* rather than about the kernel's slack. STEP stores both
+    representations of an edge — a 3D curve and a pcurve per face — inside one
+    ``surface_curve``, and OCCT's writer marks ``master_representation`` as
+    ``.PCURVE_S1.``, so where the two disagree the file instructs the reader to
+    believe the pcurve. The reader then re-derives every tolerance from the
+    file's single uncertainty. An edge whose two representations disagree by
+    more than the tolerance recorded *here* is therefore an edge whose geometry
+    changes on import, by an amount nothing in the file bounds.
+
+    ``GeomLib_CheckCurveOnSurface`` gives the true maximum by optimisation
+    rather than by sampling, and it is the same predicate
+    ``BOPAlgo_ArgumentAnalyzer``'s ``CurveOnSurfaceMode`` applies: measured on
+    the 80 mm ball's output it reproduces that analyzer's count **exactly**
+    (73 of 5,760 pairs) — but it also returns the *magnitude*, which the fault
+    count does not, and which is the whole difference between a harmless
+    9.08e-07 mm and a deviation the size of the face it sits on.
+
+    **This needs no round trip, no boolean and no volume bar.** It is
+    ``O(edge/face pairs)``, measured at 46–57 µs per pair, and it is affordable
+    on every solid of every run — where a round-trip check is affordable only on
+    small ones, and ``BOPAlgo_ArgumentAnalyzer``'s ``SelfInterMode`` (the half
+    that makes that call superlinear: 0.67 s against ``CurveOnSurfaceMode``'s
+    0.12 s on the same 1,176-face solid) is already covered by §9's validity
+    gate.
+    """
+    worst = 0.0
+    ratio = 0.0
+    where_worst = (0.0, 0.0, 0.0)
+    worst_area = 0.0
+    over = 0
+    pairs = 0
+    total_area = 0.0
+    loose_area = 0.0
+    loose_faces = 0
+    where: list[tuple[float, float, float]] = []
+    for f in _explore(shape, TopAbs_ShapeEnum.TopAbs_FACE):
+        face = TopoDS.Face_s(f)
+        surface = BRep_Tool.Surface_s(face)
+        if surface is None:
+            continue
+        face_area = area(face)
+        if face_area <= 0.0:
+            continue
+        total_area += face_area
+        root = face_area ** 0.5
+        loose = False
+        for e in _explore(face, TopAbs_ShapeEnum.TopAbs_EDGE):
+            edge = TopoDS.Edge_s(e)
+            if BRep_Tool.Degenerated_s(edge):
+                continue
+            deviation = _pcurve_deviation(edge, face, surface)
+            if deviation is None:
+                continue
+            pairs += 1
+            if deviation > worst:
+                worst = deviation
+            if deviation > BRep_Tool.Tolerance_s(edge):
+                over += 1
+                if len(where) < samples:
+                    where.append(_edge_midpoint(edge))
+            r = deviation / root
+            if r > ratio:
+                ratio = r
+                where_worst = _edge_midpoint(edge)
+                worst_area = face_area
+            if r > LOOSE_PCURVE_RATIO and not loose:
+                loose = True
+                if len(where) < samples:
+                    where.append(_edge_midpoint(edge))
+        if loose:
+            loose_faces += 1
+            loose_area += face_area
+    fraction = loose_area / total_area if total_area > 0.0 else 0.0
+    return CurveOnSurface(worst, ratio, fraction, loose_faces, over, pairs,
+                          where, where_worst, worst_area)
+
+
+def _pcurve_deviation(edge: TopoDS_Edge, face: TopoDS_Face, surface) -> float | None:
+    """Max distance between one edge's 3D curve and its pcurve on ``face``.
+
+    ``None`` where the pair carries no pcurve or the optimiser does not
+    converge — both of which mean "nothing measured", never "measured as fine",
+    so the caller counts neither as a pass.
+    """
+    curve3d = BRep_Tool.Curve_s(edge, 0.0, 0.0)
+    if curve3d is None:
+        return None
+    curve2d = BRep_Tool.CurveOnSurface_s(edge, face, 0.0, 0.0)
+    if curve2d is None:
+        return None
+    first3d, last3d = BRep_Tool.Range_s(edge)
+    first2d, last2d = BRep_Tool.Range_s(edge, face)
+    check = GeomLib_CheckCurveOnSurface(GeomAdaptor_Curve(curve3d, first3d, last3d))
+    check.Perform(
+        Adaptor3d_CurveOnSurface(
+            Geom2dAdaptor_Curve(curve2d, first2d, last2d), GeomAdaptor_Surface(surface)
+        )
+    )
+    return check.MaxDistance() if check.IsDone() else None
+
+
+def _edge_midpoint(edge: TopoDS_Edge) -> tuple[float, float, float]:
+    """A point on the edge, for a failure message to point at."""
+    curve = BRep_Tool.Curve_s(edge, 0.0, 0.0)
+    first, last = BRep_Tool.Range_s(edge)
+    p = curve.Value(0.5 * (first + last))
+    return (round(p.X(), 4), round(p.Y(), 4), round(p.Z(), 4))
 
 
 # --- Construction -----------------------------------------------------------

@@ -241,6 +241,7 @@ def _run_with_pool(
         )
         stats["pinhole_wires_removed"] = boundary.n_pinhole_wires
         stats["pinhole_junctions_repaired"] = boundary.n_pinhole_junctions
+    _report_tolerance_ratio(rl, boundary, stats)
     stats["workers"] = args.workers
     if boundary.max_worker_rss:
         # Folded into the run's high-water mark as well as reported separately:
@@ -288,6 +289,7 @@ def _run_with_pool(
         threshold = lp.t ** 3
         dropped = comps.dropped(threshold)
         keep_labels = set(comps.volumes) - dropped
+        _check_component_tolerance(rl, comps, keep_labels, boundary.pieces, stats)
     if n_fused:
         rl.always(
             f"note: {n_fused} disagreeing cap cluster(s) repaired with a local "
@@ -459,6 +461,7 @@ def _run_with_pool(
 
     with Timer(rl, "validate"):
         invalid, total_volume = _validate(result_solids, report=rl.substage)
+        _check_export_truth(rl, result_solids, stats)
     if invalid:
         raise ProcessingError(
             f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
@@ -497,6 +500,208 @@ def _run_with_pool(
     stats["output"] = args.output
     shutil.rmtree(tmpdir, ignore_errors=True)
     return stats
+
+
+def _report_tolerance_ratio(rl: RunLog, boundary, stats: dict) -> None:
+    """Report which trims lean hardest on their own recorded tolerance.
+
+    Reported, never failed on — :data:`latticegen2.occ.TOLERANCE_FEATURE_RATIO_WARN`
+    says why, with the measurement. The quantity is
+    :func:`latticegen2.occ.tolerance_feature_ratio` and docs/algorithm.md §7.3
+    explains why it is taken here, in the worker, where the junction still has
+    a name.
+    """
+    worst_pieces = boundary.worst_tolerance_pieces()
+    if not worst_pieces:
+        return
+    worst = worst_pieces[0]
+    tol, face_area, where = worst.tolerance_evidence
+    flagged = sum(
+        1 for p in boundary.pieces
+        if p.tolerance_ratio > occ.TOLERANCE_FEATURE_RATIO_WARN
+    )
+    stats["worst_tolerance_ratio"] = f"{worst.tolerance_ratio:.3e}"
+    stats["tolerance_ratio_flagged"] = flagged
+    rl.line(
+        f"tolerance vs feature size: worst {worst.tolerance_ratio:.3e} at junction "
+        f"{worst.node} ({tol:.4e} mm recorded on a {face_area:.6f} mm^2 face at "
+        f"[{where[0]:.3f}, {where[1]:.3f}, {where[2]:.3f}]); {flagged} of "
+        f"{len(boundary.pieces)} piece(s) above {occ.TOLERANCE_FEATURE_RATIO_WARN:g}"
+    )
+    for piece in worst_pieces[1:]:
+        t, a, w = piece.tolerance_evidence
+        rl.line(
+            f"  next: {piece.tolerance_ratio:.3e} at {piece.node} "
+            f"({t:.4e} mm on {a:.6f} mm^2 at [{w[0]:.3f}, {w[1]:.3f}, {w[2]:.3f}])"
+        )
+
+
+def _check_component_tolerance(rl: RunLog, comps, keep_labels, pieces, stats: dict) -> None:
+    """Name the bodies whose *whole* description leans on tolerance.
+
+    The sharp predicate, and the reason both halves of §7.3 exist. A grazing
+    trim with a fat recorded tolerance is common and usually harmless: welded
+    into a body of tens of thousands of mm³ it is one small region described
+    loosely, and the exported solid is sound. The same trim alone in a small
+    floating component is a body whose *entire* description is that loose — and
+    that is the body §9's export cannot write faithfully.
+
+    **What separates them is the fraction, not the worst reading, and the first
+    version of this got that wrong.** On `SpiralTest.step` at ``cc=5, t=1``, 79
+    of 2,404 pieces clear the warning bar and *both* surviving components
+    contain one — the dominant body holds the single worst junction in the whole
+    part (4.041e-01 at ``(-4, -8, 2)``). With 2,348 boundary junctions in it, a
+    body that large is almost certain to contain a bad one, so a maximum says
+    nothing about the body. How much *of* the body is described that way does:
+
+    ======================  =========  ==========  ==========
+    component               volume     flagged     fraction
+    ======================  =========  ==========  ==========
+    0, the lattice proper   27,864 mm³  82 / 2,348  **3.5 %**
+    14, the island          4.17 mm³    2 / 6       **33.3 %**
+    ======================  =========  ==========  ==========
+
+    **Both figures are reported and neither is a bar.** That is one part, and a
+    two-junction component reaches 100 % trivially — every such component here
+    is already below ``t^3`` and dropped by §8 before this runs. A tenfold
+    separation on a single measurement is a ranking, not a calibration, and
+    dressing it up as a threshold would be the mistake docs/specification.md §11
+    records four times over.
+
+    So this predicts and :func:`_check_export_truth` decides. What it buys is
+    the report arriving at `connect`, about 40 s into a part that takes eight
+    minutes, naming junctions of a body the run has not yet built.
+    """
+    worst_at_node: dict = {}
+    for p in pieces:
+        node = tuple(p.node)
+        if p.tolerance_ratio > worst_at_node.get(node, (0.0,))[0]:
+            worst_at_node[node] = (p.tolerance_ratio, p.tolerance_evidence)
+
+    flagged = []
+    for cid in sorted(keep_labels):
+        readings = []
+        for vid in comps.members[cid]:
+            vertex = comps.vertices[vid]
+            if vertex.is_interior:
+                continue        # built by index, exactly; no boolean, no slack
+            hit = worst_at_node.get(tuple(vertex.node))
+            if hit is not None:
+                readings.append((hit[0], tuple(vertex.node), hit[1]))
+        if not readings:
+            continue
+        ratio, node, evidence = max(readings)
+        above = sum(1 for r, _n, _e in readings
+                    if r > occ.TOLERANCE_FEATURE_RATIO_WARN)
+        if above:
+            flagged.append((cid, comps.volumes[cid], above, len(readings),
+                            ratio, node, evidence))
+
+    stats["tolerance_flagged_components"] = len(flagged)
+    if not flagged:
+        return
+    rl.always(
+        f"note: {len(flagged)} output body/bodies contain junctions whose trim "
+        f"needed a tolerance comparable to the feature it bounds "
+        f"(docs/algorithm.md §7.3). Read the percentage, not the worst reading: "
+        f"a large body will contain one, a body largely made of them is where an "
+        f"unwritable output comes from. The export-truth gate at `validate` "
+        f"decides:"
+    )
+    for cid, volume, above, total, ratio, node, (tol, face_area, where) in flagged:
+        rl.always(
+            f"  body {cid}: {volume:.4f} mm^3, {above} of {total} boundary "
+            f"junction(s) above the bar ({100.0 * above / max(total, 1):.1f}% of "
+            f"the body); worst {ratio:.3e} at {node} ({tol:.4e} mm on a "
+            f"{face_area:.6f} mm^2 face at [{where[0]:.3f}, {where[1]:.3f}, "
+            f"{where[2]:.3f}])"
+        )
+
+
+def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], stats: dict) -> None:
+    """Ask of every output solid the question ``BRepCheck_Analyzer`` cannot.
+
+    The analyzer asks whether the geometry agrees with itself to within the
+    tolerances **recorded in this process**. STEP AP214 cannot carry those: one
+    ``UNCERTAINTY_MEASURE_WITH_UNIT`` per file, against one tolerance per vertex,
+    edge and face in the B-rep. So a solid can pass the analyzer and still
+    describe something the file does not - see
+    :func:`latticegen2.occ.curve_on_surface_deviations` and docs/algorithm.md S9.
+
+    Runs on **every** solid. Not gated by volume, and not by a round trip: the
+    measurement is local, exact and ``O(edge/face pairs)``, which is exactly why
+    it can look at the dominant body - the one a round-trip check could never
+    afford, and the one an unwritable description would matter most on.
+
+    The quantity is how much of a body's surface is loosely described, not how
+    bad its worst face is; :data:`latticegen2.occ.LOOSE_AREA_FRACTION_MAX`
+    carries the measurement that settled which of those two separates a sound
+    body from an unwritable one, and why the obvious answer is the wrong one.
+    """
+    worst = 0.0
+    ratio = 0.0
+    worst_area = 0.0
+    where_worst = (0.0, 0.0, 0.0)
+    over = 0
+    pairs = 0
+    fraction = 0.0
+    loose_faces = 0
+    where: list[tuple[float, float, float]] = []
+    culprit = -1
+    per_solid = []
+    for i, solid in enumerate(solids):
+        cos = occ.curve_on_surface_deviations(solid)
+        pairs += cos.pairs
+        over += cos.over_tolerance
+        loose_faces += cos.loose_faces
+        worst = max(worst, cos.worst)
+        per_solid.append((i, cos))
+        if cos.ratio > ratio:
+            ratio, worst_area, where_worst = cos.ratio, cos.face_area, cos.where_worst
+        if cos.loose_area_fraction > fraction:
+            fraction, culprit = cos.loose_area_fraction, i
+            where = list(cos.where)
+    stats["worst_pcurve_deviation_mm"] = f"{worst:.3e}"
+    stats["worst_pcurve_ratio"] = f"{ratio:.3e}"
+    stats["loose_area_fraction"] = f"{fraction:.3e}"
+    stats["loose_faces"] = loose_faces
+    stats["pcurve_pairs_over_tolerance"] = over
+    rl.line(
+        f"export truth: {fraction:.3e} of the worst solid's surface is loosely "
+        f"described ({loose_faces} face(s) across {len(solids)} solid(s), bar "
+        f"{occ.LOOSE_AREA_FRACTION_MAX:g}); worst pcurve-vs-3D deviation "
+        f"{worst:.4e} mm over {pairs} edge/face pair(s), worst against its own "
+        f"feature {ratio:.3e} on a {worst_area:.6f} mm^2 face at "
+        f"[{where_worst[0]:.3f}, {where_worst[1]:.3f}, {where_worst[2]:.3f}]; "
+        f"{over} pair(s) deviate by more than their own recorded tolerance"
+    )
+    # Per solid as well as in aggregate, because the aggregate is a maximum and
+    # the whole point of this quantity is that it is a property of one *body*.
+    # Reading "solid 0 at 5.6e-04, solid 1 at 4.0e-01" is what tells the user
+    # the lattice is sound and one island is not; a single worst figure hides
+    # exactly that (docs/algorithm.md S9).
+    if len(per_solid) > 1:
+        for i, cos in per_solid:
+            rl.line(
+                f"  solid {i}: {cos.loose_area_fraction:.4e} of its surface loose "
+                f"({cos.loose_faces} face(s)), worst deviation {cos.worst:.4e} mm"
+            )
+    if fraction > occ.LOOSE_AREA_FRACTION_MAX:
+        raise ProcessingError(
+            f"Solid {culprit} cannot be written to STEP faithfully: "
+            f"{100.0 * fraction:.2f}% of its surface lies on faces whose pcurve "
+            f"strays further from its own 3D curve than "
+            f"{occ.LOOSE_PCURVE_RATIO:g} of the face's own size, against a bar of "
+            f"{100.0 * occ.LOOSE_AREA_FRACTION_MAX:.2f}%. Worst deviation "
+            f"{worst:.4e} mm"
+            + (f", near {where[:4]}" if where else "")
+            + ". STEP AP214 declares one tolerance for a whole file, so a body "
+            f"described this loosely is geometry the exported file would not pin "
+            f"down, whatever this process records (docs/algorithm.md S9). The run "
+            f"stops rather than writing it: nothing has been discarded, the "
+            f"temporary folder is kept, and the `connect` stage above named the "
+            f"junctions this body was built from."
+        )
 
 
 UNIFY_VOLUME_TOL = 1e-4

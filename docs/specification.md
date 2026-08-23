@@ -291,6 +291,30 @@ Since this involves computational geometry:
   genuinely *connected* material, and reading the rule as an unconditional
   "volume < t³ → delete" would punch holes in the output.
   
+- **No body is ever dropped to make an export succeed, and the run fails
+  instead.** A body the generator cannot write faithfully is a hard failure
+  (exit 4) naming the face and its position, with the temporary folder kept —
+  not a body quietly removed from the output. §1 asks for a lattice filling the
+  user's volume; silently shipping less of one is a wrong answer rather than a
+  degraded one, and the size of the piece does not change that.
+
+  **What makes a body unwritable is a property of STEP, not of this generator.**
+  AP214 carries exactly one modelling tolerance for a whole file — the
+  `UNCERTAINTY_MEASURE_WITH_UNIT` of its representation context — where an OCCT
+  B-rep carries one per vertex, per edge and per face. Export collapses them and
+  import re-derives them all from that single number, so a body whose validity
+  rests on a locally fat tolerance is valid in the generator and is not
+  guaranteed valid in the file. Measured: a 6.573e-02 mm vertex tolerance comes
+  back from a round trip at 1e-07, and `dense-lattice`'s dominant solid loses
+  its 5.151e-04 mm edge tolerances to a declared 2.E-07.
+
+  The run therefore measures the quantity that decides — how far each pcurve
+  strays from its own 3D curve, against the size of the face carrying it — on
+  **every** output solid, large and small alike, and refuses past a bar of 1e-2.
+  It is also measured at the source, per trimmed junction, so a failure can name
+  the junctions responsible rather than only a coordinate. See
+  docs/algorithm.md §7.3 and §9.
+
 - **STEP schema/AP:** AP214
 
 - **Geometry representation in the file:** exact B-rep solid
@@ -337,6 +361,11 @@ For every scenario the harness must verify, without human intervention:
 - **No generated material lies outside the input body** (boolean cut of output
   against input leaves ~zero volume) — a direct check of §1's "fits exactly
   within the user's boundary geometry", independent of any golden sample.
+- **The shipped file's pcurves still agree with their own 3D curves.** Read the
+  output back with OCCT's own reader and measure, per edge/face pair, the exact
+  distance between the two representations against the area of the face carrying
+  it. This is asked of the *artefact* rather than of the process that wrote it,
+  which is the only version the downstream tools see.
 - Bounding box of output matches requested `--input` within tolerance.
 - Runtime stays under an agreed performance budget: `smoke-fast` and
   `dense-lattice` < 10 minutes, `smoke-verified` < 20 minutes.
@@ -392,6 +421,125 @@ diagnosis. Remove an item once it's fixed and verified.*
 ---
 
 ## 11. Closed — kept for the reasoning, not as work
+
+### A body can be valid here and not describable in the file — the export-truth gate
+
+**Found and closed 2026-08-23.** `BRepCheck_Analyzer` passes every output solid,
+`assemble` proves every one watertight, containment holds — and the file the
+user receives can still be inconsistent, because **STEP AP214 has no
+representation for per-subshape tolerance**. A file carries exactly one
+`UNCERTAINTY_MEASURE_WITH_UNIT`, in its `geometric_representation_context`,
+against one tolerance per vertex, per edge and per face in an OCCT B-rep. Export
+collapses N into 1; import re-derives all N from that one number.
+
+**This is not incidental to the pipeline, it is aimed at its own repairs.**
+docs/algorithm.md §8's two-rung repair fixes a falsely self-intersecting wire by
+*widening a recorded vertex tolerance*, and the property that makes it safe —
+"it moves no geometry" — is exactly the property that makes it unexportable. The
+same is true of every fat tolerance a boolean records when it trims a strut
+almost tangentially to a curved input surface.
+
+**Measured, and pinned by `test/test_export_truth.py`:**
+
+* A vertex tolerance of 6.573e-02 mm — the figure OCCT itself records on
+  `SpiralTest`'s fat vertex — written to STEP and read back comes home at
+  **1e-07**.
+* `dense-lattice`'s dominant body, the same solid before and after its own round
+  trip: worst pcurve↔3D deviation 5.1514e-04 mm with a max edge tolerance of
+  **5.151e-04** covering it exactly and **0** of 62,792 pairs over tolerance;
+  afterwards the tolerances are clamped to **1.525e-04** and **4** pairs are
+  over. The file had declared `2.E-07`, because OCCT's `write.precision.mode`
+  defaults to *Average* and a lattice averages ~99 % exactly-built interior
+  edges at `Precision::Confusion` against the 1 % of boundary trims that carry
+  real tolerance.
+
+**Three export-side levers were tried and none fixes it**, recorded so they are
+not retried: `write.precision.mode` at Greatest, Least or an explicit session
+value leaves the ball's over-tolerance count at 60–95 in every mode;
+`write.surfacecurve.mode = Off` makes the worst deviation *worse*
+(1.5e-06 → 6.3e-06 mm); `BRepLib::SameParameter` before writing changes nothing.
+Coordinate precision is ruled out with a number — 14 significant digits, ~1e-11
+mm at 2,000 mm coordinates, six orders below the tightest tolerance in play.
+What OCCT does do is mark every `surface_curve`'s `master_representation` as
+`.PCURVE_S1.`, so where the two representations disagree the file tells the
+reader to believe the pcurve.
+
+#### What was built: measure at the source, gate on the output, never drop
+
+Three parts, and the middle one took two wrong turns before it measured right.
+
+**1. At the source (docs/algorithm.md §7.3).** Every trimmed piece is measured
+in the worker, on the face list the trim already produced: worst
+`edge tolerance / sqrt(face area)` over its faces. One area and one centroid on
+the single worst face — and the last moment at which the junction still has a
+name. On `SpiralTest` at `cc=5, t=1`, **two of the six junctions forming the
+4.17 mm³ island rank 2nd and 4th of 2,404 boundary pieces**, at 2.907e-01 and
+2.093e-01. That is available at the end of `boundary`, 5 m 55 s into an
+eight-minute run, before the junction graph that turns them into a body exists.
+
+**It reports and does not refuse, and that is measured rather than cautious.**
+79 of 2,404 pieces clear the 1e-2 warning bar, most of them welded into the
+27,864 mm³ dominant body where a locally loose description is absorbed and the
+exported solid is sound. Failing on it would refuse a part whose output is fine.
+
+Combined with connectivity it is much sharper, but **not in the way the first
+implementation assumed**: both surviving components contain a flagged junction —
+the dominant body holds the single worst one in the whole part — so the maximum
+says nothing. The fraction does: 82 of 2,348 boundary junctions (3.5 %) for the
+lattice against 2 of 6 (33.3 %) for the island. Reported per body at `connect`,
+about 40 s in.
+
+**2. On the output (docs/algorithm.md §9), and the bar took three tries.**
+`GeomLib_CheckCurveOnSurface` gives the exact maximum pcurve↔3D deviation per
+edge/face pair by optimisation, at 46–57 µs per pair — no round trip, no
+boolean, no volume bar, so it runs on **every** solid including the dominant
+one. What to compare is the part that needed measuring:
+
+* *A fault count* — what `BOPAlgo_ArgumentAnalyzer`'s `CurveOnSurfaceMode`
+  reports — cannot see it. The island has **0**; the 80 mm ball's own accepted
+  golden-sample output has **73 of 5,760**, every one by ~4 % at 3.8e-07 mm,
+  which is `SameParameter` recording a tolerance equal to the deviation it just
+  measured.
+* *The worst face, against its own size* gets it **backwards**. The sound
+  lattice scores 3.07e-02 and the unwritable island 2.45e-02, so a bar there
+  refuses the whole part.
+* *The share of a body's surface that is loosely described* separates them by
+  **706×**: **5.6178e-04** for the lattice against **3.9685e-01** for the island
+  — 41 loose faces of 44,059 against 3 of 36. A face is loose when some edge's
+  pcurve strays past `LOOSE_PCURVE_RATIO` (1e-3) of `sqrt` of its own area;
+  `LOOSE_AREA_FRACTION_MAX` is **1e-2**, which is 18× above the sound body and
+  40× below the unwritable one. Both committed scenarios measure **exactly
+  zero** loose area.
+
+Run end to end, the gate does exactly what it is meant to: `connect` reports
+both bodies with their fractions (3.5 % and 33.3 % of their junctions flagged),
+`validate` measures 5.6178e-04 and 3.9685e-01, and the run stops naming solid 1
+— the island — while the 27,864 mm³ lattice beside it is untouched and
+unrefused.
+
+**3. Past the bar the run fails (exit 4), and nothing is ever discarded.**
+Deleting material so an export can succeed is "produce a wrong result", which
+docs/algorithm.md §11 forbids; §1 asks for a lattice filling the user's volume,
+and silently shipping less of one is a wrong answer rather than a degraded one,
+whatever the size of the piece. The temp folder is kept, the message names the
+face and its position, and `connect` has already named the junctions.
+
+#### What this leaves open
+
+**`SpiralTest` at `cc=5, t=1` does not currently complete on this branch**, and
+that is honest rather than hidden: the run stops at `simplify`, on the same
+4.170538 mm³ island, at the unification volume guard — a *separate* defect, and
+one this branch deliberately does not touch. The export-truth gate was validated
+past it by relaxing that pre-filter in the measurement harness only.
+
+**The repair direction is not attempted here and is the obvious next step.** The
+fault is a pcurve that does not match its own 3D curve; re-fitting it at the
+source — where the junction is still identifiable and the trim can be redone —
+would fix the body rather than refuse it. That is where a part like this should
+end up. Refusing is the correct behaviour until then, and it is strictly better
+than the alternative of removing the body: the user learns the part has a
+problem, where it is, and loses nothing.
+
 
 ### `stitch`'s round-2 repair — chapter closed: the fix disproved, the check repaired, the scan parallelised
 

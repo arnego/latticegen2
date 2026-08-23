@@ -416,7 +416,77 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-*Nothing open.*
+### Re-fit the pcurve at the source, so the body is kept rather than refused
+
+**Found 2026-08-23**, alongside §11's export-truth gate, and deliberately not
+attempted there. The gate is the right behaviour today and the wrong end state:
+it tells the user a body cannot be written and stops, where the fault is
+repairable and the body could be kept.
+
+**What is wrong.** A boundary trim against a fat curved surface can leave an
+edge whose pcurve does not match its own 3D curve — measured up to
+**2.118e-02 mm** apart on a face of 0.05 mm², on `SpiralTest.step` at
+`cc=5, t=1`. In this process that is legal, because the edge records a tolerance
+large enough to cover it. In the exported file it is not, because STEP AP214
+declares one tolerance for the whole file (§11), so the reader re-derives a
+tight one and the two representations no longer agree. The body then tessellates
+into a shell with holes: 11 edges of its 147 triangles used by one triangle
+rather than two.
+
+**Where.** The trim is `boundary.trim_junction` (docs/algorithm.md §7). That is
+also the only place the junction is still identifiable — §7.3's
+`tolerance_feature_ratio` already ranks the offenders there, and on this part it
+puts two of the six junctions forming the unwritable island **2nd and 4th of
+2,404 boundary pieces**, at the end of `boundary`, 5 m 55 s into an eight-minute
+run. So the information needed to aim a repair is already measured and already
+in hand before anything downstream exists.
+
+**What to try.** Re-fit the offending pcurve so it agrees with its 3D curve to
+within a tolerance the file *can* carry — `ShapeFix_Edge::FixAddPCurve` or
+`ShapeConstruct_ProjectCurveOnSurface`, asked for a tight tolerance rather than
+the one the boolean settled for. Failing that, re-derive the trim for that
+junction the way docs/algorithm.md §7.1's disagreeing-cap repair does: give the
+kernel operands it handles better and redo the intersection locally.
+
+**Two things already ruled out, so they are not retried.** `ShapeFix_Shape` and
+`BRepLib::SameParameter` were both measured against this defect and neither
+helps — they were being asked to repair damage that does not exist until export
+(§11). And no export-side setting reaches it: `write.precision.mode` in every
+mode, `write.surfacecurve.mode = Off`, and `SameParameter` before writing were
+each measured and each leave it (§11).
+
+**How to verify.** `test/spiral-island-unwritable.brep` is the body, committed
+for exactly this. Today it fails `occ.exported_mesh_defects` with **11**
+non-manifold edges in 147 triangles
+(`test_export_truth.py::test_the_island_does_not_survive_being_written`, which
+pins `(147, 11)`). A working repair takes that to `(n, 0)` while preserving the
+solid's volume, and the whole-part check is `SpiralTest` at `cc=5, t=1`
+completing and writing its STEP. Note that two *other* defects stop that part
+first on this branch — see the item below and §11.
+
+### Re-run the rehearsal with the unbounded export-truth check
+
+**Deferred by decision 2026-08-23.** §11's export-truth gate was measured on
+`TD_HX_rehearsal_test` at `cc=5, t=1` *while it still skipped solids above a
+face count*; the bound was then removed so the dominant body is checked too, and
+the rehearsal has not been re-run since.
+
+**What is unknown, precisely.** Two things, and they are different questions.
+*Does it pass* — whether the 583,806-face dominant body's tessellation survives
+its own round trip. Its thirteen small siblings do; the 80 mm ball's dominant
+body ships 73 `InvalidCurveOnSurface` faults and `dense-lattice`'s picks up 4,
+both harmless and both tessellating cleanly, so this is genuinely open rather
+than rhetorical. *And what it costs* — docs/algorithm.md §9 removed a
+whole-output re-import for costing **22 minutes**, and this adds a write and a
+tessellation on top of that re-read, on one 2 GB solid.
+
+**How to verify.** `python src/main.py -i test/TD_HX_rehearsal_test.step -cc 5
+-t 1 --cores 6 -v`, and read `export_truth_s` in the run summary. Watch peak
+memory as well as the clock: mesh points are interned to integers and edges
+counted by integer key specifically so a solid this size can be attempted, and
+that is an argument rather than a measurement until this run exists. A refusal
+here is a real finding about the part, not a miscalibration — the instrument has
+a clean record on all sixteen bodies measured so far.
 
 ---
 
@@ -563,22 +633,21 @@ island fixture, where rung 2 can be allowed to act.
 the solids the run actually produced and replayed from its kept temporary
 folder. Its **583,806-face dominant body has not been put through the check
 yet** — the size bound that used to exclude it was removed after that run, on
-the user's decision, and re-measuring it is deferred rather than skipped.
+the user's decision. Re-running it is deferred rather than skipped, and is §10's
+second item.
 
-**What the dominant bodies cost, and what they carry, is the open measurement.**
-The 80 mm ball's own dominant body ships **73** `InvalidCurveOnSurface` faults
-and `dense-lattice`'s picks up 4 from its own round trip — harmless at their
-magnitudes, and nothing in the pipeline was watching before this. Both
-tessellate cleanly. Whether a rehearsal-scale dominant body does, and what
-measuring it costs in time and memory, is the next thing to run.
+**What the dominant bodies carry is worth recording either way.** The 80 mm
+ball's own dominant body ships **73** `InvalidCurveOnSurface` faults and
+`dense-lattice`'s picks up 4 from its own round trip — harmless at their
+magnitudes, both tessellating cleanly, and nothing in the pipeline was watching
+before this.
 
-**The repair direction is not attempted here and is the obvious next step.** The
-fault is a pcurve that does not match its own 3D curve; re-fitting it at the
-source — where the junction is still identifiable and the trim can be redone —
-would fix the body rather than refuse it. That is where a part like this should
-end up. Refusing is the correct behaviour until then, and it is strictly better
-than the alternative of removing the body: the user learns the part has a
-problem, where it is, and loses nothing.
+**Refusing is the correct behaviour and not the end state.** It is strictly
+better than removing the body — the user learns the part has a problem, learns
+where it is, and loses nothing — but the fault is repairable, and repairing it
+at the source would keep the body instead of stopping the run. That is real
+work rather than closed reasoning, so it is written up as an item in §10 with
+what to try, what is already ruled out, and how to verify it.
 
 
 ### `stitch`'s round-2 repair — chapter closed: the fix disproved, the check repaired, the scan parallelised

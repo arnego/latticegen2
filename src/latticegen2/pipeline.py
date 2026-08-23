@@ -461,12 +461,16 @@ def _run_with_pool(
 
     with Timer(rl, "validate"):
         invalid, total_volume = _validate(result_solids, report=rl.substage)
-        _check_export_truth(rl, result_solids, stats)
-    if invalid:
-        raise ProcessingError(
-            f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
-            f"BRepCheck_Analyzer validity check."
-        )
+        if invalid:
+            # The established gate speaks first. A body that is already invalid
+            # here needs no argument about what the file would do with it, and
+            # reporting the export check instead would name the second-order
+            # symptom of a fault BRepCheck has already found.
+            raise ProcessingError(
+                f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
+                f"BRepCheck_Analyzer validity check."
+            )
+        _check_export_truth(rl, result_solids, tmpdir, stats)
     rl.line(f"validity: all {len(result_solids)} solid(s) pass BRepCheck_Analyzer")
     stats["solids_written"] = len(result_solids)
     stats["lattice_volume_mm3"] = round(total_volume, 4)
@@ -618,97 +622,109 @@ def _check_component_tolerance(rl: RunLog, comps, keep_labels, pieces, stats: di
         )
 
 
-def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], stats: dict) -> None:
-    """Ask of every output solid the question ``BRepCheck_Analyzer`` cannot.
+def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
+                        stats: dict) -> None:
+    """Can each output body survive being written to STEP? Measured, per body.
 
-    The analyzer asks whether the geometry agrees with itself to within the
+    `BRepCheck_Analyzer` asks whether a shape agrees with itself to within the
     tolerances **recorded in this process**. STEP AP214 cannot carry those: one
-    ``UNCERTAINTY_MEASURE_WITH_UNIT`` per file, against one tolerance per vertex,
-    edge and face in the B-rep. So a solid can pass the analyzer and still
-    describe something the file does not - see
-    :func:`latticegen2.occ.curve_on_surface_deviations` and docs/algorithm.md S9.
+    ``UNCERTAINTY_MEASURE_WITH_UNIT`` per file, against one per vertex, edge and
+    face in the B-rep. So a solid can pass every gate this pipeline has and
+    still not describe, in the file, what it describes here — and the pipeline's
+    own repairs manufacture exactly that geometry, docs/algorithm.md S8's second
+    rung being a widened vertex tolerance whose safety rests on moving nothing.
 
-    Runs on **every** solid. Not gated by volume, and not by a round trip: the
-    measurement is local, exact and ``O(edge/face pairs)``, which is exactly why
-    it can look at the dominant body - the one a round-trip check could never
-    afford, and the one an unwritable description would matter most on.
+    **The instrument is a tessellation of the exported body**, not a proxy for
+    one (:func:`latticegen2.occ.exported_mesh_defects`), and three cheaper
+    proxies were tried and disproved against ground truth on 16 real bodies
+    before settling here: a fault count after the round trip false-positives on
+    two sound rehearsal solids, and so does the share of a body's surface
+    described more loosely than its own feature size. Both would refuse, or
+    delete, geometry from a part that has been inspected and accepted. Only
+    "does it still tessellate" matches what actually breaks downstream, and it
+    is the symptom that found the one genuinely unwritable body this project has
+    produced.
 
-    The quantity is how much of a body's surface is loosely described, not how
-    bad its worst face is; :data:`latticegen2.occ.LOOSE_AREA_FRACTION_MAX`
-    carries the measurement that settled which of those two separates a sound
-    body from an unwritable one, and why the obvious answer is the wrong one.
+    **A solid too large to round-trip is reported unmeasured, never passed.**
+    That is an honest gap: the dominant body is exactly where this could not be
+    afforded (docs/algorithm.md S9 removed a whole-output round trip for costing
+    22 minutes), and saying so is the same distinction
+    ``tools/verify_geometry.material_outside`` draws for the cut it cannot
+    afford. ``tools/e2e.py`` covers the whole output in dev/CI.
+
+    The pcurve reading below is kept and logged because it is cheap, exact and
+    informative about *why* a body is fragile - but it decides nothing, and
+    :data:`latticegen2.occ.LOOSE_AREA_FRACTION_MAX` records the measurement that
+    took it out of the deciding seat.
     """
+    started = _dt.datetime.now()
+    broken: list[tuple[int, int, int]] = []
+    unmeasured: list[tuple[int, int]] = []
     worst = 0.0
-    ratio = 0.0
-    worst_area = 0.0
-    where_worst = (0.0, 0.0, 0.0)
-    over = 0
-    pairs = 0
     fraction = 0.0
     loose_faces = 0
-    where: list[tuple[float, float, float]] = []
-    culprit = -1
-    per_solid = []
-    # Timed on its own rather than left inside `validate`'s total. This project
-    # has already learned once that a stage timer covering several phases prices
-    # the stage and says nothing about any one of them (docs/testing.md, the six
-    # `stitch` timers that retired a proposal on their first run).
-    started = _dt.datetime.now()
+    pairs = 0
+    probe = os.path.join(tmpdir, "export_truth_probe.step")
     for i, solid in enumerate(solids):
-        cos = occ.curve_on_surface_deviations(solid)
-        pairs += cos.pairs
-        over += cos.over_tolerance
-        loose_faces += cos.loose_faces
-        worst = max(worst, cos.worst)
-        per_solid.append((i, cos))
-        if cos.ratio > ratio:
-            ratio, worst_area, where_worst = cos.ratio, cos.face_area, cos.where_worst
-        if cos.loose_area_fraction > fraction:
-            fraction, culprit = cos.loose_area_fraction, i
-            where = list(cos.where)
+        reading = occ.curve_on_surface_deviations(solid)
+        pairs += reading.pairs
+        loose_faces += reading.loose_faces
+        worst = max(worst, reading.worst)
+        fraction = max(fraction, reading.loose_area_fraction)
+        n_faces, _ = occ.count_subshapes(solid)
+        if n_faces > occ.EXPORT_ROUNDTRIP_MAX_FACES:
+            unmeasured.append((i, n_faces))
+            rl.line(
+                f"  solid {i}: {n_faces} faces - too large to round-trip, "
+                f"UNMEASURED; {reading.loose_area_fraction:.4e} of its surface is "
+                f"loosely described, worst deviation {reading.worst:.4e} mm"
+            )
+            continue
+        triangles, bad = occ.exported_mesh_defects(solid, probe)
+        rl.line(
+            f"  solid {i}: {n_faces} faces -> {triangles} triangle(s) after a "
+            f"STEP round trip, {bad} non-manifold edge(s); "
+            f"{reading.loose_area_fraction:.4e} of its surface loosely described, "
+            f"worst deviation {reading.worst:.4e} mm"
+        )
+        if bad:
+            broken.append((i, bad, triangles))
     elapsed = (_dt.datetime.now() - started).total_seconds()
     stats["export_truth_s"] = round(elapsed, 2)
+    stats["export_truth_unmeasured"] = len(unmeasured)
     stats["worst_pcurve_deviation_mm"] = f"{worst:.3e}"
-    stats["worst_pcurve_ratio"] = f"{ratio:.3e}"
     stats["loose_area_fraction"] = f"{fraction:.3e}"
     stats["loose_faces"] = loose_faces
-    stats["pcurve_pairs_over_tolerance"] = over
     rl.line(
-        f"export truth: {fraction:.3e} of the worst solid's surface is loosely "
-        f"described ({loose_faces} face(s) across {len(solids)} solid(s), bar "
-        f"{occ.LOOSE_AREA_FRACTION_MAX:g}); worst pcurve-vs-3D deviation "
-        f"{worst:.4e} mm over {pairs} edge/face pair(s), worst against its own "
-        f"feature {ratio:.3e} on a {worst_area:.6f} mm^2 face at "
-        f"[{where_worst[0]:.3f}, {where_worst[1]:.3f}, {where_worst[2]:.3f}]; "
-        f"{over} pair(s) deviate by more than their own recorded tolerance "
-        f"[{elapsed:.1f}s]"
+        f"export truth: {len(solids) - len(unmeasured)} of {len(solids)} solid(s) "
+        f"round-tripped and tessellated, {len(unmeasured)} too large to measure; "
+        f"worst pcurve-vs-3D deviation {worst:.4e} mm over {pairs} edge/face "
+        f"pair(s) [{elapsed:.1f}s]"
     )
-    # Per solid as well as in aggregate, because the aggregate is a maximum and
-    # the whole point of this quantity is that it is a property of one *body*.
-    # Reading "solid 0 at 5.6e-04, solid 1 at 4.0e-01" is what tells the user
-    # the lattice is sound and one island is not; a single worst figure hides
-    # exactly that (docs/algorithm.md S9).
-    if len(per_solid) > 1:
-        for i, cos in per_solid:
-            rl.line(
-                f"  solid {i}: {cos.loose_area_fraction:.4e} of its surface loose "
-                f"({cos.loose_faces} face(s)), worst deviation {cos.worst:.4e} mm"
-            )
-    if fraction > occ.LOOSE_AREA_FRACTION_MAX:
+    if unmeasured:
+        # Said without -v as well: "not measured" must never read as "measured
+        # and fine", which is the whole reason this line exists.
+        rl.always(
+            f"note: {len(unmeasured)} solid(s) were too large to round-trip and "
+            f"are UNMEASURED for export fidelity, not passed - "
+            f"{[f'solid {i} ({n} faces)' for i, n in unmeasured]}. "
+            f"tools/e2e.py checks the whole written file in dev/CI "
+            f"(docs/algorithm.md S9)."
+        )
+    if broken:
+        first, bad, triangles = broken[0]
         raise ProcessingError(
-            f"Solid {culprit} cannot be written to STEP faithfully: "
-            f"{100.0 * fraction:.2f}% of its surface lies on faces whose pcurve "
-            f"strays further from its own 3D curve than "
-            f"{occ.LOOSE_PCURVE_RATIO:g} of the face's own size, against a bar of "
-            f"{100.0 * occ.LOOSE_AREA_FRACTION_MAX:.2f}%. Worst deviation "
-            f"{worst:.4e} mm"
-            + (f", near {where[:4]}" if where else "")
-            + ". STEP AP214 declares one tolerance for a whole file, so a body "
-            f"described this loosely is geometry the exported file would not pin "
-            f"down, whatever this process records (docs/algorithm.md S9). The run "
-            f"stops rather than writing it: nothing has been discarded, the "
-            f"temporary folder is kept, and the `connect` stage above named the "
-            f"junctions this body was built from."
+            f"Solid {first} does not survive being written to STEP: after a "
+            f"round trip its {triangles} triangles carry {bad} edge(s) not used "
+            f"by exactly two of them, so nothing downstream can tessellate it "
+            f"consistently"
+            + (f" ({len(broken)} solid(s) affected)" if len(broken) > 1 else "")
+            + f". STEP AP214 declares one tolerance for a whole file where this "
+            f"B-rep carries one per subshape, so a body whose validity rests on "
+            f"a locally fat tolerance is valid here and not in the file "
+            f"(docs/algorithm.md S9). The run stops rather than writing it: "
+            f"nothing has been discarded, the temporary folder is kept, and the "
+            f"`connect` stage above named the junctions this body was built from."
         )
 
 

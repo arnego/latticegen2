@@ -489,33 +489,53 @@ says nothing. The fraction does: 82 of 2,348 boundary junctions (3.5 %) for the
 lattice against 2 of 6 (33.3 %) for the island. Reported per body at `connect`,
 about 40 s in.
 
-**2. On the output (docs/algorithm.md §9), and the bar took three tries.**
-`GeomLib_CheckCurveOnSurface` gives the exact maximum pcurve↔3D deviation per
-edge/face pair by optimisation, at 46–57 µs per pair — no round trip, no
-boolean, no volume bar, so it runs on **every** solid including the dominant
-one. What to compare is the part that needed measuring:
+**2. On the output (docs/algorithm.md §9), and the instrument took four tries.**
+The question is whether a body survives being written, so the check asks exactly
+that: write one solid to STEP, read it back, tessellate it, count edges not used
+by exactly two triangles. Cheap on the bodies it exists for — the rehearsal's
+thirteen small solids cost well under a minute between them.
 
-* *A fault count* — what `BOPAlgo_ArgumentAnalyzer`'s `CurveOnSurfaceMode`
-  reports — cannot see it. The island has **0**; the 80 mm ball's own accepted
-  golden-sample output has **73 of 5,760**, every one by ~4 % at 3.8e-07 mm,
-  which is `SameParameter` recording a tolerance equal to the deviation it just
-  measured.
-* *The worst face, against its own size* gets it **backwards**. The sound
-  lattice scores 3.07e-02 and the unwritable island 2.45e-02, so a bar there
-  refuses the whole part.
-* *The share of a body's surface that is loosely described* separates them by
-  **706×**: **5.6178e-04** for the lattice against **3.9685e-01** for the island
-  — 41 loose faces of 44,059 against 3 of 36. A face is loose when some edge's
-  pcurve strays past `LOOSE_PCURVE_RATIO` (1e-3) of `sqrt` of its own area;
-  `LOOSE_AREA_FRACTION_MAX` is **1e-2**, which is 18× above the sound body and
-  40× below the unwritable one. Both committed scenarios measure **exactly
-  zero** loose area.
+Three cheaper quantities were tried first and are recorded because what they
+cost to learn is the useful part. On `SpiralTest` alone, two look decisive: a
+fault count is blind (the broken island has **0**, the accepted ball's own
+output has 73), the worst face is backwards (the sound lattice scores 3.07e-02
+against the island's 2.45e-02), and the share of surface described more loosely
+than its own feature size separates them by **706×**.
 
-Run end to end, the gate does exactly what it is meant to: `connect` reports
-both bodies with their fractions (3.5 % and 33.3 % of their junctions flagged),
-`validate` measures 5.6178e-04 and 3.9685e-01, and the run stops naming solid 1
-— the island — while the 27,864 mm³ lattice beside it is untouched and
-unrefused.
+**Then the rehearsal was used as ground truth and the third one
+false-positives.** All fourteen of its solids were round-tripped and
+tessellated:
+
+| body | faces | loose area | faults after RT | **bad mesh edges** |
+|---|---|---|---|---|
+| `SpiralTest` island | 36 | 3.97e-01 | 29 | **11** |
+| rehearsal unify 3 | 12 | 1.76e-01 | 0 | 0 |
+| rehearsal unify 5 | 12 | 1.76e-01 | 0 | 0 |
+| rehearsal unify 10 | 29 | 0 | 8 | 0 |
+| rehearsal unify 13 | 7 | 0 | 1 | 0 |
+| rehearsal, nine others | — | 0 | 0 | 0 |
+
+Exactly one of the sixteen bodies is broken. The loose-area fraction refuses
+unify 3 and 5; a fault count refuses unify 10 and 13; only the tessellation is
+right about all of them. **Both rejected proxies would have refused — or, in the
+shape of rule this replaces, deleted — geometry from a part that has been
+inspected and accepted.** The pcurve figures are still measured and logged
+because they say why a body is fragile; they decide nothing, and a unit test
+pins that.
+
+**A solid too large to round-trip is reported *unmeasured*, never passed.**
+`EXPORT_ROUNDTRIP_MAX_FACES` (5,000) draws the line, and the run says so on the
+console without `-v` — the same distinction `material_outside` already draws for
+the cut it cannot afford. That is a real gap: the dominant body is exactly where
+this cannot be afforded, and `tools/e2e.py` is what covers the whole written
+file in dev/CI.
+
+**Why the gate is needed at all, demonstrated on the real body.** As this
+pipeline builds it, the island is `BRepCheck_Analyzer`-**invalid** — rung 2
+declines its fat vertex and the validity gate refuses the run. Let rung 2 act
+(widen the vertex; nothing moves) and **the body becomes valid**. Written, its
+147 triangles still carry 11 broken edges. The repair that makes a body pass
+every gate the pipeline had is precisely what hides the remaining defect.
 
 **3. Past the bar the run fails (exit 4), and nothing is ever discarded.**
 Deleting material so an export can succeed is "produce a wrong result", which
@@ -526,11 +546,28 @@ face and its position, and `connect` has already named the junctions.
 
 #### What this leaves open
 
-**`SpiralTest` at `cc=5, t=1` does not currently complete on this branch**, and
-that is honest rather than hidden: the run stops at `simplify`, on the same
-4.170538 mm³ island, at the unification volume guard — a *separate* defect, and
-one this branch deliberately does not touch. The export-truth gate was validated
-past it by relaxing that pre-filter in the measurement harness only.
+**`SpiralTest` at `cc=5, t=1` does not complete on this branch**, and it stops
+*before* the new gate: at `simplify`, on the same 4.170538 mm³ island, at the
+unification volume guard — a *separate* defect this branch deliberately does not
+touch. Relaxing that pre-filter in the measurement harness only, the run then
+reaches `validate` and the island is refused there by the existing
+`BRepCheck_Analyzer` gate, because rung 2's fixed cap declines its fat vertex.
+So on this branch the part is refused twice over before the export-truth check
+is what stops it — which is why the demonstration above is made on the committed
+island fixture, where rung 2 can be allowed to act.
+
+**The rehearsal is refused by nothing.** Its thirteen small solids all
+round-trip and tessellate cleanly, and the 583,806-face dominant body is
+reported unmeasured. That verdict is measured on the fourteen solids the
+rehearsal actually produced — replayed from the run's kept temporary folder
+rather than from a second hour-long run, which is the same geometry by
+construction.
+
+**The whole-output gap is real.** The dominant body of any production part is
+above `EXPORT_ROUNDTRIP_MAX_FACES` and is reported unmeasured. Measured on this
+branch, the 80 mm ball's own dominant body ships **73** `InvalidCurveOnSurface`
+faults and `dense-lattice`'s picks up 4 from its own round trip — harmless at
+their magnitudes, and nothing in the pipeline was watching before this.
 
 **The repair direction is not attempted here and is the obvious next step.** The
 fault is a pcurve that does not match its own 3D curve; re-fitting it at the

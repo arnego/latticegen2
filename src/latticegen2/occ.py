@@ -413,6 +413,101 @@ This is not a bar on its own. It is the predicate
 
 
 LOOSE_AREA_FRACTION_MAX = 1e-2
+"""How much of a body's surface may be loosely described. **Disproved as a gate.**
+
+Kept as the level at which the reported figure is worth reading, and kept
+documented because what it cost to learn is the useful part.
+
+The idea was sound and the separation looked decisive. `SpiralTest.step` at
+``cc=5, t=1`` produces two solids — the 27,864 mm3 lattice, which exports and
+tessellates cleanly, and a 4.17 mm3 island whose tessellation carries 11
+non-manifold edges. By worst face the **sound** body scores worse (3.07e-02
+against 2.45e-02), and by fault count the **broken** body scores zero; only the
+share of surface described more loosely than its own feature size ranked them
+correctly, at 5.6178e-04 against 3.9685e-01, a 706x separation.
+
+**Then it was measured against ground truth on a second part and it
+false-positives.** Every one of the `TD_HX_rehearsal_test` rehearsal's fourteen
+solids was round-tripped and tessellated:
+
+======================  ======  ==========  ===========  ==========
+body                    faces   loose area  faults ship  bad edges
+======================  ======  ==========  ===========  ==========
+`SpiralTest` island     36      3.97e-01    29           **11**
+rehearsal unify 3       12      1.76e-01    0            0
+rehearsal unify 5       12      1.76e-01    0            0
+rehearsal unify 10      29      0           8            0
+rehearsal unify 13      7       0           1            0
+rehearsal, nine others  --      0           0            0
+======================  ======  ==========  ===========  ==========
+
+Exactly one body is broken. This quantity refuses two that are not, and a
+**fault count after the round trip** — the other obvious candidate — refuses two
+different ones that are not. Both would have refused, or in the shape of rule
+this replaces deleted, geometry from a part that has been inspected and
+accepted.
+
+So the gate is :func:`exported_mesh_defects`, which asks the question directly,
+and this stays as a diagnostic: it is cheap, it is exact, and it says *why* a
+body is fragile. It decides nothing, and ``test_export_truth.py`` pins that so a
+later change cannot quietly promote it back.
+
+**The lesson is the one this project keeps re-learning** (specification.md §11):
+a quantity that separates a known-good body from a known-bad one on the part
+that motivated it is a ranking, not a calibration, and the second part is where
+you find out."""
+
+
+class CurveOnSurface(NamedTuple):
+    """How far a shape's pcurves stray from their own 3D curves."""
+
+    worst: float
+    """Largest max-deviation over all edge/face pairs, in mm. Reported only."""
+    ratio: float
+    """That deviation against the feature carrying it, worst pair. Reported
+    only — :data:`LOOSE_AREA_FRACTION_MAX` records the measurement showing that a
+    bar on this column refuses a sound body and passes a broken one."""
+    loose_area_fraction: float
+    """**The quantity the gate reads.** Share of the shape's surface area on
+    faces that are loose at :data:`LOOSE_PCURVE_RATIO`."""
+    loose_faces: int
+    """How many faces that is."""
+    over_tolerance: int
+    """Pairs whose deviation exceeds the edge's own recorded tolerance.
+
+    OCCT's own predicate — the one ``BOPAlgo_ArgumentAnalyzer``'s
+    ``CurveOnSurfaceMode`` reports as ``InvalidCurveOnSurface`` — reproduced
+    here so the two can be compared face for face (``test_export_truth.py``).
+    Reported, never gated on: see ``ratio``."""
+    pairs: int
+    """Edge/face pairs carrying a pcurve, i.e. the pairs actually measured."""
+    where: list[tuple[float, float, float]]
+    """Sample midpoints of the offending edges, for the failure message."""
+    where_worst: tuple[float, float, float]
+    """Midpoint of the edge behind ``ratio``, so a failure names one place."""
+    face_area: float
+    """Area of the face behind ``ratio``, in mm²."""
+
+
+#: Offending edge positions reported when the gate fires. Enough to localise the
+#: region without turning one failure into a wall of coordinates — the same
+#: reasoning behind §8's sampled free-edge positions.
+CURVE_ON_SURFACE_SAMPLES = 10
+
+LOOSE_PCURVE_RATIO = 1e-3
+"""When one face counts as *loosely described*, against its own feature size.
+
+Dimensionless: a face is loose when some edge's pcurve strays further than this
+times ``sqrt`` of the face's own area from that edge's 3D curve. An absolute
+figure in millimetres cannot express this — 2e-03 mm is a defect on a
+0.05 mm² face and nothing at all on a 100 mm² one, and this tool's legal
+parameters span both.
+
+This is not a bar on its own. It is the predicate
+:data:`LOOSE_AREA_FRACTION_MAX` then measures the *extent* of."""
+
+
+LOOSE_AREA_FRACTION_MAX = 1e-2
 """How much of a body's surface may be loosely described before it is refused.
 
 The gate :func:`latticegen2.pipeline._check_export_truth` enforces before export
@@ -540,6 +635,100 @@ def curve_on_surface_deviations(
     fraction = loose_area / total_area if total_area > 0.0 else 0.0
     return CurveOnSurface(worst, ratio, fraction, loose_faces, over, pairs,
                           where, where_worst, worst_area)
+
+
+EXPORT_ROUNDTRIP_MAX_FACES = 5_000
+"""Largest solid :func:`exported_mesh_defects` will round-trip and mesh.
+
+Writing a solid to STEP, reading it back and tessellating it is cheap on the
+small bodies this check exists for — the `TD_HX_rehearsal_test` rehearsal's
+thirteen, of 6 to 29 faces each, take well under a minute between them — and it
+is the cost docs/algorithm.md S9 removed from this pipeline for the *whole*
+output, at 22 minutes on a 2 GB result.
+
+So the bound is what makes the check affordable, and a solid above it is
+reported **unmeasured** rather than passed — the same distinction
+``tools/verify_geometry.material_outside`` draws for the cut it cannot afford.
+That is an honest gap and it is named as one: see
+:func:`latticegen2.pipeline._check_export_truth`."""
+
+
+DEFAULT_MESH_DEFLECTION = 0.05
+"""Chordal deviation used when tessellating an exported body to check it.
+
+Fine enough that a face of ~0.05 mm2 — the scale of the geometry this catches —
+gets more than one triangle, which is what makes a non-manifold edge visible
+at all."""
+
+
+def exported_mesh_defects(
+    shape: TopoDS_Shape, path: str, deflection: float = DEFAULT_MESH_DEFLECTION
+) -> tuple[int, int]:
+    """Tessellate ``shape`` **as the file writes it** and count broken edges.
+
+    Returns ``(triangles, edges not used by exactly two triangles)``. The shape
+    is written to STEP and read back first, because the question is about the
+    artefact and not about the solid in memory: STEP AP214 declares one
+    tolerance for a whole file where the B-rep carries one per subshape, so the
+    body a reader reconstructs is not the body written.
+
+    **This is the one instrument with a clean record on both parts, and three
+    cheaper proxies were disproved against it.** Ground truth, measured on the
+    14 solids of the `cc=5, t=1` rehearsal and the 2 of `SpiralTest.step`:
+
+    ===========================  ======  ==========  ===========  ==========
+    body                         faces   loose area  faults ship  bad edges
+    ===========================  ======  ==========  ===========  ==========
+    `SpiralTest` island          36      3.97e-01    29           **11**
+    rehearsal unify 3            12      1.76e-01    0            0
+    rehearsal unify 5            12      1.76e-01    0            0
+    rehearsal unify 10           29      0           8            0
+    rehearsal unify 13           7       0           1            0
+    rehearsal, nine others       --      0           0            0
+    ===========================  ======  ==========  ===========  ==========
+
+    Exactly one of those bodies is broken, and only the last column says so.
+    A **fault count after the round trip** fires on unify 10 and 13, which
+    tessellate perfectly. The **share of surface loosely described**
+    (:data:`LOOSE_AREA_FRACTION_MAX`) fires on unify 3 and 5, which also
+    tessellate perfectly. Both would refuse — or, in the shape of the rule this
+    replaces, delete — sound geometry from a part that has been accepted.
+
+    Non-manifold tessellation is also the symptom that found the island in the
+    first place: 11 bad edges in 147 triangles, against 105,628 triangles of
+    lattice beside it carrying none. It is the property that makes a body
+    useless downstream, rather than a proxy for it.
+
+    The mesh is compared on **rounded coordinates** rather than on topology,
+    deliberately: what breaks in a reader is that two triangles which should
+    share an edge do not, and that is a question about points, not about the
+    B-rep's opinion of them.
+    """
+    write_step(shape, path, "export-truth-probe")
+    shipped = read_step(path)
+    BRepMesh_IncrementalMesh(shipped, deflection, False, 0.2, True)
+    counts: dict = {}
+    triangles = 0
+    for f in _explore(shipped, TopAbs_ShapeEnum.TopAbs_FACE):
+        face = TopoDS.Face_s(f)
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(face, loc)
+        if tri is None:
+            continue
+        trsf = loc.Transformation()
+        pts = []
+        for i in range(1, tri.NbNodes() + 1):
+            p = tri.Node(i).Transformed(trsf)
+            pts.append((round(p.X(), 7), round(p.Y(), 7), round(p.Z(), 7)))
+        for i in range(1, tri.NbTriangles() + 1):
+            a, b, c = tri.Triangle(i).Get()
+            triangles += 1
+            for u, v in ((a, b), (b, c), (c, a)):
+                key = (pts[u - 1], pts[v - 1])
+                if key[0] > key[1]:
+                    key = (key[1], key[0])
+                counts[key] = counts.get(key, 0) + 1
+    return triangles, sum(1 for n in counts.values() if n != 2)
 
 
 def _pcurve_deviation(edge: TopoDS_Edge, face: TopoDS_Face, surface) -> float | None:

@@ -1380,69 +1380,68 @@ program builds itself.
   at `Precision::Confusion`, so the average is ~1e-7 and the 1 % of boundary
   trims that carry real tolerance are truncated.
 
-  **What is measured.** `occ.curve_on_surface_deviations` takes the exact
-  maximum distance between each edge's 3D curve and its pcurve on each face, by
-  optimisation rather than sampling (`GeomLib_CheckCurveOnSurface`), and
-  expresses it against the feature carrying it — `deviation / sqrt(that face's
-  area)`. An absolute figure in millimetres cannot do this job: 2e-03 mm is a
-  defect on a 0.05 mm² face and nothing at all on a 100 mm² one, and the CLI's
-  legal parameters span both.
+  **What is measured, and three cheaper things that were measured first.** The
+  question is whether a body survives being written, so the instrument answers
+  exactly that: `occ.exported_mesh_defects` writes one solid to STEP, reads it
+  back, tessellates it, and counts edges not used by exactly two triangles. That
+  is the property that makes a body useless downstream rather than a proxy for
+  it, and it is the symptom that found the one genuinely unwritable body this
+  project has produced.
 
-  **Two obvious readings are wrong, and both were measured before this one was
-  chosen.** `SpiralTest.step` at `cc=5, t=1` is the case: two output solids, the
-  27,864 mm³ lattice which exports and tessellates cleanly, and a 4.17 mm³
-  island whose 135 triangles carry 9 non-manifold edges and 4 crossings against
-  the lattice's 105,628 carrying none.
+  Three cheaper quantities were tried as the gate before this one. `SpiralTest`
+  at `cc=5, t=1` produces two solids — the 27,864 mm³ lattice, sound, and the
+  4.17 mm³ island, not — and on that part alone two of the three look decisive:
 
-  | solid | worst deviation | worst ratio | pairs over their own tolerance |
-  |---|---|---|---|
-  | 0, the lattice, 45,861 faces | 4.90e-03 mm | **3.07e-02** | 4 / 193,310 |
-  | 1, the island, 36 faces | 2.12e-02 mm | **2.45e-02** | 0 / 192 |
+  | quantity | lattice (sound) | island (broken) |
+  |---|---|---|
+  | fault count after the round trip | 4 of 193,310 | **0** of 192 |
+  | worst face, deviation ÷ √area | **3.07e-02** | 2.45e-02 |
+  | share of surface loosely described | 5.6178e-04 | **3.9685e-01** |
 
-  A **fault count** cannot see it — the island has none, and the 80 mm ball's
-  own accepted golden-sample output has 73 of 5,760 pairs past their recorded
-  tolerance, every one by ~4 % at 3.8e-07 mm, which is `SameParameter` recording
-  a tolerance equal to the deviation it just measured rather than a defect. And
-  a bar on the **worst face** gets it backwards: the sound body scores worse
-  than the broken one, so such a bar refuses the whole part, which §11 rules out
-  more firmly than it asks for any gate.
+  A fault count is blind and the worst face is backwards, but the third
+  separates by 706×. **It then false-positives on the second part.** Every one
+  of the `TD_HX_rehearsal_test` rehearsal's fourteen solids was round-tripped
+  and tessellated as ground truth:
 
-  **What separates them is how much of the body is loosely described.** A
-  handful of sliver faces in a lattice of 45,861 is a local blemish; the same
-  description over a body of 36 faces *is* the body.
+  | body | faces | loose area | faults after RT | **bad mesh edges** |
+  |---|---|---|---|---|
+  | `SpiralTest` island | 36 | 3.97e-01 | 29 | **11** |
+  | rehearsal unify 3 | 12 | 1.76e-01 | 0 | 0 |
+  | rehearsal unify 5 | 12 | 1.76e-01 | 0 | 0 |
+  | rehearsal unify 10 | 29 | 0 | 8 | 0 |
+  | rehearsal unify 13 | 7 | 0 | 1 | 0 |
+  | rehearsal, nine others | — | 0 | 0 | 0 |
 
-  | statistic | lattice | island | ratio |
-  |---|---|---|---|
-  | **fraction of area loose at 1e-3** | **5.6e-04** | **4.0e-01** | **706×** |
-  | fraction of pairs loose at 1e-3 | 2.7e-04 | 4.2e-02 | 152× |
-  | fraction of pairs loose at 3e-3 | 7.0e-05 | 2.6e-02 | 387× |
+  Exactly one of the sixteen is broken. The loose-area fraction refuses unify 3
+  and 5; a fault count refuses unify 10 and 13; only the last column is right
+  about all of them. Both rejected proxies would have refused — or, in the shape
+  of rule this replaces, **deleted** — geometry from a part that has been
+  inspected and accepted.
 
-  Area rather than pair count: it is what "how much of this body" means
-  physically, and it does not weight a face by how many edges the boolean
-  happened to subdivide it into. So a face is *loose* when some edge's pcurve
-  strays past `LOOSE_PCURVE_RATIO` (1e-3) of `sqrt` of that face's own area, and
-  `LOOSE_AREA_FRACTION_MAX` (**1e-2**) bounds the share of a body's surface that
-  may be. Measured end to end on the real run, the lattice carries **41 loose
-  faces of 44,059** and the island **3 of 36**, so the bar sits **18× above** the
-  sound body and **40× below** the unwritable one — and the two committed
-  scenarios measure **exactly zero**: the 80 mm ball and both solids of the test
-  cylinder have no loose face at all.
+  The pcurve readings are still measured and logged, because they are cheap and
+  they say *why* a body is fragile, and `LOOSE_PCURVE_RATIO` /
+  `LOOSE_AREA_FRACTION_MAX` keep the calibration history. They decide nothing,
+  and `test_export_truth.py` pins that.
 
-  The run reports the figure **per solid** as well as in aggregate, because the
-  aggregate is a maximum and this quantity is a property of one body. Reading
-  `solid 0: 5.6178e-04 ... solid 1: 3.9685e-01` is what says the lattice is
-  sound and one island is not.
+  **The demonstration that this gate is needed at all is on the real body, and
+  it turns on the pipeline's own repair.** As this pipeline builds it, the
+  island is `BRepCheck_Analyzer`-**invalid**: §8's rung 2 declines the fat vertex
+  and the validity gate refuses the run. Let rung 2 act on it — widen the vertex,
+  which moves no geometry — and **the body becomes valid**. Written, its 147
+  triangles still carry 11 broken edges. So the repair that makes a body pass
+  every gate this pipeline had is precisely what makes the remaining defect
+  invisible, and this check is the only thing left that sees it.
 
-  This is calibrated on the one part this project has that produces an
-  unwritable body, so it is a bar with measured margin rather than a law. Its
-  failure mode if it is ever wrong is a refused run with the temp folder kept,
-  never material silently missing from the output.
-
-  **It runs on every solid, and needs no volume bar to be affordable.** No round
-  trip, no boolean, `O(edge/face pairs)` at 46–57 µs per pair. That is the whole
-  reason it can be the gate: a check restricted to bodies small enough to
-  re-export cheaply would never look at the dominant one, and the dominant one
-  is where an unwritable description would matter most.
+  **A solid too large to round-trip is reported *unmeasured*, never passed.**
+  The round trip is cheap on the bodies this exists for — the rehearsal's
+  thirteen, of 6 to 29 faces, cost well under a minute between them — and
+  unaffordable on the dominant one, which is the 22-minute cost this section
+  removed for the whole output. `EXPORT_ROUNDTRIP_MAX_FACES` (5,000) draws that
+  line, and above it the run says so on the console without `-v`, the same
+  distinction `tools/verify_geometry.material_outside` draws for the cut it
+  cannot afford. That is a real gap and naming it is the honest response;
+  `tools/e2e.py` checks the whole written file in dev/CI. The pcurve readings
+  are reported for those solids as supporting evidence, never as a pass.
 
   **Past the bar the run fails (exit 4), naming the face and its position, and
   nothing is discarded.** Deleting material to make an export succeed is
@@ -1760,7 +1759,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is finding the faces to repair, on a sound layer (§8, G11, G12) |
 | That scan run as a parallel batch filter over a compound (§8) | The second stage to use OCCT's own threads rather than this project's process pool, and for the same two reasons as `validate`: it returns a verdict rather than geometry, and the call has a flag. **44.1 s → 22.6 s** in a controlled pair, same 19 faces repaired, output byte-identical; chunked at 20,000 faces because the analyzer holds ~14 kB per face. The predicate has to be re-evaluated per face *as the repair reaches it*, not once up front: repairs widen shared tolerances, so a neighbour can be fixed for free, and asking too early counted 15 such faces as unrepaired |
 | Tolerance measured against feature size in the worker (§7.3) | Correctness, not speed, and a *localiser* rather than a gate. Costs one area and one centroid per trimmed piece, on the face list the trim already produced, and it is the last point at which the junction still has a name. Two of the six junctions forming `SpiralTest`'s unwritable 4.17 mm³ island rank 2nd and 4th of 2,404 pieces; combined with §8's components it names exactly one body where the piece-level reading names two dozen, at `connect` rather than at the end |
-| Export truth measured on every output solid (§9) | Correctness. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written. `GeomLib_CheckCurveOnSurface` gives the exact pcurve↔3D deviation at 46–57 µs per edge/face pair: no round trip, no boolean, no volume bar, so the *dominant* solid is checked too. The quantity is the **share of a body's surface** described more loosely than its own feature size — 296× separation on the one part that produces an unwritable body, where a fault count sees nothing and the worst face ranks the sound body worse than the broken one |
+| Export truth measured per output solid (§9) | Correctness. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. Solids above `EXPORT_ROUNDTRIP_MAX_FACES` are reported *unmeasured*, never passed |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |

@@ -153,13 +153,12 @@ def curve_on_surface(path: str) -> dict:
     shape, because STEP AP214 declares one tolerance for a whole file where the
     B-rep carries one per subshape (docs/algorithm.md S9).
 
-    ``fraction`` is the quantity to judge on: how much of a body's surface is
-    described more loosely than its own feature size. ``over`` is OCCT's own
-    per-edge predicate, reported rather than gated on - the 80 mm ball's
-    accepted output has 73 of 5,760 pairs past their recorded tolerance, every
-    one by ~4 % at 3.8e-07 mm, which is a knife edge and not a defect. Neither
-    is ``worst``: measured on `SpiralTest`, the sound dominant body scores
-    *worse* on it than the island that cannot be written.
+    **Everything this returns is a diagnostic, not a verdict.** Three cheaper
+    quantities were tried as gates and two false-positive on sound rehearsal
+    solids (``latticegen2.occ.LOOSE_AREA_FRACTION_MAX``); what decides is
+    whether the exported body still tessellates, which ``manifold_check`` above
+    already asks of the whole file. These numbers say *why* a body is fragile
+    and rank the candidates; they do not pass or fail anything.
     """
     shape = occ.read_step(path)
     worst, ratio, over, pairs = 0.0, 0.0, 0, 0

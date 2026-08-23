@@ -21,6 +21,9 @@ import pytest
 from OCP.BOPAlgo import BOPAlgo_ArgumentAnalyzer
 from OCP.BRep import BRep_Builder, BRep_Tool
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeSphere
+from OCP.BRepTools import BRepTools
+from OCP.TopoDS import TopoDS_Shape
+from OCP.BRep import BRep_Builder as _BRepBuilder
 from OCP.TopAbs import TopAbs_ShapeEnum
 from OCP.TopoDS import TopoDS
 
@@ -32,6 +35,7 @@ from latticegen2.boundary import trim_junction
 TESTDIR = os.path.dirname(os.path.abspath(__file__))
 SPIRAL = os.path.join(TESTDIR, "SpiralTest.step")
 BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
+ISLAND = os.path.join(TESTDIR, "spiral-island-unwritable.brep")
 
 
 def vertices(shape):
@@ -250,6 +254,111 @@ def test_curve_on_surface_deviations_reports_positions_when_it_fires():
     reading = occ.curve_on_surface_deviations(sphere)
     assert len(reading.where) <= occ.CURVE_ON_SURFACE_SAMPLES
     assert reading.pairs > 0, "degenerate edges are skipped, but not every edge is"
+
+
+# --- the gate itself, against the body it exists for ------------------------
+
+
+def load_island():
+    """The one body this project has produced that cannot be written to STEP.
+
+    Lifted straight out of a `SpiralTest.step` run at ``cc=5, t=1`` after
+    `simplify`: 4.1629 mm^3, 36 faces. Committed rather than reproduced,
+    per docs/testing.md — a synthetic case proves the code does what you think,
+    only the real one proves it does what the part needs, and this defect took
+    three wrong diagnoses before the right instrument found it.
+    """
+    shape = TopoDS_Shape()
+    BRepTools.Read_s(shape, ISLAND, _BRepBuilder())
+    solids = occ.solids(shape)
+    assert len(solids) == 1
+    return solids[0]
+
+
+def test_repairing_the_island_is_what_makes_it_invisible(tmp_path):
+    """The gap this gate exists for, demonstrated end to end on the real body.
+
+    Three steps, all measured here:
+
+    1. As this branch builds it, the island is ``BRepCheck_Analyzer``-**invalid**
+       — one face carries a falsely self-intersecting wire whose shared vertex
+       OCCT recorded at 6.573e-02 mm, above rung 2's fixed 4e-3 mm cap, so the
+       repair declines it and the existing validity gate refuses the run.
+    2. Raise that cap — which is exactly what rung 2 does once it is allowed to
+       act — and the repair widens the vertex, **the face becomes valid, and so
+       does the body**. Nothing moved: a tolerance is metadata.
+    3. Write it. Its 147 triangles still carry 11 edges used by one triangle
+       rather than two.
+
+    So the repair that makes the body pass every gate this pipeline had is
+    precisely what makes the remaining defect invisible, and the export-truth
+    check is the only thing left that sees it. That is the case
+    ``docs/algorithm.md`` §9 is about, and it is why the check measures the
+    exported tessellation rather than anything about the solid in memory.
+    """
+    island = load_island()
+    assert not occ.is_valid(island), (
+        "as built on this branch the existing validity gate already refuses it"
+    )
+
+    # Rung 2 with its cap raised, as docs/algorithm.md §8's repair would apply
+    # it. Patched on the module rather than reimplemented, so this exercises the
+    # real repair and not a stand-in for it.
+    original = occ.SELF_INTERSECT_MAX_VERTEX_TOL
+    try:
+        occ.SELF_INTERSECT_MAX_VERTEX_TOL = 0.1
+        repaired, still_invalid = occ.fix_vertex_tolerances(occ.faces(island))
+    finally:
+        occ.SELF_INTERSECT_MAX_VERTEX_TOL = original
+    assert (repaired, still_invalid) == (1, 0)
+    assert occ.is_valid(island), "the repair makes the body pass BRepCheck_Analyzer"
+
+    triangles, bad = occ.exported_mesh_defects(island, str(tmp_path / "island.step"))
+    assert triangles > 0
+    assert bad > 0, (
+        "this body is why the export-truth gate exists; if it now survives a "
+        "round trip, either OCCT or the generator has changed and the gate "
+        "needs re-deriving against fresh ground truth"
+    )
+
+
+def test_the_island_does_not_survive_being_written(tmp_path):
+    """The same measurement without the repair, so the fixture cannot rot."""
+    triangles, bad = occ.exported_mesh_defects(
+        load_island(), str(tmp_path / "island.step")
+    )
+    assert (triangles, bad) == (147, 11)
+
+
+def test_a_sound_body_survives_being_written(tmp_path):
+    """The control. A gate that only ever fires proves nothing (G10)."""
+    box = BRepPrimAPI_MakeBox(3.0, 4.0, 5.0).Shape()
+    triangles, bad = occ.exported_mesh_defects(box, str(tmp_path / "box.step"))
+    assert triangles == 12
+    assert bad == 0
+
+
+def test_the_cheaper_proxies_do_not_decide():
+    """Three quantities were tried before the tessellation and two of them
+    false-positive on sound rehearsal solids (:data:`occ.LOOSE_AREA_FRACTION_MAX`).
+    They are still measured and logged, because they say *why* a body is
+    fragile — this pins that they do not decide, so a later change cannot
+    quietly promote one back into the gate.
+    """
+    import ast
+    import inspect
+
+    from latticegen2 import pipeline
+
+    tree = ast.parse(inspect.getsource(pipeline._check_export_truth).strip())
+    body = tree.body[0].body
+    if isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]                      # drop the docstring, keep the code
+    code = "\n".join(ast.unparse(node) for node in body)
+    assert "exported_mesh_defects" in code, "the tessellation is the instrument"
+    assert "LOOSE_AREA_FRACTION_MAX" not in code, (
+        "the loose-area fraction false-positives on two sound rehearsal solids"
+    )
 
 
 # --- the two parts, measured -------------------------------------------------

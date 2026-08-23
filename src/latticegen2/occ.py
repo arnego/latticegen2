@@ -637,21 +637,13 @@ def curve_on_surface_deviations(
                           where, where_worst, worst_area)
 
 
-EXPORT_ROUNDTRIP_MAX_FACES = 5_000
-"""Largest solid :func:`exported_mesh_defects` will round-trip and mesh.
-
-Writing a solid to STEP, reading it back and tessellating it is cheap on the
-small bodies this check exists for — the `TD_HX_rehearsal_test` rehearsal's
-thirteen, of 6 to 29 faces each, take well under a minute between them — and it
-is the cost docs/algorithm.md S9 removed from this pipeline for the *whole*
-output, at 22 minutes on a 2 GB result.
-
-So the bound is what makes the check affordable, and a solid above it is
-reported **unmeasured** rather than passed — the same distinction
-``tools/verify_geometry.material_outside`` draws for the cut it cannot afford.
-That is an honest gap and it is named as one: see
-:func:`latticegen2.pipeline._check_export_truth`."""
-
+#: No size bound, deliberately. A solid this cannot afford to measure used to be
+#: reported *unmeasured*, which put the dominant body of every production part —
+#: the one where an unwritable description matters most — outside the only
+#: detector with a clean record. Per the user's decision the cost is accepted
+#: instead: docs/algorithm.md §9 removed a whole-output re-import for costing
+#: 22 minutes, and this is that cost coming back, knowingly, for a correctness
+#: check rather than for a count of solids.
 
 DEFAULT_MESH_DEFLECTION = 0.05
 """Chordal deviation used when tessellating an exported body to check it.
@@ -703,12 +695,28 @@ def exported_mesh_defects(
     deliberately: what breaks in a reader is that two triangles which should
     share an edge do not, and that is a question about points, not about the
     B-rep's opinion of them.
+
+    **Run on every solid, with no size bound.** That is the expensive decision
+    on this branch and it was taken deliberately: bounding it by face count is
+    what puts a production part's dominant body outside the check, and a body
+    nobody looks at is exactly where an unwritable description would do the most
+    damage. Points are interned to integers and edges counted by integer key
+    rather than by tuples of floats, which is the one concession made to the
+    size of shape this now has to survive; the cost at rehearsal scale is
+    **not yet measured** and is expected to be tens of minutes.
     """
     write_step(shape, path, "export-truth-probe")
     shipped = read_step(path)
     BRepMesh_IncrementalMesh(shipped, deflection, False, 0.2, True)
-    counts: dict = {}
+    # A point is interned to a small integer and an edge to one integer built
+    # from its two endpoints, rather than keeping tuples of floats as keys. On a
+    # lattice this is the difference between a dict of a few hundred megabytes
+    # and one of several gigabytes, and the check now runs on solids of ~600,000
+    # faces where it used to be skipped.
+    point_id: dict[tuple[int, int, int], int] = {}
+    counts: dict[int, int] = {}
     triangles = 0
+    quantum = 1e7                       # 1e-7 mm, OCCT's own confusion
     for f in _explore(shipped, TopAbs_ShapeEnum.TopAbs_FACE):
         face = TopoDS.Face_s(f)
         loc = TopLoc_Location()
@@ -716,18 +724,24 @@ def exported_mesh_defects(
         if tri is None:
             continue
         trsf = loc.Transformation()
-        pts = []
+        ids = []
         for i in range(1, tri.NbNodes() + 1):
             p = tri.Node(i).Transformed(trsf)
-            pts.append((round(p.X(), 7), round(p.Y(), 7), round(p.Z(), 7)))
+            key = (round(p.X() * quantum), round(p.Y() * quantum),
+                   round(p.Z() * quantum))
+            got = point_id.get(key)
+            if got is None:
+                got = point_id[key] = len(point_id)
+            ids.append(got)
         for i in range(1, tri.NbTriangles() + 1):
             a, b, c = tri.Triangle(i).Get()
             triangles += 1
             for u, v in ((a, b), (b, c), (c, a)):
-                key = (pts[u - 1], pts[v - 1])
-                if key[0] > key[1]:
-                    key = (key[1], key[0])
-                counts[key] = counts.get(key, 0) + 1
+                lo, hi = ids[u - 1], ids[v - 1]
+                if lo > hi:
+                    lo, hi = hi, lo
+                edge = lo * 4_294_967_296 + hi
+                counts[edge] = counts.get(edge, 0) + 1
     return triangles, sum(1 for n in counts.values() if n != 2)
 
 

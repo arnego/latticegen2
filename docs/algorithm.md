@@ -1432,16 +1432,22 @@ program builds itself.
   every gate this pipeline had is precisely what makes the remaining defect
   invisible, and this check is the only thing left that sees it.
 
-  **A solid too large to round-trip is reported *unmeasured*, never passed.**
-  The round trip is cheap on the bodies this exists for — the rehearsal's
-  thirteen, of 6 to 29 faces, cost well under a minute between them — and
-  unaffordable on the dominant one, which is the 22-minute cost this section
-  removed for the whole output. `EXPORT_ROUNDTRIP_MAX_FACES` (5,000) draws that
-  line, and above it the run says so on the console without `-v`, the same
-  distinction `tools/verify_geometry.material_outside` draws for the cut it
-  cannot afford. That is a real gap and naming it is the honest response;
-  `tools/e2e.py` checks the whole written file in dev/CI. The pcurve readings
-  are reported for those solids as supporting evidence, never as a pass.
+  **Every solid is measured, with no size bound, and that is this section's
+  expensive decision.** An earlier revision skipped solids above a face count
+  and reported them *unmeasured* — honest, and wrong in the way that matters:
+  the dominant body of every production part fell outside the only detector
+  with a clean record, which is exactly where an unwritable description would do
+  the most damage. Per the user's decision the cost is accepted instead. This
+  section removed a whole-output re-import for costing **22 minutes**, and this
+  is that cost returning knowingly — for a correctness check this time, rather
+  than for a count of solids.
+
+  What that buys is that no body ships unexamined. What it costs at rehearsal
+  scale is **not yet measured**: the check now writes, re-reads and tessellates
+  a 583,806-face solid, where the removed re-import only re-read one. Expect
+  tens of minutes and watch the peak memory — points are interned to integers
+  and edges counted by integer key precisely so this can be attempted at that
+  size at all. `export_truth_s` in the run summary is what to read.
 
   **Past the bar the run fails (exit 4), naming the face and its position, and
   nothing is discarded.** Deleting material to make an export succeed is
@@ -1759,7 +1765,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is finding the faces to repair, on a sound layer (§8, G11, G12) |
 | That scan run as a parallel batch filter over a compound (§8) | The second stage to use OCCT's own threads rather than this project's process pool, and for the same two reasons as `validate`: it returns a verdict rather than geometry, and the call has a flag. **44.1 s → 22.6 s** in a controlled pair, same 19 faces repaired, output byte-identical; chunked at 20,000 faces because the analyzer holds ~14 kB per face. The predicate has to be re-evaluated per face *as the repair reaches it*, not once up front: repairs widen shared tolerances, so a neighbour can be fixed for free, and asking too early counted 15 such faces as unrepaired |
 | Tolerance measured against feature size in the worker (§7.3) | Correctness, not speed, and a *localiser* rather than a gate. Costs one area and one centroid per trimmed piece, on the face list the trim already produced, and it is the last point at which the junction still has a name. Two of the six junctions forming `SpiralTest`'s unwritable 4.17 mm³ island rank 2nd and 4th of 2,404 pieces; combined with §8's components it names exactly one body where the piece-level reading names two dozen, at `connect` rather than at the end |
-| Export truth measured per output solid (§9) | Correctness. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. Solids above `EXPORT_ROUNDTRIP_MAX_FACES` are reported *unmeasured*, never passed |
+| Export truth measured on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |

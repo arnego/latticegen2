@@ -226,6 +226,11 @@ refuses rather than shipping or discarding. The message names the face and its
 position, the `connect` stage above names the junctions the body was built
 from, and the temporary folder is kept. See docs/algorithm.md §7.3 and §9.
 
+The check writes each solid, reads it back and tessellates it, so on a large
+part it is not cheap — `export_truth_s` in the run summary reports what it
+cost. It is deliberately not bounded by size: a body nobody looks at is exactly
+where an unwritable description would do the most damage.
+
 ### Exit codes
 
 | Code | Meaning |

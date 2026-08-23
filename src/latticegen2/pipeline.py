@@ -645,12 +645,15 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
     is the symptom that found the one genuinely unwritable body this project has
     produced.
 
-    **A solid too large to round-trip is reported unmeasured, never passed.**
-    That is an honest gap: the dominant body is exactly where this could not be
-    afforded (docs/algorithm.md S9 removed a whole-output round trip for costing
-    22 minutes), and saying so is the same distinction
-    ``tools/verify_geometry.material_outside`` draws for the cut it cannot
-    afford. ``tools/e2e.py`` covers the whole output in dev/CI.
+    **Every solid is measured, with no size bound, and that is the expensive
+    decision on this branch.** An earlier revision skipped solids above a face
+    count and reported them *unmeasured* — honest, but it put the dominant body
+    of every production part outside the only detector with a clean record,
+    which is precisely where an unwritable description would do the most damage.
+    Per the user's decision the cost is accepted instead. docs/algorithm.md S9
+    removed a whole-output re-import for costing 22 minutes, and this is that
+    cost returning knowingly, for a correctness check rather than for a count of
+    solids. The rehearsal-scale figure is **not yet measured**.
 
     The pcurve reading below is kept and logged because it is cheap, exact and
     informative about *why* a body is fragile - but it decides nothing, and
@@ -659,7 +662,6 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
     """
     started = _dt.datetime.now()
     broken: list[tuple[int, int, int]] = []
-    unmeasured: list[tuple[int, int]] = []
     worst = 0.0
     fraction = 0.0
     loose_faces = 0
@@ -672,14 +674,7 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
         worst = max(worst, reading.worst)
         fraction = max(fraction, reading.loose_area_fraction)
         n_faces, _ = occ.count_subshapes(solid)
-        if n_faces > occ.EXPORT_ROUNDTRIP_MAX_FACES:
-            unmeasured.append((i, n_faces))
-            rl.line(
-                f"  solid {i}: {n_faces} faces - too large to round-trip, "
-                f"UNMEASURED; {reading.loose_area_fraction:.4e} of its surface is "
-                f"loosely described, worst deviation {reading.worst:.4e} mm"
-            )
-            continue
+        rl.substage("export truth", i, len(solids))
         triangles, bad = occ.exported_mesh_defects(solid, probe)
         rl.line(
             f"  solid {i}: {n_faces} faces -> {triangles} triangle(s) after a "
@@ -689,28 +684,17 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
         )
         if bad:
             broken.append((i, bad, triangles))
+    rl.substage("export truth", len(solids), len(solids))
     elapsed = (_dt.datetime.now() - started).total_seconds()
     stats["export_truth_s"] = round(elapsed, 2)
-    stats["export_truth_unmeasured"] = len(unmeasured)
     stats["worst_pcurve_deviation_mm"] = f"{worst:.3e}"
     stats["loose_area_fraction"] = f"{fraction:.3e}"
     stats["loose_faces"] = loose_faces
     rl.line(
-        f"export truth: {len(solids) - len(unmeasured)} of {len(solids)} solid(s) "
-        f"round-tripped and tessellated, {len(unmeasured)} too large to measure; "
+        f"export truth: all {len(solids)} solid(s) round-tripped and tessellated; "
         f"worst pcurve-vs-3D deviation {worst:.4e} mm over {pairs} edge/face "
         f"pair(s) [{elapsed:.1f}s]"
     )
-    if unmeasured:
-        # Said without -v as well: "not measured" must never read as "measured
-        # and fine", which is the whole reason this line exists.
-        rl.always(
-            f"note: {len(unmeasured)} solid(s) were too large to round-trip and "
-            f"are UNMEASURED for export fidelity, not passed - "
-            f"{[f'solid {i} ({n} faces)' for i, n in unmeasured]}. "
-            f"tools/e2e.py checks the whole written file in dev/CI "
-            f"(docs/algorithm.md S9)."
-        )
     if broken:
         first, bad, triangles = broken[0]
         raise ProcessingError(

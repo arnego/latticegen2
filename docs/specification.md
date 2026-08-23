@@ -523,12 +523,15 @@ inspected and accepted.** The pcurve figures are still measured and logged
 because they say why a body is fragile; they decide nothing, and a unit test
 pins that.
 
-**A solid too large to round-trip is reported *unmeasured*, never passed.**
-`EXPORT_ROUNDTRIP_MAX_FACES` (5,000) draws the line, and the run says so on the
-console without `-v` — the same distinction `material_outside` already draws for
-the cut it cannot afford. That is a real gap: the dominant body is exactly where
-this cannot be afforded, and `tools/e2e.py` is what covers the whole written
-file in dev/CI.
+**Every solid is measured, with no size bound — the user's decision, and the
+expensive one.** An earlier revision skipped solids above a face count and
+reported them *unmeasured*, which was honest and wrong in the way that matters:
+it put the dominant body of every production part outside the only detector with
+a clean record. docs/algorithm.md §9 removed a whole-output re-import for
+costing 22 minutes, and this is that cost returning knowingly, for a correctness
+check rather than for a count of solids. The rehearsal-scale figure is **not yet
+measured** and is expected to be tens of minutes; `export_truth_s` in the run
+summary is what to read.
 
 **Why the gate is needed at all, demonstrated on the real body.** As this
 pipeline builds it, the island is `BRepCheck_Analyzer`-**invalid** — rung 2
@@ -556,18 +559,18 @@ So on this branch the part is refused twice over before the export-truth check
 is what stops it — which is why the demonstration above is made on the committed
 island fixture, where rung 2 can be allowed to act.
 
-**The rehearsal is refused by nothing.** Its thirteen small solids all
-round-trip and tessellate cleanly, and the 583,806-face dominant body is
-reported unmeasured. That verdict is measured on the fourteen solids the
-rehearsal actually produced — replayed from the run's kept temporary folder
-rather than from a second hour-long run, which is the same geometry by
-construction.
+**The rehearsal's thirteen small solids are refused by nothing**, measured on
+the solids the run actually produced and replayed from its kept temporary
+folder. Its **583,806-face dominant body has not been put through the check
+yet** — the size bound that used to exclude it was removed after that run, on
+the user's decision, and re-measuring it is deferred rather than skipped.
 
-**The whole-output gap is real.** The dominant body of any production part is
-above `EXPORT_ROUNDTRIP_MAX_FACES` and is reported unmeasured. Measured on this
-branch, the 80 mm ball's own dominant body ships **73** `InvalidCurveOnSurface`
-faults and `dense-lattice`'s picks up 4 from its own round trip — harmless at
-their magnitudes, and nothing in the pipeline was watching before this.
+**What the dominant bodies cost, and what they carry, is the open measurement.**
+The 80 mm ball's own dominant body ships **73** `InvalidCurveOnSurface` faults
+and `dense-lattice`'s picks up 4 from its own round trip — harmless at their
+magnitudes, and nothing in the pipeline was watching before this. Both
+tessellate cleanly. Whether a rehearsal-scale dominant body does, and what
+measuring it costs in time and memory, is the next thing to run.
 
 **The repair direction is not attempted here and is the obvious next step.** The
 fault is a pcurve that does not match its own 3D curve; re-fitting it at the

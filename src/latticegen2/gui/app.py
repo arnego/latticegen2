@@ -32,12 +32,17 @@ from ..cli import (
 )
 from ..errors import LatticeGenError
 from ..sysinfo import logical_core_count
+from . import model
 from .model import RunState
 from .runner import GRACE_SECONDS, LaunchError, Run, build_argv
 
 POLL_MS = 100
 BAR_HEIGHT = 16
 WIDTH = 460
+#: Height of the log pane, in text lines. Deep enough to read a stage's worth
+#: of output at a glance and shallow enough that the window still sits in a
+#: corner of the screen, which is what §3.1 asks of it.
+LOG_ROWS = 8
 
 WHAT_IT_MAKES = """\
 latticegen2 fills the solid body of a STEP file with a diamond-strut lattice \
@@ -153,13 +158,19 @@ class App:
         self.cc_var = tk.StringVar(value="10")
         self.t_var = tk.StringVar(value="1.5")
         self.cores_var = tk.StringVar(value=str(logical_core_count()))
+        self.verbose_var = tk.BooleanVar(value=False)
         self.derived_var = tk.StringVar(value="—")
         self.message_var = tk.StringVar(value="")
+        #: What the log pane was last drawn from — the number of lines that have
+        #: arrived and the filter in force. Redrawing only when that changes
+        #: keeps the 10 Hz poll from rebuilding a 400-line widget for nothing.
+        self._log_key: tuple | None = None
 
         self._build(root)
         for var in (self.input_var, self.cc_var, self.t_var, self.cores_var,
                     self.outdir_var):
             var.trace_add("write", lambda *_a: self._revalidate())
+        self.verbose_var.trace_add("write", lambda *_a: self._render_log())
         self._revalidate()
         root.protocol("WM_DELETE_WINDOW", self._on_exit)
         root.after(POLL_MS, self._drain)
@@ -205,6 +216,16 @@ class App:
             self._spin(params, "t", self.t_var, T_RANGE, 0.1, 2),
             self._spin(params, "cores", self.cores_var, CORES_RANGE, 1, 4),
         ]
+        # **Deliberately not in `self.fields`.** Everything else is a parameter
+        # of the run and is frozen once it starts; this is a filter over output
+        # that has already arrived. Every line crosses the event stream whichever
+        # way the box is set (docs/algorithm.md §10), so it can be changed
+        # *during* a run — or after a failure, to read what led to it — and the
+        # pane redraws from what was already received. That is the whole reason
+        # the child is never given `-v` itself.
+        self.verbose_check = ttk.Checkbutton(params, text="verbose",
+                                             variable=self.verbose_var)
+        self.verbose_check.grid(row=0, column=6, sticky="w", padx=(12, 0))
 
         self.message = ttk.Label(outer, textvariable=self.message_var,
                                  foreground="#a11", wraplength=WIDTH - 24)
@@ -232,8 +253,28 @@ class App:
         self.resource_label = ttk.Label(self.panel, text="", foreground="#555")
         self.resource_label.grid(row=3, column=0, sticky="w", pady=(3, 0))
 
+        # Created but not gridded. `_render_log` shows it only when it has
+        # something in it, so an ordinary run does not carry an empty box
+        # around for the hour it takes — and the box appearing is itself the
+        # signal that the child said something unexpected.
+        self.log_frame = ttk.Frame(self.panel)
+        log = self.log_frame
+        log.columnconfigure(0, weight=1)
+        # `width=1` rather than a character count, so the pane takes the width
+        # the rest of the window already has instead of setting it: the root is
+        # not resizable, so a Text asking for 60 columns would widen everything.
+        self.log_text = tk.Text(log, height=LOG_ROWS, width=1, wrap="word",
+                                font=("TkFixedFont", 8), state="disabled",
+                                background="#fbfbfb", relief="solid",
+                                borderwidth=1, highlightthickness=0)
+        self.log_text.grid(row=0, column=0, sticky="ew")
+        scroll = ttk.Scrollbar(log, orient="vertical",
+                               command=self.log_text.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.log_text.configure(yscrollcommand=scroll.set)
+
         self.result_label = ttk.Label(self.panel, text="", wraplength=WIDTH - 24)
-        self.result_label.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self.result_label.grid(row=5, column=0, sticky="w", pady=(6, 0))
         self.open_button = ttk.Button(self.panel, text="Open export folder",
                                       command=self._open_output_folder)
 
@@ -351,6 +392,7 @@ class App:
         self._force_at = None
         self._started = time.monotonic()
         self._closed_seen = 0
+        self._log_key = None
         self.start.configure(text="Stop!")
         for widget in self.fields:
             widget.state(["disabled"])
@@ -401,7 +443,7 @@ class App:
                 if kind == "event":
                     self.state.apply(payload)
                 elif kind in ("raw", "stderr"):
-                    self.state.lines.append((payload, True))
+                    self.state.add_line(payload, model.OUT)
                 elif kind == "closed":
                     self._closed_seen += 1
             if drained or run.running:
@@ -439,6 +481,33 @@ class App:
         else:
             self.sub_bar.set(state.sub_fraction, state.sub_text())
         self.resource_label.configure(text=state.resource_text())
+        self._render_log()
+
+    def _render_log(self) -> None:
+        """Draw the lines the tick box admits, and hide the pane when there
+        are none.
+
+        Keyed on ``lines_seen`` rather than ``len(lines)`` because the backlog
+        is a bounded deque: once it is full its length stops changing, and a
+        length-keyed redraw would freeze the pane at exactly the point in a long
+        run where there is most to read.
+        """
+        verbose = bool(self.verbose_var.get())
+        key = (self.state.lines_seen, verbose)
+        if key == self._log_key:
+            return
+        self._log_key = key
+        visible = self.state.visible_lines(verbose)
+        if visible:
+            self.log_frame.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        else:
+            self.log_frame.grid_forget()
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        if visible:
+            self.log_text.insert("1.0", "\n".join(visible))
+        self.log_text.configure(state="disabled")
+        self.log_text.see("end")
 
     def _finish(self, run: Run) -> None:
         code = run.returncode()
@@ -464,7 +533,7 @@ class App:
             text += f"\nIntermediate files kept in: {state.tmpdir}"
         self.result_label.configure(
             text=("✔ " if state.status == progress.OK else "✘ ") + text)
-        self.open_button.grid(row=5, column=0, sticky="w", pady=(4, 0))
+        self.open_button.grid(row=6, column=0, sticky="w", pady=(4, 0))
         self._revalidate()
 
     # -- odds and ends -----------------------------------------------------

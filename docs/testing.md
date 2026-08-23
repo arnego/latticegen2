@@ -41,10 +41,7 @@ header rewrite.
 | `test_pipeline.py` | Same-domain unification's fallback ladder — a kernel that refuses to merge must yield a larger file, never a failed run | yes |
 | `test_progress.py` | The NDJSON event schema (docs/algorithm.md §10): every event carries exactly the fields it declares, the reader returns `None` on kernel chatter and truncated lines rather than raising, and a dead consumer cannot abandon a run mid-pipeline | no |
 | `test_runlog_events.py` | **The guarantee that watching a run does not change it.** The same sequence of writes with and without an emitter produces an identical `.log`; `stage_begin` emits without logging; `substage` rate-limits without ever dropping a stage's final count | no |
-| `test_gui.py` | The front-end's testable half (specification.md §3.1): the stage weights, the reduction from an event stream to what the window shows — fed deliberately hostile input — the argv handed to the child, and the cancel sentinel. One test builds a withdrawn Tk window, guarded by `importorskip` | no |
-| `test_progress.py` | The NDJSON event schema (docs/algorithm.md §10): every event carries exactly the fields it declares, the reader returns `None` on kernel chatter and truncated lines rather than raising, and a dead consumer cannot abandon a run mid-pipeline | no |
-| `test_runlog_events.py` | **The guarantee that watching a run does not change it.** The same sequence of writes with and without an emitter produces an identical `.log`; `stage_begin` emits without logging; `substage` rate-limits without ever dropping a stage's final count | no |
-| `test_gui.py` | The front-end's testable half (specification.md §3.1): the stage weights, the reduction from an event stream to what the window shows — fed deliberately hostile input — the argv handed to the child, and the cancel sentinel. One test builds a withdrawn Tk window, guarded by `importorskip` | no |
+| `test_gui.py` | The front-end's testable half (specification.md §3.1): the stage weights, the reduction from an event stream to what the window shows — fed deliberately hostile input — the argv handed to the child, the cancel sentinel, and the **verbose** tick box: that unticked the pane holds only what the child wrote outside the event stream and is hidden when that is empty, that ticking it reveals the run's whole log, and that it stays enabled while a run is in flight. Several tests build widgets in one shared withdrawn Tk root, guarded by `importorskip` | no |
 | `test_verify_geometry.py` | The one part of the harness whose failure mode is a plausible number rather than an exception: `material_outside`'s per-solid cut, the contradiction against a boolean-free containment check, and that a face lying *on* the input surface is a tie rather than a protrusion. The only test file that reaches into `tools/` — see the note below | yes |
 
 ## E2E verification
@@ -83,17 +80,6 @@ python src/main.py -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke.step -v
 | Runtime budget | wall clock: 10 min for `smoke-fast` and `dense-lattice`, 20 min for `smoke-verified` |
 | Golden-sample match | symmetric-difference volume both ways, tolerance `t³` |
 | **Watching a run does not change it** | the `progress-stream` scenario runs `smoke-fast` twice, with and without `--progress-stream`, and requires an identical `.step` and an identical `.log` |
-| **Watching a run does not change it** | the `progress-stream` scenario runs `smoke-fast` twice, with and without `--progress-stream`, and requires an identical `.step` and an identical `.log` |
-
-The `progress-stream` scenario is the gate the whole front-end rests on, and it
-is cheap enough to run every time because it doubles a seven-second scenario
-rather than adding a new class of cost. It earns its place because the event
-emission is not confined to a corner: it reaches into `RunLog.line` and into
-`WorkerPool.run`'s dispatch loop, which every parallel stage goes through. Two
-runs and a byte comparison is the only thing that can hold "additive" as a claim
-about that. Its log comparison masks the four quantities that legitimately vary
-between any two runs — clock times, elapsed times, measured memory and the run's
-own directory — which leaves every count and every geometric figure under test.
 
 The `progress-stream` scenario is the gate the whole front-end rests on, and it
 is cheap enough to run every time because it doubles a seven-second scenario

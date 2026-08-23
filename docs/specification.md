@@ -128,6 +128,10 @@ can sit in a corner of the screen.
   field, and recomputed as the input, `cc` or `t` change.
 * **cc**, **t**, **cores** — spin controls bounded by the same constants
   `cli.parse_args` enforces, defaulting `cores` to the machine's logical count.
+* **verbose** — a tick box beside `cores`, controlling the log pane described
+  below. It is the window's equivalent of `-v`, and like `-v` it changes only
+  what is *shown*: the `.log` is written in full either way, and so is the
+  command line's own console output, which this does not touch.
 * **?** — the parameter reference, which is `cli.USAGE` verbatim plus a
   description of what the tool produces. There is one description of the
   parameters, so the window and `--help` cannot disagree.
@@ -151,6 +155,36 @@ becomes `Stop!`, and two bars appear:
 Beneath them, one line of resource data: peak memory and elapsed time. Peak
 memory is genuinely all that is measured continuously (§3's summary list), and
 the line says only that rather than padding itself out.
+
+Beneath *that*, with **verbose** ticked, the run's own output in a scrolling
+pane — every line of it, which is what the `.log` gets.
+
+**Unticked, the pane holds only what the child wrote outside the event stream:**
+kernel chatter on stdout, and anything at all on stderr, which is where a
+failure's one reason line lands (§7). It is hidden entirely when that is empty,
+so an ordinary run does not carry a blank box around for the hour it takes —
+and the box appearing is itself the signal that something spoke up.
+
+**Nothing else is shown unticked, deliberately.** The window is not a terminal,
+and everything a clean run logs is either already on screen in a widget — the
+parameters are in the input boxes, the stage in the top bar, duration and peak
+memory in the resource line, the outcome in the result banner — or a statistic
+that is neither a warning nor an error. Repeating it as text would be the
+window competing with itself.
+
+**This is a window-side rule, and it is deliberately not the `console` flag the
+events carry.** That flag says whether a *command-line* run would have printed
+the line, and §3 requires the whole end-of-run summary to print there
+regardless of `-v` — which is right for a terminal and wrong here, the window
+having drawn most of that summary already. The command line is unaffected by
+any of this.
+
+**The tick box is the one control that stays live while a run is in flight**,
+and that is the point of it. The child is never given `-v`: every line crosses
+the event stream either way (docs/algorithm.md §10), so verbosity here is a
+filter over output already received rather than a flag that had to be decided
+before the run started. Tick it forty minutes in — or after a failure, to read
+what led to it — and the pane fills in what was hidden.
 
 **Where a stage has no countable work — `export`'s single writer call, or
 `simplify` while its one dominant solid is unified — the second bar sweeps and

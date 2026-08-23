@@ -162,7 +162,7 @@ def test_junk_on_stdout_is_kept_as_text_and_never_raises():
         "",
     ])
     assert state.stage == "connect"
-    assert [text for text, _console in state.lines] == [
+    assert [text for text, _source in state.lines] == [
         "Intel oneMKL FATAL ERROR", '{"ev":"stage_begin","name":"cla',
     ]
 
@@ -176,14 +176,76 @@ def test_the_log_backlog_is_bounded():
     assert state.lines[-1][0] == f"line {model.LOG_BACKLOG * 2 - 1}"
 
 
-def test_a_console_flag_travels_with_every_line():
+def test_a_line_remembers_where_it_came_from():
     """What makes verbosity a filter the reader can change during a run, rather
-    than a flag that had to be decided before it started."""
+    than a flag that had to be decided before it started.
+
+    The run's own logging is one source and everything the child wrote outside
+    the event stream is the other. The event's ``console`` flag is deliberately
+    *not* the axis: a clean run marks its whole 66-line summary console-true,
+    and every figure in it is either already drawn in a widget or a statistic
+    that is neither a warning nor an error.
+    """
     state = model.reduce_stream([
-        event(progress.LOG, msg="quiet", console=False),
-        event(progress.LOG, msg="loud", console=True),
+        event(progress.LOG, msg="stage boundary: 8.1s", console=False),
+        event(progress.LOG, msg="  Peak memory:    282.73 MB", console=True),
+        "Intel oneMKL FATAL ERROR",
     ])
-    assert list(state.lines) == [("quiet", False), ("loud", True)]
+    assert list(state.lines) == [
+        ("stage boundary: 8.1s", model.LOG),
+        ("  Peak memory:    282.73 MB", model.LOG),
+        ("Intel oneMKL FATAL ERROR", model.OUT),
+    ]
+
+
+def test_only_what_the_run_wrote_outside_the_event_stream_shows_unticked():
+    """The user's decision, and the reason for it.
+
+    A clean run's every log line is either something the window already draws —
+    the parameters sit in the input boxes, the stage in the top bar, duration
+    and peak memory in the resource line — or a statistic that is neither a
+    warning nor an error. What is left is what the child said unprompted, which
+    is exactly the thing worth surfacing unasked.
+    """
+    state = model.reduce_stream([
+        event(progress.LOG, msg="classification: 2925 nodes -> 33 interior",
+              console=False),
+        event(progress.LOG, msg="  Duration:       5.28s", console=True),
+        "FAILED: 1 of 14 output solids failed OCCT's check",
+    ])
+    assert state.visible_lines(verbose=False) == [
+        "FAILED: 1 of 14 output solids failed OCCT's check"]
+    assert state.visible_lines(verbose=True) == [
+        "classification: 2925 nodes -> 33 interior",
+        "  Duration:       5.28s",
+        "FAILED: 1 of 14 output solids failed OCCT's check",
+    ]
+
+
+def test_a_clean_run_leaves_the_unticked_view_completely_empty():
+    """Nothing to read is the point: the result banner already carries the
+    outcome, and the pane is hidden rather than shown empty."""
+    state = model.reduce_stream(
+        [event(progress.LOG, msg=f"  stat_{i}: {i}", console=True)
+         for i in range(66)]
+    )
+    assert state.visible_lines(verbose=False) == []
+    assert len(state.visible_lines(verbose=True)) == 66
+
+
+def test_lines_seen_keeps_counting_after_the_backlog_is_full():
+    """What the window redraws its log pane on.
+
+    ``len(lines)`` stops changing the moment the deque saturates, so keying the
+    redraw on it would freeze the pane after 400 lines — at exactly the point in
+    a long run where there is most to read.
+    """
+    state = model.reduce_stream(
+        [event(progress.LOG, msg=f"line {i}", console=False)
+         for i in range(model.LOG_BACKLOG + 25)]
+    )
+    assert len(state.lines) == model.LOG_BACKLOG
+    assert state.lines_seen == model.LOG_BACKLOG + 25
 
 
 def test_an_indeterminate_tick_switches_the_sub_bar_and_keeps_its_label():
@@ -522,3 +584,105 @@ def test_going_indeterminate_twice_does_not_double_the_animation(tk_root):
     before = bar._sweep
     bar._animate(stale)          # the callback left over from the first run
     assert bar._sweep == before, "a stale callback advanced the sweep"
+
+
+# --- the verbose tick box (specification.md §3.1) ----------------------------
+
+
+def test_ticking_the_box_reveals_the_run_s_own_log_and_unticking_hides_it(tk_root):
+    """And the pane itself comes and goes with its contents.
+
+    An ordinary run has nothing to put in it, so carrying an empty bordered box
+    for the hour the run takes would read as something broken. The box
+    appearing is itself the signal that the child said something.
+    """
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+    app.panel.grid(row=7, column=0, columnspan=3, sticky="ew")
+    app.state.apply(progress.parse_line(event(
+        progress.LOG, msg="stage boundary: 8.1s", console=False)))
+    app.state.apply(progress.parse_line(event(
+        progress.LOG, msg="  Peak memory:    282.73 MB", console=True)))
+
+    app._render_log()
+    assert app.log_text.get("1.0", "end").strip() == ""
+    assert not app.log_frame.grid_info()
+
+    app.verbose_var.set(True)
+    tk_root.update()
+    assert app.log_text.get("1.0", "end").strip().splitlines() == [
+        "stage boundary: 8.1s", "  Peak memory:    282.73 MB"]
+    assert app.log_frame.grid_info()
+
+    app.verbose_var.set(False)
+    tk_root.update()
+    assert app.log_text.get("1.0", "end").strip() == ""
+    assert not app.log_frame.grid_info()
+
+
+def test_the_tick_box_stays_live_while_a_run_is_in_flight(tmp_path, tk_root):
+    """The one control that must *not* be frozen with the parameters.
+
+    Every line crosses as an event whichever way the box is set, so verbosity is
+    a filter over output already received (docs/algorithm.md §10). Disabling it
+    with the rest of the fields would turn it back into a flag that has to be
+    decided before the run starts — which is what the child never gets.
+    """
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+    assert app.verbose_check not in app.fields
+    for widget in app.fields:
+        widget.state(["disabled"])
+    assert "disabled" not in app.verbose_check.state()
+
+
+def test_a_new_line_reaches_the_pane_after_the_backlog_saturates(tk_root):
+    """The redraw is keyed on ``lines_seen``, not on the deque's length."""
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+    app.panel.grid(row=7, column=0, columnspan=3, sticky="ew")
+    for i in range(model.LOG_BACKLOG):
+        app.state.add_line(f"line {i}", model.OUT)
+    app._render_log()
+    app.state.add_line("the newest line", model.OUT)
+    app._render_log()
+    assert app.log_text.get("1.0", "end").strip().endswith("the newest line")
+
+
+def test_stderr_and_kernel_chatter_are_shown_whatever_the_box_says(tmp_path, tk_root):
+    """They are not `-v` output; they are the run saying something went wrong.
+
+    A failure's one reason line (specification.md §7) reaches the window this
+    way, so it must not depend on the box being ticked.
+    """
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+    app.panel.grid(row=7, column=0, columnspan=3, sticky="ew")
+
+    class Child:
+        running = False
+        cancel_path = str(tmp_path / "x.cancel")
+        stderr_lines = ["Intel oneMKL FATAL ERROR"]
+
+        def __init__(self):
+            import queue
+
+            self.events = queue.Queue()
+
+        def returncode(self):
+            return 1
+
+        def clear_cancel(self):
+            pass
+
+    app.run = Child()
+    app.run.events.put(("stderr", "Intel oneMKL FATAL ERROR"))
+    app._closed_seen = 2
+    app._drain()
+    assert not app.verbose_var.get()
+    assert "Intel oneMKL FATAL ERROR" in app.log_text.get("1.0", "end")
+    assert app.log_frame.grid_info()

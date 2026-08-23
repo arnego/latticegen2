@@ -129,6 +129,20 @@ down in order, the temp folder is kept for analysis and the window says where it
 is. When the run finishes, **Open export folder** takes you to the result and the
 inputs re-enable for another run.
 
+The **verbose** tick box beside `cores` is the window's `-v`: ticked, a pane
+appears carrying every line the run logs. Unticked it holds only what the run
+said unprompted — kernel chatter, and anything on stderr, which is where a
+failure's reason line lands — and is hidden entirely when there is none of
+that, so an ordinary run shows no pane at all. Everything else a clean run
+logs is already on screen: the parameters in the input boxes, the stage in the
+bar, duration and peak memory in the resource line, the outcome in the banner.
+
+Like `-v` it changes only what is shown, never the run, the `.log`, or what the
+command line prints. It is the one control that stays live while a run is in
+flight, because every line reaches the window either way and the box only
+filters them: tick it forty minutes in — or after a failure, to read what led
+to it — and the pane fills in what was hidden.
+
 The window is deliberately small and plain, so it can sit in a corner of the
 screen for the hour a large part takes. It adds nothing the command line cannot
 do; it is the same `src/main.py`, run as a child process. Full behaviour is in

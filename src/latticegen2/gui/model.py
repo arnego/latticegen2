@@ -26,6 +26,23 @@ from .weights import overall_permille
 #: grow the window's memory without bound.
 LOG_BACKLOG = 400
 
+#: Where a line came from, which is what the window's **verbose** tick box
+#: filters on (specification.md §3.1).
+#:
+#: ``LOG`` is the run's own logging, arriving as `progress.LOG` events. All of
+#: it is verbose-only: a clean run's every line is either something the window
+#: already draws in a widget — the parameters sit in the input boxes, the stage
+#: in the top bar, duration and peak memory in the resource line — or a
+#: statistic that is neither a warning nor an error.
+#:
+#: ``OUT`` is what the child wrote *outside* the event stream: kernel chatter on
+#: stdout, and anything at all on stderr, which is where a failure's one reason
+#: line lands (specification.md §7). That is shown whichever way the box is set,
+#: because it is the run reporting that something went wrong rather than `-v`
+#: output.
+LOG = "log"
+OUT = "out"
+
 
 @dataclass
 class RunState:
@@ -48,6 +65,7 @@ class RunState:
     log: str | None = None
     tmpdir: str | None = None
     summary: dict = field(default_factory=dict)
+    #: ``(text, source)`` pairs, source being :data:`LOG` or :data:`OUT`.
     lines: deque = field(default_factory=lambda: deque(maxlen=LOG_BACKLOG))
     #: How many lines have *ever* arrived, which ``len(lines)`` cannot say once
     #: the backlog is full and the deque starts dropping from the left. The
@@ -56,16 +74,23 @@ class RunState:
     #: read.
     lines_seen: int = 0
 
-    def add_line(self, text: str, console: bool) -> None:
-        """Record one line of the run's own output.
-
-        ``console`` is whether a command-line run would have printed it, which
-        is what the window's **verbose** tick box filters on (specification.md
-        §3.1). Every line crosses regardless, so the filter can be changed
-        while the run is going.
-        """
-        self.lines.append((text, console))
+    def add_line(self, text: str, source: str) -> None:
+        """Record one line the child produced. ``source`` is :data:`LOG` or
+        :data:`OUT`."""
+        self.lines.append((text, source))
         self.lines_seen += 1
+
+    def visible_lines(self, verbose: bool) -> list[str]:
+        """The lines the log pane shows.
+
+        Every line is kept whichever way the box is set, so this is a filter
+        over output already received rather than a decision taken before the
+        run started — which is why the child is never given ``-v`` and why the
+        box stays live while a run is in flight. Tick it after a failure and
+        the run's own account of itself is still there to read.
+        """
+        return [text for text, source in self.lines
+                if verbose or source == OUT]
 
     # -- derived, for the widgets -----------------------------------------
 
@@ -160,7 +185,7 @@ class RunState:
                                            self.sub_fraction))
 
         elif ev == progress.LOG:
-            self.add_line(event["msg"], bool(event["console"]))
+            self.add_line(event["msg"], LOG)
 
         elif ev == progress.SUMMARY:
             self.summary = dict(event["stats"])
@@ -199,5 +224,5 @@ def reduce_stream(lines) -> RunState:
         if event is not None:
             state.apply(event)
         elif line.strip():
-            state.add_line(line.rstrip("\n"), True)
+            state.add_line(line.rstrip("\n"), OUT)
     return state

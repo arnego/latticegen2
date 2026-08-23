@@ -32,6 +32,7 @@ from ..cli import (
 )
 from ..errors import LatticeGenError
 from ..sysinfo import logical_core_count
+from . import model
 from .model import RunState
 from .runner import GRACE_SECONDS, LaunchError, Run, build_argv
 
@@ -217,11 +218,11 @@ class App:
         ]
         # **Deliberately not in `self.fields`.** Everything else is a parameter
         # of the run and is frozen once it starts; this is a filter over output
-        # that has already arrived. Every line crosses as an event carrying
-        # whether `-v` would have shown it (docs/algorithm.md §10), so the tick
-        # box can be changed *during* a run and the pane redraws from what was
-        # already received — which is the whole reason the child is never given
-        # `-v` itself.
+        # that has already arrived. Every line crosses the event stream whichever
+        # way the box is set (docs/algorithm.md §10), so it can be changed
+        # *during* a run — or after a failure, to read what led to it — and the
+        # pane redraws from what was already received. That is the whole reason
+        # the child is never given `-v` itself.
         self.verbose_check = ttk.Checkbutton(params, text="verbose",
                                              variable=self.verbose_var)
         self.verbose_check.grid(row=0, column=6, sticky="w", padx=(12, 0))
@@ -252,8 +253,12 @@ class App:
         self.resource_label = ttk.Label(self.panel, text="", foreground="#555")
         self.resource_label.grid(row=3, column=0, sticky="w", pady=(3, 0))
 
-        log = ttk.Frame(self.panel)
-        log.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        # Created but not gridded. `_render_log` shows it only when it has
+        # something in it, so an ordinary run does not carry an empty box
+        # around for the hour it takes — and the box appearing is itself the
+        # signal that the child said something unexpected.
+        self.log_frame = ttk.Frame(self.panel)
+        log = self.log_frame
         log.columnconfigure(0, weight=1)
         # `width=1` rather than a character count, so the pane takes the width
         # the rest of the window already has instead of setting it: the root is
@@ -438,10 +443,7 @@ class App:
                 if kind == "event":
                     self.state.apply(payload)
                 elif kind in ("raw", "stderr"):
-                    # Kernel chatter and anything on stderr are shown whatever
-                    # the tick box says: they are not `-v` output, they are the
-                    # run telling the user something went sideways.
-                    self.state.add_line(payload, True)
+                    self.state.add_line(payload, model.OUT)
                 elif kind == "closed":
                     self._closed_seen += 1
             if drained or run.running:
@@ -482,7 +484,8 @@ class App:
         self._render_log()
 
     def _render_log(self) -> None:
-        """Draw the lines the tick box admits, newest visible.
+        """Draw the lines the tick box admits, and hide the pane when there
+        are none.
 
         Keyed on ``lines_seen`` rather than ``len(lines)`` because the backlog
         is a bounded deque: once it is full its length stops changing, and a
@@ -494,13 +497,15 @@ class App:
         if key == self._log_key:
             return
         self._log_key = key
-        joined = [line for line, console in self.state.lines
-                  if console or verbose]
-        text = "\n".join(joined)
+        visible = self.state.visible_lines(verbose)
+        if visible:
+            self.log_frame.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        else:
+            self.log_frame.grid_forget()
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
-        if text:
-            self.log_text.insert("1.0", text)
+        if visible:
+            self.log_text.insert("1.0", "\n".join(visible))
         self.log_text.configure(state="disabled")
         self.log_text.see("end")
 

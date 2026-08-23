@@ -124,10 +124,18 @@ minutes later.
 
 While a run is going, two bars show which pipeline stage is running and how far
 into it — `boundary trim: 9,776 / 19,552` — with peak memory and elapsed time
-beneath them. **Stop!** cancels the run exactly as Ctrl+C would: workers are shut
+beneath them, and the run's own output in a scrolling pane below that.
+**Stop!** cancels the run exactly as Ctrl+C would: workers are shut
 down in order, the temp folder is kept for analysis and the window says where it
 is. When the run finishes, **Open export folder** takes you to the result and the
 inputs re-enable for another run.
+
+The **verbose** tick box beside `cores` is the window's `-v`. Unticked, the pane
+shows what a command-line run prints; ticked, it adds the lines `-v` adds — and
+like `-v` it changes only what is shown, never the run or the `.log`. It is the
+one control that stays live while a run is in flight, because every line reaches
+the window either way and the box only filters them: tick it forty minutes in
+and the pane fills in what was hidden.
 
 The window is deliberately small and plain, so it can sit in a corner of the
 screen for the hour a large part takes. It adds nothing the command line cannot

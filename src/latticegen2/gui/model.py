@@ -49,6 +49,23 @@ class RunState:
     tmpdir: str | None = None
     summary: dict = field(default_factory=dict)
     lines: deque = field(default_factory=lambda: deque(maxlen=LOG_BACKLOG))
+    #: How many lines have *ever* arrived, which ``len(lines)`` cannot say once
+    #: the backlog is full and the deque starts dropping from the left. The
+    #: window redraws its log pane only when this changes, so without it a long
+    #: run would stop updating the pane at exactly the point there is most to
+    #: read.
+    lines_seen: int = 0
+
+    def add_line(self, text: str, console: bool) -> None:
+        """Record one line of the run's own output.
+
+        ``console`` is whether a command-line run would have printed it, which
+        is what the window's **verbose** tick box filters on (specification.md
+        §3.1). Every line crosses regardless, so the filter can be changed
+        while the run is going.
+        """
+        self.lines.append((text, console))
+        self.lines_seen += 1
 
     # -- derived, for the widgets -----------------------------------------
 
@@ -143,7 +160,7 @@ class RunState:
                                            self.sub_fraction))
 
         elif ev == progress.LOG:
-            self.lines.append((event["msg"], bool(event["console"])))
+            self.add_line(event["msg"], bool(event["console"]))
 
         elif ev == progress.SUMMARY:
             self.summary = dict(event["stats"])
@@ -182,5 +199,5 @@ def reduce_stream(lines) -> RunState:
         if event is not None:
             state.apply(event)
         elif line.strip():
-            state.lines.append((line.rstrip("\n"), True))
+            state.add_line(line.rstrip("\n"), True)
     return state

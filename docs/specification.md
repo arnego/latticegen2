@@ -128,6 +128,9 @@ can sit in a corner of the screen.
   field, and recomputed as the input, `cc` or `t` change.
 * **cc**, **t**, **cores** — spin controls bounded by the same constants
   `cli.parse_args` enforces, defaulting `cores` to the machine's logical count.
+* **verbose** — a tick box beside `cores`, controlling the log pane described
+  below. It is the window's equivalent of `-v`, and like `-v` it changes only
+  what is *shown*: the `.log` is written in full either way.
 * **?** — the parameter reference, which is `cli.USAGE` verbatim plus a
   description of what the tool produces. There is one description of the
   parameters, so the window and `--help` cannot disagree.
@@ -151,6 +154,19 @@ becomes `Stop!`, and two bars appear:
 Beneath them, one line of resource data: peak memory and elapsed time. Peak
 memory is genuinely all that is measured continuously (§3's summary list), and
 the line says only that rather than padding itself out.
+
+Beneath *that*, the run's own output, in a scrolling pane — the same lines a
+command-line run prints, and with **verbose** ticked, the lines `-v` adds to
+them. Anything the child writes outside the event stream (kernel chatter on
+stdout, anything on stderr) is shown whichever way the box is set: that is not
+`-v` output, it is the run reporting that something went sideways.
+
+**The tick box is the one control that stays live while a run is in flight**,
+and that is the point of it. The child is never given `-v`: every log line
+crosses as an event carrying whether a command-line run would have printed it
+(docs/algorithm.md §10), so verbosity here is a filter over output already
+received rather than a flag that had to be decided before the run started. Tick
+it forty minutes in and the pane fills in what was hidden.
 
 **Where a stage has no countable work — `export`'s single writer call, or
 `simplify` while its one dominant solid is unified — the second bar sweeps and

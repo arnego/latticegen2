@@ -1375,7 +1375,9 @@ program builds itself.
   carried inside it as `log` events rather than printed alongside: OCCT writes to
   file descriptor 1 below `sys.stdout`, so a mixed stream could not be parsed
   reliably. Every line is emitted with a flag saying whether `-v` would have
-  shown it, which makes verbosity a filter the reader can change *during* a run.
+  shown it, which makes verbosity a filter the reader can change *during* a
+  run — which the window's **verbose** tick box is (specification.md §3.1),
+  and it is the one control there that stays live while a run is going.
   And `stage_begin` **emits without logging** — a reader has to be told that
   `simplify` is what has been running for the last nineteen minutes, but nothing
   may be added to the `.log` for the front-end's benefit.

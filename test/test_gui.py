@@ -186,6 +186,21 @@ def test_a_console_flag_travels_with_every_line():
     assert list(state.lines) == [("quiet", False), ("loud", True)]
 
 
+def test_lines_seen_keeps_counting_after_the_backlog_is_full():
+    """What the window redraws its log pane on.
+
+    ``len(lines)`` stops changing the moment the deque saturates, so keying the
+    redraw on it would freeze the pane after 400 lines — at exactly the point in
+    a long run where there is most to read.
+    """
+    state = model.reduce_stream(
+        [event(progress.LOG, msg=f"line {i}", console=True)
+         for i in range(model.LOG_BACKLOG + 25)]
+    )
+    assert len(state.lines) == model.LOG_BACKLOG
+    assert state.lines_seen == model.LOG_BACKLOG + 25
+
+
 def test_an_indeterminate_tick_switches_the_sub_bar_and_keeps_its_label():
     state = model.reduce_stream([
         event(progress.STAGE_BEGIN, name="export", i=11, n=12),
@@ -522,3 +537,93 @@ def test_going_indeterminate_twice_does_not_double_the_animation(tk_root):
     before = bar._sweep
     bar._animate(stale)          # the callback left over from the first run
     assert bar._sweep == before, "a stale callback advanced the sweep"
+
+
+# --- the verbose tick box (specification.md §3.1) ----------------------------
+
+
+def test_the_tick_box_filters_the_log_pane_by_the_console_flag(tk_root):
+    """Unticked shows what a command-line run prints; ticked adds `-v`'s lines.
+
+    The filter is the *console* flag each line arrives with, so the window and
+    the command line cannot disagree about which lines are verbose-only.
+    """
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+    app.state.apply(progress.parse_line(event(
+        progress.LOG, msg="stage boundary: 8.1s", console=False)))
+    app.state.apply(progress.parse_line(event(
+        progress.LOG, msg="14 solid(s) written", console=True)))
+
+    app._render_log()
+    shown = app.log_text.get("1.0", "end").strip()
+    assert shown == "14 solid(s) written"
+
+    app.verbose_var.set(True)
+    tk_root.update()
+    shown = app.log_text.get("1.0", "end").strip().splitlines()
+    assert shown == ["stage boundary: 8.1s", "14 solid(s) written"]
+
+    app.verbose_var.set(False)
+    tk_root.update()
+    assert app.log_text.get("1.0", "end").strip() == "14 solid(s) written"
+
+
+def test_the_tick_box_stays_live_while_a_run_is_in_flight(tmp_path, tk_root):
+    """The one control that must *not* be frozen with the parameters.
+
+    Every line crosses as an event whichever way the box is set, so verbosity is
+    a filter over output already received (docs/algorithm.md §10). Disabling it
+    with the rest of the fields would turn it back into a flag that has to be
+    decided before the run starts — which is what the child never gets.
+    """
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+    assert app.verbose_check not in app.fields
+    for widget in app.fields:
+        widget.state(["disabled"])
+    assert "disabled" not in app.verbose_check.state()
+
+
+def test_a_new_line_reaches_the_pane_after_the_backlog_saturates(tk_root):
+    """The redraw is keyed on ``lines_seen``, not on the deque's length."""
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+    for i in range(model.LOG_BACKLOG):
+        app.state.add_line(f"line {i}", True)
+    app._render_log()
+    app.state.add_line("the newest line", True)
+    app._render_log()
+    assert app.log_text.get("1.0", "end").strip().endswith("the newest line")
+
+
+def test_stderr_and_kernel_chatter_are_shown_whatever_the_box_says(tmp_path, tk_root):
+    """They are not `-v` output; they are the run saying something went wrong."""
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+
+    class Child:
+        running = False
+        cancel_path = str(tmp_path / "x.cancel")
+        stderr_lines = ["Intel oneMKL FATAL ERROR"]
+
+        def __init__(self):
+            import queue
+
+            self.events = queue.Queue()
+
+        def returncode(self):
+            return 1
+
+        def clear_cancel(self):
+            pass
+
+    app.run = Child()
+    app.run.events.put(("stderr", "Intel oneMKL FATAL ERROR"))
+    app._closed_seen = 2
+    app._drain()
+    assert "Intel oneMKL FATAL ERROR" in app.log_text.get("1.0", "end")

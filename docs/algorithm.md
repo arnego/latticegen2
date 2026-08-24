@@ -523,7 +523,7 @@ the face count directly; `simplify` falls only 12.4 % on a 31 % smaller input,
 because its cost tracks the output it must produce — unchanged at 584,028 faces
 — more than the input it consumes. Its peak memory falls 26.3 %. Output
 identical throughout: 584,028 faces, 2,517,881 edges, 14 solids,
-330,354.002 mm³ (docs/specification.md §10).
+330,354.002 mm³ (docs/specification.md §11).
 
 The construction is *indexed*, not geometric:
 
@@ -958,22 +958,26 @@ of its *boundary* junctions clear the bar — interior ones are built by index,
 with no boolean and no slack — and reports the count, the fraction and the
 worst.
 
-**The fraction is what separates them, and the first version of this section
-claimed the maximum did.** Both surviving components contain a flagged junction:
-the dominant body holds the single worst one in the whole part (4.041e-01 at
-`(-4, -8, 2)`). With 2,348 boundary junctions in it, a body that large is almost
-certain to contain a bad one, so its maximum says nothing about it. How much of
-the body is described that way does:
+**On this part the fraction separates them where the maximum does not.** Both
+surviving components contain a flagged junction: the dominant body holds the
+single worst one in the whole part (4.041e-01 at `(-4, -8, 2)`). With 2,348
+boundary junctions in it, a body that large is almost certain to contain a bad
+one, so its maximum says nothing about it. How much of the body is described
+that way does:
 
 | component | volume | flagged | fraction |
 |---|---|---|---|
 | 0, the lattice proper | 27,864 mm³ | 82 / 2,348 | **3.5 %** |
 | 14, the island | 4.17 mm³ | 2 / 6 | **33.3 %** |
 
-**Neither figure is a bar, and the tenfold separation is one part's
-measurement.** A two-junction component reaches 100 % trivially, and every such
-component on this part is already below `t³` and dropped by §8 before this runs.
-A ranking is not a calibration, and treating it as one would be the mistake
+**Neither figure is a bar, and on the second part measured the ordering
+inverts.** `TD_HX_rehearsal_test` at `cc=5, t=1` flags its dominant body at
+**0.6 %** and two small bodies at **66.7 %** — and it is the 0.6 % body that
+§9's gate refuses, while both 66.7 % bodies tessellate cleanly
+(docs/specification.md §10). So the fraction is sharper than the maximum *on
+`SpiralTest`* and is not a general discriminator; a two-junction component
+reaches 100 % trivially, and this reading must never become a gate. A ranking is
+not a calibration, and treating it as one would be the mistake
 specification.md §11 records four times over.
 
 So this predicts and §9's export-truth gate decides. What it buys is the report
@@ -1000,27 +1004,33 @@ parameter** — orientation-safe, a pcurve being stored same-parameter with its
 edge — and compares the two surface points. Measured on the committed parts,
 against the `t` each is normally run at:
 
-| input | worst gap | max edge tolerance | gap ÷ `t` | ships? |
+| input | worst gap | shared edges | gap ÷ its usual `t` | writes output? |
 |---|---|---|---|---|
-| `80mm-test-ball.step` | 7.7e-14 | 1.0e-05 | 2e-14 | yes |
-| `test-cylinder.STEP` | 4.5e-04 | 2.5e-04 | 3.0e-04 | yes |
-| `TD_HX_rehearsal_test.step` | 8.1e-03 | 8.1e-03 | 8.1e-03 | yes |
-| `SpiralTest.step` | **4.2e-02** | 2.1e-02 | **4.2e-02** | **no** |
+| `80mm-test-ball.step` | 7.7e-14 | 5 | 2e-14 | yes |
+| `test-cylinder.STEP` | 4.5e-04 | 27 | 3.0e-04 | yes |
+| `SpiralTest.step` | 6.9e-03 | 33 | 6.9e-03 | yes |
+| `TD_HX_rehearsal_test.step` | **8.1e-03** | 1,043 | **8.1e-03** | **no** (§9) |
 
-The last row is the whole reason this exists. Two of that file's swept B-spline
-patches run **42.4 microns apart along the whole of their shared edge** —
-constant to six figures at every sample, and returned identically by projecting
-either face's boundary onto the other's surface. The two surfaces never meet. At
-`t = 1` mm the trim cuts that seam into faces of 0.010 to 0.226 mm², and the
-4.17 mm³ island built from six such junctions is the body §9's export-truth gate
-refuses.
+**What a gap does when it matters is take a region the trim then cuts into
+features smaller than itself.** The clearest instance is committed as
+`test/spiral-island-unwritable.brep`: two swept B-spline patches **42.4 microns
+apart along the whole of their shared edge** — constant to six figures at every
+sample, and returned identically by projecting either face's boundary onto the
+other's surface, so the two surfaces simply never meet. At `t = 1` mm the trim
+cuts that seam into faces of 0.010 to 0.226 mm², and the 4.17 mm³ island built
+from six such junctions is refused by §9's export-truth gate. That fixture is
+why this measurement exists, and it stays refused.
 
-**It reports and does not refuse.** The separation between the part that fails
-and the worst part that ships is a factor of five on two data points, which is a
-ranking and not a calibration — §11, and docs/specification.md §11's four
-recorded instances of confusing the two. `pipeline.SEAM_GAP_WARN_FRACTION`, a
-thousandth of `t`, decides only whether the line is worth writing, and §9's
-failure message cites the reading when it fired.
+**It reports and does not refuse, and the table above is why that is not
+timidity.** The two largest readings are within 18 % of each other and fall on
+opposite sides of the outcome column, so a bar placed between them would be
+fitted to two points. Worse, the correlation is not a diagnosis: the rehearsal
+is the part that fails **and none of the 26 defects in its output lies at the
+coordinate this check names** (docs/specification.md §10). So the reading orders
+the parts and does not explain any one of them.
+`pipeline.SEAM_GAP_WARN_FRACTION`, a thousandth of `t`, decides only whether the
+line is worth writing, and §9's failure message cites the reading as a family to
+consider rather than as a location to go to.
 
 **This is also the disproof of the repair that used to be proposed here.**
 docs/specification.md §11 records it in full: no re-fitting of a pcurve keeps
@@ -1171,7 +1181,7 @@ worker processes. And the two runs produce the *same shell*: 21,694 pieces,
 301,505 faces, 14 components and 18,496 interface rings either way, so the
 "route, not result" property above is measured rather than argued. What remained
 at that point was round 2's serial merge, which held the stage's mean CPU at
-1.16 cores while round 1 peaked at 5.96 (specification.md §10) — the two levers
+1.16 cores while round 1 peaked at 5.96 (specification.md §11) — the two levers
 below are what closed that gap.
 
 **Round 2 is now dispatched per component across the same shared worker pool
@@ -1692,12 +1702,16 @@ program builds itself.
   is that cost returning knowingly — for a correctness check this time, rather
   than for a count of solids.
 
-  What that buys is that no body ships unexamined. What it costs at rehearsal
-  scale is **not yet measured**: the check now writes, re-reads and tessellates
-  a 583,806-face solid, where the removed re-import only re-read one. Expect
-  tens of minutes and watch the peak memory — points are interned to integers
-  and edges counted by integer key precisely so this can be attempted at that
-  size at all. `export_truth_s` in the run summary is what to read.
+  What that buys is that no body ships unexamined, and on the rehearsal it is
+  immediately what the bound was hiding: the 583,894-face dominant body
+  tessellates into 1,427,670 triangles carrying **26** edges not used by exactly
+  two of them, so that part now writes nothing (docs/specification.md §10). What
+  it costs there is **2,068.9 s (34.5 min)**, taking `validate` from 3 m 44.9 s
+  to 36 m 32.2 s — the check writes, re-reads and tessellates that solid where
+  the removed re-import only re-read one. Peak memory does not move (18,951 MB
+  against 19,291 MB without it), because points are interned to integers and
+  edges counted by integer key precisely so a solid this size can be attempted
+  at all. `export_truth_s` in the run summary is what to read.
 
   **Past the bar the run fails (exit 4), naming the face and its position, and
   nothing is discarded.** Deleting material to make an export succeed is

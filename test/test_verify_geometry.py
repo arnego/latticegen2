@@ -110,3 +110,35 @@ def test_a_face_lying_on_the_boundary_is_a_tie_not_a_protrusion(outer):
 
     assert ev["contained"] is True, ev
     assert ev["cleared_at_mm"] <= vg.CONTAINMENT_TOL
+
+
+def test_a_real_protrusion_is_not_swallowed_by_the_distance_contradiction(outer):
+    """The load-bearing half: the contradiction must not become an off switch.
+
+    `surface_points_outside` now contradicts a point the tolerance sweep cannot
+    clear by measuring its exact distance to the body, because the sweep tops
+    out at 2e-03 mm and a 1e-09 mm tie reads there exactly like a 1 mm
+    protrusion. A contradiction that only ever exonerates would be worse than
+    no check at all (docs/testing.md, G10), so this pins the other direction:
+    a box genuinely sticking out measures a real distance and is still
+    condemned.
+    """
+    out = vg.surface_points_outside(box(10.0, 10.0, 10.0, at=(95.0, 20.0, 20.0)), outer)
+    assert out["contained"] is False
+    assert out["worst_distance_mm"] > vg.PROTRUSION_MIN_MM
+    assert out["worst_distance_at"] is not None, "and it says where"
+
+
+def test_the_distance_contradiction_exonerates_only_points_actually_on_the_body(outer):
+    """And the direction it was built for, stated as the quantity rather than a count.
+
+    A face flush with the boundary has its points *on* the body, so their exact
+    distance to it is zero however the classifier votes about which side they
+    are on. That is what makes the bar tight enough to be meaningless as a
+    calibration: the ties measured on `SpiralTest.step` sit at 0.000000 mm
+    (median 9.95e-10) against protrusions of 0.239 to 0.771 mm.
+    """
+    flush = box(10.0, 10.0, 10.0, at=(90.0, 20.0, 20.0))
+    ev = vg.surface_points_outside(flush, outer)
+    assert ev["contained"] is True
+    assert ev["worst_distance_mm"] <= vg.PROTRUSION_MIN_MM

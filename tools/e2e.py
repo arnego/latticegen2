@@ -7,6 +7,11 @@ run as a whole.
 
 Usage:
     python tools/e2e.py [--only smoke-fast,dense-lattice]
+
+`spiral-stress` is much the slowest, and most of that is the §6.2 checks
+rather than the run: its dominant body is past the exact containment cut's
+face bound, so containment falls back to point sampling over a 45,801-face
+solid. Use `--only` while iterating.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ MAIN = os.path.join(ROOT, "src", "main.py")
 TESTDIR = os.path.join(ROOT, "test")
 BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
+SPIRAL = os.path.join(TESTDIR, "SpiralTest.step")
 BALL_GOLDEN = os.path.join(TESTDIR, "80mm-test-ball-cc20t4-golden-sample.step")
 CYLINDER_GOLDEN = os.path.join(TESTDIR, "test-cylinder-cc10t1.5-golden-sample.step")
 
@@ -143,7 +149,12 @@ def outside_check(rep: Report, output: str, input_path: str, t: float) -> None:
                   f"{ev['cleared_at_mm']:g} mm (bar {vg.CONTAINMENT_TOL:g} mm)"
                   if ev.get("cleared_at_mm") is not None else
                   f"{ev['outside']} of {ev['sampled']} surface points still outside at "
-                  f"{vg.CONTAINMENT_TOL:g} mm")
+                  f"{vg.CONTAINMENT_SWEEP[-1]:g} mm; the {ev.get('probed', 0)} measured "
+                  f"exactly are {ev.get('worst_distance_mm', 0.0):.3e} mm from the input "
+                  f"at worst"
+                  + (f" (worst at {ev['worst_distance_at']})"
+                     if ev.get("worst_distance_at") else "")
+                  + f", against a {vg.PROTRUSION_MIN_MM:g} mm bar")
 
 
 GOLDEN_EXACT_BUDGET_S = 1800.0
@@ -340,12 +351,51 @@ def scenario_invalid_input(outdir: str) -> Report:
     return rep
 
 
+def scenario_spiral_stress(outdir: str) -> Report:
+    """The hardest committed part, and the one that was refused until 2026-08-24.
+
+    `SpiralTest.step` is a swept B-spline whose trims record tolerances two
+    orders above anything the other committed parts produce, it is the only
+    committed part whose dominant component tiles, and it is the only one that
+    exercises docs/algorithm.md §7.2 — the intersection that returns its own
+    operand, the local-block re-trim, and a junction dropped for containment.
+    Every one of those paths is silent on the other scenarios.
+
+    It was a fixture rather than a scenario while §9's export-truth gate refused
+    its output, correctly (docs/specification.md §11). Two things closed that:
+    a re-modelled input whose worst seam gap fell 4.24e-02 → 6.86e-03 mm, and a
+    writer that declares the greatest tolerance the shape carries rather than
+    the average. Committing it as a scenario is what stops either regressing
+    unnoticed.
+
+    **No golden sample**, deliberately: one is only worth having once a human
+    has inspected the output it pins (docs/testing.md), and `golden_check`
+    already skips and says so. **The containment check will fall back** — the
+    dominant body is past ``verify_geometry.CUT_MAX_FACES``, so expect the
+    `[NOTE]` saying the exact boolean was not attempted and a pass on the
+    weaker point-sampling check. That fallback is labelled wherever it is
+    reported and never turns an unmeasured result into a pass.
+    """
+    rep = Report("spiral-stress")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "spiral-stress.step")
+    proc, elapsed = run_generator(
+        ["-i", SPIRAL, "-cc", "5", "-t", "1", "-o", out, "--cores", "6"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+    rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        geometry_checks(rep, out, SPIRAL, 5.0, 1.0)
+    return rep
+
+
 SCENARIOS = {
     "smoke-fast": scenario_smoke_fast,
     "invalid-input": scenario_invalid_input,
     "progress-stream": scenario_progress_stream,
     "smoke-verified": scenario_smoke_verified,
     "dense-lattice": scenario_dense_lattice,
+    "spiral-stress": scenario_spiral_stress,
 }
 
 

@@ -988,6 +988,46 @@ a body the run has not yet built.
 | ...p99 | 3.71e-02 |
 | ...worst piece | 4.04e-01 |
 
+### 7.4 Whether the input's own faces meet, measured once at `import`
+
+A B-rep may record a gap between the two faces meeting at an edge and cover it
+with that edge's tolerance. That is legal, ordinary, and invisible at the scale
+the input was drawn. It stops being harmless when this tool cuts the region
+carrying it into features smaller than the gap.
+
+`occ.surface_seam_gaps` evaluates both faces' pcurves at the **edge's own
+parameter** — orientation-safe, a pcurve being stored same-parameter with its
+edge — and compares the two surface points. Measured on the committed parts,
+against the `t` each is normally run at:
+
+| input | worst gap | max edge tolerance | gap ÷ `t` | ships? |
+|---|---|---|---|---|
+| `80mm-test-ball.step` | 7.7e-14 | 1.0e-05 | 2e-14 | yes |
+| `test-cylinder.STEP` | 4.5e-04 | 2.5e-04 | 3.0e-04 | yes |
+| `TD_HX_rehearsal_test.step` | 8.1e-03 | 8.1e-03 | 8.1e-03 | yes |
+| `SpiralTest.step` | **4.2e-02** | 2.1e-02 | **4.2e-02** | **no** |
+
+The last row is the whole reason this exists. Two of that file's swept B-spline
+patches run **42.4 microns apart along the whole of their shared edge** —
+constant to six figures at every sample, and returned identically by projecting
+either face's boundary onto the other's surface. The two surfaces never meet. At
+`t = 1` mm the trim cuts that seam into faces of 0.010 to 0.226 mm², and the
+4.17 mm³ island built from six such junctions is the body §9's export-truth gate
+refuses.
+
+**It reports and does not refuse.** The separation between the part that fails
+and the worst part that ships is a factor of five on two data points, which is a
+ranking and not a calibration — §11, and docs/specification.md §11's four
+recorded instances of confusing the two. `pipeline.SEAM_GAP_WARN_FRACTION`, a
+thousandth of `t`, decides only whether the line is worth writing, and §9's
+failure message cites the reading when it fired.
+
+**This is also the disproof of the repair that used to be proposed here.**
+docs/specification.md §11 records it in full: no re-fitting of a pcurve keeps
+that body, because no curve on either surface closes a gap between the surfaces.
+The measurement costs 0.1 s on `SpiralTest` and 1.2 s on the rehearsal's 1,043
+shared edges.
+
 ---
 
 ## 8. Connectivity, the floating-body rule, and stitching
@@ -1730,7 +1770,36 @@ program builds itself.
   the default: a mismatched unit would silently corrupt every dimension rather
   than fail.
 * **Export.** `STEPControl_Writer` with `write.step.schema = AP214IS`, producing an
-  AP214 file per spec §5.
+  AP214 file per spec §5, and **`write.precision.mode = Greatest`** — the file's
+  single `UNCERTAINTY_MEASURE_WITH_UNIT` declares the largest tolerance the
+  shape actually carries rather than the average of them.
+
+  OCCT's default is *Average*, which on a lattice is pathological by
+  construction: ~99 % of the edges are exactly-built interior edges at
+  `Precision::Confusion`, so the average lands near the floor and the 1 % of
+  boundary trims carrying real tolerance are clamped below what their own
+  geometry needs. Measured on `SpiralTest.step`'s dominant solid — 45,801 faces,
+  and 111,618 triangles with **zero** non-manifold edges *in this process*:
+
+  | mode | declared | bad edges after a round trip |
+  |---|---|---|
+  | Average | 1.E-05 | **2** |
+  | Session 1e-4 | 1.E-04 | **2** |
+  | Session 5e-4 | 5.E-04 | 0 |
+  | **Greatest** | 1.E-02 | **0** |
+
+  Both modes declaring more than the offending edge's own 1.512e-04 mm fix it
+  and both declaring less do not, which identifies the mechanism rather than
+  correlating with it. Greatest is the only setting that is a property of the
+  shape instead of a guess about it, and the figure it produces is bounded by
+  the pipeline's own repairs — capped at a tenth of `t` (§8) — so it cannot
+  exceed that. The 80 mm ball still declares 1.E-05.
+
+  **It must be set after the writer is constructed.** Constructing a
+  `STEPControl_Writer` initialises the STEP session and resets `Interface_Static`
+  to its defaults, so a value set beforehand is discarded in any process that
+  has not already touched the STEP controller — which the pipeline had, because
+  it reads its input first, so the bug appeared only in a fresh process.
 * **Header rewrite.** STEP is plain text. After export, a small quote-aware pass
   sets `FILE_NAME`'s first field to the part name
   `<input_stem>+lattice+cc<cc>+t<t>` — spec §5's `+`-separated convention,
@@ -1977,6 +2046,8 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is finding the faces to repair, on a sound layer (§8, G11, G12) |
 | That scan run as a parallel batch filter over a compound (§8) | The second stage to use OCCT's own threads rather than this project's process pool, and for the same two reasons as `validate`: it returns a verdict rather than geometry, and the call has a flag. **44.1 s → 22.6 s** in a controlled pair, same 19 faces repaired, output byte-identical; chunked at 20,000 faces because the analyzer holds ~14 kB per face. The predicate has to be re-evaluated per face *as the repair reaches it*, not once up front: repairs widen shared tolerances, so a neighbour can be fixed for free, and asking too early counted 15 such faces as unrepaired |
 | Tolerance measured against feature size in the worker (§7.3) | Correctness, not speed, and a *localiser* rather than a gate. Costs one area and one centroid per trimmed piece, on the face list the trim already produced, and it is the last point at which the junction still has a name. Two of the six junctions forming `SpiralTest`'s unwritable 4.17 mm³ island rank 2nd and 4th of 2,404 pieces; combined with §8's components it names exactly one body where the piece-level reading names two dozen, at `connect` rather than at the end |
+| The input's own seam gaps measured once at `import` (§7.4) | Correctness reporting, not a gate. Two faces of a B-rep may sit apart and be held together by the edge's tolerance; this tool then cuts that region into features smaller than the gap. `SpiralTest.step`'s worst is **4.2e-02 mm**, constant along the edge, and it is why that part's island cannot be written — and why no pcurve re-fit repairs it (docs/specification.md §11). 0.1 s there, 1.2 s on the rehearsal's 1,043 shared edges. Reported at `import` and cited by §9's refusal, so a failure points at the model rather than only at a coordinate |
+| The exported file declares the shape's **greatest** tolerance, not the average (§9) | Correctness. AP214 carries one tolerance per file, and OCCT's Average default is pathological on a lattice — ~99 % exact interior edges pull it to the floor and clamp the boundary trims that actually need slack. `SpiralTest`'s dominant body tessellates with **0** broken edges in memory and came back from its own round trip with **2**; declaring the greatest tolerance takes it to **0** and lets the part ship. Free, and self-scaling: a body needing nothing declares nothing |
 | Export truth measured on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
@@ -2059,7 +2130,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind that budget: logical core count (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8), and the two export-truth measurements — tolerance against feature size (§7.3) and pcurve-versus-3D-curve deviation (§9) |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the two export-truth measurements — tolerance against feature size (§7.3) and pcurve-versus-3D-curve deviation (§9) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |

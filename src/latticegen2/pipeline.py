@@ -37,7 +37,7 @@ from .boundary import (
     resolve_interfaces,
     trim_boundary,
 )
-from .classify import Klass, classify_nodes, save_mesh, tessellate_surface
+from .classify import Klass, classify_nodes, stage_mesh, tessellate_surface
 from .cli import Args
 from .connect import build_components
 from .errors import InputGeometryError, OutputError, ProcessingError
@@ -109,19 +109,21 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
                 f"bounds must be defined by a solid, not by surfaces alone."
             )
         lo, hi = occ.bounding_box(body)
+        seam_gap = occ.surface_seam_gaps(body, bar=SEAM_GAP_WARN_FRACTION * args.t)
     rl.line(f"input bounding box: lo={np.round(lo, 4).tolist()} hi={np.round(hi, 4).tolist()}")
+    _report_seam_gaps(rl, seam_gap, args.t, stats)
 
     body_path = os.path.join(tmpdir, "input.brep")
     BRepTools.Write_s(body, body_path)
 
     with Timer(rl, "tessellate"):
         mesh = tessellate_surface(body, lp)
-    # Staged here rather than by `classify`, which writes the same file but only
+    # Staged here rather than by `classify`, which needs the same file but only
     # on its parallel path: `boundary` needs it either way, to ask whether a
     # trim left material outside the body without asking a boolean
-    # (docs/algorithm.md §7.2).
-    mesh_path = os.path.join(tmpdir, "classify_mesh.npz")
-    save_mesh(mesh, mesh_path)
+    # (docs/algorithm.md §7.2). `classify_nodes` is handed the path so the two
+    # stages share one staging write rather than making the same one twice.
+    mesh_path = stage_mesh(mesh, tmpdir)
     rl.line(
         f"surface mesh: {len(mesh.tris)} triangles, {len(mesh.verts)} vertices, "
         f"measured chordal deviation d={mesh.deviation:.5f} mm "
@@ -156,8 +158,8 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         with Timer(rl, "classify"):
             candidates = candidate_nodes(lp, lo, hi)
             classification = classify_nodes(
-                lp, mesh, candidates, tmpdir=tmpdir, pool=pool,
-                report=rl.substage,
+                lp, mesh, candidates, tmpdir=tmpdir, mesh_path=mesh_path,
+                pool=pool, report=rl.substage,
             )
         counts = classification.counts()
         rl.line(
@@ -187,6 +189,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         return _run_with_pool(
             args, rl, tmpdir, lp, tpl, tmesh, body, body_path, stats,
             interior_nodes, boundary_nodes, pool, mesh_path, mesh.deviation,
+            seam_gap,
         )
     finally:
         pool.__exit__(*sys.exc_info())
@@ -207,6 +210,7 @@ def _run_with_pool(
     pool: WorkerPool,
     mesh_path: str,
     mesh_deviation: float,
+    seam_gap,
 ) -> dict:
     """The boundary-through-export span of :func:`_run`, run under one shared pool.
 
@@ -527,7 +531,7 @@ def _run_with_pool(
                 f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
                 f"BRepCheck_Analyzer validity check."
             )
-        _check_export_truth(rl, result_solids, tmpdir, stats)
+        _check_export_truth(rl, result_solids, tmpdir, stats, seam_gap, args.t)
     rl.line(f"validity: all {len(result_solids)} solid(s) pass BRepCheck_Analyzer")
     stats["solids_written"] = len(result_solids)
     stats["lattice_volume_mm3"] = round(total_volume, 4)
@@ -679,8 +683,68 @@ def _check_component_tolerance(rl: RunLog, comps, keep_labels, pieces, stats: di
         )
 
 
+SEAM_GAP_WARN_FRACTION = 1e-3
+"""When an input body's own seam gap is worth saying out loud, against ``t``.
+
+A thousandth of the strut side: 4e-04 mm at ``t = 0.4``, 1e-03 mm at ``t = 1``.
+Nothing is refused on it — see :func:`latticegen2.occ.surface_seam_gaps` for
+why the committed parts do not support a bar — but a gap this size relative to
+the features the trim is about to cut is the thing to know about *before* an
+eight-minute run, rather than from a coordinate at the end of one.
+
+Measured, gap divided by the ``t`` each part is normally run at: the ball
+2e-14, the cylinder 3.0e-04, `TD_HX_rehearsal_test` 8.1e-03, `SpiralTest`
+4.2e-02. The first two are silent, the last two speak up, and only the last is
+actually refused later — which is the honest state of knowledge here.
+"""
+
+
+def _report_seam_gaps(rl: RunLog, gap, t: float, stats: dict) -> None:
+    """Say whether the *input*'s own faces meet, before anything is built on it.
+
+    docs/specification.md S11: the one body this project has produced that
+    cannot be written to STEP inherited a 42.4 micron gap between two of its
+    input's swept B-spline patches. That gap is invisible on the input's own
+    1,000 mm2 faces and fatal on the 0.01 mm2 ones the trim cuts out of the same
+    region, and it is the reason no re-fitting of a pcurve repairs that body:
+    there is no curve on either surface that closes a gap between the surfaces.
+
+    **Reported to the console, and never gated on.** The warning goes out with
+    ``console=True`` rather than under ``-v``, because it is the one line in the
+    run that is about the user's *file* rather than about this tool's progress,
+    and because the failure it predicts arrives minutes later carrying an output
+    coordinate that nobody can act on. Both places name a point in the input's
+    own coordinate system, which is what a modeller needs to find the seam.
+
+    It is not a gate. The separation between the part that fails and the worst
+    part that ships is a factor of five on two data points, and refusing on that
+    would refuse `TD_HX_rehearsal_test`, which has been inspected and accepted —
+    docs/algorithm.md §11's one unacceptable failure mode. The run continues
+    exactly as before.
+    """
+    if gap.edges == 0:
+        return
+    stats["input_seam_gap_mm"] = f"{gap.worst:.3e}"
+    if gap.worst <= SEAM_GAP_WARN_FRACTION * t:
+        rl.line(
+            f"input seam gaps: worst {gap.worst:.3e} mm over {gap.edges} shared "
+            f"edge(s) -- negligible against t={t:g} mm"
+        )
+        return
+    rl.line(
+        f"input seam gaps: the two faces meeting at one of this body's own edges "
+        f"are {gap.worst:.4e} mm apart at [{gap.where[0]:.3f}, {gap.where[1]:.3f}, "
+        f"{gap.where[2]:.3f}] -- {gap.worst / t:.2e} of t={t:g} mm, on {gap.over} "
+        f"of {gap.edges} shared edge(s). That is a property of the input file, "
+        f"not of this run: its own tolerance covers it, and the trim is about to "
+        f"cut that region into features smaller than the gap. If this run fails "
+        f"at `export truth`, that coordinate is the geometry to fix",
+        console=True,
+    )
+
+
 def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
-                        stats: dict) -> None:
+                        stats: dict, seam_gap=None, t: float = 0.0) -> None:
     """Can each output body survive being written to STEP? Measured, per body.
 
     `BRepCheck_Analyzer` asks whether a shape agrees with itself to within the
@@ -766,7 +830,29 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
             f"(docs/algorithm.md S9). The run stops rather than writing it: "
             f"nothing has been discarded, the temporary folder is kept, and the "
             f"`connect` stage above named the junctions this body was built from."
+            + _seam_gap_note(seam_gap, t)
         )
+
+
+def _seam_gap_note(gap, t: float) -> str:
+    """Name the input's own seam gap in an export-truth failure, when it is big.
+
+    The failure above gives a coordinate in the *output*; this gives the reason,
+    in the *input*, and it is the difference between a user re-running with
+    different parameters and a user fixing their model. `SpiralTest.step` at
+    ``cc=5, t=1`` is the whole case: a 4.2406e-02 mm gap between two of its own
+    swept patches, cut into 0.01 mm2 faces by a 1 mm strut.
+    """
+    if gap is None or t <= 0.0 or gap.worst <= SEAM_GAP_WARN_FRACTION * t:
+        return ""
+    return (
+        f" Note also the `import` stage's reading: two faces of the *input* body "
+        f"are {gap.worst:.4e} mm apart at their shared edge "
+        f"[{gap.where[0]:.3f}, {gap.where[1]:.3f}, {gap.where[2]:.3f}], "
+        f"{gap.worst / t:.2e} of t={t:g} mm. A gap between two surfaces cannot be "
+        f"repaired by re-fitting a curve on either of them, so where that region "
+        f"is what was trimmed, the input is what has to change."
+    )
 
 
 UNIFY_VOLUME_TOL = 1e-4

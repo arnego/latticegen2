@@ -458,102 +458,6 @@ that motivated it is a ranking, not a calibration, and the second part is where
 you find out."""
 
 
-class CurveOnSurface(NamedTuple):
-    """How far a shape's pcurves stray from their own 3D curves."""
-
-    worst: float
-    """Largest max-deviation over all edge/face pairs, in mm. Reported only."""
-    ratio: float
-    """That deviation against the feature carrying it, worst pair. Reported
-    only — :data:`LOOSE_AREA_FRACTION_MAX` records the measurement showing that a
-    bar on this column refuses a sound body and passes a broken one."""
-    loose_area_fraction: float
-    """**The quantity the gate reads.** Share of the shape's surface area on
-    faces that are loose at :data:`LOOSE_PCURVE_RATIO`."""
-    loose_faces: int
-    """How many faces that is."""
-    over_tolerance: int
-    """Pairs whose deviation exceeds the edge's own recorded tolerance.
-
-    OCCT's own predicate — the one ``BOPAlgo_ArgumentAnalyzer``'s
-    ``CurveOnSurfaceMode`` reports as ``InvalidCurveOnSurface`` — reproduced
-    here so the two can be compared face for face (``test_export_truth.py``).
-    Reported, never gated on: see ``ratio``."""
-    pairs: int
-    """Edge/face pairs carrying a pcurve, i.e. the pairs actually measured."""
-    where: list[tuple[float, float, float]]
-    """Sample midpoints of the offending edges, for the failure message."""
-    where_worst: tuple[float, float, float]
-    """Midpoint of the edge behind ``ratio``, so a failure names one place."""
-    face_area: float
-    """Area of the face behind ``ratio``, in mm²."""
-
-
-#: Offending edge positions reported when the gate fires. Enough to localise the
-#: region without turning one failure into a wall of coordinates — the same
-#: reasoning behind §8's sampled free-edge positions.
-CURVE_ON_SURFACE_SAMPLES = 10
-
-LOOSE_PCURVE_RATIO = 1e-3
-"""When one face counts as *loosely described*, against its own feature size.
-
-Dimensionless: a face is loose when some edge's pcurve strays further than this
-times ``sqrt`` of the face's own area from that edge's 3D curve. An absolute
-figure in millimetres cannot express this — 2e-03 mm is a defect on a
-0.05 mm² face and nothing at all on a 100 mm² one, and this tool's legal
-parameters span both.
-
-This is not a bar on its own. It is the predicate
-:data:`LOOSE_AREA_FRACTION_MAX` then measures the *extent* of."""
-
-
-LOOSE_AREA_FRACTION_MAX = 1e-2
-"""How much of a body's surface may be loosely described before it is refused.
-
-The gate :func:`latticegen2.pipeline._check_export_truth` enforces before export
-and ``tools/verify_geometry.curve_on_surface`` re-applies to the written file —
-one constant rather than two, so they cannot drift apart.
-
-**The worst face is the wrong quantity, and measurement is what settled that.**
-`SpiralTest.step` at ``cc=5, t=1`` produces exactly two output solids: the
-27,864 mm³ lattice, which exports and tessellates cleanly, and a 4.17 mm³
-floating island whose 135 triangles carry 9 non-manifold edges and 4 crossings
-against the lattice's 105,628 carrying none. By worst face the **sound** body
-scores worse:
-
-============================  ============  =============  ==============
-solid                         worst dev     worst ratio    over tolerance
-============================  ============  =============  ==============
-0, the lattice, 45,861 faces  4.90e-03 mm   **3.07e-02**   4 / 193,310
-1, the island, 36 faces       2.12e-02 mm   **2.45e-02**   0 / 192
-============================  ============  =============  ==============
-
-A bar on that column refuses the whole part, which docs/algorithm.md §11 rules
-out more firmly than it asks for any gate. What actually separates them is how
-much *of the body* is loose — a handful of sliver faces in a lattice of 45,861
-is a local blemish; the same description over a body of 36 faces is the body:
-
-===========================================  ===========  ===========  ======
-statistic                                    lattice      island       ratio
-===========================================  ===========  ===========  ======
-fraction of **area** loose at 1e-3           **5.6e-04**  **4.0e-01**  706x
-fraction of pairs loose at 1e-3              2.7e-04      4.2e-02      152x
-fraction of pairs loose at 3e-3              7.0e-05      2.6e-02      387x
-===========================================  ===========  ===========  ======
-
-Area is the one used: it is what "how much of this body" means physically, and
-it does not count a four-edged face four times. Measured end to end on the real
-run, the lattice carries 41 loose faces of 44,059 and the island 3 of 36 — so at
-**1e-2** the bar sits **18x above** the sound body and **40x below** the
-unwritable one, and the two committed scenarios measure exactly zero.
-
-Worth stating plainly: this is calibrated on the one part this project has that
-produces an unwritable body, so it is a bar with measured margin rather than a
-law. The committed scenarios sit far below it (see ``test_export_truth.py``),
-and the failure mode if it is ever wrong is a refused run with the temp folder
-kept — never material silently missing from the output."""
-
-
 def curve_on_surface_deviations(
     shape: TopoDS_Shape, samples: int = CURVE_ON_SURFACE_SAMPLES
 ) -> CurveOnSurface:
@@ -636,6 +540,130 @@ def curve_on_surface_deviations(
     return CurveOnSurface(worst, ratio, fraction, loose_faces, over, pairs,
                           where, where_worst, worst_area)
 
+
+
+class SurfaceSeamGap(NamedTuple):
+    """How far apart two faces' surfaces are along an edge they share."""
+
+    worst: float
+    """Largest separation found, in mm. Zero on a body whose faces meet."""
+    where: tuple[float, float, float]
+    """A point on the worse side of the widest gap, so it can be inspected."""
+    edges: int
+    """Shared edges measured, i.e. edges with exactly two faces and two pcurves."""
+    over: int
+    """How many of them exceed ``bar``."""
+
+
+_NO_SEAM_GAP = SurfaceSeamGap(0.0, (0.0, 0.0, 0.0), 0, 0)
+
+#: Samples per edge. The gap this exists to find is a modelling error rather
+#: than a wobble, so it is essentially constant along the edge that carries it —
+#: measured 4.2406e-02 mm at all 17 samples of `SpiralTest`'s worst seam, to six
+#: figures. Seventeen is therefore generous rather than tuned.
+SEAM_GAP_SAMPLES = 17
+
+
+def surface_seam_gaps(
+    shape: TopoDS_Shape, bar: float = 0.0, samples: int = SEAM_GAP_SAMPLES
+) -> SurfaceSeamGap:
+    """Do the two faces meeting at each edge actually *meet*?
+
+    For every edge with exactly two faces, both faces' pcurves are evaluated at
+    the same edge parameter and the two surface points compared. A B-rep is
+    allowed to record a gap here and cover it with the edge's tolerance; that is
+    legal, ordinary, and what almost every CAD file does at the micron scale.
+
+    **It stops being harmless when a later operation cuts the region carrying it
+    into features smaller than the gap**, which is exactly what this tool does
+    to its input. Measured on the committed parts, with the run each is normally
+    given:
+
+    =============================  ============  ==============  ==========
+    input                          worst gap     max edge tol    ships?
+    =============================  ============  ==============  ==========
+    `80mm-test-ball.step`          7.7e-14       1.0e-05         yes
+    `test-cylinder.STEP`           4.5e-04       2.5e-04         yes
+    `TD_HX_rehearsal_test.step`    8.1e-03       8.1e-03         yes
+    `SpiralTest.step`              **4.2e-02**   2.1e-02         **no**
+    =============================  ============  ==============  ==========
+
+    The last row is a real defect in that file: two swept B-spline patches that
+    run **42.4 microns apart along the whole of their shared edge** — constant to
+    six figures at every sample, and confirmed independently by projecting each
+    face's boundary onto the other's surface, which returns the same 4.2406e-02
+    both ways. The two surfaces never meet; a 2.12e-02 mm edge tolerance is what
+    holds the model together there. At ``t = 1`` mm the lattice cuts that seam
+    into faces of 0.01 to 0.23 mm2, where the same gap is a hole, and the body
+    built from them is the one docs/specification.md S11's export-truth gate
+    refuses.
+
+    **This is why re-fitting a pcurve cannot repair that body**, and the
+    measurement is here so that conclusion is reproducible rather than
+    remembered. No curve on either surface can close a gap between the surfaces
+    themselves.
+
+    ``bar`` counts how many edges exceed it and is otherwise not used: nothing
+    here refuses anything. The separation between the part that fails and the
+    part that ships is a factor of five on two data points, which is a ranking
+    and not a calibration — docs/specification.md S11 records what happens when
+    those are confused.
+
+    Evaluating both pcurves at the **edge**'s own parameter is what makes this
+    orientation-safe: a pcurve is stored same-parameter with the edge, so the
+    two are compared at corresponding points whether or not the faces traverse
+    the edge the same way.
+    """
+    # One sample is the edge's midpoint, not its start: `samples - 1` divisions
+    # of the range is the right arithmetic for two or more, and undefined for
+    # one. `samples` is documented as tunable, so the single-sample case is
+    # answered rather than left to divide by zero.
+    steps = max(1, samples - 1)
+    ancestors = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(
+        shape, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, ancestors
+    )
+    worst = 0.0
+    where = (0.0, 0.0, 0.0)
+    measured = 0
+    over = 0
+    for i in range(1, ancestors.Extent() + 1):
+        edge = TopoDS.Edge_s(ancestors.FindKey(i))
+        if BRep_Tool.Degenerated_s(edge):
+            continue
+        faces = list(ancestors.FindFromIndex(i))
+        if len(faces) != 2:
+            continue
+        fa, fb = TopoDS.Face_s(faces[0]), TopoDS.Face_s(faces[1])
+        sa, sb = BRep_Tool.Surface_s(fa), BRep_Tool.Surface_s(fb)
+        if sa is None or sb is None:
+            continue
+        ca = BRep_Tool.CurveOnSurface_s(edge, fa, 0.0, 0.0)
+        cb = BRep_Tool.CurveOnSurface_s(edge, fb, 0.0, 0.0)
+        if ca is None or cb is None:
+            continue
+        first, last = BRep_Tool.Range_s(edge)
+        measured += 1
+        widest = 0.0
+        widest_at = None
+        for k in range(samples):
+            t = (first + 0.5 * (last - first) if samples == 1
+                 else first + (last - first) * k / steps)
+            ua, ub = ca.Value(t), cb.Value(t)
+            pa = sa.Value(ua.X(), ua.Y())
+            gap = pa.Distance(sb.Value(ub.X(), ub.Y()))
+            if gap > widest:
+                widest = gap
+                widest_at = pa
+        if bar > 0.0 and widest > bar:
+            over += 1
+        if widest > worst:
+            worst = widest
+            where = (round(widest_at.X(), 4), round(widest_at.Y(), 4),
+                     round(widest_at.Z(), 4))
+    if measured == 0:
+        return _NO_SEAM_GAP
+    return SurfaceSeamGap(worst, where, measured, over)
 
 #: No size bound, deliberately. A solid this cannot afford to measure used to be
 #: reported *unmeasured*, which put the dominant body of every production part —
@@ -1470,16 +1498,88 @@ def read_step(path: str) -> TopoDS_Shape:
     return shape
 
 
+#: OCCT's ``write.precision.mode`` value for *Greatest* -- declare the file's
+#: single uncertainty as the largest tolerance actually recorded anywhere in the
+#: shape, rather than as the average of them all.
+WRITE_PRECISION_GREATEST = 1
+
+
 def write_step(shape: TopoDS_Shape, path: str, part_name: str) -> None:
     """Write ``shape`` as an AP214 STEP file in millimetres.
 
     ``part_name`` is applied to the file's header by
     :func:`latticegen2.stepout.rewrite_step_header`, which runs after this.
+
+    **The file's one declared tolerance is the greatest the shape carries, not
+    the average.** AP214 has room for exactly one
+    ``UNCERTAINTY_MEASURE_WITH_UNIT`` per representation context, against one
+    tolerance per vertex, per edge and per face in an OCCT B-rep, and the reader
+    re-derives all of them from that single number. OCCT's default is *Average*,
+    which on a lattice is pathological by construction: ~99 % of the edges are
+    exactly-built interior edges at ``Precision::Confusion``, so the average
+    lands near 1e-05 mm and the 1 % of boundary trims carrying real tolerance
+    are silently clamped. The geometry those trims describe then changes on
+    import, by an amount nothing in the file bounds.
+
+    **Measured on the body that made this change**, `SpiralTest.step`'s dominant
+    solid at ``cc=5, t=1`` -- 45,801 faces, and a solid that tessellates into
+    111,618 triangles with **zero** non-manifold edges *in this process*:
+
+    ==============  ======================  ==================
+    mode            declared uncertainty    bad edges after RT
+    ==============  ======================  ==================
+    Average         1.E-05                  **2**
+    Session 1e-4    1.E-04                  **2**
+    Session 5e-4    5.E-04                  0
+    **Greatest**    1.E-02                  **0**
+    ==============  ======================  ==================
+
+    The two defects sat on one 0.037 mm2 sliver whose edge records 1.512e-04 mm
+    and whose pcurve strays 3.53e-05 mm -- comfortably consistent while the
+    tolerance survives, and inconsistent once it is clamped to a figure below
+    it. Both modes that declare *more* than 1.512e-04 fix it and both that
+    declare less do not, which identifies the mechanism rather than merely
+    correlating with it.
+
+    **Why Greatest rather than a tuned constant.** It is the only setting that
+    is a property of the shape instead of a guess about it: it declares what
+    this body actually needs, so a body needing nothing declares nothing. The
+    figure it produces is bounded by the pipeline's own repairs, which are
+    capped at a tenth of ``t`` (docs/algorithm.md S8), so it can never exceed
+    that -- 1e-02 mm here against a 1 mm strut, forty times below the smallest
+    feature the CLI accepts.
+
+    **docs/specification.md S11 recorded this lever as tried and useless, and
+    that entry was measured against the wrong quantity** -- the count of
+    edge/face pairs past their own recorded tolerance, which is one of the three
+    proxies the same section later disproved as a gate. Against the gate that
+    actually decides, a tessellation of the written body, it is the difference
+    between a part that ships and a part that is refused.
     """
+    writer = STEPControl_Writer()
+    # **Every one of these is set after the writer exists, deliberately.**
+    # Constructing one initialises the STEP session, and that initialisation
+    # resets `Interface_Static` to its defaults -- so a value set beforehand is
+    # silently discarded in any process that has not already touched the STEP
+    # controller. It cost a run to find: the pipeline reads its input first, so
+    # the session was already up and the setting held, while the same call in a
+    # fresh process wrote an Average file and reported `write.precision.mode`
+    # still reading 0.
+    #
+    # The reset does not distinguish between statics, so the schema, the part
+    # name and the unit are on exactly the same footing and are set here too.
+    # Only `write.precision.mode` was ever observed wrong because the other
+    # three happen to survive on their defaults in this project's own runs --
+    # `AP214IS` and `MM` *are* OCCT's defaults, and the pipeline had already
+    # opened the session by reading its input. A fresh process writing without
+    # reading first would have got OCCT's default product name into the file's
+    # PRODUCT entity, where specification.md S5 asks for the part name and
+    # `stepout.rewrite_step_header` -- which only touches FILE_NAME and
+    # FILE_DESCRIPTION -- would not have put it back.
     _configure_step_units()
     Interface_Static.SetCVal_s("write.step.schema", "AP214IS")
     Interface_Static.SetCVal_s("write.step.product.name", part_name)
-    writer = STEPControl_Writer()
+    Interface_Static.SetIVal_s("write.precision.mode", WRITE_PRECISION_GREATEST)
     status = writer.Transfer(shape, STEPControl_StepModelType.STEPControl_AsIs)
     if status != IFSelect_ReturnStatus.IFSelect_RetDone:
         raise OutputError(f"STEP transfer failed (OCCT status {status}): {path}")

@@ -370,6 +370,28 @@ CONTAINMENT_DEFLECTION = 0.05
 sampled by :func:`surface_points_outside`. Fine enough that a protrusion of
 `CONTAINMENT_TOL` cannot slip between samples on a strut of side `t >= 0.4` mm."""
 
+PROTRUSION_MIN_MM = 1e-6
+"""Exact point-to-body distance below which a point outside is a tie, not material.
+
+A point *on* the input's boundary cannot be material outside it, whatever the
+classifier says about which side it is on. This is the bar on the exact
+distance, and it is deliberately tight rather than tuned: the ties measured on
+`SpiralTest.step` sit at 0.000000 mm (median 9.95e-10), and the genuine
+protrusions docs/algorithm.md S7.2 was built to remove measured 0.239, 0.771 and
+0.380 mm. Eight orders separate them, so nothing here rests on where in that gap
+the bar sits -- which is the property docs/specification.md S11 keeps asking for
+and rarely gets.
+
+It is also the *only* bar that can be tight. The classifier sweep cannot be,
+because it is asking a tolerance question about a point lying on a surface, and
+its answer there is a coin flip an unclosed input seam can bias."""
+
+#: Points measured exactly when the sweep cannot clear them. `BRepExtrema` is
+#: ~milliseconds per point against a 13-face body, and a real containment
+#: failure shows up in the first few -- the residuals docs/algorithm.md S7.2
+#: found were whole junction faces, hundreds of points each, not singletons.
+DISTANCE_PROBE_MAX = 200
+
 CONTAINMENT_SWEEP = (1e-6, 1e-5, 1e-4, 1e-3, 2e-3)
 """Tolerances tried in order, so the result reports *how far* out the worst point
 is rather than only whether it cleared one bar."""
@@ -384,6 +406,25 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
     which nothing is outside, which is an upper bound on how far the worst point
     protrudes.
 
+    A point the sweep cannot clear is then **contradicted rather than believed**:
+    its exact distance to ``body`` is measured with ``BRepExtrema_DistShapeShape``
+    — no tolerance, no boolean — and reported as ``worst_distance_mm``. That is
+    the quantity that separates a tie from a protrusion, and the classifier's own
+    answer cannot, being a tolerance question asked about a point lying on a
+    surface.
+
+    **A candidate the distance probe did not answer for is not contained.**
+    ``contained`` is only ever True on that arm when every point the sweep left
+    over was actually measured -- ``probed == unswept`` -- and every measurement
+    came back a tie. Two ways it can be less: a ``BRepExtrema_DistShapeShape``
+    that does not report ``IsDone``, and a candidate set longer than
+    :data:`DISTANCE_PROBE_MAX`, of which only the first slice is probed. Both
+    used to leave ``worst_distance_mm`` at its initial 0.0 and read as a pass,
+    which is the "unmeasured must never read as measured" rule ``material_outside``
+    beside this was written to obey (docs/testing.md), broken on the check that
+    stands in for it. ``unprobed`` reports the shortfall so a caller can say
+    which of the two it is.
+
     **This is weaker than the exact cut and must be reported as such.** It samples
     the boundary rather than integrating the volume, and it is sound *here*
     because a lattice's material is everywhere within `t/2` of its own surface, so
@@ -391,7 +432,9 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
     specific to this geometry, not general.
     """
     from OCP.BRep import BRep_Tool
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
     from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.BRepExtrema import BRepExtrema_DistShapeShape
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
     from OCP.TopAbs import TopAbs_ShapeEnum, TopAbs_State
     from OCP.TopLoc import TopLoc_Location
@@ -410,7 +453,9 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
             p = tri.Node(i).Transformed(trsf)
             pts.append((p.X(), p.Y(), p.Z()))
     if not pts:
-        return {"sampled": 0, "outside": None, "cleared_at_mm": None}
+        return {"sampled": 0, "outside": None, "cleared_at_mm": None,
+                "unswept": 0, "worst_distance_mm": 0.0, "worst_distance_at": None,
+                "probed": 0, "contained": False}
     pts = np.unique(np.array(pts), axis=0)
 
     # Each tolerance re-tests only what the previous one called OUT, which is
@@ -440,12 +485,59 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
             cleared = tol
             break
 
+    # **A point the sweep cannot clear is contradicted, not believed.** The
+    # sweep tops out at CONTAINMENT_SWEEP[-1], so past it a 1e-09 mm tie and a
+    # 1 mm protrusion report identically -- and the classifier does return OUT
+    # for points that are exactly on the boundary, which is the failure mode
+    # docs/testing.md already records ("nothing was actually wrong with the
+    # geometry; the check simply could not say so").
+    #
+    # `BRepExtrema_DistShapeShape` answers the question the classifier is being
+    # asked to approximate, without a tolerance and without a boolean: how far
+    # is this point from the body? Material outside has somewhere to be, so a
+    # real protrusion measures a real distance. Measured on `SpiralTest.step`
+    # at cc=5, t=1, the 15 points its sweep could not clear are 0.000000 mm from
+    # the input, median 9.95e-10 -- against the 0.239 to 0.771 mm the genuine
+    # protrusions of docs/algorithm.md S7.2 measured. Eight orders apart.
+    # **A probe that did not answer is not a probe that said "fine".** Two ways
+    # this arm can measure less than it was asked to, and both have to reach the
+    # verdict rather than the initial value of `worst_mm`: a
+    # `BRepExtrema_DistShapeShape` that does not report `IsDone`, and a candidate
+    # set longer than DISTANCE_PROBE_MAX, of which only the first slice is
+    # measured at all. Counting successful probes is what separates "all of them
+    # are ties" from "none of them was measured" -- the same distinction
+    # `material_outside` draws when it reports a solid unmeasured rather than
+    # passing it (docs/testing.md), on the check that stands in for it.
+    worst_mm = 0.0
+    worst_at = None
+    probed = 0
+    for p in candidates[:DISTANCE_PROBE_MAX]:
+        vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*p)).Vertex()
+        probe = BRepExtrema_DistShapeShape(vertex, body)
+        probe.Perform()
+        if not probe.IsDone():
+            continue
+        probed += 1
+        if probe.Value() > worst_mm:
+            worst_mm = probe.Value()
+            worst_at = (round(float(p[0]), 4), round(float(p[1]), 4),
+                        round(float(p[2]), 4))
+
     return {
         "sampled": int(len(pts)),
         "outside": counts[CONTAINMENT_SWEEP[0]],
         "counts": counts,
         "cleared_at_mm": cleared,
-        "contained": cleared is not None and cleared <= CONTAINMENT_TOL,
+        "unswept": len(candidates),
+        "worst_distance_mm": worst_mm,
+        "worst_distance_at": worst_at,
+        "probed": probed,
+        "unprobed": len(candidates) - probed,
+        "contained": (
+            (cleared is not None and cleared <= CONTAINMENT_TOL)
+            # Every candidate measured, and every measurement a tie.
+            or (probed == len(candidates) and worst_mm <= PROTRUSION_MIN_MM)
+        ),
     }
 
 

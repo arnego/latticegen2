@@ -35,6 +35,7 @@ from latticegen2.boundary import trim_junction
 TESTDIR = os.path.dirname(os.path.abspath(__file__))
 SPIRAL = os.path.join(TESTDIR, "SpiralTest.step")
 BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
+CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
 ISLAND = os.path.join(TESTDIR, "spiral-island-unwritable.brep")
 
 
@@ -323,11 +324,25 @@ def test_repairing_the_island_is_what_makes_it_invisible(tmp_path):
 
 
 def test_the_island_does_not_survive_being_written(tmp_path):
-    """The same measurement without the repair, so the fixture cannot rot."""
+    """The same measurement without the repair, so the fixture cannot rot.
+
+    ``(148, 10)`` is the body's **own** tessellation, not damage the write did:
+    since :func:`occ.write_step` declares the greatest tolerance the shape
+    carries rather than the average of them, the round trip now reproduces what
+    the solid already is. Measured, this fixture in memory: 148 triangles, 10
+    edges not used by exactly two of them. Under the old Average default the
+    file under-declared and the figure came home at ``(147, 11)`` — one defect
+    of which the writer had added.
+
+    That is the sharpest statement of what this fixture is for. Its 42.4 micron
+    surface gap is not an export artefact and no writer setting reaches it, so
+    it stays refused while `SpiralTest.step`'s own bodies — whose only obstacle
+    *was* the under-declared tolerance — now ship.
+    """
     triangles, bad = occ.exported_mesh_defects(
         load_island(), str(tmp_path / "island.step")
     )
-    assert (triangles, bad) == (147, 11)
+    assert (triangles, bad) == (148, 10)
 
 
 def test_a_sound_body_survives_being_written(tmp_path):
@@ -392,16 +407,20 @@ def test_a_fat_trim_is_flagged_at_the_source():
     """And the warning bar is reachable, or it is untested decoration.
 
     `SpiralTest.step` is committed for exactly this: its swept B-spline surface
-    makes the boolean fit trim curves two orders fatter than anything the other
-    parts produce. Junction (-6, -10, 1) is one of the six forming the 4.17 mm^3
-    island that cannot be written to STEP, and it is the 2nd worst of the part's
-    2,404 boundary pieces — flagged at the end of `boundary`, before the
-    junction graph that turns it into a body even exists.
+    makes the boolean fit trim curves against a near-tangent, and junction
+    (-10, -2, 0) is the worst of the part's 2,349 boundary junctions at
+    4.497e-01 — 6.657e-04 mm of recorded tolerance on a face of 0.000002 mm^2.
+
+    **A flagged junction is not a defect**, which is the reason this reading
+    reports rather than refuses: this part now completes and writes a valid
+    STEP with 56 of its junctions above the bar. What the reading buys is a
+    name and a coordinate at the end of `boundary`, minutes before anything
+    downstream exists to be measured.
     """
     lp = lattice_params(5.0, 1.0)
     tpl = build_template(lp)
     body = occ.read_step(SPIRAL)
-    pos = lattice_nodes(lp, [(-6, -10, 1)])[0]
+    pos = lattice_nodes(lp, [(-10, -2, 0)])[0]
     trim = trim_junction(lp, tpl, pos, body)
     assert trim.pieces, "the fixture junction must actually be trimmed"
     worst = max(r.ratio for r in trim.tolerances)
@@ -409,3 +428,240 @@ def test_a_fat_trim_is_flagged_at_the_source():
         "this junction is why the warning bar exists; if it no longer clears it "
         "the bar or the trim has changed and both need re-deriving"
     )
+
+
+# --- why the island cannot be repaired at the source -------------------------
+
+
+def test_a_sound_body_has_no_seam_gap():
+    """The control. Two faces of a box meet exactly, so there is nothing to find."""
+    box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    gap = occ.surface_seam_gaps(box)
+    assert gap.edges == 12
+    assert gap.worst < 1e-9
+
+
+def test_the_committed_spiral_is_measured_where_its_predecessor_failed():
+    """The seam gap is read from the real file, and the reading is what warns.
+
+    The `SpiralTest.step` committed before 2026-08-24 had two swept B-spline
+    patches running **42.4 microns apart** along the whole of their shared edge
+    — held together by a 2.12e-02 mm edge tolerance, invisible on its own
+    886 mm2 and 1,018 mm2 faces, and fatal on the 0.01 mm2 ones the trim cut out
+    of the same region. That is the defect this measurement exists to name, and
+    the replacement part closes it by a factor of six.
+
+    Pinned as a **bound rather than a value**, deliberately: what must not
+    regress is that the reading is taken and is small, not that the file stays
+    byte-identical. It is still above :data:`pipeline.SEAM_GAP_WARN_FRACTION`
+    at ``t = 1``, so this part still reports its seam — and it now completes and
+    writes a valid STEP anyway, which is exactly why the reading is a warning
+    and not a gate.
+    """
+    from latticegen2.pipeline import SEAM_GAP_WARN_FRACTION
+
+    gap = occ.surface_seam_gaps(occ.read_step(SPIRAL), bar=1e-3)
+    assert gap.worst < 1e-2, (
+        "the committed part regressed to the 4.24e-02 mm seam gap that made its "
+        "predecessor's island unwritable"
+    )
+    assert gap.worst > SEAM_GAP_WARN_FRACTION * 1.0, (
+        "and it is still the part that exercises the warning, or the warning is "
+        "untested decoration"
+    )
+
+
+def test_the_parts_that_ship_are_ranked_below_the_part_that_does_not():
+    """And the ranking is a ranking, not a bar — the ball is the far end of it."""
+    ball = occ.surface_seam_gaps(occ.read_step(BALL))
+    spiral = occ.surface_seam_gaps(occ.read_step(SPIRAL))
+    assert ball.worst < 1e-9 < spiral.worst
+
+
+def test_a_material_input_gap_is_reported_to_the_user_with_its_coordinates(tmp_path):
+    """A defective input has to be named, on the console, in its own coordinates.
+
+    This is the behaviour the whole seam-gap measurement exists to deliver, and
+    it is pinned rather than left to a docstring: the one thing a modeller can
+    act on is *where in their file* the two faces fail to meet. The line goes
+    out with ``console=True`` rather than under ``-v``, because a user who did
+    not ask for verbose output still needs to hear that the run is about to
+    trim a region their model does not close.
+
+    Both halves are asserted — that it reaches the console, and that it carries
+    the point — because either alone is useless.
+    """
+    from latticegen2.pipeline import _report_seam_gaps
+    from latticegen2.runlog import RunLog
+
+    shown = []
+
+    class Recorder(RunLog):
+        def line(self, msg, console=None):
+            shown.append((msg, console))
+
+    rl = Recorder(str(tmp_path / "run.log"), verbose=False)
+    stats = {}
+    _report_seam_gaps(
+        rl, occ.SurfaceSeamGap(4.2406e-2, (-22.044, -8.786, -30.0), 30, 10), 1.0, stats
+    )
+    assert len(shown) == 1
+    msg, console = shown[0]
+    assert console is True, "a user without -v must still be told about their input"
+    for coordinate in ("-22.044", "-8.786", "-30.000"):
+        assert coordinate in msg, "the point in the *input* is what can be acted on"
+    assert "4.2406e-02" in msg and "input" in msg
+    assert stats["input_seam_gap_mm"] == "4.241e-02"
+
+
+def test_a_negligible_input_gap_does_not_shout_at_the_user(tmp_path):
+    """The other half, and the one that keeps the warning worth reading.
+
+    Every real B-rep records some gap. The cylinder's is 4.5e-04 mm and it ships
+    a golden-sample-exact lattice, so a line claiming its input needs fixing
+    would be false — and a warning that fires on sound parts stops being read.
+    """
+    from latticegen2.pipeline import _report_seam_gaps
+    from latticegen2.runlog import RunLog
+
+    shown = []
+
+    class Recorder(RunLog):
+        def line(self, msg, console=None):
+            shown.append((msg, console))
+
+    rl = Recorder(str(tmp_path / "run.log"), verbose=False)
+    _report_seam_gaps(rl, occ.SurfaceSeamGap(4.5232e-4, (0.0, 0.0, 0.0), 27, 0), 1.5, {})
+    assert len(shown) == 1
+    msg, console = shown[0]
+    assert console is None, "log-only: nothing here needs the user's attention"
+    assert "negligible" in msg
+
+
+def test_the_committed_inputs_land_on_the_side_of_that_line_their_outcome_says(tmp_path):
+    """And it is measured against the real files, not against constructed ones.
+
+    A bar is only as good as what it is applied to. The ball and the cylinder
+    must stay silent — both ship — and the reading taken from each file has to
+    be the one the run would take.
+    """
+    from latticegen2.pipeline import _report_seam_gaps, SEAM_GAP_WARN_FRACTION
+    from latticegen2.runlog import RunLog
+
+    for part, t in ((BALL, 4.0), (CYLINDER, 1.5)):
+        gap = occ.surface_seam_gaps(occ.read_step(part))
+        assert gap.worst <= SEAM_GAP_WARN_FRACTION * t, (
+            f"{part} ships today; warning about its input would be false"
+        )
+        shown = []
+
+        class Recorder(RunLog):
+            def line(self, msg, console=None):
+                shown.append(console)
+
+        _report_seam_gaps(Recorder(str(tmp_path / "run.log")), gap, t, {})
+        assert shown == [None]
+
+
+def test_an_export_truth_failure_cites_the_input_when_the_gap_is_material():
+    """A refusal has to point somewhere the user can act.
+
+    The failure itself names a coordinate in the *output*, which is not
+    something anyone can fix. Where the input's own seam gap is material against
+    `t`, the message adds it — and says the thing that took a session to
+    establish: a gap between two surfaces is not repairable by re-fitting a
+    curve on either of them.
+    """
+    from latticegen2 import pipeline
+
+    wide = occ.SurfaceSeamGap(4.2406e-2, (-22.044, -8.786, -30.0), 30, 10)
+    note = pipeline._seam_gap_note(wide, 1.0)
+    assert "4.2406e-02" in note and "-22.044" in note
+
+    narrow = occ.SurfaceSeamGap(4.5232e-4, (0.0, 0.0, 0.0), 27, 0)
+    assert pipeline._seam_gap_note(narrow, 1.5) == "", (
+        "the cylinder ships; its own gap must not be blamed for anything"
+    )
+    assert pipeline._seam_gap_note(None, 1.0) == ""
+
+
+def test_the_file_declares_the_greatest_tolerance_the_shape_carries(tmp_path):
+    """Not the average of them — which on a lattice is the pathological summary.
+
+    AP214 has room for one ``UNCERTAINTY_MEASURE_WITH_UNIT`` per file against
+    one tolerance per subshape, so that number decides what every edge's
+    tolerance becomes on import. OCCT's default is *Average*, and ~99 % of a
+    lattice's edges are exactly-built interior edges at ``Precision::Confusion``
+    — so the average lands near the floor and the boundary trims that carry real
+    tolerance are clamped below what their own geometry needs.
+
+    Measured on `SpiralTest.step`'s dominant solid, which tessellates into
+    111,618 triangles with **zero** non-manifold edges in memory: Average
+    declares 1.E-05 and it comes back with 2, Greatest declares 1.E-02 and it
+    comes back with 0. The part completes on the second and is refused on the
+    first.
+
+    The box here carries one deliberately fattened edge, so a correct writer has
+    to declare at least that — an averaging one cannot, having eleven exact
+    edges to average it against.
+    """
+    box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    BRep_Builder().UpdateEdge(edges(box)[0], 1e-2)
+
+    path = str(tmp_path / "box.step")
+    occ.write_step(box, path, "precision")
+    declared = [
+        line for line in open(path, errors="replace")
+        if "UNCERTAINTY_MEASURE_WITH_UNIT" in line
+    ]
+    assert len(declared) == 1
+    value = float(declared[0].split("LENGTH_MEASURE(")[1].split(")")[0])
+    assert value >= 1e-2, (
+        "the file must declare a tolerance that covers the shape's own worst; "
+        "below it, the geometry that tolerance was carrying changes on import"
+    )
+
+
+def test_the_precision_setting_survives_the_writer_being_constructed(tmp_path):
+    """The ordering trap, pinned — it cost a full run to find.
+
+    ``Interface_Static`` values are session state, and constructing a
+    ``STEPControl_Writer`` initialises the STEP session, which resets them to
+    their defaults. Setting the mode *before* the writer exists is therefore
+    silently discarded in any process that has not already touched the STEP
+    controller — which the pipeline had, because it reads its input first, so
+    the bug hid there and appeared only in a fresh process.
+
+    Asserting the mode *after* a write is what catches a regression to the
+    wrong order: the value has to be the one this module set, not the default
+    the writer's own initialisation would restore.
+    """
+    from OCP.Interface import Interface_Static
+
+    Interface_Static.SetIVal_s("write.precision.mode", 0)      # the default
+    occ.write_step(
+        BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape(), str(tmp_path / "b.step"), "order"
+    )
+    assert Interface_Static.IVal_s("write.precision.mode") == occ.WRITE_PRECISION_GREATEST
+
+
+def test_the_part_name_survives_the_writer_being_constructed(tmp_path):
+    """The same trap, on the static that carries specification.md §5's metadata.
+
+    The reset does not distinguish between statics, so ``write.step.product.name``
+    is on exactly the same footing as ``write.precision.mode`` above — and it is
+    the one where a regression is *invisible* rather than merely wrong, because
+    ``stepout.rewrite_step_header`` patches FILE_NAME and FILE_DESCRIPTION and
+    never touches the PRODUCT entity. Set before the writer exists, this comes
+    back as OCCT's own translator string.
+
+    Asserted against the file rather than against the static, since the file is
+    what a downstream reader opens.
+    """
+    path = tmp_path / "named.step"
+    occ.write_step(
+        BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape(), str(path), "fixture+lattice+cc20+t4"
+    )
+    text = path.read_text(encoding="utf-8", errors="replace")
+    assert "PRODUCT('fixture+lattice+cc20+t4" in text
+    assert "Open CASCADE STEP translator" not in text.split("DATA;", 1)[1]

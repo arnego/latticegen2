@@ -614,6 +614,11 @@ def surface_seam_gaps(
     two are compared at corresponding points whether or not the faces traverse
     the edge the same way.
     """
+    # One sample is the edge's midpoint, not its start: `samples - 1` divisions
+    # of the range is the right arithmetic for two or more, and undefined for
+    # one. `samples` is documented as tunable, so the single-sample case is
+    # answered rather than left to divide by zero.
+    steps = max(1, samples - 1)
     ancestors = TopTools_IndexedDataMapOfShapeListOfShape()
     TopExp.MapShapesAndAncestors_s(
         shape, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, ancestors
@@ -642,7 +647,8 @@ def surface_seam_gaps(
         widest = 0.0
         widest_at = None
         for k in range(samples):
-            t = first + (last - first) * k / (samples - 1)
+            t = (first + 0.5 * (last - first) if samples == 1
+                 else first + (last - first) * k / steps)
             ua, ub = ca.Value(t), cb.Value(t)
             pa = sa.Value(ua.X(), ua.Y())
             gap = pa.Distance(sb.Value(ub.X(), ub.Y()))
@@ -1550,17 +1556,29 @@ def write_step(shape: TopoDS_Shape, path: str, part_name: str) -> None:
     actually decides, a tessellation of the written body, it is the difference
     between a part that ships and a part that is refused.
     """
+    writer = STEPControl_Writer()
+    # **Every one of these is set after the writer exists, deliberately.**
+    # Constructing one initialises the STEP session, and that initialisation
+    # resets `Interface_Static` to its defaults -- so a value set beforehand is
+    # silently discarded in any process that has not already touched the STEP
+    # controller. It cost a run to find: the pipeline reads its input first, so
+    # the session was already up and the setting held, while the same call in a
+    # fresh process wrote an Average file and reported `write.precision.mode`
+    # still reading 0.
+    #
+    # The reset does not distinguish between statics, so the schema, the part
+    # name and the unit are on exactly the same footing and are set here too.
+    # Only `write.precision.mode` was ever observed wrong because the other
+    # three happen to survive on their defaults in this project's own runs --
+    # `AP214IS` and `MM` *are* OCCT's defaults, and the pipeline had already
+    # opened the session by reading its input. A fresh process writing without
+    # reading first would have got OCCT's default product name into the file's
+    # PRODUCT entity, where specification.md S5 asks for the part name and
+    # `stepout.rewrite_step_header` -- which only touches FILE_NAME and
+    # FILE_DESCRIPTION -- would not have put it back.
     _configure_step_units()
     Interface_Static.SetCVal_s("write.step.schema", "AP214IS")
     Interface_Static.SetCVal_s("write.step.product.name", part_name)
-    writer = STEPControl_Writer()
-    # **After the writer exists, deliberately.** Constructing one initialises the
-    # STEP session, and that initialisation resets these statics to their
-    # defaults -- so a value set beforehand is silently discarded in any process
-    # that has not already touched the STEP controller. It cost a run to find:
-    # the pipeline reads its input first, so the session was already up and the
-    # setting held, while the same call in a fresh process wrote an Average
-    # file and reported `write.precision.mode` still reading 0.
     Interface_Static.SetIVal_s("write.precision.mode", WRITE_PRECISION_GREATEST)
     status = writer.Transfer(shape, STEPControl_StepModelType.STEPControl_AsIs)
     if status != IFSelect_ReturnStatus.IFSelect_RetDone:

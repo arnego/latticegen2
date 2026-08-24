@@ -37,7 +37,7 @@ from .boundary import (
     resolve_interfaces,
     trim_boundary,
 )
-from .classify import Klass, classify_nodes, save_mesh, tessellate_surface
+from .classify import Klass, classify_nodes, stage_mesh, tessellate_surface
 from .cli import Args
 from .connect import build_components
 from .errors import InputGeometryError, OutputError, ProcessingError
@@ -118,12 +118,12 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
 
     with Timer(rl, "tessellate"):
         mesh = tessellate_surface(body, lp)
-    # Staged here rather than by `classify`, which writes the same file but only
+    # Staged here rather than by `classify`, which needs the same file but only
     # on its parallel path: `boundary` needs it either way, to ask whether a
     # trim left material outside the body without asking a boolean
-    # (docs/algorithm.md §7.2).
-    mesh_path = os.path.join(tmpdir, "classify_mesh.npz")
-    save_mesh(mesh, mesh_path)
+    # (docs/algorithm.md §7.2). `classify_nodes` is handed the path so the two
+    # stages share one staging write rather than making the same one twice.
+    mesh_path = stage_mesh(mesh, tmpdir)
     rl.line(
         f"surface mesh: {len(mesh.tris)} triangles, {len(mesh.verts)} vertices, "
         f"measured chordal deviation d={mesh.deviation:.5f} mm "
@@ -158,8 +158,8 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         with Timer(rl, "classify"):
             candidates = candidate_nodes(lp, lo, hi)
             classification = classify_nodes(
-                lp, mesh, candidates, tmpdir=tmpdir, pool=pool,
-                report=rl.substage,
+                lp, mesh, candidates, tmpdir=tmpdir, mesh_path=mesh_path,
+                pool=pool, report=rl.substage,
             )
         counts = classification.counts()
         rl.line(

@@ -342,28 +342,33 @@ case for invalid input).
 
 All are implemented in [`tools/e2e.py`](../tools/e2e.py).
 
-**`SpiralTest.step` is committed as a fixture, not as a scenario, and that is
-a measurement rather than an omission.** At 2,073 boundary junctions it is a
-fraction of `dense-lattice`, but its swept B-spline surface makes the boolean
-fit trim curves carrying recorded tolerances two orders above anything the
-other committed parts produce — 2.1e-02 mm on edges, 6.6e-02 mm on a vertex,
-against the rehearsal's 8.7e-04 to 1.5e-03 mm. That is what makes it valuable,
-and it is why the unit suite uses it heavily (`test_boundary.py`,
-`test_export_truth.py`).
+**`SpiralTest.step` is the hardest committed part, and as of 2026-08-24 it is
+an end-to-end scenario rather than only a fixture.** At 2,073 boundary
+junctions it is a fraction of `dense-lattice`, but its swept B-spline surface
+makes the boolean fit trim curves carrying recorded tolerances an order above
+anything the other committed parts produce, it is the only committed part whose
+dominant component tiles, and it is the only one that exercises §7.2 at all —
+the intersection that returns its own operand (8 junctions), the local-block
+re-trim (10), and a junction dropped for containment (1). Every one of those
+paths is silent on the other scenarios, which is why the unit suite uses it
+heavily (`test_boundary.py`, `test_export_truth.py`) as well.
 
-It is **not** an end-to-end scenario because it cannot currently complete: §9's
-export-truth gate refuses it, and correctly. After a STEP round trip its
-dominant body carries 2 non-manifold edges and its 4.17 mm³ floating island 11,
-so nothing downstream could tessellate the file consistently. That is the open
-item §10 records — re-fitting the pcurve at the source so the body is kept
-rather than refused — and until it is closed a scenario here would be a
-permanently red test rather than a gate.
+It could not complete until two things landed on the same day. The part itself
+was re-modelled: its worst **input seam gap** — the distance between the two
+faces meeting at one of its own edges — fell from 4.2406e-02 mm to
+6.8602e-03 mm, which took its 4.17 mm³ island from 11 non-manifold edges after
+a round trip to **0**. And the STEP writer was changed to declare the
+*greatest* tolerance a shape carries rather than the average of them (§11),
+which took its dominant body from 2 to **0** — that body already tessellated
+perfectly in memory, so the two remaining defects were the file
+under-declaring, not the geometry.
 
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
 | smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | generation < 10 minutes. **Measured: 6.4 s.** |
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
 | dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
+| spiral-stress | -i test/SpiralTest.step -cc 5 -t 1 --cores 6 | valid STEP, no golden sample, generation < 20 minutes. **Measured: 11 m 01 s**, both solids `BRepCheck_Analyzer`-valid with 0 non-manifold edges after a round trip. Containment falls back to point sampling — the dominant body is past `verify_geometry.CUT_MAX_FACES` — and is reported as the weaker check, never as an unmeasured pass. |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
 ### 6.2 Automated pass/fail checks
@@ -588,112 +593,6 @@ actually fails: G10 is the case where a synthetic reproduction matching the
 symptom to four significant figures passed a full measurement gate while
 repairing an entirely different defect.
 
-### Re-fit the pcurve at the source, so the body is kept rather than refused
-
-**Found 2026-08-23**, alongside §11's export-truth gate, and deliberately not
-attempted there. The gate is the right behaviour today and the wrong end state:
-it tells the user a body cannot be written and stops, where the fault is
-repairable and the body could be kept.
-
-**What is wrong.** A boundary trim against a fat curved surface can leave an
-edge whose pcurve does not match its own 3D curve — measured up to
-**2.118e-02 mm** apart on a face of 0.05 mm², on `SpiralTest.step` at
-`cc=5, t=1`. In this process that is legal, because the edge records a tolerance
-large enough to cover it. In the exported file it is not, because STEP AP214
-declares one tolerance for the whole file (§11), so the reader re-derives a
-tight one and the two representations no longer agree. The body then tessellates
-into a shell with holes: 11 edges of its 147 triangles used by one triangle
-rather than two.
-
-**Where.** The trim is `boundary.trim_junction` (docs/algorithm.md §7). That is
-also the only place the junction is still identifiable — §7.3's
-`tolerance_feature_ratio` already ranks the offenders there, and on this part it
-puts two of the six junctions forming the unwritable island **2nd and 4th of
-2,404 boundary pieces**, at the end of `boundary`, 5 m 55 s into an eight-minute
-run. So the information needed to aim a repair is already measured and already
-in hand before anything downstream exists.
-
-**What to try.** Re-fit the offending pcurve so it agrees with its 3D curve to
-within a tolerance the file *can* carry — `ShapeFix_Edge::FixAddPCurve` or
-`ShapeConstruct_ProjectCurveOnSurface`, asked for a tight tolerance rather than
-the one the boolean settled for. Failing that, re-derive the trim for that
-junction the way docs/algorithm.md §7.1's disagreeing-cap repair does: give the
-kernel operands it handles better and redo the intersection locally.
-
-**Two things already ruled out, so they are not retried.** `ShapeFix_Shape` and
-`BRepLib::SameParameter` were both measured against this defect and neither
-helps — they were being asked to repair damage that does not exist until export
-(§11). And no export-side setting reaches it: `write.precision.mode` in every
-mode, `write.surfacecurve.mode = Off`, and `SameParameter` before writing were
-each measured and each leave it (§11).
-
-**The dominant body has the same fault, and that is the half that matters.**
-The island is 4.17 mm³ and could in principle be given up; the 27,864 mm³
-lattice cannot. Measured on the whole part at `cc=5, t=1`, both solids after a
-STEP round trip:
-
-| solid | faces | triangles | non-manifold edges | loosely described | worst deviation |
-|---|---|---|---|---|---|
-| 0, the lattice proper | 45,825 | 111,687 | **2** | 5.37e-04 | 4.898e-03 mm |
-| 1, the island | 36 | 147 | **11** | 3.97e-01 | 2.120e-02 mm |
-
-So a repair aimed only at the island leaves the run still refused. The two
-numbers also differ in kind: the island is *mostly* loosely described (40 % of
-its surface) while the lattice has a couple of bad edges in a body that is
-otherwise sound, which is why the committed fixture is not enough on its own to
-tell whether a candidate repair works at scale.
-
-**Part of the repair already exists, and its effect is measured.**
-docs/algorithm.md §7.2's `OutsideProbe` and one-cell local-block re-trim were
-built for containment, not for writability — but they improve this too. Running
-the same part with the probe disabled and everything else identical:
-
-| | solid 0's non-manifold edges |
-|---|---|
-| §7.2 repairs disabled | **7** |
-| §7.2 repairs enabled | **2** |
-
-Whatever is left is therefore *not* the untrimmed-intersection family §7.2
-already handles, and a candidate fix should be measured against the 2 rather
-than the 7 — otherwise it will appear to work while only re-doing what the
-local block already does.
-
-**How to verify.** `test/spiral-island-unwritable.brep` is the island,
-committed for exactly this. Today it fails `occ.exported_mesh_defects` with
-**11** non-manifold edges in 147 triangles
-(`test_export_truth.py::test_the_island_does_not_survive_being_written`, which
-pins `(147, 11)`). A working repair takes that to `(n, 0)` while preserving the
-solid's volume.
-
-The whole-part check is
-
-    python src/main.py -i test/SpiralTest.step -cc 5 -t 1 --cores 6
-
-completing and writing its STEP. Today it exits 4 at `export truth` — read the
-two `solid N:` lines above the failure, which carry the table's figures — and
-that is now the *first* thing that stops the part rather than the last: the
-unification volume guard and the material-outside residual that used to stop it
-earlier are both fixed. The export-truth stage itself costs ~85 s here.
-
-**Closing this item is what turns `SpiralTest.step` into an e2e scenario.** It
-is committed as a fixture rather than a scenario precisely because the run
-cannot complete (§6.1), so a `spiral-stress` entry in §6.1's table and
-`tools/e2e.py` is the natural last step of the fix, not a separate piece of
-work. The scenario was written once and withdrawn when the gate refused the
-part, so it is worth writing down what it needs rather than leaving it to be
-rediscovered:
-
-* `-i test/SpiralTest.step -cc 5 -t 1 --cores 6`, and a runtime budget of 20
-  minutes — generation alone measured 8 to 10 minutes across the runs above,
-  and the §6.2 checks that follow it are the slow part, not the run;
-* **no golden sample**, which `golden_check` already handles by skipping and
-  saying so. One should be committed only after the first passing output has
-  been inspected by hand, per the note under §6.1's table;
-* the containment check will fall back to `surface_points_outside`, because
-  the dominant body is past `verify_geometry.CUT_MAX_FACES` — expect the
-  `[NOTE]` line saying the exact cut was not attempted, and a pass on the
-  weaker check rather than on the boolean.
-
 ### Re-run the rehearsal with the unbounded export-truth check
 
 **Deferred by decision 2026-08-23.** §11's export-truth gate was measured on
@@ -721,6 +620,166 @@ a clean record on all sixteen bodies measured so far.
 ---
 
 ## 11. Closed — kept for the reasoning, not as work
+
+### Re-fitting the pcurve cannot keep the body — the gap is in the input file
+
+**Opened 2026-08-23 as an item in §10, closed 2026-08-24 by measurement, and
+the conclusion is the opposite of what the item proposed.** It read: a boundary
+trim against a fat curved surface leaves an edge whose pcurve does not match its
+own 3D curve, so re-fit that pcurve — `ShapeFix_Edge::FixAddPCurve` or
+`ShapeConstruct_ProjectCurveOnSurface`, asked for a tight tolerance — and the
+body is kept rather than refused. **No such re-fit exists**, because the pcurve
+is not what is wrong.
+
+**What is actually wrong is `SpiralTest.step`.** Two of its swept B-spline
+patches run **42.4 microns apart along the whole of the edge they share** — the
+worst gap, and constant to six figures at all 17 samples along it. The model is
+held together there by a 2.120e-02 mm tolerance recorded on that edge, which is
+legal, ordinary, and invisible on the 886 mm² and 1,018 mm² faces carrying it.
+Confirmed from both directions, and independently of the pcurves: projecting
+either face's boundary image onto the *other* face's surface returns the same
+4.2406e-02 mm at every sample. **The two surfaces never meet.**
+
+That number is the one §10 was chasing. The 2.120e-02 mm "pcurve deviation" it
+recorded is half the gap, seen from one side, and it propagates into every
+junction trimmed near that seam. At `t = 1` mm the lattice cuts the region into
+faces of 0.010 to 0.226 mm², where 42 microns is a hole rather than a tolerance,
+and the 4.17 mm³ island built from six such junctions is the body the
+export-truth gate refuses.
+
+**So the proposed repair is impossible in principle, not merely difficult: no
+curve on either surface closes a gap between the surfaces.** Measured anyway,
+rather than argued:
+
+* `ShapeFix_Edge::FixRemovePCurve` + `FixAddPCurve` on the island's eight
+  offending pairs: **both return false, every deviation unchanged**.
+* `ShapeConstruct_ProjectCurveOnSurface::Perform` **cannot be called from OCP
+  at all** — it returns its result through a `Handle&` out-parameter, and the
+  reassignment does not reach Python (verified: the placeholder comes back
+  unchanged). Recorded so the next attempt does not spend the afternoon on it.
+* A hand-rolled equivalent — sample the 3D curve, project each point with
+  `ShapeAnalysis_Surface::NextValueOfUV` seeded from the existing pcurve, fit a
+  `Geom2d_BSplineCurve` through the samples, rescale its knots back to the
+  edge's own parameter range, install with `BRep_Builder::UpdateEdge`, and keep
+  the result only where the deviation actually improves — **improves one pair of
+  eight and leaves the tessellation at exactly `(147, 11)`**. The seven it
+  cannot improve are the ones pinned at an endpoint the surface does not reach.
+* The one-cell local-block re-trim (§7.2), which §10 named as the fallback,
+  returns the **same** 2.120289520131689e-02 mm on the same junction. It is a
+  better-conditioned intersection of the same two surfaces, and the gap is not
+  a conditioning problem.
+
+**And the export side cannot reach it either, which is the finding that settles
+it.** The island tessellates into **10** non-manifold edges *in memory, before
+anything is written*. A round trip at OCCT's default `write.precision.mode`
+(Average) makes it 11; at Greatest the file declares 5.E-02 and it comes home at
+10 — the in-memory figure exactly. There is nothing for a declared tolerance to
+restore, because nothing was lost in the writing.
+
+#### What was built instead: name the input's defect at `import`
+
+`occ.surface_seam_gaps` evaluates both faces' pcurves of every shared edge at
+the **edge's own parameter** — which is orientation-safe, a pcurve being stored
+same-parameter with its edge — and compares the two surface points. It costs
+1.2 s on the 1,043 shared edges of `TD_HX_rehearsal_test` and 0.1 s on
+`SpiralTest`, and it ranks the committed parts exactly as their outcomes do:
+
+| input | worst gap | max edge tol | gap ÷ its usual `t` | ships? |
+|---|---|---|---|---|
+| `80mm-test-ball.step` | 7.7e-14 | 1.0e-05 | 2e-14 | yes |
+| `test-cylinder.STEP` | 4.5e-04 | 2.5e-04 | 3.0e-04 | yes |
+| `TD_HX_rehearsal_test.step` | 8.1e-03 | 8.1e-03 | 8.1e-03 | yes |
+| `SpiralTest.step` | **4.2e-02** | 2.1e-02 | **4.2e-02** | **no** |
+
+**It reports and does not refuse**, and that is deliberate rather than timid:
+the separation between the part that fails and the worst part that ships is a
+factor of five on two data points. This project has recorded four times what
+happens when a ranking is promoted to a calibration (§11, G9–G12), and a bar
+there would refuse `TD_HX_rehearsal_test`, which has been inspected and
+accepted. `pipeline.SEAM_GAP_WARN_FRACTION` (a thousandth of `t`) decides only
+whether the line is worth writing.
+
+What it buys is *where* the report lands. The gap is now named in the run log at
+the `import` stage, before a single junction is trimmed, and the export-truth
+failure at the end of an eight-minute run cites it — so a refusal points at the
+user's model rather than only at a coordinate in an output they cannot fix.
+
+#### What actually kept the body: the file's one declared tolerance
+
+**Written 2026-08-23, and finished 2026-08-24 when the part was re-modelled.**
+The paragraphs above stand: a 42.4 micron gap between two surfaces is not
+repairable by re-fitting a curve on either of them, and the committed
+`test/spiral-island-unwritable.brep` — cut from the old file — is still refused,
+which is what it is for. What changed is that the *input* was fixed, and that
+exposed the second, separate half of the problem.
+
+**The re-modelled part closed the island and left the dominant body broken.**
+Its worst seam gap fell 4.2406e-02 → 6.8602e-03 mm and the 4.17 mm³ island went
+from 11 non-manifold edges to **0**. The 45,801-face lattice beside it stayed at
+**2** — unchanged, and *not* a seam-gap defect: both sat on one 0.037 mm² sliver
+at [14.78, -17.00, 50.0], and the nearest input edge is 3.7 microns away with a
+gap there of 3.5e-05 mm.
+
+**The measurement that identified it is that the body tessellates perfectly in
+memory** — 111,618 triangles, **0** bad edges — and comes back from its own
+round trip with 2. The old island was the opposite: broken before it was ever
+written. So here the write really was the fault, and one setting reaches it:
+
+| `write.precision.mode` | declared uncertainty | bad edges after a round trip |
+|---|---|---|
+| Average (OCCT's default) | 1.E-05 | **2** |
+| Session 1e-4 | 1.E-04 | **2** |
+| Session 5e-4 | 5.E-04 | 0 |
+| **Greatest** | 1.E-02 | **0** |
+
+The sliver's edge records 1.512e-04 mm and its pcurve strays 3.53e-05 mm —
+consistent while the tolerance survives, inconsistent once it is clamped below
+it. **Both modes declaring more than 1.512e-04 fix it and both declaring less do
+not**, which identifies the mechanism rather than correlating with it. Average
+is pathological on a lattice by construction: ~99 % of the edges are
+exactly-built interior edges at `Precision::Confusion`, so the average lands
+near the floor and the 1 % of boundary trims carrying real tolerance are the
+ones truncated.
+
+`occ.write_step` now sets **Greatest**. It is the only option that is a property
+of the shape rather than a guess about it — a body needing nothing declares
+nothing, and the 80 mm ball's output still declares 1.E-05. The figure is
+bounded by the pipeline's own repairs, capped at a tenth of `t`
+(docs/algorithm.md §8), so it cannot exceed that: 1.E-02 mm here against a 1 mm
+strut, forty times below the smallest feature the CLI accepts.
+
+**This section previously recorded that lever as tried and useless, and that
+entry was measured against the wrong quantity.** It reported
+`write.precision.mode` at Greatest "leaves the ball's over-tolerance count at
+60–95 in every mode" — the count of edge/face pairs past their own recorded
+tolerance, which is one of the three proxies *this same section* then disproved
+as a gate. Against the gate that actually decides, a tessellation of the written
+body, it is the difference between a part that ships and a part that is refused.
+It is the same lesson the rest of the chapter carries, turned on the chapter
+itself: a lever is only as disproved as the quantity it was disproved against.
+
+**One real bug on the way in, worth the line it takes.** Constructing a
+`STEPControl_Writer` initialises the STEP session, and that initialisation
+**resets `Interface_Static` values to their defaults** — so setting the mode
+before the writer exists is silently discarded in any process that has not
+already touched the STEP controller. The pipeline reads its input first, so the
+session was already up and the setting held there; a fresh process wrote an
+Average file while `write.precision.mode` still read 0. It is set after the
+writer now, and `test_export_truth.py` asserts the mode survives a write.
+
+**`SpiralTest.step` is now an e2e scenario** (§6.1): `-cc 5 -t 1 --cores 6`
+completes in **11 m 01 s**, writes a 194 MB STEP, and both solids are
+`BRepCheck_Analyzer`-valid with 0 non-manifold edges after a round trip. The
+committed island fixture stays refused and is now pinned at **`(148, 10)`** —
+which is its own in-memory tessellation, the round trip no longer adding a
+defect of its own.
+
+**The lesson, and it is the sixth chapter to record it:** the first convincing
+explanation was wrong again. "The trim fitted a sloppy pcurve" fitted every
+symptom — the magnitude, the face sizes, the fact that only that part shows it —
+and the defect was in the file the whole time. What settled it was, once more, a
+measurement that shared no machinery with the thing under test: comparing the
+two *surfaces*, rather than either of them against a curve.
 
 ### A body can be valid here and not describable in the file — the export-truth gate
 
@@ -872,12 +931,13 @@ ball's own dominant body ships **73** `InvalidCurveOnSurface` faults and
 magnitudes, both tessellating cleanly, and nothing in the pipeline was watching
 before this.
 
-**Refusing is the correct behaviour and not the end state.** It is strictly
-better than removing the body — the user learns the part has a problem, learns
-where it is, and loses nothing — but the fault is repairable, and repairing it
-at the source would keep the body instead of stopping the run. That is real
-work rather than closed reasoning, so it is written up as an item in §10 with
-what to try, what is already ruled out, and how to verify it.
+**Refusing is the correct behaviour, and it is also the end state.** It was
+written up in §10 as work — re-fit the offending pcurve at the source and keep
+the body — and that item is now closed, disproved: the fault is not a sloppy
+pcurve but a 42.4 micron gap between two of the *input*'s own surfaces, which no
+curve on either of them can close. See the chapter above it in this section. The
+gate stays exactly as built; what changed is that the run now names the input's
+seam at `import`, and the refusal cites it.
 
 
 ### `stitch`'s round-2 repair — chapter closed: the fix disproved, the check repaired, the scan parallelised

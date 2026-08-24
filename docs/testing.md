@@ -42,7 +42,7 @@ header rewrite.
 | `test_progress.py` | The NDJSON event schema (docs/algorithm.md §10): every event carries exactly the fields it declares, the reader returns `None` on kernel chatter and truncated lines rather than raising, and a dead consumer cannot abandon a run mid-pipeline | no |
 | `test_runlog_events.py` | **The guarantee that watching a run does not change it.** The same sequence of writes with and without an emitter produces an identical `.log`; `stage_begin` emits without logging; `substage` rate-limits without ever dropping a stage's final count | no |
 | `test_gui.py` | The front-end's testable half (specification.md §3.1): the stage weights, the reduction from an event stream to what the window shows — fed deliberately hostile input — the argv handed to the child, the cancel sentinel, and the **verbose** tick box: that unticked the pane holds only what the child wrote outside the event stream and is hidden when that is empty, that ticking it reveals the run's whole log, and that it stays enabled while a run is in flight. Several tests build widgets in one shared withdrawn Tk root, guarded by `importorskip` | no |
-| `test_export_truth.py` | What `BRepCheck_Analyzer` structurally cannot ask (docs/algorithm.md §7.3, §9). First **the premise**, pinned against the kernel: a 6.573e-02 mm vertex tolerance does not survive a STEP round trip, and AP214 declares exactly one tolerance per file — if a future OCCT ever carried per-subshape tolerance, that test is what would say so. Then the gate, against `spiral-island-unwritable.brep`, the one body this project has produced that cannot be written: **§8's rung-2 repair makes it `BRepCheck`-valid and it still tessellates into 11 broken edges**, which is the whole case for the check. Plus the control (a box survives), and a test that the three disproved proxies stay out of the deciding seat | yes |
+| `test_export_truth.py` | What `BRepCheck_Analyzer` structurally cannot ask (docs/algorithm.md §7.3, §9). First **the premise**, pinned against the kernel: a 6.573e-02 mm vertex tolerance does not survive a STEP round trip, and AP214 declares exactly one tolerance per file — if a future OCCT ever carried per-subshape tolerance, that test is what would say so. Then the gate, against `spiral-island-unwritable.brep`, the one body this project has produced that cannot be written: **§8's rung-2 repair makes it `BRepCheck`-valid and it still tessellates into 11 broken edges**, which is the whole case for the check. Plus the control (a box survives), a test that the three disproved proxies stay out of the deciding seat, and — the reason that body stays refused — that the 42.4 micron gap between two of `SpiralTest.step`'s **own** surfaces is where it comes from (docs/algorithm.md §7.4) | yes |
 | `test_verify_geometry.py` | The one part of the harness whose failure mode is a plausible number rather than an exception: `material_outside`'s per-solid cut, the contradiction against a boolean-free containment check, and that a face lying *on* the input surface is a tie rather than a protrusion. The only test file that reaches into `tools/` — see the note below | yes |
 
 ## E2E verification
@@ -77,7 +77,7 @@ python src/main.py -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke.step -v
 | **Export fidelity, reported not gated** | `vg.curve_on_surface` re-reads the written STEP and measures, per edge/face pair, the exact pcurve-to-3D-curve distance (`GeomLib_CheckCurveOnSurface`). Printed as a `[NOTE]`, never as a pass or fail: three quantities of this kind were tried as bars and two false-positive on sound rehearsal solids (docs/algorithm.md §9). What decides is the manifold check above, which is the same question asked directly |
 | Closed manifold | every mesh edge used by exactly 2 triangles |
 | No self-intersections | `triangles_properly_cross` — plane-straddle pre-check, then edge piercing |
-| No material outside the input body | boolean cut of output against input **per solid**, volume ≈ 0; a non-zero remainder is contradicted against a boolean-free containment check and reported as unmeasured if the two disagree (see below) |
+| No material outside the input body | boolean cut of output against input **per solid**, volume ≈ 0; a non-zero remainder is contradicted against a boolean-free containment check and reported as unmeasured if the two disagree (see below). Where that fallback cannot clear a point either, it is contradicted **again** by its exact distance to the body (`BRepExtrema`, no tolerance, no boolean) — the classifier returns OUT for points lying exactly on the boundary, which a trimmed lattice's faces all do, and the tolerance sweep stops at 2e-03 mm so a 1e-09 mm tie and a 1 mm protrusion read identically there. Measured on `spiral-stress`: 37 points the sweep could not clear, 6.3e-08 mm from the input at worst, against protrusions of 0.239–0.771 mm when §7.2's repair was missing |
 | Bounding box within input + (cc+t) | direct comparison |
 | Runtime budget | wall clock: 10 min for `smoke-fast` and `dense-lattice`, 20 min for `smoke-verified` |
 | Golden-sample match | symmetric-difference volume both ways, tolerance `t³` |
@@ -115,12 +115,23 @@ and, on the ninth, 1 of 55,513 surface points outside at 1e-06 mm and none at
 1e-05 mm — so nothing was actually wrong with the geometry; the check simply
 could not say so.
 
-**`SpiralTest.step` is a unit-test fixture rather than an e2e scenario.** It is
-the part whose kernel-recorded tolerances reach 1e-02 mm, the only committed
-one whose dominant component tiles, and the only one that has ever exercised
-docs/algorithm.md §7.2 — but it cannot complete a run today, because §9's
-export-truth gate refuses its output and is right to (docs/specification.md
-§6.1, §10). Adding it here would commit a permanently failing scenario.
+**`SpiralTest.step` is both a unit-test fixture and, since 2026-08-24, the
+`spiral-stress` e2e scenario.** It is the only committed part whose dominant
+component tiles and the only one that exercises docs/algorithm.md §7.2 at all —
+8 junctions whose intersection returns its own operand, 10 re-trimmed against a
+local block, 1 dropped for containment. It is much the slowest scenario, and
+most of that is the §6.2 checks rather than the 11-minute run: its dominant body
+is past `verify_geometry.CUT_MAX_FACES`, so containment falls back to point
+sampling over 45,801 faces. Use `--only` while iterating.
+
+It was a fixture alone while §9's export-truth gate refused its output, and
+correctly. Two changes closed that, and both are worth knowing before touching
+either: the part was re-modelled (worst input seam gap 4.24e-02 → 6.86e-03 mm,
+which took its island from 11 non-manifold edges to 0), and the writer now
+declares the greatest tolerance a shape carries rather than the average (which
+took the dominant body from 2 to 0). `test/spiral-island-unwritable.brep`, cut
+from the *old* file, is still refused and still committed — it is the case
+neither change reaches.
 
 Two things follow for anyone extending this file. A boolean-based check needs a
 scale at which it is known to work, and `dense-lattice`'s 15,966 faces is not
@@ -237,7 +248,7 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 | Scenario | Total | Dominant stages |
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
-| `SpiralTest`, `cc=5 t=1` | ~7 min generation | boundary trim (6 min) |
+| `SpiralTest`, `cc=5 t=1` | 11 min | boundary trim (6 min), validate (1 m 53 s, mostly export truth) |
 | test cylinder, `cc=10 t=1.5` | ~40 s | simplify, boundary trim, stitch |
 | `TD_HX_rehearsal_test`, `cc=5 t=1` | 51.7 min, 19.3 GB peak, 2.00 GB output | simplify, boundary trim, stitch, validate |
 

@@ -579,8 +579,14 @@ def trim_junction(
                     localized = True
         if outside_mm > 0.0:
             # Nothing this stage can do trims it correctly, so it does not go
-            # into the output at all. See `TrimResult.dropped`.
-            return TrimResult([], 0, [], retrimmed, localized, outside_mm, True)
+            # into the output at all. See `TrimResult.dropped`. The pinhole
+            # count is still reported: the repair really did run on this
+            # junction's faces, and docs/algorithm.md §7's aggregate line is the
+            # only evidence a run gives that it ran at all -- dropping the
+            # junction's geometry is no reason to drop the measurement with it.
+            return TrimResult(
+                [], n_pinholes, [], retrimmed, localized, outside_mm, True
+            )
     return TrimResult(out, n_pinholes, tolerances, retrimmed, localized, outside_mm)
 
 
@@ -1077,9 +1083,13 @@ def trim_boundary(
     if len(boundary_nodes) == 0:
         return result
 
-    probe = _worker_probe(mesh_path, outside_margin)
-
     if workers <= 1:
+        # Built only on the path that uses it. On the parallel path each worker
+        # builds (and memoises) its own from the same staged `.npz`, and a copy
+        # here would be a mesh plus a ray-casting index the master never queries
+        # -- and `_PROBE_CACHE` would then hold both alive through `stitch`,
+        # `simplify` and `export`, which are where this run's peak memory is.
+        probe = _worker_probe(mesh_path, outside_margin)
         positions = nodes(lp, boundary_nodes)
         for i in range(len(boundary_nodes)):
             trim = trim_junction(lp, tpl, positions[i], body, probe)

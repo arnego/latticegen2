@@ -643,3 +643,25 @@ def test_the_precision_setting_survives_the_writer_being_constructed(tmp_path):
         BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape(), str(tmp_path / "b.step"), "order"
     )
     assert Interface_Static.IVal_s("write.precision.mode") == occ.WRITE_PRECISION_GREATEST
+
+
+def test_the_part_name_survives_the_writer_being_constructed(tmp_path):
+    """The same trap, on the static that carries specification.md §5's metadata.
+
+    The reset does not distinguish between statics, so ``write.step.product.name``
+    is on exactly the same footing as ``write.precision.mode`` above — and it is
+    the one where a regression is *invisible* rather than merely wrong, because
+    ``stepout.rewrite_step_header`` patches FILE_NAME and FILE_DESCRIPTION and
+    never touches the PRODUCT entity. Set before the writer exists, this comes
+    back as OCCT's own translator string.
+
+    Asserted against the file rather than against the static, since the file is
+    what a downstream reader opens.
+    """
+    path = tmp_path / "named.step"
+    occ.write_step(
+        BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape(), str(path), "fixture+lattice+cc20+t4"
+    )
+    text = path.read_text(encoding="utf-8", errors="replace")
+    assert "PRODUCT('fixture+lattice+cc20+t4" in text
+    assert "Open CASCADE STEP translator" not in text.split("DATA;", 1)[1]

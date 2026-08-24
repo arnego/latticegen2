@@ -90,6 +90,21 @@ def save_mesh(mesh: TriMesh, path: str) -> None:
     )
 
 
+#: Filename the surface mesh is staged under inside a run's temporary folder.
+#: Named once because two stages need the same file for different reasons --
+#: `classify` dispatches its sweep against it and `boundary` builds its
+#: `OutsideProbe` from it (docs/algorithm.md §5.4, §7.2) -- and two literals
+#: would let the staging path and the reading path drift apart silently.
+MESH_STAGE_NAME = "classify_mesh.npz"
+
+
+def stage_mesh(mesh: TriMesh, tmpdir: str) -> str:
+    """Write ``mesh`` to this run's staging path and return it."""
+    path = os.path.join(tmpdir, MESH_STAGE_NAME)
+    save_mesh(mesh, path)
+    return path
+
+
 def load_mesh(path: str) -> TriMesh:
     """Read back what :func:`save_mesh` wrote."""
     with np.load(path) as z:
@@ -1046,6 +1061,7 @@ def _classify_parallel(
     candidates: np.ndarray,
     pool: WorkerPool,
     tmpdir: str,
+    mesh_path: str | None = None,
     report=None,
 ) -> tuple[np.ndarray, int]:
     """Spread :func:`classify_slice` across the run's shared worker pool.
@@ -1065,8 +1081,12 @@ def _classify_parallel(
     path's row for row, and `imap`'s ordered results make it identical run to
     run as well.
     """
-    mesh_path = os.path.join(tmpdir, "classify_mesh.npz")
-    save_mesh(mesh, mesh_path)
+    # Staged by the caller where it has already been -- the pipeline needs the
+    # same file for `boundary`'s containment probe whether or not this path
+    # runs, so writing it a second time here would serialise the whole mesh
+    # twice for a byte-identical result.
+    if mesh_path is None:
+        mesh_path = stage_mesh(mesh, tmpdir)
     nodes_path = os.path.join(tmpdir, "classify_nodes.npz")
     np.savez(nodes_path, candidates=np.asarray(candidates, dtype=np.int64))
 
@@ -1092,6 +1112,7 @@ def classify_nodes(
     candidates: np.ndarray,
     *,
     tmpdir: str | None = None,
+    mesh_path: str | None = None,
     pool: WorkerPool | None = None,
     report=None,
 ) -> Classification:
@@ -1107,6 +1128,11 @@ def classify_nodes(
     the GIL finding behind every other stage's process pool (G7, G17) does not
     even arise, and neither does G15 — nothing here is topology.
 
+    ``mesh_path`` is where the caller has already staged ``mesh`` with
+    :func:`stage_mesh`; the parallel path reuses it rather than writing the same
+    file again. Left ``None`` it stages the mesh itself, which is what a caller
+    with no other use for the file (a unit test, a prototype) wants.
+
     ``report``, if given, is called ``(label, done, total)`` as the stage advances,
     for the graphical front-end (docs/algorithm.md §10). It is an observer: it
     receives no geometry, returns nothing, and every path here behaves the same
@@ -1115,7 +1141,7 @@ def classify_nodes(
     """
     if pool is not None and pool.active and tmpdir is not None and len(candidates) > 0:
         node_class, max_rss = _classify_parallel(
-            lp, mesh, candidates, pool, tmpdir, report=report
+            lp, mesh, candidates, pool, tmpdir, mesh_path=mesh_path, report=report
         )
     else:
         node_class, max_rss = classify_slice(lp, mesh, candidates), 0

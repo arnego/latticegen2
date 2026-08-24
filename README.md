@@ -220,15 +220,21 @@ unconditional.
 exit 4 rather than a body quietly missing from the output. STEP AP214 declares
 one modelling tolerance for a whole file where an OCCT B-rep carries one per
 vertex, edge and face, so a solid can be valid in the generator and not in the
-file. Every output solid is measured for it before export — how much of its
-surface is described more loosely than its own feature size — and the run
-refuses rather than shipping or discarding. The message names the face and its
-position, the `connect` stage above names the junctions the body was built
-from, and the temporary folder is kept. See docs/algorithm.md §7.3 and §9.
+file. Every output solid is measured for it before export — each is written,
+read back and tessellated, and the run refuses rather than shipping or
+discarding a body whose triangles no longer meet edge to edge. The message
+names the face and its position, the `connect` stage above names the junctions
+the body was built from, and the temporary folder is kept. See
+docs/algorithm.md §7.3 and §9.
 
-The check writes each solid, reads it back and tessellates it, so on a large
-part it is not cheap — `export_truth_s` in the run summary reports what it
-cost. It is deliberately not bounded by size: a body nobody looks at is exactly
+Cheaper proxies for that question — how much of a body's surface is described
+more loosely than its own feature size, and how many faults a round trip
+introduces — are measured and logged because they say *why* a body is fragile,
+but they decide nothing: each was tried as the gate and each refused sound
+geometry from a part that had been inspected and accepted.
+
+The check is a full write and re-read per solid, so on a large part it is not
+cheap — `export_truth_s` in the run summary reports what it cost. It is deliberately not bounded by size: a body nobody looks at is exactly
 where an unwritable description would do the most damage.
 
 ### Exit codes

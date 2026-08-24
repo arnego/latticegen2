@@ -149,12 +149,17 @@ def outside_check(rep: Report, output: str, input_path: str, t: float) -> None:
                   f"{ev['cleared_at_mm']:g} mm (bar {vg.CONTAINMENT_TOL:g} mm)"
                   if ev.get("cleared_at_mm") is not None else
                   f"{ev['outside']} of {ev['sampled']} surface points still outside at "
-                  f"{vg.CONTAINMENT_SWEEP[-1]:g} mm; the {ev.get('probed', 0)} measured "
-                  f"exactly are {ev.get('worst_distance_mm', 0.0):.3e} mm from the input "
-                  f"at worst"
+                  f"{vg.CONTAINMENT_SWEEP[-1]:g} mm; the {ev.get('probed', 0)} of "
+                  f"{ev.get('unswept', 0)} measured exactly are "
+                  f"{ev.get('worst_distance_mm', 0.0):.3e} mm from the input at worst"
                   + (f" (worst at {ev['worst_distance_at']})"
                      if ev.get("worst_distance_at") else "")
-                  + f", against a {vg.PROTRUSION_MIN_MM:g} mm bar")
+                  + f", against a {vg.PROTRUSION_MIN_MM:g} mm bar"
+                  # An unprobed candidate is not a cleared one, and the verdict
+                  # says so; the detail says how many, so a failure here reads
+                  # as "not measured" rather than as "measured and outside".
+                  + (f"; {ev['unprobed']} could not be measured"
+                     if ev.get("unprobed") else ""))
 
 
 GOLDEN_EXACT_BUDGET_S = 1800.0

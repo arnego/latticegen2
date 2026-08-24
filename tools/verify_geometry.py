@@ -413,6 +413,18 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
     answer cannot, being a tolerance question asked about a point lying on a
     surface.
 
+    **A candidate the distance probe did not answer for is not contained.**
+    ``contained`` is only ever True on that arm when every point the sweep left
+    over was actually measured -- ``probed == unswept`` -- and every measurement
+    came back a tie. Two ways it can be less: a ``BRepExtrema_DistShapeShape``
+    that does not report ``IsDone``, and a candidate set longer than
+    :data:`DISTANCE_PROBE_MAX`, of which only the first slice is probed. Both
+    used to leave ``worst_distance_mm`` at its initial 0.0 and read as a pass,
+    which is the "unmeasured must never read as measured" rule ``material_outside``
+    beside this was written to obey (docs/testing.md), broken on the check that
+    stands in for it. ``unprobed`` reports the shortfall so a caller can say
+    which of the two it is.
+
     **This is weaker than the exact cut and must be reported as such.** It samples
     the boundary rather than integrating the volume, and it is sound *here*
     because a lattice's material is everywhere within `t/2` of its own surface, so
@@ -487,19 +499,29 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
     # at cc=5, t=1, the 15 points its sweep could not clear are 0.000000 mm from
     # the input, median 9.95e-10 -- against the 0.239 to 0.771 mm the genuine
     # protrusions of docs/algorithm.md S7.2 measured. Eight orders apart.
+    # **A probe that did not answer is not a probe that said "fine".** Two ways
+    # this arm can measure less than it was asked to, and both have to reach the
+    # verdict rather than the initial value of `worst_mm`: a
+    # `BRepExtrema_DistShapeShape` that does not report `IsDone`, and a candidate
+    # set longer than DISTANCE_PROBE_MAX, of which only the first slice is
+    # measured at all. Counting successful probes is what separates "all of them
+    # are ties" from "none of them was measured" -- the same distinction
+    # `material_outside` draws when it reports a solid unmeasured rather than
+    # passing it (docs/testing.md), on the check that stands in for it.
     worst_mm = 0.0
     worst_at = None
-    if candidates:
-        for p in candidates[:DISTANCE_PROBE_MAX]:
-            vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*p)).Vertex()
-            probe = BRepExtrema_DistShapeShape(vertex, body)
-            probe.Perform()
-            if not probe.IsDone():
-                continue
-            if probe.Value() > worst_mm:
-                worst_mm = probe.Value()
-                worst_at = (round(float(p[0]), 4), round(float(p[1]), 4),
-                            round(float(p[2]), 4))
+    probed = 0
+    for p in candidates[:DISTANCE_PROBE_MAX]:
+        vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*p)).Vertex()
+        probe = BRepExtrema_DistShapeShape(vertex, body)
+        probe.Perform()
+        if not probe.IsDone():
+            continue
+        probed += 1
+        if probe.Value() > worst_mm:
+            worst_mm = probe.Value()
+            worst_at = (round(float(p[0]), 4), round(float(p[1]), 4),
+                        round(float(p[2]), 4))
 
     return {
         "sampled": int(len(pts)),
@@ -509,10 +531,12 @@ def surface_points_outside(solid, body, deflection: float = CONTAINMENT_DEFLECTI
         "unswept": len(candidates),
         "worst_distance_mm": worst_mm,
         "worst_distance_at": worst_at,
-        "probed": min(len(candidates), DISTANCE_PROBE_MAX),
+        "probed": probed,
+        "unprobed": len(candidates) - probed,
         "contained": (
             (cleared is not None and cleared <= CONTAINMENT_TOL)
-            or worst_mm <= PROTRUSION_MIN_MM
+            # Every candidate measured, and every measurement a tie.
+            or (probed == len(candidates) and worst_mm <= PROTRUSION_MIN_MM)
         ),
     }
 

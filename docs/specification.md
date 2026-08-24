@@ -627,14 +627,63 @@ helps — they were being asked to repair damage that does not exist until expor
 mode, `write.surfacecurve.mode = Off`, and `SameParameter` before writing were
 each measured and each leave it (§11).
 
-**How to verify.** `test/spiral-island-unwritable.brep` is the body, committed
-for exactly this. Today it fails `occ.exported_mesh_defects` with **11**
-non-manifold edges in 147 triangles
+**The dominant body has the same fault, and that is the half that matters.**
+The island is 4.17 mm³ and could in principle be given up; the 27,864 mm³
+lattice cannot. Measured on the whole part at `cc=5, t=1`, both solids after a
+STEP round trip:
+
+| solid | faces | triangles | non-manifold edges | loosely described | worst deviation |
+|---|---|---|---|---|---|
+| 0, the lattice proper | 45,825 | 111,687 | **2** | 5.37e-04 | 4.898e-03 mm |
+| 1, the island | 36 | 147 | **11** | 3.97e-01 | 2.120e-02 mm |
+
+So a repair aimed only at the island leaves the run still refused. The two
+numbers also differ in kind: the island is *mostly* loosely described (40 % of
+its surface) while the lattice has a couple of bad edges in a body that is
+otherwise sound, which is why the committed fixture is not enough on its own to
+tell whether a candidate repair works at scale.
+
+**Part of the repair already exists, and its effect is measured.**
+docs/algorithm.md §7.2's `OutsideProbe` and one-cell local-block re-trim were
+built for containment, not for writability — but they improve this too. Running
+the same part with the probe disabled and everything else identical:
+
+| | solid 0's non-manifold edges |
+|---|---|
+| §7.2 repairs disabled | **7** |
+| §7.2 repairs enabled | **2** |
+
+Whatever is left is therefore *not* the untrimmed-intersection family §7.2
+already handles, and a candidate fix should be measured against the 2 rather
+than the 7 — otherwise it will appear to work while only re-doing what the
+local block already does.
+
+**How to verify.** `test/spiral-island-unwritable.brep` is the island,
+committed for exactly this. Today it fails `occ.exported_mesh_defects` with
+**11** non-manifold edges in 147 triangles
 (`test_export_truth.py::test_the_island_does_not_survive_being_written`, which
 pins `(147, 11)`). A working repair takes that to `(n, 0)` while preserving the
-solid's volume, and the whole-part check is `SpiralTest` at `cc=5, t=1`
-completing and writing its STEP. Note that two *other* defects stop that part
-first on this branch — see the item below and §11.
+solid's volume.
+
+The whole-part check is
+
+    python src/main.py -i test/SpiralTest.step -cc 5 -t 1 --cores 6
+
+completing and writing its STEP. Today it exits 4 at `export truth` — read the
+two `solid N:` lines above the failure, which carry the table's figures — and
+that is now the *first* thing that stops the part rather than the last: the
+unification volume guard and the material-outside residual that used to stop it
+earlier are both fixed. The export-truth stage itself costs ~85 s here.
+
+**Closing this item is what turns `SpiralTest.step` into an e2e scenario.** It
+is committed as a fixture rather than a scenario precisely because the run
+cannot complete (§6.1), so a `spiral-stress` entry in §6.1's table and
+`tools/e2e.py` is the natural last step of the fix, not a separate piece of
+work. The scenario was written and then withdrawn for that reason, and its
+text survives on the branch behind PR #28
+(`claude/latticegen2-bug-report-4e205b`, `tools/e2e.py`) — worth copying rather
+than rewriting, since it already carries the runtime budget and the
+golden-sample handling for a part that has no golden sample yet.
 
 ### Re-run the rehearsal with the unbounded export-truth check
 

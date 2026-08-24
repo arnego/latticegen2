@@ -679,11 +679,20 @@ earlier are both fixed. The export-truth stage itself costs ~85 s here.
 is committed as a fixture rather than a scenario precisely because the run
 cannot complete (§6.1), so a `spiral-stress` entry in §6.1's table and
 `tools/e2e.py` is the natural last step of the fix, not a separate piece of
-work. The scenario was written and then withdrawn for that reason, and its
-text survives on the branch behind PR #28
-(`claude/latticegen2-bug-report-4e205b`, `tools/e2e.py`) — worth copying rather
-than rewriting, since it already carries the runtime budget and the
-golden-sample handling for a part that has no golden sample yet.
+work. The scenario was written once and withdrawn when the gate refused the
+part, so it is worth writing down what it needs rather than leaving it to be
+rediscovered:
+
+* `-i test/SpiralTest.step -cc 5 -t 1 --cores 6`, and a runtime budget of 20
+  minutes — generation alone measured 8 to 10 minutes across the runs above,
+  and the §6.2 checks that follow it are the slow part, not the run;
+* **no golden sample**, which `golden_check` already handles by skipping and
+  saying so. One should be committed only after the first passing output has
+  been inspected by hand, per the note under §6.1's table;
+* the containment check will fall back to `surface_points_outside`, because
+  the dominant body is past `verify_geometry.CUT_MAX_FACES` — expect the
+  `[NOTE]` line saying the exact cut was not attempted, and a pass on the
+  weaker check rather than on the boolean.
 
 ### Re-run the rehearsal with the unbounded export-truth check
 

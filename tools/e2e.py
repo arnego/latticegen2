@@ -125,10 +125,16 @@ def outside_check(rep: Report, output: str, input_path: str, t: float) -> None:
               f"{measured:.6g} mm^3 over {n_ok} of {result['solids']} solid(s)")
     for item in result["unmeasured"]:
         ev = item["containment"]
-        print(f"  [NOTE] solid {item['solid']} ({item['faces']} faces): the cut claimed "
-              f"{item['cut_claimed_mm3']:.6g} mm^3 of its own {item['volume_mm3']:.6g} mm^3 "
-              f"lies outside, which a boolean-free containment check contradicts; "
-              f"falling back to that check")
+        if item.get("reason") == "not attempted":
+            print(f"  [NOTE] solid {item['solid']} ({item['faces']} faces): past "
+                  f"{vg.CUT_MAX_FACES} faces the exact cut is neither affordable nor "
+                  f"trustworthy on this input, so it was not attempted; using the "
+                  f"boolean-free containment check instead")
+        else:
+            print(f"  [NOTE] solid {item['solid']} ({item['faces']} faces): the cut claimed "
+                  f"{item['cut_claimed_mm3']:.6g} mm^3 of its own {item['volume_mm3']:.6g} mm^3 "
+                  f"lies outside, which a boolean-free containment check contradicts; "
+                  f"falling back to that check")
         rep.check(f"solid {item['solid']} is contained in the input "
                   f"(weaker than the exact cut)",
                   bool(ev.get("contained")),

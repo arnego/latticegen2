@@ -896,12 +896,32 @@ def unify_same_domain(
 # `cc=5, t=1` rehearsal faces: 1.05x, 1.05x, 1.25x, 1.10x (G12).
 SELF_INTERSECT_TOL_GROWTH = 4.0
 
-# ...and never above this in absolute terms, whatever the kernel recorded.
-# The CLI's smallest legal strut is ``t = 0.4`` mm (specification.md §3), so
-# this sits a hundredfold below the smallest feature any legal run can produce
-# and needs no knowledge of the run's actual parameters. Measured need: at most
-# 1.093e-03 mm (G12), so this clears it by 3.7x.
+# ...and never above this in absolute terms, whatever the kernel recorded. The
+# CLI's smallest legal strut is ``t = 0.4`` mm (specification.md §3), so this
+# sits a hundredfold below the smallest feature any legal run can produce.
 SELF_INTERSECT_MAX_VERTEX_TOL = 4e-3
+
+# ...except that a *fixed* absolute cap is only right for the part it was
+# calibrated on, and this one was calibrated on `TD_HX_rehearsal_test`, whose
+# vertices carry tolerances of 8.7e-04 to 1.5e-03 mm (G12). A vertex whose
+# recorded tolerance already **exceeds** the cap cannot be widened at all: the
+# first candidate step is refused, nothing grows, and the repair reports the
+# face as residual without having tried. That is not a bound on growth, it is
+# an off switch, and it fired the first time a part with fatter trims arrived.
+# On `SpiralTest.step` at ``cc=5, t=1`` the falsely self-intersecting wire's
+# shared vertex carries **6.573e-02 mm** — sixteen times the cap — and needs
+# exactly one 1.25x step to clear, which the relative bound above allows
+# comfortably and this one forbade outright.
+#
+# So the absolute cap scales with the run's own smallest real feature instead
+# of with one part's measurements. A tenth of ``t`` reproduces the same order
+# as the fixed figure at small ``t`` while admitting what the kernel itself
+# records at larger ``t``: 0.04 mm at ``t = 0.4``, 0.1 mm at ``t = 1`` (the
+# 8.216e-02 mm the spiral needs, with 22 % to spare). The relative bound stays
+# the one that actually governs — every case measured needs 1.05x to 1.25x,
+# far inside 4x — and this remains the backstop against a kernel-recorded
+# tolerance that is itself absurd.
+SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION = 0.1
 
 # Geometric step used to search for the smallest widening that satisfies OCCT's
 # own predicate. A search rather than a formula because the predicate is
@@ -932,11 +952,18 @@ def _self_intersecting_pair(
     return None
 
 
-def _widen_self_intersection_vertices(face: TopoDS_Face) -> bool:
+def _widen_self_intersection_vertices(
+    face: TopoDS_Face, max_vertex_tol: float | None = None
+) -> bool:
     """Widen the shared vertex of a falsely self-intersecting adjacent pair.
 
     Returns whether anything was widened. Moves no geometry: it only raises a
     recorded tolerance, and ``BRep_Builder.UpdateVertex`` never lowers one.
+
+    ``max_vertex_tol`` is the absolute ceiling, which the caller derives from
+    the run's own ``t`` (:data:`SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION`) rather
+    than taking a fixed figure calibrated on one part — see that constant for
+    the case where a fixed one silently disabled this rung.
     """
     builder = BRep_Builder()
     as_built: dict = {}
@@ -950,9 +977,15 @@ def _widen_self_intersection_vertices(face: TopoDS_Face) -> bool:
             key = vertex.TShape()
             start = as_built.setdefault(key, BRep_Tool.Tolerance_s(vertex))
             want = BRep_Tool.Tolerance_s(vertex) * SELF_INTERSECT_TOL_STEP
-            if want > min(
-                start * SELF_INTERSECT_TOL_GROWTH, SELF_INTERSECT_MAX_VERTEX_TOL
-            ):
+            # Resolved here rather than bound as a default argument, so that
+            # patching the module constant still reaches this — which is how
+            # `test_export_truth.py` exercises the real repair with a raised
+            # cap rather than a stand-in for it.
+            ceiling = (
+                SELF_INTERSECT_MAX_VERTEX_TOL if max_vertex_tol is None
+                else max_vertex_tol
+            )
+            if want > min(start * SELF_INTERSECT_TOL_GROWTH, ceiling):
                 continue  # capped: leave it for the caller to count as residual
             builder.UpdateVertex(vertex, want)
             grew = touched = True
@@ -960,10 +993,20 @@ def _widen_self_intersection_vertices(face: TopoDS_Face) -> bool:
             return touched
 
 
-def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
+def fix_vertex_tolerances(
+    faces: Iterable[TopoDS_Face],
+    max_vertex_tol: float | None = None,
+) -> tuple[int, int]:
     """Correct vertex tolerances the boundary sew leaves wrong.
 
     Returns ``(repaired, still_invalid)`` counted in faces.
+
+    ``max_vertex_tol`` bounds rung 2's widening absolutely. Callers inside the
+    pipeline pass :data:`SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION` times the
+    run's ``t``. ``None`` falls back to :data:`SELF_INTERSECT_MAX_VERTEX_TOL`,
+    read at call time so the constant can still be patched — right only for
+    parts whose recorded tolerances are of the rehearsal's order, and kept so a
+    caller with no lattice in hand still gets a bound.
 
     Two faults, both of them a *recorded tolerance* being wrong rather than any
     geometry being wrong, and both repaired the same way: by correcting the
@@ -1011,10 +1054,9 @@ def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
     So this rung widens that vertex, and asks OCCT's own predicate whether the
     result is enough rather than re-deriving the rule OCCT applies. The search
     is bounded twice — at :data:`SELF_INTERSECT_TOL_GROWTH` times the tolerance
-    the kernel itself recorded, and at
-    :data:`SELF_INTERSECT_MAX_VERTEX_TOL` absolutely — so its failure mode is a
-    face left in ``still_invalid`` for ``validate`` to report, never an
-    unbounded tolerance. Widening is also monotonically *permissive*: every
+    the kernel itself recorded, and at ``max_vertex_tol`` absolutely — so its
+    failure mode is a face left in ``still_invalid`` for ``validate`` to
+    report, never an unbounded tolerance. Widening is also monotonically *permissive*: every
     check that reads a vertex tolerance (the contextual vertex check, this
     self-intersection check) is a "within tolerance" test, so a neighbouring
     face sharing the vertex can only become more valid, never less.
@@ -1064,7 +1106,7 @@ def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
             fixer.FixVertexTolerance(edge, face)
             touched = True
         if not BRepCheck_Analyzer(face).IsValid():
-            touched |= _widen_self_intersection_vertices(face)
+            touched |= _widen_self_intersection_vertices(face, max_vertex_tol)
         if not touched:
             still_invalid += 1
             continue
@@ -1080,6 +1122,26 @@ def fix_vertex_tolerances(faces: Iterable[TopoDS_Face]) -> tuple[int, int]:
         else:
             still_invalid += 1
     return repaired, still_invalid
+
+
+def _wire_closes(wire, tol: float = 1e-7) -> bool:
+    """Whether ``wire``'s edges form a closed loop.
+
+    Asked of the vertices rather than of OCCT's ``Closed`` flag, which
+    ``BRep_Builder`` leaves unset on wires a boolean produced — the same reason
+    :mod:`latticegen2.weld` computes closure itself rather than reading the
+    flag. A closed loop uses every vertex an even number of times; a wire with
+    loose ends does not.
+    """
+    counts: dict = {}
+    for e in _explore(wire, TopAbs_ShapeEnum.TopAbs_EDGE):
+        edge = TopoDS.Edge_s(e)
+        if BRep_Tool.Degenerated_s(edge):
+            continue
+        for v in _explore(edge, TopAbs_ShapeEnum.TopAbs_VERTEX):
+            key = TopoDS.Vertex_s(v).TShape()
+            counts[key] = counts.get(key, 0) + 1
+    return bool(counts) and all(n % 2 == 0 for n in counts.values())
 
 
 def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape, int]:
@@ -1105,16 +1167,32 @@ def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape,
     repair unable to open a hole:
 
     * it is not the face's outer wire;
-    * every one of its edges is shorter than ``tol``, so the region it could
-      bound is smaller than ``tol²`` — nothing, against a strut of side ``t``;
     * every one of its edges is used exactly **once** in ``shape``, i.e. is
       already unpaired. An inner wire properly shared with a neighbouring face
-      is left alone, however small.
+      is left alone, however small. **This is the condition that carries the
+      argument**: the repair can only ever delete edges that are already
+      defects;
+    * and it bounds nothing — either because every edge is shorter than ``tol``,
+      so the region it could enclose is under ``tol²``, **or** because the wire
+      **does not close**, which is a stronger statement and needs no threshold
+      at all. An open wire encloses nothing at any length.
 
     So this only ever deletes edges that are already defects, and only when they
     bound nothing. Measured on the piece above: surface area and cap areas
     unchanged **exactly**, the solid still valid, and ``shell_defects`` going
     from ``(2, 0)`` to ``(0, 0)``.
+
+    **The "does not close" arm exists because the length bar is not what makes
+    this safe, and a part eventually proved it.** `test-cylinder.STEP` at
+    ``cc=4, t=0.8`` leaves junction (48,16,-27) carrying exactly this defect at
+    **0.3267 mm** — a single-edge inner wire whose endpoints are that far
+    apart, four orders above ``tol``, on a face of 1.29 mm². The trim's own
+    output is an open shell for it, and `stitch` reported it as one free edge
+    with nothing to weld to. Removing it leaves the face count unchanged, the
+    surface area **bit-identical**, and the shell closed — the same evidence the
+    micron-scale cases give, because the mechanism is the same and only the
+    scale differs. Raising ``tol`` to cover it instead would have made a
+    threshold load-bearing that the paragraph above is careful to say is not.
 
     **What the caller must not check is volume**, and the reason is a property
     of OCCT rather than of this repair: ``BRepGProp::VolumeProperties`` documents
@@ -1132,6 +1210,7 @@ def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape,
 
     def is_pinhole(wire) -> bool:
         n = 0
+        tiny = True
         for e in _explore(wire, TopAbs_ShapeEnum.TopAbs_EDGE):
             n += 1
             edge = TopoDS.Edge_s(e)
@@ -1140,11 +1219,13 @@ def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape,
             props = GProp_GProps()
             BRepGProp.LinearProperties_s(edge, props)
             if props.Mass() >= tol:
-                return False
+                tiny = False
             i = edge_faces.FindIndex(edge)
             if i == 0 or edge_faces.FindFromIndex(i).Extent() != 1:
                 return False        # shared with another face: not ours to remove
-        return n > 0
+        # Short enough to bound nothing, *or* structurally incapable of bounding
+        # anything because it does not close. See the docstring.
+        return n > 0 and (tiny or not _wire_closes(wire))
 
     reshape = BRepTools_ReShape()
     n_removed = 0

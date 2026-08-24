@@ -340,7 +340,24 @@ List concrete parameter sets that must be run automatically (at minimum: one sma
 case, one large/dense case, one edge case at parameter boundaries, one expected-failure
 case for invalid input).
 
-All four are implemented in [`tools/e2e.py`](../tools/e2e.py) and all four pass.
+All are implemented in [`tools/e2e.py`](../tools/e2e.py).
+
+**`SpiralTest.step` is committed as a fixture, not as a scenario, and that is
+a measurement rather than an omission.** At 2,073 boundary junctions it is a
+fraction of `dense-lattice`, but its swept B-spline surface makes the boolean
+fit trim curves carrying recorded tolerances two orders above anything the
+other committed parts produce — 2.1e-02 mm on edges, 6.6e-02 mm on a vertex,
+against the rehearsal's 8.7e-04 to 1.5e-03 mm. That is what makes it valuable,
+and it is why the unit suite uses it heavily (`test_boundary.py`,
+`test_export_truth.py`).
+
+It is **not** an end-to-end scenario because it cannot currently complete: §9's
+export-truth gate refuses it, and correctly. After a STEP round trip its
+dominant body carries 2 non-manifold edges and its 4.17 mm³ floating island 11,
+so nothing downstream could tessellate the file consistently. That is the open
+item §10 records — re-fitting the pcurve at the source so the body is kept
+rather than refused — and until it is closed a scenario here would be a
+permanently red test rather than a gate.
 
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
@@ -416,6 +433,161 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
+### `SpiralTest.step`: five defects, each exposed by fixing the one before
+
+**Committed as a test fixture 2026-08-20**, at the user's request — as an
+end-to-end scenario at first, and reduced to a fixture once §9's export-truth
+gate landed and refused its output (§6.1). It earned its place immediately: a part a fraction of `dense-lattice`'s size that
+found four generator defects and three harness ones. What links all four is
+one property — its swept B-spline surface makes the boolean fit trim curves
+carrying recorded tolerances **two orders above** anything the other committed
+parts produce (2.1e-02 mm on edges, 6.6e-02 mm on a vertex, against the
+rehearsal's 8.7e-04 to 1.5e-03 mm). Every bar calibrated on the older parts met
+input it had never seen.
+
+**1. Rung 2's absolute cap was an off switch** (docs/algorithm.md §8).
+`SELF_INTERSECT_MAX_VERTEX_TOL` was a fixed 4e-3 mm; the failing wire's shared
+vertex was recorded by OCCT itself at 6.573e-02 mm, sixteen times that. The
+first candidate step was refused, nothing grew, and the run reported the face
+as residual *without having tried*. A bound that can sit below the value it
+bounds is not a bound. Now a tenth of the run's own `t`; the repair itself was
+never wrong and still needs only 1.25x.
+
+**2. The unification volume guard compared a size-biased quantity**
+(docs/algorithm.md §9). Two solids unified by the same call in the same stage:
+27,864 mm³ drifting 1.013e-05 relative, and 4.17 mm³ drifting 1.837e-03 —
+ninety times apart, and **both** far inside the 2.1e-02 mm tolerances OCCT
+records on the edges being merged. The small one failed a 1e-4 bar while its
+exact symmetric difference against the un-unified solid, cut both ways, is
+0 mm³. Loosening the relative figure a third time would have been the wrong
+response to the same evidence: the guard now decides on displacement,
+`|ΔV| / area`, with relative drift kept only as a cheap pre-filter, because
+measuring area costs 7.7 s on a 64k-face solid and would otherwise be paid on
+every run for a guard that almost never fires.
+
+**3. The intersection returned its own operand** (docs/algorithm.md §7.2). The
+serious one: 8 junctions came back untrimmed, leaving material up to 1.29 mm
+outside the input body. Established against four independent tests because
+`BRepAlgoAPI_Cut` agrees with `Common` and both are wrong. Repaired by
+re-trimming the six convex half-struts and fusing them, behind a
+self-validating detector.
+
+**4. Boundary-to-boundary caps whose rings do not correspond**
+(docs/algorithm.md §8). Exposed by fixing 3: a cap where both sides present the
+whole quad to six decimals but with six edges against four. `weld.unweldable`
+now checks those caps too, having previously assumed the sew would reconcile
+them.
+
+**Harness defects found on the way**, all in `tools/`:
+
+* `material_outside`'s per-solid cut ran **17 minutes and 14.5 GB** on the
+  45,897-face output without finishing — the ill-conditioned case
+  docs/testing.md already documents at 43,530 faces, now bounded by
+  `CUT_MAX_FACES`. Above it the cut is skipped and the solid reported
+  *unmeasured* with containment evidence, never as a pass.
+* `surface_points_outside` re-tested every sampled point at all five
+  tolerances. Raising the tolerance can only turn OUT into ON, so the OUT set
+  shrinks monotonically and each tolerance need only re-test what the previous
+  one rejected — exact, and up to 5x off a check whose single pass is ~31
+  minutes at this scale.
+* **The `stitch` free-edge failure added earlier the same day named the wrong
+  edges.** It sampled ten of *all* free edges, of which 8,444 of 8,450 were the
+  interface rings that are supposed to be free, so it pointed at innocent
+  geometry — and cost a probe chasing those coordinates. It now reports the
+  edges lying away from any expected interface, which localised defect 4 to a
+  single cap on the next run.
+
+**5. The residual, and the trap it sat in.** Defect 3's first repair left all
+three parameter sets producing watertight, `BRepCheck_Analyzer`-valid solids
+that still had material outside the body — 0.239, 0.771 and 0.380 mm. **The
+pipeline's own gates passed all three**, because watertight and valid say
+nothing about containment, and that reading was made twice in this session
+before a boolean-free sample caught it. §6.2's material-outside check is the
+only thing that sees this.
+
+The residual was a different shape from what §7.2's per-half-strut repair
+covers: the fused intersection and the six half-strut ones *agree with each
+other* and are both wrong, so no boolean can grade either. Closed by two things
+(docs/algorithm.md §7.2): a check that uses no kernel at all — ray parity over
+the classification mesh plus a distance bar, which separates ties from
+protrusions by two orders — and a repair that hands the kernel a smaller tool,
+a one-cell block cut from the body, validated against Monte Carlo ground truth
+and pinned at one cell because at four it reproduces the wrong answer. Where
+neither works, the junction is **dropped** rather than shipped or fatal: one of
+2,073 at `cc=5, t=1`, a 0.53 mm sliver of negligible volume, costing 0.03 % of
+the lattice to keep §1's containment absolute.
+
+| run | localized | dropped | points outside, after |
+|---|---|---|---|
+| `cc=5, t=1` | 10 | 1 | **0 of 4,076** |
+| `cc=7, t=1.4` | 4 | 0 | **0 of 4,069** |
+| `cc=4, t=0.8` | 13 | 0 | **0 of 4,060** |
+
+Probing every junction costs ~+24 % on `boundary`.
+
+**The lesson that recurs, and this is the fifth chapter to record it:** the
+first convincing explanation was wrong three separate times here — the fat
+tolerances looked like a third calibration mistake and were not, `Cut` looked
+like a sound cross-check and was not, and the re-trimmed caps looked like they
+would fail to weld and matched to 1e-15. What settled each was a measurement
+that did not share machinery with the thing under test.
+
+### `assemble` fails on holes `stitch` already measured — half fixed, root cause open
+
+**Reported 2026-08-20** against v3.0.0, as two runs of a heat-exchanger part
+that is *not* `TD_HX_rehearsal_test.step` (larger, and one variant carries
+internal channels). Both die at `assemble`:
+
+| | run 1, `cc=5 t=1` | run 2, `cc=7 t=1.4` |
+|---|---|---|
+| `stitch` expected free edges | 105,460 | 38,156 |
+| seam-only split gave | 269,791 (rejected, correctly) | 99,818 (rejected, correctly) |
+| **full unsplit sew gave** | **105,477** (+17) | **38,170** (+14) |
+| `assemble` failed with | **17 edges on 1 face** | **14 edges on 1 face** |
+
+**Done: the run no longer carries on past that.** The excess after the *unsplit*
+sew is exactly the count that later kills `assemble`, and `_sew_round_two`
+measured it, logged it, and returned anyway — so the run spent a whole
+`instance` stage (1 m 00 s) building an interior for a boundary layer that could
+never close, then reported the failure against assembly rather than the sew.
+That is now a hard failure at `stitch`, with the free edges' world positions in
+the message, and the surviving repair line prints the positions of the edges the
+split left free. See docs/algorithm.md §8, `test_weld.py::test_a_hole_the_unsplit_sew_cannot_close_fails_in_stitch_not_in_assemble`.
+
+**Open: why the boundary layer has those holes at all.** Not the seam split —
+that is the 269,791/99,818 figure, caught and discarded as designed (G9, G21).
+Not the interior either: `interior shell: ... 105460 open edges` matches
+`want_rings` exactly in both runs. The holes are in the sewn boundary layer
+after a correct full sew.
+
+**Where to start.** The failing edge positions sit on the caps the same run
+logged as declined-unpaired:
+
+    declined (633,-99,-75)h5 @ [2078.461, -60.0, 936.93]
+    failing  [2079.348,-59.537,937.856]  [2078.836,-59.527,937.482]
+             [2079.042,-61.34,936.566]   [2078.836,-61.34,936.42]
+
+    declined (629,-97,-86)h0 @ [2079.904, -27.5, 910.394]
+    failing  [2078.836,-27.572,910.415]  [2078.909,-27.572,910.467]
+             [2078.836,-27.821,909.165]  [2079.247,-28.006,909.682]
+
+Same pattern in run 2. That contradicts two claims this codebase makes about
+the case: the note `pipeline._log_interfaces` prints for it ("the output stays
+watertight") and `_sew_round_two`'s reasoning that `want` is exact because a
+declined cap keeps its own face. Two mechanisms are live in both runs and the
+log cannot separate them — the `unpaired` decline path itself, and
+`boundary._fuse_group`'s `_owning_cap` re-tagging (4 and 5 fused clusters
+respectively), where a mis-assigned cap key produces this signature exactly.
+Note `TD_HX_rehearsal_test` at `cc=5, t=1` declines 3 unpaired caps and stays
+watertight, so being unpaired is not by itself sufficient.
+
+**Blocked on the input.** `TD HX LatticeGen3.0 Test.stp`, or the smaller
+`LatticeGen3.0 Test_2.stp` which fails identically. Not the temp folder. Per
+docs/testing.md this defect family must be diagnosed on the geometry that
+actually fails: G10 is the case where a synthetic reproduction matching the
+symptom to four significant figures passed a full measurement gate while
+repairing an entirely different defect.
+
 ### Re-fit the pcurve at the source, so the body is kept rather than refused
 
 **Found 2026-08-23**, alongside §11's export-truth gate, and deliberately not
@@ -455,14 +627,72 @@ helps — they were being asked to repair damage that does not exist until expor
 mode, `write.surfacecurve.mode = Off`, and `SameParameter` before writing were
 each measured and each leave it (§11).
 
-**How to verify.** `test/spiral-island-unwritable.brep` is the body, committed
-for exactly this. Today it fails `occ.exported_mesh_defects` with **11**
-non-manifold edges in 147 triangles
+**The dominant body has the same fault, and that is the half that matters.**
+The island is 4.17 mm³ and could in principle be given up; the 27,864 mm³
+lattice cannot. Measured on the whole part at `cc=5, t=1`, both solids after a
+STEP round trip:
+
+| solid | faces | triangles | non-manifold edges | loosely described | worst deviation |
+|---|---|---|---|---|---|
+| 0, the lattice proper | 45,825 | 111,687 | **2** | 5.37e-04 | 4.898e-03 mm |
+| 1, the island | 36 | 147 | **11** | 3.97e-01 | 2.120e-02 mm |
+
+So a repair aimed only at the island leaves the run still refused. The two
+numbers also differ in kind: the island is *mostly* loosely described (40 % of
+its surface) while the lattice has a couple of bad edges in a body that is
+otherwise sound, which is why the committed fixture is not enough on its own to
+tell whether a candidate repair works at scale.
+
+**Part of the repair already exists, and its effect is measured.**
+docs/algorithm.md §7.2's `OutsideProbe` and one-cell local-block re-trim were
+built for containment, not for writability — but they improve this too. Running
+the same part with the probe disabled and everything else identical:
+
+| | solid 0's non-manifold edges |
+|---|---|
+| §7.2 repairs disabled | **7** |
+| §7.2 repairs enabled | **2** |
+
+Whatever is left is therefore *not* the untrimmed-intersection family §7.2
+already handles, and a candidate fix should be measured against the 2 rather
+than the 7 — otherwise it will appear to work while only re-doing what the
+local block already does.
+
+**How to verify.** `test/spiral-island-unwritable.brep` is the island,
+committed for exactly this. Today it fails `occ.exported_mesh_defects` with
+**11** non-manifold edges in 147 triangles
 (`test_export_truth.py::test_the_island_does_not_survive_being_written`, which
 pins `(147, 11)`). A working repair takes that to `(n, 0)` while preserving the
-solid's volume, and the whole-part check is `SpiralTest` at `cc=5, t=1`
-completing and writing its STEP. Note that two *other* defects stop that part
-first on this branch — see the item below and §11.
+solid's volume.
+
+The whole-part check is
+
+    python src/main.py -i test/SpiralTest.step -cc 5 -t 1 --cores 6
+
+completing and writing its STEP. Today it exits 4 at `export truth` — read the
+two `solid N:` lines above the failure, which carry the table's figures — and
+that is now the *first* thing that stops the part rather than the last: the
+unification volume guard and the material-outside residual that used to stop it
+earlier are both fixed. The export-truth stage itself costs ~85 s here.
+
+**Closing this item is what turns `SpiralTest.step` into an e2e scenario.** It
+is committed as a fixture rather than a scenario precisely because the run
+cannot complete (§6.1), so a `spiral-stress` entry in §6.1's table and
+`tools/e2e.py` is the natural last step of the fix, not a separate piece of
+work. The scenario was written once and withdrawn when the gate refused the
+part, so it is worth writing down what it needs rather than leaving it to be
+rediscovered:
+
+* `-i test/SpiralTest.step -cc 5 -t 1 --cores 6`, and a runtime budget of 20
+  minutes — generation alone measured 8 to 10 minutes across the runs above,
+  and the §6.2 checks that follow it are the slow part, not the run;
+* **no golden sample**, which `golden_check` already handles by skipping and
+  saying so. One should be committed only after the first passing output has
+  been inspected by hand, per the note under §6.1's table;
+* the containment check will fall back to `surface_points_outside`, because
+  the dominant body is past `verify_geometry.CUT_MAX_FACES` — expect the
+  `[NOTE]` line saying the exact cut was not attempted, and a pass on the
+  weaker check rather than on the boolean.
 
 ### Re-run the rehearsal with the unbounded export-truth check
 

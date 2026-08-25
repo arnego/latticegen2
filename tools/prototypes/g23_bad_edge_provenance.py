@@ -79,7 +79,13 @@ from latticegen2.parallel import read_brep
 QUANTUM = 1e7
 """Points are interned on a 1e-7 mm grid — OCCT's own confusion, and exactly
 what `occ.exported_mesh_defects` uses, so edge keys here mean what they mean in
-production."""
+production.
+
+``--skip-degenerate`` additionally matches production's rule of dropping
+triangles with two coincident vertices. Without the flag this script reports the
+count as it stood *before* that rule, which is what the before/after in G23 is
+measured with — and it is why the two once disagreed by one, production having
+counted the collapsed ``lo == hi`` key that this script has always skipped."""
 
 
 def _mesh_edge_key(a, b):
@@ -87,7 +93,7 @@ def _mesh_edge_key(a, b):
     return lo * 4_294_967_296 + hi
 
 
-def analyse(shape, deflection=occ.DEFAULT_MESH_DEFLECTION):
+def analyse(shape, deflection=occ.DEFAULT_MESH_DEFLECTION, skip_degenerate=False):
     """Count mesh edges by use, and record which (face, B-rep edge) produced each.
 
     Returns ``(triangles, counts, provenance, point_of, edge_faces, edge_map)``.
@@ -109,6 +115,7 @@ def analyse(shape, deflection=occ.DEFAULT_MESH_DEFLECTION):
         edge_faces[i] = ancestry.FindFromKey(e).Extent() if ancestry.Contains(e) else 0
 
     missing_poly = [0]
+    degenerate_tris = [0]
     pole_nodes = set()
     poly_pairs = [0]
     point_id = {}
@@ -170,6 +177,15 @@ def analyse(shape, deflection=occ.DEFAULT_MESH_DEFLECTION):
         for i in range(1, tri.NbTriangles() + 1):
             a, b, c = tri.Triangle(i).Get()
             triangles += 1
+            ia, ib, ic = ids[a - 1], ids[b - 1], ids[c - 1]
+            if skip_degenerate and (ia == ib or ib == ic or ia == ic):
+                # A triangle two of whose vertices intern to one point has no
+                # area. It contributes its collapsed key once *and the real
+                # edge twice*, since that edge appears as both (A,P) and (P,A)
+                # in the same triangle -- which is how a sound pole reads as an
+                # over-used edge.
+                degenerate_tris[0] += 1
+                continue
             for u, v in ((a, b), (b, c), (c, a)):
                 lo, hi = ids[u - 1], ids[v - 1]
                 if lo == hi:
@@ -179,7 +195,8 @@ def analyse(shape, deflection=occ.DEFAULT_MESH_DEFLECTION):
                 provenance[key].append((fi, seg_owner.get(key)))
 
     print(f"  [edge/face pairs with a polygon: {poly_pairs[0]}, "
-          f"without: {missing_poly[0]}]", flush=True)
+          f"without: {missing_poly[0]}; degenerate triangles: "
+          f"{degenerate_tris[0]}, skipped: {skip_degenerate}]", flush=True)
     return triangles, counts, provenance, point_of, edge_faces, edge_map, pole_nodes
 
 
@@ -199,10 +216,11 @@ def verdict(key, uses, prov, edge_faces):
     return "M", brep_edges, faces
 
 
-def report(path, deflection=occ.DEFAULT_MESH_DEFLECTION, show=True):
+def report(path, deflection=occ.DEFAULT_MESH_DEFLECTION, show=True,
+           skip_degenerate=False):
     t0 = time.time()
     shape = read_brep(path)
-    tri, counts, prov, point_of, edge_faces, edge_map, poles = analyse(shape, deflection)
+    tri, counts, prov, point_of, edge_faces, edge_map, poles = analyse(shape, deflection, skip_degenerate)
     bad = [(k, n) for k, n in counts.items() if n != 2]
     at_pole = sum(1 for k, _n in bad
                   if (k // 4_294_967_296) in poles or (k % 4_294_967_296) in poles)
@@ -297,6 +315,13 @@ def main(argv):
     if not argv:
         print(__doc__)
         return 2
+    skip = False
+    if argv[0] == "--skip-degenerate":
+        skip = True
+        argv = argv[1:]
+    if not argv:
+        print(__doc__)
+        return 2
     if argv[0] == "--control-c2":
         return 0 if control_c2(argv[1]) else 1
     defl = occ.DEFAULT_MESH_DEFLECTION
@@ -304,7 +329,7 @@ def main(argv):
         defl = float(argv[1])
         argv = argv[2:]
     for path in argv:
-        report(path, deflection=defl)
+        report(path, deflection=defl, skip_degenerate=skip)
     return 0
 
 

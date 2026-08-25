@@ -1104,7 +1104,10 @@ boundary-to-boundary cap at all (6 unpaired, 0 mismatched, 0 unweldable). The
 case above is still what the check is *for*, and it remains the clearest
 statement of the mechanism; it is simply no longer reproduced by that input.
 `TD_HX_rehearsal_test` at `cc=5, t=1` flags exactly one, which is the only
-committed part that currently exercises this at all.
+committed part that currently exercises this at all — and it does exercise it
+end to end: the run repairs that cap with the local fuse, and the two mesh edges
+the duplicate used to produce, plus the `4x` edge beside them, are gone from its
+export-truth reading (`tools/prototypes/RESULTS.md` G23).
 
 **A flagged cap is fused, not simply declined, and that is a correction to what
 this section used to claim.** Declining withdraws *both* keys, so
@@ -1679,6 +1682,21 @@ program builds itself.
   is the property that makes a body useless downstream rather than a proxy for
   it, and it is the symptom that found the one genuinely unwritable body this
   project has produced.
+
+  **Triangles with two coincident vertices are skipped**, which is
+  `shell_defects`' and `free_edges`' rule about degenerate *edges* restated one
+  level down: a thing with no extent cannot be a hole. Mesh points are interned
+  by rounded coordinate, so at a pole -- a cone apex, a sphere pole -- a whole
+  parametric range collapses to one id, and such a triangle contributes its
+  collapsed key once *and the real edge twice*, making a closed fan read as four
+  uses. The test is interned-id equality rather than area, because the defect is
+  created by the interning; a thin triangle with three distinct ids still bounds
+  material and is still counted. Measured: a plain sphere reported 4 defects and
+  a cone 2, both now 0, while a cone with its base removed still reports all 63
+  segments of that hole -- and on `TD_HX_rehearsal_test` at `cc=5, t=1` the
+  dominant body falls from 26 readings to **13**, every survivor used once
+  (`tools/prototypes/RESULTS.md` G23) — 16 from this skip alone, and the last
+  three with §8's fused cap.
 
   Three cheaper quantities were tried as the gate before this one. `SpiralTest`
   at `cc=5, t=1` produces two solids — the 27,864 mm³ lattice, sound, and the

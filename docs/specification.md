@@ -502,17 +502,29 @@ throughout, so this is not the fat-tolerance family §8's repair rungs address.
 Meshed alone in a compound with no neighbour, every implicated `ConicalSurface`
 reproduces its own fold, and all eight share one property: their `v` range
 begins at exactly **-1.7321 = -√3**, the cone's apex, where the whole u-range
-collapses to one point. Excluding bad edges incident to the image of a
-**degenerate** edge accounts for **9 of 25** — a real but partial explanation,
-and the third place in this codebase where degenerate edges have been counted as
-defects (`shell_defects` always skipped them; `free_edges` did not until G21).
-Recorded rather than applied, since it changes a correctness gate's verdict.
+collapses to one point.
 
-**So repairing the declined cap removes 2 of 26 and the part still does not
-ship.** The remaining 14 are neither `T` nor pole-adjacent, and
-`spiral-island-unwritable.brep` — known to be genuinely unwritable — shows the
-same `M` and `interior` classes (8 and 2, with 0 `T`), so neither class can be
-dismissed as noise and no narrowing of the gate is defensible on two parts.
+**Nine of those readings were the gate's own arithmetic and are now gone.** At
+a pole a whole parametric range maps to one point, so distinct parametric nodes
+intern to one id, and a triangle with two vertices there contributes its
+collapsed key once *and the real edge twice* — a closed fan reading as four
+uses. `occ.exported_mesh_defects` now skips triangles with two coincident
+vertices, which is the same reasoning `shell_defects` and `free_edges` already
+apply to degenerate *edges* one level down (`free_edges` counted them until
+G21). Measured: the count falls **25 → 16**, exactly 9 degenerate triangles are
+skipped, every pole-incident reading disappears and no `M` or `T` edge does.
+The smallest statement of that bug is that a plain `BRepPrimAPI_MakeSphere`
+reported 4 defects and a `MakeCone` 2 — sound closed solids this gate would
+have refused (`tools/prototypes/RESULTS.md` G23).
+
+**The item stays open: the part still does not ship.** Solid 0 now reads
+**16** rather than 26, of which 2 are the declined-cap `T` pair — a real
+generator defect, repaired separately — leaving **9 `M`, 4 `interior` and 1
+`4x/interior`** on faces `BRepCheck_Analyzer` calls valid with 1e-07
+tolerances. `spiral-island-unwritable.brep`, known to be genuinely unwritable,
+shows the same `M` and `interior` classes (8 and 2, with 0 `T`) and carries **0**
+degenerate triangles, so neither class can be dismissed as noise and no
+narrowing of the gate is defensible on two parts.
 
 **Do not reach for the input's seam gaps.** The failure message cites them and
 the reading is real — 8.1162e-03 mm at [1869.577, 92.830, 983.105], on 54 of

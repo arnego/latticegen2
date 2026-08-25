@@ -1680,6 +1680,20 @@ program builds itself.
   it, and it is the symptom that found the one genuinely unwritable body this
   project has produced.
 
+  **Triangles with two coincident vertices are skipped**, which is
+  `shell_defects`' and `free_edges`' rule about degenerate *edges* restated one
+  level down: a thing with no extent cannot be a hole. Mesh points are interned
+  by rounded coordinate, so at a pole -- a cone apex, a sphere pole -- a whole
+  parametric range collapses to one id, and such a triangle contributes its
+  collapsed key once *and the real edge twice*, making a closed fan read as four
+  uses. The test is interned-id equality rather than area, because the defect is
+  created by the interning; a thin triangle with three distinct ids still bounds
+  material and is still counted. Measured: a plain sphere reported 4 defects and
+  a cone 2, both now 0, while a cone with its base removed still reports all 63
+  segments of that hole -- and on `TD_HX_rehearsal_test` at `cc=5, t=1` the
+  dominant body falls from 26 readings to 16 (`tools/prototypes/RESULTS.md`
+  G23).
+
   Three cheaper quantities were tried as the gate before this one. `SpiralTest`
   at `cc=5, t=1` produces two solids — the 27,864 mm³ lattice, sound, and the
   4.17 mm³ island, not — and on that part alone two of the three look decisive:

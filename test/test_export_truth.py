@@ -20,9 +20,13 @@ import os
 import pytest
 from OCP.BOPAlgo import BOPAlgo_ArgumentAnalyzer
 from OCP.BRep import BRep_Builder, BRep_Tool
-from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeSphere
+from OCP.BRepPrimAPI import (
+    BRepPrimAPI_MakeBox,
+    BRepPrimAPI_MakeCone,
+    BRepPrimAPI_MakeSphere,
+)
 from OCP.BRepTools import BRepTools
-from OCP.TopoDS import TopoDS_Shape
+from OCP.TopoDS import TopoDS_Shape, TopoDS_Shell
 from OCP.BRep import BRep_Builder as _BRepBuilder
 from OCP.TopAbs import TopAbs_ShapeEnum
 from OCP.TopoDS import TopoDS
@@ -339,6 +343,12 @@ def test_the_island_does_not_survive_being_written(tmp_path):
     surface gap is not an export artefact and no writer setting reaches it, so
     it stays refused while `SpiralTest.step`'s own bodies — whose only obstacle
     *was* the under-declared tolerance — now ship.
+
+    It is also immune to the degenerate-triangle skip, and measurably so
+    rather than by assumption: this body meshes with **0** degenerate
+    triangles and carries no degenerate B-rep edge, so every one of its 10
+    defects is real geometry. That is what makes it the required real fault
+    in the control set (G10) — a rule that cleared it would be wrong.
     """
     defects = occ.exported_mesh_defects(
         load_island(), str(tmp_path / "island.step")
@@ -359,6 +369,10 @@ def test_the_island_does_not_survive_being_written(tmp_path):
     )
     assert defects.where and len(defects.where) <= occ.MESH_DEFECT_SAMPLES
     assert all(len(pos) == 3 for pos in defects.where)
+    assert defects.degenerate == 0, (
+        "this body has no pole, so the degenerate-triangle skip cannot reach "
+        "it -- which is why its numbers are a fixed point for that change"
+    )
 
 
 def test_a_sound_body_survives_being_written(tmp_path):
@@ -368,6 +382,71 @@ def test_a_sound_body_survives_being_written(tmp_path):
     assert defects.triangles == 12
     assert defects.bad == 0
     assert defects.by_use == {} and defects.where == []
+
+
+def test_a_pole_does_not_read_as_a_defect(tmp_path):
+    """A sound solid with a pole must read clean, and did not.
+
+    At a pole -- a sphere pole, a cone apex -- a whole parametric range maps to
+    one 3D point, so distinct parametric nodes intern to a single id. A triangle
+    with two vertices there contributes its collapsed key once *and the real
+    edge twice*, since that edge appears as both (A,P) and (P,A) within the same
+    triangle. With two sound neighbours also using it, a perfectly closed fan
+    reads as four uses.
+
+    Measured before the degenerate-triangle skip: this sphere reported
+    ``bad == 4`` with ``by_use == {4: 2, 1: 2}`` and `MakeCone(5, 0, 10)`
+    reported ``bad == 2`` with ``{4: 1, 1: 1}`` -- one defect per degenerate
+    triangle, on closed solids the export-truth gate would have refused
+    outright. Those figures are what make this a regression test rather than a
+    tautology.
+    """
+    sphere = BRepPrimAPI_MakeSphere(10.0).Shape()
+    degenerate = [e for e in edges(sphere) if BRep_Tool.Degenerated_s(e)]
+    assert degenerate, "the fixture must actually carry degenerate edges"
+
+    defects = occ.exported_mesh_defects(sphere, str(tmp_path / "sphere.step"))
+    assert defects.triangles == 2022, "the mesher's own total, skips included"
+    assert defects.degenerate == 2, "one per pole"
+    assert defects.bad == 0
+    assert defects.by_use == {} and defects.where == []
+
+    cone = BRepPrimAPI_MakeCone(5.0, 0.0, 10.0).Shape()
+    cone_defects = occ.exported_mesh_defects(cone, str(tmp_path / "cone.step"))
+    assert (cone_defects.bad, cone_defects.degenerate) == (0, 1)
+
+
+def test_a_hole_at_a_pole_is_still_caught(tmp_path):
+    """The blind-spot control, and the reason the rule is about *triangles*.
+
+    Skipping anything merely *near* a pole would hide a genuine hole whose
+    boundary reached one. Skipping triangles with two coincident vertices cannot:
+    a triangle that bounds nothing is not what bounds a hole.
+
+    This is the sharpest case available -- the cone's base disk removed, so the
+    hole lies on the boundary of the very face that carries the apex. Every one
+    of its 63 mesh segments is still reported. Measured before the skip, the
+    same shell read **65** with ``{1: 64, 4: 1}``: a real hole with two apex
+    artefacts piled on top. The fix makes the reading cleaner, not weaker.
+    """
+    cone = BRepPrimAPI_MakeCone(5.0, 0.0, 10.0).Shape()
+    lateral = [
+        f for f in occ.faces(cone)
+        if any(BRep_Tool.Degenerated_s(TopoDS.Edge_s(e))
+               for e in occ._explore(f, TopAbs_ShapeEnum.TopAbs_EDGE))
+    ]
+    assert len(lateral) == 1, "the apex-bearing face must be identifiable"
+
+    builder = BRep_Builder()
+    shell = TopoDS_Shell()
+    builder.MakeShell(shell)
+    for f in lateral:
+        builder.Add(shell, f)
+
+    defects = occ.exported_mesh_defects(shell, str(tmp_path / "holed.step"))
+    assert defects.degenerate == 1, "the apex triangle is still skipped"
+    assert defects.bad == 63, "the whole base polyline, nothing swallowed"
+    assert defects.by_use == {1: 63}, "a hole reads as used-once, and only that"
 
 
 def test_the_cheaper_proxies_do_not_decide():

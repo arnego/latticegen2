@@ -699,12 +699,26 @@ class MeshDefects(NamedTuple):
 
     ``where`` carries up to :data:`MESH_DEFECT_SAMPLES` midpoints, rounded as
     `shell_defects` rounds its own so the two reports name the same edges.
+
+    ``triangles`` is the mesher's own total and **includes** the ones skipped
+    below; it is a size report, and the figures quoted throughout the docs are
+    that total.
+
+    ``degenerate`` is how many triangles were skipped as having no area. It is
+    reported rather than kept silent because a solid that reads 0 *because*
+    triangles were skipped is exactly what a reader has to be able to see — the
+    same argument as ``by_use``, and the lesson of a rule that once took a
+    93-minute run and a prototype to unpick. It carries **no default**, so a
+    construction that has not counted them cannot quietly report none: this
+    project has recorded more than once what it costs when an unmeasured
+    quantity reads as a measured zero.
     """
 
     triangles: int
     bad: int
     by_use: dict[int, int]
     where: list[tuple[float, float, float]]
+    degenerate: int
 
 
 def exported_mesh_defects(
@@ -750,6 +764,15 @@ def exported_mesh_defects(
     share an edge do not, and that is a question about points, not about the
     B-rep's opinion of them.
 
+    **That rounding has one corollary, and it cost this check nine false
+    readings on a production part.** At a pole a whole parametric range maps to
+    a single point, so distinct parametric nodes intern to one id; triangles
+    with two coincident vertices are skipped for that reason, and the loop below
+    says why. Measured: `BRepPrimAPI_MakeSphere(10.0)` reported 4 defects and
+    `MakeCone(5, 0, 10)` reported 2 -- closed, sound solids -- and both now read
+    0, while a cone with its base removed still reports every one of the 63
+    segments of that hole.
+
     **Run on every solid, with no size bound.** That is the expensive decision
     on this branch and it was taken deliberately: bounding it by face count is
     what puts a production part's dominant body outside the check, and a body
@@ -770,6 +793,7 @@ def exported_mesh_defects(
     point_id: dict[tuple[int, int, int], int] = {}
     counts: dict[int, int] = {}
     triangles = 0
+    degenerate = 0
     quantum = 1e7                       # 1e-7 mm, OCCT's own confusion
     for f in _explore(shipped, TopAbs_ShapeEnum.TopAbs_FACE):
         face = TopoDS.Face_s(f)
@@ -790,8 +814,36 @@ def exported_mesh_defects(
         for i in range(1, tri.NbTriangles() + 1):
             a, b, c = tri.Triangle(i).Get()
             triangles += 1
-            for u, v in ((a, b), (b, c), (c, a)):
-                lo, hi = ids[u - 1], ids[v - 1]
+            ia, ib, ic = ids[a - 1], ids[b - 1], ids[c - 1]
+            if ia == ib or ib == ic or ia == ic:
+                # **A triangle with two vertices at one point bounds nothing,
+                # and counting it reports sound geometry as broken.** At a pole
+                # -- a cone apex, a sphere pole -- a whole parametric range maps
+                # to a single 3D point, so distinct parametric nodes intern to
+                # one id here. Such a triangle then contributes its collapsed
+                # key once *and the real edge twice*, since that edge appears as
+                # both (A,P) and (P,A) within the same triangle; with two sound
+                # neighbours also using it, a perfectly closed fan reads as four
+                # uses. Measured: `BRepPrimAPI_MakeSphere(10.0)` reports 4 bad
+                # edges and `MakeCone(5, 0, 10)` reports 2, one per degenerate
+                # triangle, on solids that are closed and sound.
+                #
+                # This is the same reasoning `shell_defects` and `free_edges`
+                # already apply one level down, to degenerate *edges* of the
+                # B-rep: a thing with no extent cannot be a hole, and a check is
+                # only as trustworthy as the quantity it compares
+                # (docs/algorithm.md §11). `free_edges` counted them until G21,
+                # where they made a correct sew miss its expectation by exactly
+                # the 10 the rehearsal leaves.
+                #
+                # The test is interned-id equality rather than geometric area,
+                # deliberately: the defect is created by the interning, so it
+                # belongs at the interning. A triangle with three distinct ids
+                # that merely happens to be thin is not this, and is still
+                # counted -- a genuine sliver bounds material.
+                degenerate += 1
+                continue
+            for lo, hi in ((ia, ib), (ib, ic), (ic, ia)):
                 if lo > hi:
                     lo, hi = hi, lo
                 edge = lo * 4_294_967_296 + hi
@@ -815,7 +867,7 @@ def exported_mesh_defects(
         where.append(
             tuple(round((a[i] + b[i]) / (2 * quantum), 3) for i in range(3))
         )
-    return MeshDefects(triangles, len(bad), by_use, where)
+    return MeshDefects(triangles, len(bad), by_use, where, degenerate)
 
 
 def _pcurve_deviation(edge: TopoDS_Edge, face: TopoDS_Face, surface) -> float | None:

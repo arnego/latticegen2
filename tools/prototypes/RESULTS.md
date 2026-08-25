@@ -1739,18 +1739,63 @@ u-range collapses to a single 3D point. The same three faces recur at
 lattice-periodic positions (504823 / 558350 / 581848, identical to seven
 figures), which is why the coordinates repeat at Δy = 45.0 and 95.0.
 
-Marking mesh nodes that are the image of a **degenerate** edge and excluding bad
-edges incident to one accounts for **9 of the 25**, leaving 16. It does not
-account for the other 14, so the apex is a real but partial explanation.
+### Nine of the 25 were the gate's own arithmetic — fixed
+
+The first reading of this was that the apex is where bad edges *sit*, and that
+excluding edges incident to a pole node accounts for 9 of the 25. That is the
+right count for the wrong reason, and the mechanism is sharper than the
+correlation.
+
+**A triangle with two vertices at one point contributes its collapsed key once
+*and the real edge twice***, since that edge appears as both `(A,P)` and `(P,A)`
+within the same triangle. With two sound neighbours also using it, a perfectly
+closed fan reads as four uses. Mesh points are interned by rounded coordinate,
+so at a pole — a cone apex, a sphere pole — a whole parametric range collapses
+to one id and exactly that happens.
+
+**The smallest statement of the bug is not the rehearsal at all:**
+
+| shape | triangles | degenerate triangles | bad before | `by_use` before | after |
+|---|---|---|---|---|---|
+| `MakeSphere(10.0)` | 2022 | 2 | **4** | `{4: 2, 1: 2}` | **0** |
+| `MakeCone(5, 0, 10)` | 445 | 1 | **2** | `{4: 1, 1: 1}` | **0** |
+
+Two closed, sound solids the export-truth gate would have refused outright, with
+one defect per degenerate triangle. On the rehearsal's dominant body the count
+falls **25 → 16**, exactly **9** triangles are skipped, every pole-incident
+reading disappears (`bad edges touching a pole: 0 of 16`) and **no `M` or `T`
+edge does** — the rule does not reach into real defects.
+
+**The blind-spot control is what chooses the rule.** Excluding edges *near* a
+pole would hide a genuine hole whose boundary reached one; skipping triangles
+that bound nothing cannot. Measured on a cone with its base disk removed — a
+real hole on the boundary of the very face carrying the apex:
+
+| | bad | `by_use` |
+|---|---|---|
+| before | 65 | `{1: 64, 4: 1}` |
+| after | **63** | `{1: 63}` |
+
+63 is exactly the base polyline. The fix makes the reading *cleaner*, not
+weaker: the old rule piled two apex artefacts on top of a real hole.
+
+The test is **interned-id equality rather than geometric area**, deliberately —
+the defect is created by the interning, so it belongs at the interning, and a
+thin triangle with three distinct ids still bounds material and is still
+counted. It also subsumes the collapsed `lo == hi` key production used to count,
+so production and this script now share one rule.
 
 **This is the same counting bug this project has now found three times.**
 `shell_defects` has always skipped degenerate edges; `free_edges` counted them
-until G21 (10 phantom holes on this very part); `exported_mesh_defects` has
-never had the test. The control is clean — `spiral-island-unwritable.brep`, the
-one body known to be genuinely unwritable, has **0 pole nodes**, so all 10 of
-its defects survive the exclusion untouched. Recorded rather than applied: it
-changes a correctness gate's verdict, and per §5.1 a gate is only as trustworthy
-as the quantity it compares, so the decision is the user's.
+until G21 (10 phantom holes on this very part); `exported_mesh_defects` never
+had the test. The controls are clean: the 13 sibling solids read 0 both ways,
+`--control-c2` still reports a removed face's edges as `one-face`, and
+`spiral-island-unwritable.brep` — the one body known to be genuinely unwritable
+— meshes with **0** degenerate triangles, so all 10 of its defects are untouched.
+
+**It does not make the part ship**, and that is the point to carry: 16 readings
+remain — 9 `M`, 4 `interior`, 2 `T` and 1 `4x/interior` — on faces
+`BRepCheck_Analyzer` calls valid.
 
 ### What this does and does not settle
 

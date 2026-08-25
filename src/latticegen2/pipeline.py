@@ -855,9 +855,14 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
         triangles, bad = defects.triangles, defects.bad
         rl.line(
             f"  solid {i}: {n_faces} faces -> {triangles} triangle(s) after a "
-            f"STEP round trip, {bad} non-manifold edge(s); "
-            f"{reading.loose_area_fraction:.4e} of its surface loosely described, "
-            f"worst deviation {reading.worst:.4e} mm"
+            f"STEP round trip, {bad} non-manifold edge(s)"
+            # Unconditional, not folded into the `if bad:` branch below: a solid
+            # reading 0 *because* triangles were skipped is precisely what a
+            # reader must be able to see.
+            + (f" ({defects.degenerate} degenerate triangle(s) skipped)"
+               if defects.degenerate else "")
+            + f"; {reading.loose_area_fraction:.4e} of its surface loosely "
+            f"described, worst deviation {reading.worst:.4e} mm"
         )
         if bad:
             # The breakdown by use count and the positions, because a total

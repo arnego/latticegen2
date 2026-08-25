@@ -34,7 +34,7 @@ header rewrite.
 | `test_connect.py` | The junction graph and the floating-body rule's three outcomes | no |
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
-| `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §10) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell, and `SpiralTest`'s own fat-tolerance face, where a *fixed* absolute cap disabled rung 2 outright. Also that a boundary layer still short of its expected free edges after the unsplit sew fails in `stitch` rather than in `assemble`, and the two properties the round-2 check rests on: that the batch validity scan behind the repair returns exactly what the per-face predicate does, and that `free_edges` does not count a degenerate edge as a hole | yes |
+| `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §11) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell, and `SpiralTest`'s own fat-tolerance face, where a *fixed* absolute cap disabled rung 2 outright. Also that a boundary layer still short of its expected free edges after the unsplit sew fails in `stitch` rather than in `assemble`, and the two properties the round-2 check rests on: that the batch validity scan behind the repair returns exactly what the per-face predicate does, and that `free_edges` does not count a degenerate edge as a hole | yes |
 | `test_boundary.py` | The per-half-strut re-trim behind docs/algorithm.md §7.2, against the four real `SpiralTest.step` junctions whose intersection returns them untrimmed — including that a correctly trimmed junction is left bit-for-bit alone and that a junction wholly inside is checked and kept. Also the symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7) and the two guards on it, tested against the **real** failing junctions in `TD_HX_rehearsal_test.step` rather than synthetic stand-ins — both the `cc=5, t=1` junction the repair was built for and the `cc=12, t=2.5` one whose repair a relative-volume bar wrongly refused (G19) — see the note below | yes |
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6. Also that the strided parallel sweep (docs/algorithm.md §5.4) returns *identical* classes to the serial one, across a real process boundary — identical rather than equivalent, because stride arithmetic invites off-by-ones that a tolerance would hide | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
@@ -115,11 +115,14 @@ and, on the ninth, 1 of 55,513 surface points outside at 1e-06 mm and none at
 1e-05 mm — so nothing was actually wrong with the geometry; the check simply
 could not say so.
 
-**`SpiralTest.step` is both a unit-test fixture and, since 2026-08-24, the
-`spiral-stress` e2e scenario.** It is the only committed part whose dominant
-component tiles and the only one that exercises docs/algorithm.md §7.2 at all —
-8 junctions whose intersection returns its own operand, 10 re-trimmed against a
-local block, 1 dropped for containment. It is much the slowest scenario, and
+**`SpiralTest.step` is both a unit-test fixture and the `spiral-stress` e2e
+scenario.** It is the only committed part whose dominant component tiles, and
+the only *scenario* exercising docs/algorithm.md §7.2 — 8 junctions whose
+intersection returns its own operand, 10 re-trimmed against a local block, 1
+dropped for containment. §7.2 is not peculiar to it:
+`TD_HX_rehearsal_test.step` at `cc=5, t=1` re-trims **35** junctions per
+half-strut, and that part is far too slow to be a scenario, so the automated
+coverage §7.2 has is this one part's. It is much the slowest scenario, and
 most of that is the §6.2 checks rather than the 11-minute run: its dominant body
 is past `verify_geometry.CUT_MAX_FACES`, so containment falls back to point
 sampling over 45,801 faces. Use `--only` while iterating.
@@ -250,16 +253,17 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
 | `SpiralTest`, `cc=5 t=1` | 11 min | boundary trim (6 min), validate (1 m 53 s, mostly export truth) |
 | test cylinder, `cc=10 t=1.5` | ~40 s | simplify, boundary trim, stitch |
-| `TD_HX_rehearsal_test`, `cc=5 t=1` | 51.7 min, 19.3 GB peak, 2.00 GB output | simplify, boundary trim, stitch, validate |
+| `TD_HX_rehearsal_test`, `cc=5 t=1` | ~93 min, 19.0 GB peak, **no output — refused at `export truth`** (specification.md §10) | validate (36 m 32 s, mostly export truth), boundary trim, simplify, stitch |
 
-Both scenario rows and the rehearsal are post-Phase-2 (specification.md §10):
-building the interior's full-strut lateral faces already merged took the
-cylinder from ~56 s to ~45 s and the rehearsal from 55.3 min to 51.7 min, with
-an identical output in both cases. The rehearsal figure comes from a
-**controlled pair run back to back on the same machine** rather than from
-comparing two sessions — its five untouched stages agree to within 1 %, where
-the 2026-08-14/15 pair swung 25-36 % on machine load alone. Prefer that method
-for any future performance claim here.
+**The rehearsal row is not comparable with the others, and not with its own
+past figures.** It is a single run rather than a controlled pair, and most of
+what separates it from the ~52 min this part used to take is one stage:
+`validate` carries the unbounded export-truth check, 34.5 min of it
+(docs/algorithm.md §9). Read it as the current cost of the whole part, not as a
+performance measurement. **Prefer a controlled pair run back to back on the same
+machine** for any performance claim here — the standard this file holds itself
+to, because untouched stages have swung 25-36 % between sessions on machine load
+alone.
 
 The cylinder's ~45 s → ~40 s since comes from two changes, measured together as
 a controlled pair on `dense-lattice` (**50.30 s → 40.50 s, −19.5 %**, output
@@ -279,38 +283,26 @@ moved an order of magnitude further and in the opposite direction — but a
 smaller claim than −62 % would not survive that much drift, which is the reason
 to run the pair on an otherwise idle machine.
 
-**The rehearsal row is still 51.7 min deliberately, even though the part has
-been re-run since**, and the reason is a useful worked example of when *not* to
-update a number. The 2026-08-17 re-run with both changes in
-([profiling-reports.md](profiling-reports.md)) measured 56.8 min — slower — and
-neither half of that is usable as a whole-run figure:
+**A stage measured in a clean window and a whole-run total are not the same kind
+of claim**, and the rehearsal's history is the worked example. Runs of it have
+measured 55.3, 51.7 and 56.8 minutes; the slowest was competing with another
+process from `stitch` onward, and its `boundary` reproduced a known slow band
+(889 s at **4.28 cores**, against 14 m 51 s at **4.22 cores** on untouched
+code). Per-stage figures from windows that were clean are usable and are quoted
+in [profiling-reports.md](profiling-reports.md) — whole-run totals from the same
+runs are not.
 
-* another process started three seconds before `stitch` ended, so `instance`
-  onward ran under competition;
-* `boundary` measured 889 s at **4.28 cores**, and the 2026-08-15 profile
-  recorded 14 m 51 s at **4.22 cores** on *untouched* code, labelled "no —
-  variance" in specification.md §10's table. The run reproduces that slow-band
-  point to within 1 %.
-
-The per-stage results from it *are* usable where the window was clean —
-`classify` 126 s → 47.0 s at 4.02 cores, `validate` 225 s → 114.0 s with its
-I/O falling to exactly zero — and they are quoted in
-[profiling-reports.md](profiling-reports.md) rather than here. **A stage
-measurement in a clean window and a whole-run total are not the same kind of
-claim**, and this run yields the first and not the second.
-
-The third row is the scale rehearsal, first run end to end on 2026-08-14,
-re-profiled on 2026-08-15 after implementing specification.md §10's paths 1–4
-(its full per-stage table, both dates side by side, and the honest result for
-each path are in [specification.md](specification.md) §10), and re-measured on
-2026-08-17 — the figures above — on the first run of this part to pass
-`validate` and write its STEP.
+The last row is the scale rehearsal, the largest part this project measures
+against and the one that currently produces no output — it is refused at
+`export truth` (specification.md §10). Its per-stage history, and the honest
+result for each of the parallelism paths tried on it, are in
+[specification.md](specification.md) §11.
 
 **`stitch` grew from 1 m 13 s to 11 m 18 s between those two profiles, and
 almost all of it is the price of a correct result rather than new overhead.**
 The 08-15 figure was measured on a run whose round-2 seam-only split was
 silently producing a broken shell (118,760 open edges — docs/specification.md
-§10). With the free-edge check that catches that in place, this part's one
+§11). With the free-edge check that catches that in place, this part's one
 tiled component fails it and is redone with a **full unsplit sew**, which the
 run reports as `stitch_repaired_components: 1` — exactly the documented
 fallback cost in docs/algorithm.md §8, "at the cost of the saving only for the
@@ -331,7 +323,7 @@ one worth carrying:
 
 * The retolerance scan is 44.6 s — the easy half, worth ~1.2 % of the run.
   **Done, 2026-08-18: 44.1 s → 22.6 s in a controlled pair** (docs/algorithm.md
-  §8). What bit was not the predicate change §10 warned about but *when* the
+  §8). What bit was not the predicate change §11 warns about but *when* the
   predicate is evaluated — repairs widen shared tolerances, so scanning every
   face before repairing anything counts the neighbours a repair fixes for free
   as unrepaired. See specification.md §11: the first explanation fitted the
@@ -379,7 +371,7 @@ that the paths 1–4 chapter is closed:
   small scraps, so there is nothing to spread across workers, and the added
   `.brep` round trip cost a few percent (+8 %) rather than saving anything.
   Correct behaviour on a part with more evenly sized components; not this one.
-  See specification.md §10 for the full account of why this was kept anyway.
+  See specification.md §11 for the full account of why this was kept anyway.
 * **`validate` no longer uses the worker pool at all, and this is the one
   distinction worth carrying away from that chapter.** Per-*body* dispatch
   failed for `simplify` and `validate` alike, for the same reason. Going

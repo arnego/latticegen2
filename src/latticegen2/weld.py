@@ -255,9 +255,19 @@ def unweldable(
     sides gave up their caps and six edges were left with nothing to weld to,
     which `assemble` would have reported as six holes.
 
-    Declining costs an extra solid at worst and never a hole
-    (docs/algorithm.md §11), which is the trade this whole function exists to
-    make.
+    **Declining is not free where the two sides are coincident**, which is the
+    case this check most often finds. Withdrawing the interface leaves *both*
+    sides' cap faces in place, and that costs "an extra solid" only when the
+    decline actually separates the bodies; where the two pieces stay connected
+    through their other interfaces, the two sheets end up inside one solid as
+    material counted twice. Measured on `TD_HX_rehearsal_test` at `cc=5, t=1`:
+    one declined cap, both sides planar and 7.368093e-01 mm², and the two mesh
+    edges between them are the only defects in that body this generator is
+    responsible for (``tools/prototypes/RESULTS.md`` G23).
+
+    So the caller fuses these pairs with the same local boolean a *mismatched*
+    cap already gets, and declines only what the fuse cannot merge — which is
+    the fallback this function's result still means (docs/algorithm.md §8).
 
     Run *before* the caps are dropped, so a rejection costs that extra solid
     rather than a hole.

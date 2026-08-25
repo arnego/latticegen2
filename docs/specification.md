@@ -342,26 +342,29 @@ case for invalid input).
 
 All are implemented in [`tools/e2e.py`](../tools/e2e.py).
 
-**`SpiralTest.step` is the hardest committed part, and as of 2026-08-24 it is
-an end-to-end scenario rather than only a fixture.** At 2,073 boundary
+**`SpiralTest.step` is the hardest committed part.** At 2,073 boundary
 junctions it is a fraction of `dense-lattice`, but its swept B-spline surface
 makes the boolean fit trim curves carrying recorded tolerances an order above
-anything the other committed parts produce, it is the only committed part whose
-dominant component tiles, and it is the only one that exercises §7.2 at all —
-the intersection that returns its own operand (8 junctions), the local-block
-re-trim (10), and a junction dropped for containment (1). Every one of those
-paths is silent on the other scenarios, which is why the unit suite uses it
-heavily (`test_boundary.py`, `test_export_truth.py`) as well.
+anything the other committed parts produce, and it is the only committed part
+whose dominant component tiles. It is also the only *scenario* that exercises
+§7.2 — the intersection that returns its own operand (8 junctions), the
+local-block re-trim (10), and a junction dropped for containment (1) — which is
+why the unit suite uses it heavily (`test_boundary.py`, `test_export_truth.py`)
+as well.
 
-It could not complete until two things landed on the same day. The part itself
-was re-modelled: its worst **input seam gap** — the distance between the two
-faces meeting at one of its own edges — fell from 4.2406e-02 mm to
-6.8602e-03 mm, which took its 4.17 mm³ island from 11 non-manifold edges after
-a round trip to **0**. And the STEP writer was changed to declare the
-*greatest* tolerance a shape carries rather than the average of them (§11),
-which took its dominant body from 2 to **0** — that body already tessellated
-perfectly in memory, so the two remaining defects were the file
-under-declaring, not the geometry.
+**§7.2 is not peculiar to it, though, and reading it that way understates
+where that repair matters.** `TD_HX_rehearsal_test.step` at `cc=5, t=1` returns
+**35** junctions untrimmed and re-trims every one of them per half-strut. That
+part is not an e2e scenario — it is far too slow — so the committed scenarios
+are the only automated coverage §7.2 has, and they carry one part's worth of it.
+
+Two properties of the toolchain are what let this part complete, and both are
+load-bearing rather than incidental to it. Its worst **input seam gap** — the
+distance between the two faces meeting at one of its own edges — is
+6.8602e-03 mm, low enough that trimming does not cut the region into features
+smaller than the gap. And the STEP writer declares the *greatest* tolerance a
+shape carries rather than the average of them (§11), without which its dominant
+body loses 2 edges to the file under-declaring what the geometry needs.
 
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
@@ -438,135 +441,35 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### `SpiralTest.step`: five defects, each exposed by fixing the one before
+### `assemble` fails on holes `stitch` already measured — root cause open
 
-**Committed as a test fixture 2026-08-20**, at the user's request — as an
-end-to-end scenario at first, and reduced to a fixture once §9's export-truth
-gate landed and refused its output (§6.1). It earned its place immediately: a part a fraction of `dense-lattice`'s size that
-found four generator defects and three harness ones. What links all four is
-one property — its swept B-spline surface makes the boolean fit trim curves
-carrying recorded tolerances **two orders above** anything the other committed
-parts produce (2.1e-02 mm on edges, 6.6e-02 mm on a vertex, against the
-rehearsal's 8.7e-04 to 1.5e-03 mm). Every bar calibrated on the older parts met
-input it had never seen.
+**The symptom.** On a heat-exchanger part that is *not*
+`TD_HX_rehearsal_test.step` (larger, and one variant carries internal channels),
+the sewn boundary layer presents a handful more free edges than its interior
+interfaces account for, and the run stops at `stitch`:
 
-**1. Rung 2's absolute cap was an off switch** (docs/algorithm.md §8).
-`SELF_INTERSECT_MAX_VERTEX_TOL` was a fixed 4e-3 mm; the failing wire's shared
-vertex was recorded by OCCT itself at 6.573e-02 mm, sixteen times that. The
-first candidate step was refused, nothing grew, and the run reported the face
-as residual *without having tried*. A bound that can sit below the value it
-bounds is not a bound. Now a tenth of the run's own `t`; the repair itself was
-never wrong and still needs only 1.25x.
-
-**2. The unification volume guard compared a size-biased quantity**
-(docs/algorithm.md §9). Two solids unified by the same call in the same stage:
-27,864 mm³ drifting 1.013e-05 relative, and 4.17 mm³ drifting 1.837e-03 —
-ninety times apart, and **both** far inside the 2.1e-02 mm tolerances OCCT
-records on the edges being merged. The small one failed a 1e-4 bar while its
-exact symmetric difference against the un-unified solid, cut both ways, is
-0 mm³. Loosening the relative figure a third time would have been the wrong
-response to the same evidence: the guard now decides on displacement,
-`|ΔV| / area`, with relative drift kept only as a cheap pre-filter, because
-measuring area costs 7.7 s on a 64k-face solid and would otherwise be paid on
-every run for a guard that almost never fires.
-
-**3. The intersection returned its own operand** (docs/algorithm.md §7.2). The
-serious one: 8 junctions came back untrimmed, leaving material up to 1.29 mm
-outside the input body. Established against four independent tests because
-`BRepAlgoAPI_Cut` agrees with `Common` and both are wrong. Repaired by
-re-trimming the six convex half-struts and fusing them, behind a
-self-validating detector.
-
-**4. Boundary-to-boundary caps whose rings do not correspond**
-(docs/algorithm.md §8). Exposed by fixing 3: a cap where both sides present the
-whole quad to six decimals but with six edges against four. `weld.unweldable`
-now checks those caps too, having previously assumed the sew would reconcile
-them.
-
-**Harness defects found on the way**, all in `tools/`:
-
-* `material_outside`'s per-solid cut ran **17 minutes and 14.5 GB** on the
-  45,897-face output without finishing — the ill-conditioned case
-  docs/testing.md already documents at 43,530 faces, now bounded by
-  `CUT_MAX_FACES`. Above it the cut is skipped and the solid reported
-  *unmeasured* with containment evidence, never as a pass.
-* `surface_points_outside` re-tested every sampled point at all five
-  tolerances. Raising the tolerance can only turn OUT into ON, so the OUT set
-  shrinks monotonically and each tolerance need only re-test what the previous
-  one rejected — exact, and up to 5x off a check whose single pass is ~31
-  minutes at this scale.
-* **The `stitch` free-edge failure added earlier the same day named the wrong
-  edges.** It sampled ten of *all* free edges, of which 8,444 of 8,450 were the
-  interface rings that are supposed to be free, so it pointed at innocent
-  geometry — and cost a probe chasing those coordinates. It now reports the
-  edges lying away from any expected interface, which localised defect 4 to a
-  single cap on the next run.
-
-**5. The residual, and the trap it sat in.** Defect 3's first repair left all
-three parameter sets producing watertight, `BRepCheck_Analyzer`-valid solids
-that still had material outside the body — 0.239, 0.771 and 0.380 mm. **The
-pipeline's own gates passed all three**, because watertight and valid say
-nothing about containment, and that reading was made twice in this session
-before a boolean-free sample caught it. §6.2's material-outside check is the
-only thing that sees this.
-
-The residual was a different shape from what §7.2's per-half-strut repair
-covers: the fused intersection and the six half-strut ones *agree with each
-other* and are both wrong, so no boolean can grade either. Closed by two things
-(docs/algorithm.md §7.2): a check that uses no kernel at all — ray parity over
-the classification mesh plus a distance bar, which separates ties from
-protrusions by two orders — and a repair that hands the kernel a smaller tool,
-a one-cell block cut from the body, validated against Monte Carlo ground truth
-and pinned at one cell because at four it reproduces the wrong answer. Where
-neither works, the junction is **dropped** rather than shipped or fatal: one of
-2,073 at `cc=5, t=1`, a 0.53 mm sliver of negligible volume, costing 0.03 % of
-the lattice to keep §1's containment absolute.
-
-| run | localized | dropped | points outside, after |
-|---|---|---|---|
-| `cc=5, t=1` | 10 | 1 | **0 of 4,076** |
-| `cc=7, t=1.4` | 4 | 0 | **0 of 4,069** |
-| `cc=4, t=0.8` | 13 | 0 | **0 of 4,060** |
-
-Probing every junction costs ~+24 % on `boundary`.
-
-**The lesson that recurs, and this is the fifth chapter to record it:** the
-first convincing explanation was wrong three separate times here — the fat
-tolerances looked like a third calibration mistake and were not, `Cut` looked
-like a sound cross-check and was not, and the re-trimmed caps looked like they
-would fail to weld and matched to 1e-15. What settled each was a measurement
-that did not share machinery with the thing under test.
-
-### `assemble` fails on holes `stitch` already measured — half fixed, root cause open
-
-**Reported 2026-08-20** against v3.0.0, as two runs of a heat-exchanger part
-that is *not* `TD_HX_rehearsal_test.step` (larger, and one variant carries
-internal channels). Both die at `assemble`:
-
-| | run 1, `cc=5 t=1` | run 2, `cc=7 t=1.4` |
+| | `cc=5 t=1` | `cc=7 t=1.4` |
 |---|---|---|
 | `stitch` expected free edges | 105,460 | 38,156 |
 | seam-only split gave | 269,791 (rejected, correctly) | 99,818 (rejected, correctly) |
 | **full unsplit sew gave** | **105,477** (+17) | **38,170** (+14) |
-| `assemble` failed with | **17 edges on 1 face** | **14 edges on 1 face** |
 
-**Done: the run no longer carries on past that.** The excess after the *unsplit*
-sew is exactly the count that later kills `assemble`, and `_sew_round_two`
-measured it, logged it, and returned anyway — so the run spent a whole
-`instance` stage (1 m 00 s) building an interior for a boundary layer that could
-never close, then reported the failure against assembly rather than the sew.
-That is now a hard failure at `stitch`, with the free edges' world positions in
-the message, and the surviving repair line prints the positions of the edges the
-split left free. See docs/algorithm.md §8, `test_weld.py::test_a_hole_the_unsplit_sew_cannot_close_fails_in_stitch_not_in_assemble`.
+**The failure lands where it is measured**, which is the settled half of this.
+The excess after the *unsplit* sew is exactly the count that would otherwise
+break `assemble`, so `stitch` fails on it directly rather than letting the run
+build an interior for a boundary layer that cannot close. The free edges' world
+positions are in the message, and the surviving repair line prints the positions
+of the edges the split left free. See docs/algorithm.md §8 and
+`test_weld.py::test_a_hole_the_unsplit_sew_cannot_close_fails_in_stitch_not_in_assemble`.
 
-**Open: why the boundary layer has those holes at all.** Not the seam split —
-that is the 269,791/99,818 figure, caught and discarded as designed (G9, G21).
-Not the interior either: `interior shell: ... 105460 open edges` matches
-`want_rings` exactly in both runs. The holes are in the sewn boundary layer
-after a correct full sew.
+**What is open is why the boundary layer has those holes at all.** Not the seam
+split — that is the 269,791/99,818 figure, caught and discarded as designed (G9,
+G21). Not the interior either: `interior shell: ... 105460 open edges` matches
+`want_rings` exactly. The holes are in the sewn boundary layer after a correct
+full sew.
 
-**Where to start.** The failing edge positions sit on the caps the same run
-logged as declined-unpaired:
+**Where to start.** The failing edge positions sit on caps the same run logs as
+declined-unpaired:
 
     declined (633,-99,-75)h5 @ [2078.461, -60.0, 936.93]
     failing  [2079.348,-59.537,937.856]  [2078.836,-59.527,937.482]
@@ -576,46 +479,149 @@ logged as declined-unpaired:
     failing  [2078.836,-27.572,910.415]  [2078.909,-27.572,910.467]
              [2078.836,-27.821,909.165]  [2079.247,-28.006,909.682]
 
-Same pattern in run 2. That contradicts two claims this codebase makes about
-the case: the note `pipeline._log_interfaces` prints for it ("the output stays
-watertight") and `_sew_round_two`'s reasoning that `want` is exact because a
-declined cap keeps its own face. Two mechanisms are live in both runs and the
-log cannot separate them — the `unpaired` decline path itself, and
-`boundary._fuse_group`'s `_owning_cap` re-tagging (4 and 5 fused clusters
-respectively), where a mis-assigned cap key produces this signature exactly.
-Note `TD_HX_rehearsal_test` at `cc=5, t=1` declines 3 unpaired caps and stays
-watertight, so being unpaired is not by itself sufficient.
+That contradicts two claims this codebase makes: the note
+`pipeline._log_interfaces` prints ("the output stays watertight"), and
+`_sew_round_two`'s reasoning that `want` is exact because a declined cap keeps
+its own face — which `boundary.finalize_pieces` really does do, so the reasoning
+holds in the code and fails on this part. Two mechanisms are live and the log
+cannot separate them: the `unpaired` decline path itself, and
+`boundary._fuse_group`'s `_owning_cap` re-tagging, where a mis-assigned cap key
+produces this signature exactly. Being unpaired is not by itself sufficient —
+`TD_HX_rehearsal_test` at `cc=5, t=1` declines 3 unpaired caps and its boundary
+layer still closes.
 
 **Blocked on the input.** `TD HX LatticeGen3.0 Test.stp`, or the smaller
-`LatticeGen3.0 Test_2.stp` which fails identically. Not the temp folder. Per
-docs/testing.md this defect family must be diagnosed on the geometry that
-actually fails: G10 is the case where a synthetic reproduction matching the
-symptom to four significant figures passed a full measurement gate while
-repairing an entirely different defect.
+`LatticeGen3.0 Test_2.stp` which fails identically. Neither is in the
+repository. The temp folder is not a substitute: per docs/testing.md this defect
+family must be diagnosed on the geometry that actually fails, G10 being the case
+where a synthetic reproduction matching the symptom to four significant figures
+passed a full measurement gate while repairing an entirely different defect.
 
-### Re-run the rehearsal with the unbounded export-truth check
+**One caution about a near-miss.** `TD_HX_rehearsal_test` produces unaccounted
+free edges of its own — but in the *tessellation* of a finished solid, not in
+the sewn layer, and its `assemble` reports 14 watertight solids. See the item
+below. The two look alike in a coordinate dump and fail at different stages, so
+neither is a reproduction of the other.
 
-**Deferred by decision 2026-08-23.** §11's export-truth gate was measured on
-`TD_HX_rehearsal_test` at `cc=5, t=1` *while it still skipped solids above a
-face count*; the bound was then removed so the dominant body is checked too, and
-the rehearsal has not been re-run since.
+### `TD_HX_rehearsal_test` at `cc=5, t=1` is refused at `export truth`
 
-**What is unknown, precisely.** Two things, and they are different questions.
-*Does it pass* — whether the 583,806-face dominant body's tessellation survives
-its own round trip. Its thirteen small siblings do; the 80 mm ball's dominant
-body ships 73 `InvalidCurveOnSurface` faults and `dense-lattice`'s picks up 4,
-both harmless and both tessellating cleanly, so this is genuinely open rather
-than rhetorical. *And what it costs* — docs/algorithm.md §9 removed a
-whole-output re-import for costing **22 minutes**, and this adds a write and a
-tessellation on top of that re-read, on one 2 GB solid.
+**The part does not produce output.** The run reaches `validate` in ~93 minutes
+and fails there (exit 4), with nothing written and the temporary folder kept:
 
-**How to verify.** `python src/main.py -i test/TD_HX_rehearsal_test.step -cc 5
--t 1 --cores 6 -v`, and read `export_truth_s` in the run summary. Watch peak
-memory as well as the clock: mesh points are interned to integers and edges
-counted by integer key specifically so a solid this size can be attempted, and
-that is an argument rather than a measurement until this run exists. A refusal
-here is a real finding about the part, not a miscalibration — the instrument has
-a clean record on all sixteen bodies measured so far.
+    solid 0: 583894 faces -> 1427670 triangle(s) after a STEP round trip,
+             26 non-manifold edge(s)
+
+The other 13 solids carry **0** each. Everything upstream is sound — 21,955
+boundary pieces from 19,552 junctions, 122,181 interfaces, 389,492 interior
+faces, unification drift 1.60e-07, and `assemble` proving all 14 solids
+watertight — so this is one body's description failing, not the pipeline losing
+its way.
+
+**The defect is in the geometry, not in the file, and that is measured rather
+than inferred.** Tessellating `unify_0_out.brep` from the kept temp folder
+directly — no STEP, no round trip — gives the **same 1,427,670 triangles and the
+same 26 bad edges**. The write is therefore exonerated, which rules out the whole
+export-side family of repairs: this is the pattern of
+`spiral-island-unwritable.brep`, broken before it is written, and **not** the
+pattern the `Greatest` tolerance setting fixes (§11). Writer settings are not
+where the fix is.
+
+**What the 26 are is measured, not inferred, and only 2 of them are this
+generator's doing** (`tools/prototypes/RESULTS.md` G23). Each bad mesh edge is
+traced to the face and the B-rep edge that produced it, via
+`BRep_Tool.PolygonOnTriangulation_s`:
+
+| kind | count | what it is |
+|---|---|---|
+| **T** — two coincident but distinct `TopoDS_Edge`s, two faces each | **2** | genuine duplicate material |
+| **M** — one *shared* edge whose two faces discretize it differently | 9 | no hole exists in the B-rep |
+| **interior** — a segment no B-rep edge claims | 14 | inside one face's own triangulation |
+| **one-face** — a B-rep edge used by one face | **0** | a real hole would appear here |
+
+**There are no holes.** An earlier revision of this item read the 14 used-once
+edges as holes, and singled out a 2.2 mm one as "a real hole in a `t = 1` mm
+lattice rather than a rounding artefact". Every one of those is `M`: the B-rep
+edge carries **two** faces, and only one contributed that segment. The
+instrument's positive control pins what a hole actually looks like — removing
+one face from a sound solid reports its edges as `one-face` — and solid 0 has
+none. That inference was reasonable and wrong, which is the sixth time in this
+project's history the first convincing reading has not survived measurement.
+
+**The 2 that are real are the declined cap.** Both `T` edges implicate faces
+121454 and 531940 — both `Plane`, both area 7.368093e-01 mm², identical: the two
+coincident cap sheets `weld.unweldable` leaves when it declines
+[2056.81, -87.5, 967.548]. `InterfaceSet.decline` withdraws *both* keys and
+`finalize_pieces` keeps *both* sides' cap faces. Because the run assembles **14**
+solids rather than 15, the two pieces stay connected through their other
+interfaces, so the duplicate sheets end up *inside* one solid — which is exactly
+why "declining costs an extra solid, never a hole" does not hold here. This is
+the same hazard `fuse_disagreeing_pairs` already exists to avoid for
+`mismatched` caps, on the path that does not use it.
+
+**The rest is valid geometry OCCT's own mesher discretizes inconsistently.**
+`BRepCheck_Analyzer` passes all 18 implicated faces; face tolerances are 1e-07
+throughout, so this is not the fat-tolerance family §8's repair rungs address.
+Meshed alone in a compound with no neighbour, every implicated `ConicalSurface`
+reproduces its own fold, and all eight share one property: their `v` range
+begins at exactly **-1.7321 = -√3**, the cone's apex, where the whole u-range
+collapses to one point. Excluding bad edges incident to the image of a
+**degenerate** edge accounts for **9 of 25** — a real but partial explanation,
+and the third place in this codebase where degenerate edges have been counted as
+defects (`shell_defects` always skipped them; `free_edges` did not until G21).
+Recorded rather than applied, since it changes a correctness gate's verdict.
+
+**So repairing the declined cap removes 2 of 26 and the part still does not
+ship.** The remaining 14 are neither `T` nor pole-adjacent, and
+`spiral-island-unwritable.brep` — known to be genuinely unwritable — shows the
+same `M` and `interior` classes (8 and 2, with 0 `T`), so neither class can be
+dismissed as noise and no narrowing of the gate is defensible on two parts.
+
+**Do not reach for the input's seam gaps.** The failure message cites them and
+the reading is real — 8.1162e-03 mm at [1869.577, 92.830, 983.105], on 54 of
+1043 shared edges — but **none of the 26 bad edges is at that coordinate**, and
+the faces carrying them are valid with 1e-07 tolerances. The citation names a
+family, not a location.
+
+**§7.3's predictor does not point at this body, and that is a finding about the
+predictor.** It flags four bodies, ranked by the fraction of their boundary
+junctions whose trim needed a tolerance comparable to the feature it bounds:
+
+| body | volume | flagged | fraction | tessellates? |
+|---|---|---|---|---|
+| 0 | 330,314.68 mm³ | 136 / 21,649 | **0.6 %** | **no — 26 bad edges** |
+| 138 | 1.5805 mm³ | 2 / 3 | **66.7 %** | yes |
+| 151 | 1.5805 mm³ | 2 / 3 | **66.7 %** | yes |
+| 163 | 2.9110 mm³ | 1 / 5 | 20.0 % | yes |
+
+The ordering is inverted: the body with the lowest fraction is the one that
+fails, and both highest pass cleanly. docs/algorithm.md §7.3 already says the
+fraction is one part's measurement and not a bar; this is the second part, and
+it disagrees with the first. **The fraction must not become a gate**, and §7.3's
+claim that it is "much sharper" than the maximum holds for `SpiralTest` and is
+unproven in general.
+
+**What the check costs, which is the other half of what this item settles.**
+
+| | without the gate | with it |
+|---|---|---|
+| `validate` | 3 m 44.9 s | **36 m 32.2 s** |
+| of which `export_truth_s` | — | **2,068.9 s (34.5 min)** |
+| peak tree RSS | 19,291 MB | **18,951 MB** |
+
+The cost lands where docs/algorithm.md §9 expected — tens of minutes, more than
+the 22-minute re-import that was removed to make room for it. **Memory was never
+the risk**: interning mesh points to integers and counting edges by integer key
+holds a 583,894-face solid inside the run's existing peak, so that argument is
+measured rather than asserted.
+
+**How to verify a fix.** `python src/main.py -i test/TD_HX_rehearsal_test.step
+-cc 5 -t 1 --cores 6 -v`, and read the per-solid lines under `export truth`;
+solid 0 reaching 0 non-manifold edges is the bar. The in-memory tessellation of
+`temp/*/unify_0_out.brep` is the cheaper inner loop — 2 minutes against 93, and
+the same number — so iterate there and confirm on the full run.
+`tools/prototypes/g23_bad_edge_provenance.py` is what classifies the result;
+run it on the sibling solids as well, since an instrument that only ever agrees
+on sound geometry proves nothing (G10).
 
 ---
 
@@ -888,9 +894,12 @@ reported them *unmeasured*, which was honest and wrong in the way that matters:
 it put the dominant body of every production part outside the only detector with
 a clean record. docs/algorithm.md §9 removed a whole-output re-import for
 costing 22 minutes, and this is that cost returning knowingly, for a correctness
-check rather than for a count of solids. The rehearsal-scale figure is **not yet
-measured** and is expected to be tens of minutes; `export_truth_s` in the run
-summary is what to read.
+check rather than for a count of solids. At rehearsal scale that cost is
+**2,068.9 s (34.5 min)**, taking `validate` from 3 m 44.9 s to 36 m 32.2 s;
+`export_truth_s` in the run summary is what to read. Peak memory is unaffected —
+18,951 MB against 19,291 MB without the gate — because mesh points are interned
+to integers and edges counted by integer key, which is what lets a
+583,894-face solid be measured at all.
 
 **Why the gate is needed at all, demonstrated on the real body.** As this
 pipeline builds it, the island is `BRepCheck_Analyzer`-**invalid** — rung 2
@@ -918,12 +927,15 @@ So on this branch the part is refused twice over before the export-truth check
 is what stops it — which is why the demonstration above is made on the committed
 island fixture, where rung 2 can be allowed to act.
 
-**The rehearsal's thirteen small solids are refused by nothing**, measured on
-the solids the run actually produced and replayed from its kept temporary
-folder. Its **583,806-face dominant body has not been put through the check
-yet** — the size bound that used to exclude it was removed after that run, on
-the user's decision. Re-running it is deferred rather than skipped, and is §10's
-second item.
+**The rehearsal's thirteen small solids are refused by nothing, and its dominant
+body is refused.** With no size bound the 583,894-face body tessellates into
+1,427,670 triangles carrying **26** edges not used by exactly two of them, so
+`TD_HX_rehearsal_test` at `cc=5, t=1` writes no output at all. That is the
+detector doing precisely what removing the bound was meant to achieve — the
+body every production part is mostly made of is the one it now sees — and the
+defect is real rather than an artefact of writing: the same 26 edges are present
+when the solid is tessellated **in memory**, before any file exists. It is
+tracked as a live defect in §10 rather than as a property of this gate.
 
 **What the dominant bodies carry is worth recording either way.** The 80 mm
 ball's own dominant body ships **73** `InvalidCurveOnSurface` faults and
@@ -1193,7 +1205,7 @@ the two that shipped.**
   per-phase timers to `stitch` priced it: `round1 49.1s, split 3.0s, round2
   15.1s, repair 651.2s, retolerance 44.6s, rings 6.7s`. **The discarded attempt
   costs 15.1 s** — 0.5 % of the run — because the seam subset is small. The
-  repair is 85 % of the stage and no scheduling change reaches it (§10).
+  repair is 85 % of the stage and no scheduling change reaches it (§11).
 * **A chunked per-face split of `validate` — measured worth ~5×, rejected on
   correctness.** G18 measured per-face checks at 94.4 % of the serial cost
   against a 4.8 % structural floor, so it would beat the flag substantially.
@@ -1231,11 +1243,12 @@ and only the controlled pair supports the second.
 
 #### What this chapter leaves open
 
-Nothing large. `stitch`'s 651 s repair is §10's existing item and is
-algorithmic, not a scheduling change. The retolerance scan (44.6 s, ~1.2 %) is
-rescoped there with two findings that make the obvious implementation worse than
-it looked. The interior-overlap hypothesis above is ~1 % and needs a background
-submission path in `parallel.py` plus a two-phase shell build.
+Nothing large, and the two items this chapter deferred have both since been
+settled in §11: `stitch`'s repair is the price of a correct shell on heavily
+trimmed geometry rather than an unfixed inefficiency, and the retolerance scan
+is a parallel batch filter measured at 44.1 s → 22.6 s. The interior-overlap
+hypothesis above is ~1 % and needs a background submission path in `parallel.py`
+plus a two-phase shell build.
 
 One loose thread, recorded rather than resolved: the verification run wrote
 **2,517,853 edges against the 2,517,881** of the Phase 2 pair, a difference of

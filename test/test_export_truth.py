@@ -314,7 +314,8 @@ def test_repairing_the_island_is_what_makes_it_invisible(tmp_path):
     assert (repaired, still_invalid) == (1, 0)
     assert occ.is_valid(island), "the repair makes the body pass BRepCheck_Analyzer"
 
-    triangles, bad = occ.exported_mesh_defects(island, str(tmp_path / "island.step"))
+    defects = occ.exported_mesh_defects(island, str(tmp_path / "island.step"))
+    triangles, bad = defects.triangles, defects.bad
     assert triangles > 0
     assert bad > 0, (
         "this body is why the export-truth gate exists; if it now survives a "
@@ -339,18 +340,34 @@ def test_the_island_does_not_survive_being_written(tmp_path):
     it stays refused while `SpiralTest.step`'s own bodies — whose only obstacle
     *was* the under-declared tolerance — now ship.
     """
-    triangles, bad = occ.exported_mesh_defects(
+    defects = occ.exported_mesh_defects(
         load_island(), str(tmp_path / "island.step")
     )
-    assert (triangles, bad) == (148, 10)
+    assert (defects.triangles, defects.bad) == (148, 10)
+
+    # The breakdown and the positions are what make a refusal actionable:
+    # one use is a hole or two faces discretizing a shared edge
+    # differently, more than two is duplicate material. Reporting only a
+    # total is what forced the rehearsal's 26 to be re-measured outside the
+    # pipeline before anything could be said about them (G23).
+    assert sum(defects.by_use.values()) == defects.bad
+    assert 2 not in defects.by_use, "an edge used twice is not a defect"
+    assert defects.by_use == {1: 7, 3: 3}, (
+        "this fixture's defects are five used once, two interior segments "
+        "used once, and three used three times -- measured, and pinned so a "
+        "change in kind is visible and not only a change in total"
+    )
+    assert defects.where and len(defects.where) <= occ.MESH_DEFECT_SAMPLES
+    assert all(len(pos) == 3 for pos in defects.where)
 
 
 def test_a_sound_body_survives_being_written(tmp_path):
     """The control. A gate that only ever fires proves nothing (G10)."""
     box = BRepPrimAPI_MakeBox(3.0, 4.0, 5.0).Shape()
-    triangles, bad = occ.exported_mesh_defects(box, str(tmp_path / "box.step"))
-    assert triangles == 12
-    assert bad == 0
+    defects = occ.exported_mesh_defects(box, str(tmp_path / "box.step"))
+    assert defects.triangles == 12
+    assert defects.bad == 0
+    assert defects.by_use == {} and defects.where == []
 
 
 def test_the_cheaper_proxies_do_not_decide():

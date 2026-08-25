@@ -472,7 +472,7 @@ traced to the face and the B-rep edge that produced it, via
 | kind | count | what it is |
 |---|---|---|
 | **T** — two coincident but distinct `TopoDS_Edge`s, two faces each | **2** | genuine duplicate material |
-| **M** — one *shared* edge whose two faces discretize it differently | 9 | no hole exists in the B-rep |
+| **M** — one *shared* edge used by two faces, only one contributing | 9 | no hole exists in the B-rep (and the two faces do **not** discretize it differently — G24 below) |
 | **interior** — a segment no B-rep edge claims | 14 | inside one face's own triangulation |
 | **one-face** — a B-rep edge used by one face | **0** | a real hole would appear here |
 
@@ -496,13 +496,21 @@ why "declining costs an extra solid, never a hole" does not hold here. This is
 the same hazard `fuse_disagreeing_pairs` already exists to avoid for
 `mismatched` caps, on the path that does not use it.
 
-**The rest is valid geometry OCCT's own mesher discretizes inconsistently.**
+**The rest is valid geometry OCCT's own mesher does not fully cover** — recorded here as "discretizes inconsistently" until G24 measured it, and the distinction turns out to matter.
 `BRepCheck_Analyzer` passes all 18 implicated faces; face tolerances are 1e-07
 throughout, so this is not the fat-tolerance family §8's repair rungs address.
 Meshed alone in a compound with no neighbour, every implicated `ConicalSurface`
 reproduces its own fold, and all eight share one property: their `v` range
 begins at exactly **-1.7321 = -√3**, the cone's apex, where the whole u-range
 collapses to one point.
+
+**That -√3 is inherited, not generated, and reading it the other way sent this
+item looking in the wrong module.** `TD_HX_rehearsal_test.step` contains **54
+apex-touching conical faces** — drill points and countersink tips — every one
+with `RefRadius = 1.5`, `SemiAngle = π/3` and `v₀ = -√3`, at which
+`RefRadius + v·sin(SemiAngle)` is exactly zero. The trimmed patches carry the
+input's own parametrization, so nothing about the lattice put an apex there and
+no change to `boundary` or `junction` can take it away (G24).
 
 **Nine of those readings were the gate's own arithmetic and are now gone.** At
 a pole a whole parametric range maps to one point, so distinct parametric nodes
@@ -534,7 +542,52 @@ the body: the 13 are the 9 `M` and 4 `interior` readings, on faces
 `spiral-island-unwritable.brep`, known to be genuinely unwritable, shows the
 same `M` and `interior` classes (8 and 2, with 0 `T`) and carries **0**
 degenerate triangles, so neither class can be dismissed as noise and no
-narrowing of the gate is defensible on two parts.
+narrowing of the gate **by defect kind** is defensible on two parts.
+
+#### What the 13 are: the ruler, not the body (G24)
+
+**`M` is not two faces discretizing a shared edge differently.** That reading is
+withdrawn. Dumping both faces' `PolygonOnTriangulation` for every implicated
+edge gives **bit-identical** node coordinates, interning to identical keys —
+nothing disagrees. What actually happens is that the triangulation **does not
+cover the face**, measured as exact trimmed area against summed triangle area at
+the gate's own 0.05 mm deflection:
+
+| face | surface | area | mesh covers |
+|---|---|---|---|
+| 317973 | Plane | 1.601941 mm² | **51.27 %** |
+| 77748 | Cylinder | 4.226842e-07 mm² | **68.75 %** |
+| 500747 | Cylinder | 8.372943e-07 mm² | **87.50 %** |
+
+One per cluster, all three `BRepCheck_Analyzer`-valid. The boundary segments in
+the un-meshed part are exactly what read as used-once. It is purely a function
+of deflection — identical meshed alone or in context, to five decimals — and
+each face recovers once the deflection drops below its own feature size. Across
+the whole residual the count falls 13 → 8 → 4 → 4 → **0** at 0.05, 0.01, 0.002,
+0.0005 and 0.0001.
+
+**The discriminator this leaves is on mechanism rather than defect kind**, which
+is precisely what the paragraph above says is missing. Run the same sweep on the
+island and it goes the other way — **10 → 13 → 17 → 21 → 39**. A body whose
+*description* is broken disagrees with itself more the harder you look; a body
+merely finer than the ruler agrees as soon as the ruler is fine enough. The
+island's pcurve regenerating 2.118e-02 mm from its own 3D curve on a 0.05 mm²
+face is what that divergence is made of.
+
+**Recorded, not applied.** It changes what the gate *meshes at* rather than what
+the generator builds, and it turns a one-part measurement into a two-part one.
+It is the strongest candidate for closing this item and should be measured
+against a third part before it becomes a rule — this project has promoted a
+two-point ranking to a calibration before (§11, G9–G12).
+
+**Two cheap explanations were ruled out on the way.** The gate meshes with
+`isInParallel=True`, and an `M` is exactly the shape of fault a per-face
+parallel mesher could produce: measured on solid 0 both ways, **25 bad edges,
+identical `{4x: 12, 1x: 13}`**. And face 317973 has a vertex 4.013e-04 mm from a
+non-adjacent edge of its own wire whose tolerance is 3.346e-04 mm — the same
+order, and a convincing story for a face the mesher abandons half of — but it is
+**outside** that tolerance by 1.2×, and the deflection sweep is what actually
+explains the face.
 
 **Do not reach for the input's seam gaps.** The failure message cites them and
 the reading is real — 8.1162e-03 mm at [1869.577, 92.830, 983.105], on 54 of
@@ -548,17 +601,19 @@ junctions whose trim needed a tolerance comparable to the feature it bounds:
 
 | body | volume | flagged | fraction | tessellates? |
 |---|---|---|---|---|
-| 0 | 330,314.68 mm³ | 136 / 21,649 | **0.6 %** | **no — 26 bad edges** |
+| 0 | 330,314.68 mm³ | 136 / 21,649 | **0.6 %** | **no — 26 bad edges, now 13** |
 | 138 | 1.5805 mm³ | 2 / 3 | **66.7 %** | yes |
 | 151 | 1.5805 mm³ | 2 / 3 | **66.7 %** | yes |
 | 163 | 2.9110 mm³ | 1 / 5 | 20.0 % | yes |
 
-The ordering is inverted: the body with the lowest fraction is the one that
-fails, and both highest pass cleanly. docs/algorithm.md §7.3 already says the
-fraction is one part's measurement and not a bar; this is the second part, and
-it disagrees with the first. **The fraction must not become a gate**, and §7.3's
-claim that it is "much sharper" than the maximum holds for `SpiralTest` and is
-unproven in general.
+The ordering looked inverted: the body with the lowest fraction is the one
+refused, and both highest pass cleanly. **G24 reverses that reading** — solid 0
+is sound, and the predictor was right not to flag it, so what the table shows is
+the two 66.7 % bodies being over-flagged rather than solid 0 being missed. Either
+way the conclusion for §7.3 is unchanged and is the one that matters:
+docs/algorithm.md §7.3 already says the fraction is one part's measurement and
+not a bar, a two-junction component reaches 100 % trivially, and **the fraction
+must not become a gate**.
 
 **What the check costs, which is the other half of what this item settles.**
 
@@ -579,9 +634,16 @@ measured rather than asserted.
 solid 0 reaching 0 non-manifold edges is the bar. The in-memory tessellation of
 `temp/*/unify_0_out.brep` is the cheaper inner loop — 2 minutes against 93, and
 the same number — so iterate there and confirm on the full run.
-`tools/prototypes/g23_bad_edge_provenance.py` is what classifies the result;
-run it on the sibling solids as well, since an instrument that only ever agrees
-on sound geometry proves nothing (G10).
+**The cheap inner loop is a 68-face extract, not the 486 MB body**: the residual
+clusters plus their edge-neighbours, cut out with
+`tools/prototypes/g24_residual_coverage.py --extract`, reproduce every remaining
+reading exactly and mesh in **0.0 s** against ~3 minutes. Confirm on
+`unify_0_out.brep`, then on the full run.
+`tools/prototypes/g23_bad_edge_provenance.py` is what classifies the result and
+`g24_residual_coverage.py --coverage` is what shows whether a face is covered at
+all; run both on the sibling solids as well, since an instrument that only ever
+agrees on sound geometry proves nothing (G10). Do not `--sweep` an extract — an
+open patch's own cut boundary dominates its readings.
 
 ---
 

@@ -1820,4 +1820,129 @@ two data points.
 
 **Consequence for planning:** repairing the declined cap removes 2 of 26. The
 part does not ship on the strength of that fix, and the remaining readings are
-not something `boundary` or `weld` can repair.
+not something `boundary` or `weld` can repair. **G24 below says what they are**:
+sound faces the gate's own 0.05 mm mesh does not cover, which converge to 0
+under refinement while the island diverges.
+
+---
+
+## G24 — the 13 that survive are the ruler, not the body ✅ MEASURED
+
+**Run 2026-08-25**, on top of G23 and the degenerate-triangle skip (#36). G23
+closed with 13 readings on solid 0 — 9 `M` and 4 `interior`, every one used once
+— and the honest note that `spiral-island-unwritable.brep` shows the *same two
+classes*, so no narrowing of the gate **by defect kind** is defensible. This
+gate says what those 13 are and supplies a discriminator that is not about kind
+at all.
+
+Script: [`g24_residual_coverage.py`](g24_residual_coverage.py).
+
+### First, an attribution G23 got backwards
+
+G23 recorded that every folding `ConicalSurface` has a `v` range beginning at
+exactly `-1.7321 = -sqrt(3)` and read it as a property of the **generated**
+patches. It is the *input file's* own parametrization.
+`TD_HX_rehearsal_test.step` contains **54 apex-touching conical faces** — drill
+points and countersink tips — every one with `RefRadius = 1.5`,
+`SemiAngle = pi/3` and `v0 = -sqrt(3)`, at which
+`RefRadius + v*sin(SemiAngle)` is exactly zero. The trimmed patches inherit it,
+so nothing about the lattice put an apex there and no change to `boundary` or
+`junction` can take one away.
+
+That also gives the sharpest statement of the bug #36 fixed, and it is not a
+lattice: **the counter read the accepted input body itself as carrying 86
+non-manifold edges**, one per apex. It now reads 0, with 86 degenerate
+triangles skipped. `test_export_truth.py` pins it in both directions.
+
+### `M` is not a discretization mismatch — the reading is withdrawn
+
+The class was named for two faces of one shared edge discretizing it
+differently. Dumping both faces' `PolygonOnTriangulation` for every implicated
+edge gives **bit-identical** node coordinates, interning to identical keys.
+Nothing disagrees.
+
+What happens instead is that the triangulation **does not cover the face**.
+Exact trimmed area against summed triangle area, at the gate's own 0.05 mm
+deflection:
+
+| face | surface | area | mesh covers |
+|---|---|---|---|
+| 317973 | Plane | 1.601941 mm² | **51.27 %** |
+| 77748 | Cylinder | 4.226842e-07 mm² | **68.75 %** |
+| 500747 | Cylinder | 8.372943e-07 mm² | **87.50 %** |
+
+One per residual cluster, all three `BRepCheck_Analyzer`-valid. The boundary
+segments in the un-meshed part are exactly what read as used-once — which is
+also why every survivor is used once and none is over-used.
+
+**It is purely a function of deflection**, identical meshed alone or inside the
+extract to five decimals, and each face recovers once the deflection drops below
+its own feature size:
+
+| deflection | f317973 | f77748 | f500747 |
+|---|---|---|---|
+| 0.05 (the gate's) | 0.51270 | 0.68749 | 0.87498 |
+| 0.01 | 0.99851 | 0.68749 | 0.81247 |
+| 0.002 | 0.99934 | 0.68749 | 1.00001 |
+| 0.0001 | 0.99996 | **1.00002** | 1.00001 |
+
+### The discriminator, on mechanism rather than defect kind
+
+Across the whole residual the count falls **13 → 8 → 4 → 4 → 0** at 0.05, 0.01,
+0.002, 0.0005 and 0.0001. Run the same sweep on the island and it goes the
+other way:
+
+| deflection | rehearsal residue | `spiral-island-unwritable.brep` |
+|---|---|---|
+| 0.05 | 13 | 10 |
+| 0.01 | 8 | 13 |
+| 0.002 | 4 | 17 |
+| 0.0005 | 4 | 21 |
+| 0.0001 | **0** | **39** |
+
+**A body whose description is broken disagrees with itself more the harder you
+look; a body merely finer than the ruler agrees as soon as the ruler is fine
+enough.** The island's pcurve regenerating 2.118e-02 mm from its own 3D curve on
+a 0.05 mm² face is what that divergence is made of. This separates the two
+without any rule about `M` or `interior`, which is exactly what G23 said was
+missing.
+
+**Recorded, not applied.** It changes what the gate *meshes at* rather than what
+the generator builds, and it turns a one-part measurement into a two-part one.
+Two parts is also two points, and this project has promoted a two-point ranking
+to a calibration before (G9–G12); a third part should be measured before this
+becomes a rule.
+
+### Two cheap explanations ruled out
+
+* **The parallel mesher.** The gate calls
+  `BRepMesh_IncrementalMesh(..., isInParallel=True)`, and an `M` is exactly the
+  shape of fault a per-face parallel mesher could produce. Measured on solid 0
+  both ways: **25 bad edges, identical `{4x: 12, 1x: 13}`** — 104.1 s parallel
+  against 136.0 s serial.
+* **A near-self-intersecting wire in UV.** Face 317973 has a vertex
+  4.013e-04 mm from a non-adjacent edge of its own wire whose recorded tolerance
+  is 3.346e-04 mm — the same order, and a convincing story for a face the 2D
+  mesher abandons half of. It is **outside** that tolerance by 1.2×, and the
+  deflection sweep is what actually explains the face. Recorded because it
+  fitted well and was wrong.
+
+### The inner loop this leaves behind
+
+The 486 MB dominant body costs ~3 minutes an iteration. A **68-face extract** —
+the three residual clusters plus everything sharing an edge with them,
+`--extract` — reproduces every remaining reading exactly and meshes in **0.0 s**.
+Do not `--sweep` an extract: it is open, so 150 of its 166 readings are its own
+cut boundary and they climb with refinement for reasons that concern neither
+body. Classify an extract with G23 instead and read the `M`/`interior`/`T`
+tally, which ignores `one-face`.
+
+### What this settles
+
+The rehearsal's dominant body is **sound**. Of the original 26 readings, 3 were
+real duplicate material at the declined cap (#34), 9 plus a collapsed key were
+the counter's own arithmetic at the input's cone apexes (#36), and the remaining
+13 are the gate's ruler being coarser than features the trim legitimately
+produces. Nothing in `boundary`, `weld` or `simplify` needs to change — and
+§7.3's predictor, which ranks this body *lowest* of four, was right not to flag
+it.

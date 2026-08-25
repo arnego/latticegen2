@@ -1698,6 +1698,14 @@ program builds itself.
   (`tools/prototypes/RESULTS.md` G23) — 16 from this skip alone, and the last
   three with §8's fused cap.
 
+  **The sharpest statement of the bug is not a lattice at all: the gate
+  refused its own input.** `TD_HX_rehearsal_test.step` carries 54
+  apex-touching conical faces — drill points and countersink tips whose
+  `v` range begins at `RefRadius + v·sin(SemiAngle) = 0` exactly — and
+  the counter read that accepted, unmodifiable CAD model as carrying
+  **86** non-manifold edges, one per apex. It now reads 0, with 86
+  degenerate triangles skipped (`tools/prototypes/RESULTS.md` G24).
+
   Three cheaper quantities were tried as the gate before this one. `SpiralTest`
   at `cc=5, t=1` produces two solids — the 27,864 mm³ lattice, sound, and the
   4.17 mm³ island, not — and on that part alone two of the three look decisive:
@@ -2113,6 +2121,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | The input's own seam gaps measured once at `import` (§7.4) | Correctness reporting, not a gate. Two faces of a B-rep may sit apart and be held together by the edge's tolerance; this tool then cuts that region into features smaller than the gap. `SpiralTest.step`'s worst is **4.2e-02 mm**, constant along the edge, and it is why that part's island cannot be written — and why no pcurve re-fit repairs it (docs/specification.md §11). 0.1 s there, 1.2 s on the rehearsal's 1,043 shared edges. Reported at `import` and cited by §9's refusal, so a failure points at the model rather than only at a coordinate |
 | The exported file declares the shape's **greatest** tolerance, not the average (§9) | Correctness. AP214 carries one tolerance per file, and OCCT's Average default is pathological on a lattice — ~99 % exact interior edges pull it to the floor and clamp the boundary trims that actually need slack. `SpiralTest`'s dominant body tessellates with **0** broken edges in memory and came back from its own round trip with **2**; declaring the greatest tolerance takes it to **0** and lets the part ship. Free, and self-scaling: a body needing nothing declares nothing |
 | Export truth measured on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
+| Degenerate triangles skipped in that count (§9) | Correctness of the *quantity*, not of any body, and the third time this project has found the same counting bug: `shell_defects` always skipped degenerate edges, `free_edges` was corrected in G21, this counter never had the test. Mesh points are interned by rounded coordinate, so at a pole a whole parametric range collapses to one id and such a triangle contributes the real edge twice — a closed fan reading as `4x`. Keyed on interned-id equality rather than area, because the defect is created by the interning. Without it the gate reports `TD_HX_rehearsal_test.step`'s **own input** as carrying 86 non-manifold edges, one per apex of its 54 apex-touching cones, and a plain sphere and cone as broken. Cannot hide a hole: a triangle bounding nothing is not one, and a cone with its base removed still reports all 63 segments. The rehearsal's dominant body falls 26 → 13 (G23, G24) |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |

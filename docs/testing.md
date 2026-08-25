@@ -42,7 +42,7 @@ header rewrite.
 | `test_progress.py` | The NDJSON event schema (docs/algorithm.md §10): every event carries exactly the fields it declares, the reader returns `None` on kernel chatter and truncated lines rather than raising, and a dead consumer cannot abandon a run mid-pipeline | no |
 | `test_runlog_events.py` | **The guarantee that watching a run does not change it.** The same sequence of writes with and without an emitter produces an identical `.log`; `stage_begin` emits without logging; `substage` rate-limits without ever dropping a stage's final count | no |
 | `test_gui.py` | The front-end's testable half (specification.md §3.1): the stage weights, the reduction from an event stream to what the window shows — fed deliberately hostile input — the argv handed to the child, the cancel sentinel, and the **verbose** tick box: that unticked the pane holds only what the child wrote outside the event stream and is hidden when that is empty, that ticking it reveals the run's whole log, and that it stays enabled while a run is in flight. Several tests build widgets in one shared withdrawn Tk root, guarded by `importorskip` | no |
-| `test_export_truth.py` | What `BRepCheck_Analyzer` structurally cannot ask (docs/algorithm.md §7.3, §9). First **the premise**, pinned against the kernel: a 6.573e-02 mm vertex tolerance does not survive a STEP round trip, and AP214 declares exactly one tolerance per file — if a future OCCT ever carried per-subshape tolerance, that test is what would say so. Then the gate, against `spiral-island-unwritable.brep`, the one body this project has produced that cannot be written: **§8's rung-2 repair makes it `BRepCheck`-valid and it still tessellates into 11 broken edges**, which is the whole case for the check. Plus the control (a box survives), a test that the three disproved proxies stay out of the deciding seat, and — the reason that body stays refused — that the 42.4 micron gap between two of `SpiralTest.step`'s **own** surfaces is where it comes from (docs/algorithm.md §7.4) | yes |
+| `test_export_truth.py` | What `BRepCheck_Analyzer` structurally cannot ask (docs/algorithm.md §7.3, §9). First **the premise**, pinned against the kernel: a 6.573e-02 mm vertex tolerance does not survive a STEP round trip, and AP214 declares exactly one tolerance per file — if a future OCCT ever carried per-subshape tolerance, that test is what would say so. Then the gate, against `spiral-island-unwritable.brep`, the one body this project has produced that cannot be written: **§8's rung-2 repair makes it `BRepCheck`-valid and it still tessellates into 11 broken edges**, which is the whole case for the check. Plus the control (a box survives), a test that the three disproved proxies stay out of the deciding seat, and — the reason that body stays refused — that the 42.4 micron gap between two of `SpiralTest.step`'s **own** surfaces is where it comes from (docs/algorithm.md §7.4). Plus the degenerate-triangle skip: that a cone's apex and a sphere's poles are not defects, that a cone with its base removed still reports all 63 segments of that hole, that the island carries 0 degenerate triangles so its pins cannot move — and that the gate does **not** refuse `TD_HX_rehearsal_test.step`'s own accepted input, which read 86 non-manifold edges before the skip and 0 after, one per apex of its 54 apex-touching cones (G24) | yes |
 | `test_verify_geometry.py` | The one part of the harness whose failure mode is a plausible number rather than an exception: `material_outside`'s per-solid cut, the contradiction against a boolean-free containment check, and that a face lying *on* the input surface is a tie rather than a protrusion. The only test file that reaches into `tools/` — see the note below | yes |
 
 ## E2E verification
@@ -253,7 +253,7 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
 | `SpiralTest`, `cc=5 t=1` | 11 min | boundary trim (6 min), validate (1 m 53 s, mostly export truth) |
 | test cylinder, `cc=10 t=1.5` | ~40 s | simplify, boundary trim, stitch |
-| `TD_HX_rehearsal_test`, `cc=5 t=1` | ~93 min, 19.0 GB peak, **no output — refused at `export truth`** (specification.md §10) | validate (36 m 32 s, mostly export truth), boundary trim, simplify, stitch |
+| `TD_HX_rehearsal_test`, `cc=5 t=1` | ~93 min, 19.0 GB peak, **refused at `export truth`** — 13 readings on solid 0, every one used once (specification.md §10) | validate (36 m 32 s, mostly export truth), boundary trim, simplify, stitch |
 
 **The rehearsal row is not comparable with the others, and not with its own
 past figures.** It is a single run rather than a controlled pair, and most of
@@ -264,6 +264,23 @@ performance measurement. **Prefer a controlled pair run back to back on the same
 machine** for any performance claim here — the standard this file holds itself
 to, because untouched stages have swung 25-36 % between sessions on machine load
 alone.
+
+**What is refused there is now decomposed, which changes what a later session
+should do with this row.** Of the original 26 readings, 3 were real duplicate
+material at a declined cap (#34), 9 plus a collapsed key were the counter
+miscounting a cone apex (#36), and the remaining **13** are sound faces the
+gate's own 0.05 mm mesh does not fully cover — 51 %, 69 % and 87 % on three
+`BRepCheck`-valid faces. They converge to 0 as the deflection is refined while
+`spiral-island-unwritable.brep` diverges from 10 to 39 over the same sweep,
+which is a discriminator on mechanism rather than on defect kind (G24). The
+dominant body itself is sound; what is unresolved is what the gate meshes at.
+
+**The cheap inner loop for that residue is a 68-face extract**, not the
+583,894-face solid: `g24_residual_coverage.py --extract` lifts the three
+residual clusters plus their edge-neighbours out of `unify_0_out.brep` and
+reproduces every remaining reading in 0.0 s against ~3 minutes for the whole
+body. Do not `--sweep` an extract — it is open, so its own cut boundary
+dominates.
 
 The cylinder's ~45 s → ~40 s since comes from two changes, measured together as
 a controlled pair on `dense-lattice` (**50.30 s → 40.50 s, −19.5 %**, output

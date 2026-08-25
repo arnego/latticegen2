@@ -41,6 +41,7 @@ SPIRAL = os.path.join(TESTDIR, "SpiralTest.step")
 BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
 ISLAND = os.path.join(TESTDIR, "spiral-island-unwritable.brep")
+REHEARSAL = os.path.join(TESTDIR, "TD_HX_rehearsal_test.step")
 
 
 def vertices(shape):
@@ -447,6 +448,37 @@ def test_a_hole_at_a_pole_is_still_caught(tmp_path):
     assert defects.degenerate == 1, "the apex triangle is still skipped"
     assert defects.bad == 63, "the whole base polyline, nothing swallowed"
     assert defects.by_use == {1: 63}, "a hole reads as used-once, and only that"
+
+
+def test_the_gate_does_not_refuse_its_own_input(tmp_path):
+    """The sharpest statement of the pole miscount: it condemned the *input*.
+
+    The primitives above show the mechanism on the smallest possible shape.
+    This shows what it cost on a real one — and it is a different kind of
+    argument, because `TD_HX_rehearsal_test.step` is a valid, accepted CAD model
+    this project neither wrote nor may change. It carries **54 apex-touching
+    conical faces**, drill points and countersink tips whose `v` range begins
+    where `RefRadius + v*sin(SemiAngle)` is exactly zero, and the counter read
+    it as carrying **86** non-manifold edges, one per apex.
+
+    That also corrects an attribution: `tools/prototypes/RESULTS.md` G23 noticed
+    every folding `ConicalSurface` in the *output* beginning at `v = -sqrt(3)`
+    and read it as a property of the generated patches. It is inherited — the
+    input's own parametrization, `RefRadius = 1.5` and `SemiAngle = pi/3`
+    throughout (G24).
+
+    Pinned in both directions, because "0 bad edges" alone would also pass if
+    the counter had quietly stopped working.
+    """
+    body = occ.read_step(REHEARSAL)
+    defects = occ.exported_mesh_defects(body, str(tmp_path / "input.step"))
+
+    assert defects.degenerate == 86, (
+        "one degenerate triangle per apex; if this moves, either the mesher or "
+        "the input has changed and the figures in G24 need re-deriving"
+    )
+    assert defects.bad == 0, "the user's own input is not a defective body"
+    assert defects.by_use == {} and defects.where == []
 
 
 def test_the_cheaper_proxies_do_not_decide():

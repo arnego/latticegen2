@@ -815,7 +815,9 @@ def _owning_cap(
     return best
 
 
-def _fuse_group(lp: LatticeParams, group: list[BoundaryPiece]) -> BoundaryPiece:
+def _fuse_group(
+    lp: LatticeParams, group: list[BoundaryPiece]
+) -> tuple[BoundaryPiece, list[tuple[NodeKey, int]]]:
     """Fuse one cluster of mutually disagreeing pieces into a single solid.
 
     Rebuilds each piece as a solid, fuses them with one ``BRepAlgoAPI_Fuse``
@@ -869,16 +871,48 @@ def _fuse_group(lp: LatticeParams, group: list[BoundaryPiece]) -> BoundaryPiece:
             merged.faces.append(face)
         else:
             merged.cap_faces.setdefault(tag, []).append(face)
-    return merged
+
+    # `_owning_cap` tests one axis per half-strut, so it can pass for more than
+    # one node in the group and its centroid tie-break is only as good as the
+    # assumption that candidate cap centres are a full cell apart. A key no
+    # operand ever presented is therefore a real possibility, and it is exactly
+    # the misassignment docs/specification.md §10 names as one of two candidate
+    # mechanisms for a boundary layer that will not close: the true neighbour's
+    # cap goes unpaired while a cap appears where no material should be.
+    #
+    # Reported rather than raised, because a fused group legitimately *loses*
+    # keys — the disagreeing cap becomes interior material — and because no
+    # production run has yet been shown to invent one. Promoting this to a hard
+    # failure without that evidence would risk refusing correct input, which
+    # docs/algorithm.md §11 forbids more strongly than it asks for any gate.
+    presented = {key for p in group for key in p.cap_faces}
+    invented = sorted(set(merged.cap_faces) - presented)
+    return merged, invented
 
 
 def fuse_disagreeing_pairs(
     lp: LatticeParams,
     pieces: list[BoundaryPiece],
-    mismatched: list[tuple[NodeKey, int, float, float]],
-) -> tuple[list[BoundaryPiece], int]:
+    mismatched: list[tuple],
+    *,
+    strict: bool = True,
+) -> tuple[list[BoundaryPiece], int, list[tuple[NodeKey, int]]]:
     """Fuse the pieces on either side of every cap the two booleans disagreed
     about, replacing them with their fused union.
+
+    Entries may be ``(node, h, area_a, area_b)`` as `resolve_interfaces`
+    produces them for a mismatched cap, or a bare ``(node, h)`` — only the first
+    two fields are read, so the same repair serves both callers.
+
+    ``strict`` is what separates them. A *mismatched* cap has no safe
+    alternative — keeping both sides leaves overlap and a hole
+    (docs/algorithm.md §7.1) — so a fuse that cannot complete is a hard failure.
+    An *unweldable* cap does have one, namely the decline that stood before this
+    repair existed, so ``strict=False`` leaves that group untouched and lets the
+    caller decline it as before.
+
+    Returns the new piece list, the number of fuses performed, and any cap keys
+    the re-tagging invented (see :func:`_fuse_group`).
 
     Must run *before* :func:`finalize_pieces`, while every piece's ``faces``
     plus ``cap_faces`` still form its complete closed boundary — once a cap
@@ -892,12 +926,11 @@ def fuse_disagreeing_pairs(
     ``BRepAlgoAPI_Fuse`` call, rather than fusing pairs one at a time and
     risking the same piece being consumed twice.
 
-    Returns the new piece list (every fused cluster's operands replaced by
-    their fused result; every other piece untouched) and the number of local
-    fuses performed.
+    Every fused cluster's operands are replaced by their fused result and every
+    other piece is carried through untouched.
     """
     if not mismatched:
-        return pieces, 0
+        return pieces, 0, []
 
     holders: dict[tuple[NodeKey, int], list[int]] = {}
     for i, p in enumerate(pieces):
@@ -907,10 +940,13 @@ def fuse_disagreeing_pairs(
     steps = [tuple(int(x) for x in neighbor_step(h)) for h in range(6)]
     uf = UnionFind(len(pieces))
     touched: set[int] = set()
-    for node, h, _, _ in mismatched:
+    for entry in mismatched:
+        node, h = entry[0], entry[1]
         other = _neighbour(node, steps[h])
         idxs = holders.get((node, h), []) + holders.get((other, OPPOSITE_HALF[h]), [])
         if not idxs:
+            if not strict:
+                continue
             raise ProcessingError(
                 f"resolve_interfaces reported a mismatched cap at {node} h{h} with "
                 f"no piece holding it on either side; the two disagree about "
@@ -924,9 +960,41 @@ def fuse_disagreeing_pairs(
     for i in touched:
         groups.setdefault(uf.find(i), []).append(i)
 
+    fused: list[BoundaryPiece] = []
+    invented: list[tuple[NodeKey, int]] = []
+    gave_up: set[int] = set()
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            # Nothing to merge, and this is reachable rather than defensive:
+            # `weld.unweldable` reports a cap from its *interior* side when the
+            # neighbour across it is a boundary piece, and an interior node
+            # owns no `BoundaryPiece` at all — so the group is the boundary
+            # partner alone. Fusing one operand would run a boolean with no
+            # tools, rebuild the piece for nothing and re-tag its caps, which
+            # can only lose information. Leave it for the caller to decline,
+            # which is the correct outcome there: an interior cap's ring is the
+            # template quad by construction (docs/algorithm.md §5.3(b)), so a
+            # mismatch is the boundary side's and no fuse can reconcile it.
+            gave_up.update(idxs)
+            continue
+        try:
+            merged, bad_keys = _fuse_group(lp, [pieces[i] for i in idxs])
+        except ProcessingError:
+            if strict:
+                raise
+            # The operands do not overlap consistently enough to fuse. That is
+            # not a reason to fail a run this repair is only trying to improve:
+            # leaving the group alone reinstates the behaviour that stood
+            # before it, which is to decline the cap and keep both sides
+            # closed. "Do more work", never "produce a wrong result" (§11).
+            gave_up.update(idxs)
+            continue
+        fused.append(merged)
+        invented.extend(bad_keys)
+
+    touched -= gave_up
     kept = [p for i, p in enumerate(pieces) if i not in touched]
-    fused = [_fuse_group(lp, [pieces[i] for i in idxs]) for idxs in groups.values()]
-    return kept + fused, len(groups)
+    return kept + fused, len(fused), invented
 
 
 # --- Worker-process plumbing ------------------------------------------------

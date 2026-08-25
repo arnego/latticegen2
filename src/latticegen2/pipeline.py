@@ -306,6 +306,8 @@ def _run_with_pool(
             if len(interior_nodes) else set()
         iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
         n_fused = 0
+        n_weld_fused = 0
+        n_invented = 0
         if iface.mismatched:
             # Declining a mismatched cap is not a safe degradation on its own:
             # where the two sides present *different* partial regions, keeping
@@ -315,9 +317,10 @@ def _run_with_pool(
             # junctions into one solid, then interfaces are resolved again —
             # the merged piece presents one agreed region, so nothing is
             # declined there the second time.
-            boundary.pieces, n_fused = fuse_disagreeing_pairs(
+            boundary.pieces, n_fused, invented = fuse_disagreeing_pairs(
                 lp, boundary.pieces, iface.mismatched
             )
+            n_invented += len(invented)
             iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
             if iface.mismatched:
                 raise ProcessingError(
@@ -325,12 +328,47 @@ def _run_with_pool(
                     f"the junctions on either side; the local repair could not "
                     f"reconcile them."
                 )
-        # Weldability is settled here, while a rejection still only costs an
-        # extra solid: once a cap face has been given up, putting it back is an
-        # undo, and the caps are given up in `finalize_pieces` on the next line.
-        for node, h in weld.unweldable(
+        # Weldability is settled here, while a rejection still costs only an
+        # extra solid or a local fuse: once a cap face has been given up,
+        # putting it back is an undo, and the caps are given up in
+        # `finalize_pieces` below.
+        rejected = weld.unweldable(
             lp, tmesh, interior_set, boundary.pieces, iface.interfaces
-        ):
+        )
+        # **Declining is not free where the two sides are coincident**, which is
+        # the case this repair exists for. `decline` withdraws both keys and
+        # `finalize_pieces` then keeps *both* sides' cap faces — two sheets at
+        # the same nominal quad. That costs "an extra solid" only when the
+        # decline actually separates the bodies; where the two pieces stay
+        # connected through their other interfaces the duplicate ends up inside
+        # one solid, as material counted twice. Measured on
+        # `TD_HX_rehearsal_test` at `cc=5, t=1`: one declined cap, both sides
+        # 7.368093e-01 mm² and planar, and the two mesh edges between them are
+        # the only defects in that body this generator is responsible for
+        # (tools/prototypes/RESULTS.md G23).
+        #
+        # It is the same hazard `fuse_disagreeing_pairs` already exists to avoid
+        # for a mismatched cap, so it gets the same repair — non-strict, since
+        # unlike a mismatched cap this one has a safe fallback: the decline that
+        # stood before, which is what happens to any group the fuse cannot merge.
+        if rejected:
+            boundary.pieces, n_weld_fused, invented = fuse_disagreeing_pairs(
+                lp, boundary.pieces, rejected, strict=False
+            )
+            n_invented += len(invented)
+            if n_weld_fused:
+                iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
+                if iface.mismatched:
+                    boundary.pieces, extra, invented = fuse_disagreeing_pairs(
+                        lp, boundary.pieces, iface.mismatched
+                    )
+                    n_fused += extra
+                    n_invented += len(invented)
+                    iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
+                rejected = weld.unweldable(
+                    lp, tmesh, interior_set, boundary.pieces, iface.interfaces
+                )
+        for node, h in rejected:
             iface.decline(node, h)
         finalize_pieces(boundary.pieces, iface.interfaces)
         comps = build_components(
@@ -346,12 +384,29 @@ def _run_with_pool(
             f"boolean fuse (docs/algorithm.md §7.1); the merged junctions present "
             f"one agreed region rather than an extra solid."
         )
+    if n_weld_fused:
+        rl.always(
+            f"note: {n_weld_fused} cap cluster(s) whose two sides do not "
+            f"correspond edge for edge were repaired with the same local fuse "
+            f"(docs/algorithm.md §8) rather than declined. Declining leaves both "
+            f"sides' cap faces in place, which is duplicate material wherever the "
+            f"two pieces stay connected by their other interfaces."
+        )
+    if n_invented:
+        rl.always(
+            f"note: a local fuse re-tagged {n_invented} cap key(s) that neither "
+            f"operand presented (docs/specification.md §10). The output is "
+            f"unaffected unless a boundary layer later fails to close, in which "
+            f"case this is the first thing to look at."
+        )
     _log_interfaces(rl, lp, iface)
     stats["interfaces"] = iface.n_pairs
     stats["caps_unpaired"] = len(iface.unpaired)
     stats["caps_mismatched"] = len(iface.mismatched)
     stats["caps_unweldable"] = len(iface.unweldable)
     stats["fused_cap_clusters"] = n_fused
+    stats["fused_unweldable_clusters"] = n_weld_fused
+    stats["invented_cap_keys"] = n_invented
     _log_dropped(rl, comps, dropped, threshold)
     stats["components"] = len(comps.volumes)
     stats["components_dropped"] = len(dropped)
@@ -796,7 +851,8 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
         fraction = max(fraction, reading.loose_area_fraction)
         n_faces, _ = occ.count_subshapes(solid)
         rl.substage("export truth", i, len(solids))
-        triangles, bad = occ.exported_mesh_defects(solid, probe)
+        defects = occ.exported_mesh_defects(solid, probe)
+        triangles, bad = defects.triangles, defects.bad
         rl.line(
             f"  solid {i}: {n_faces} faces -> {triangles} triangle(s) after a "
             f"STEP round trip, {bad} non-manifold edge(s); "
@@ -804,6 +860,15 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
             f"worst deviation {reading.worst:.4e} mm"
         )
         if bad:
+            # The breakdown by use count and the positions, because a total
+            # alone cannot be acted on: one use is a hole or two faces
+            # discretizing a shared edge differently, more than two is
+            # duplicate material, and they have different causes
+            # (docs/specification.md §10).
+            rl.line(
+                f"    by use count {dict(sorted(defects.by_use.items()))}; "
+                f"positions {[list(p) for p in defects.where]}"
+            )
             broken.append((i, bad, triangles))
     rl.substage("export truth", len(solids), len(solids))
     elapsed = (_dt.datetime.now() - started).total_seconds()

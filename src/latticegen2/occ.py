@@ -681,9 +681,35 @@ gets more than one triangle, which is what makes a non-manifold edge visible
 at all."""
 
 
+MESH_DEFECT_SAMPLES = 10
+"""How many defect positions :func:`exported_mesh_defects` reports."""
+
+
+class MeshDefects(NamedTuple):
+    """What a tessellation of the exported body shows.
+
+    ``by_use`` maps "used by N triangles" to how many edges had that count, and
+    it is not decoration: **one** use is a hole or two faces discretizing a
+    shared edge differently, while **more** than two is duplicate or overlapping
+    material — different faults with different causes, and `shell_defects`
+    already draws exactly this distinction. Reporting only a total is what made
+    the rehearsal's 26 have to be re-measured outside the pipeline before
+    anything could be said about them (docs/specification.md §10,
+    ``tools/prototypes/RESULTS.md`` G23).
+
+    ``where`` carries up to :data:`MESH_DEFECT_SAMPLES` midpoints, rounded as
+    `shell_defects` rounds its own so the two reports name the same edges.
+    """
+
+    triangles: int
+    bad: int
+    by_use: dict[int, int]
+    where: list[tuple[float, float, float]]
+
+
 def exported_mesh_defects(
     shape: TopoDS_Shape, path: str, deflection: float = DEFAULT_MESH_DEFLECTION
-) -> tuple[int, int]:
+) -> MeshDefects:
     """Tessellate ``shape`` **as the file writes it** and count broken edges.
 
     Returns ``(triangles, edges not used by exactly two triangles)``. The shape
@@ -770,7 +796,26 @@ def exported_mesh_defects(
                     lo, hi = hi, lo
                 edge = lo * 4_294_967_296 + hi
                 counts[edge] = counts.get(edge, 0) + 1
-    return triangles, sum(1 for n in counts.values() if n != 2)
+    bad = [(e, n) for e, n in counts.items() if n != 2]
+    by_use: dict[int, int] = {}
+    for _e, n in bad:
+        by_use[n] = by_use.get(n, 0) + 1
+    # Positions for the sampled defects only. The interned key *is* the point,
+    # rounded to `quantum`, so one pass over the table recovers exactly the ids
+    # needed -- rather than carrying a parallel dict of coordinates for every
+    # mesh point, which would give back much of what interning to integers buys
+    # on a solid of this size.
+    sample = sorted(bad)[:MESH_DEFECT_SAMPLES]
+    needed = {i for e, _n in sample for i in divmod(e, 4_294_967_296)}
+    point_of = {i: k for k, i in point_id.items() if i in needed}
+    where = []
+    for e, _n in sample:
+        lo, hi = divmod(e, 4_294_967_296)
+        a, b = point_of[lo], point_of[hi]
+        where.append(
+            tuple(round((a[i] + b[i]) / (2 * quantum), 3) for i in range(3))
+        )
+    return MeshDefects(triangles, len(bad), by_use, where)
 
 
 def _pcurve_deviation(edge: TopoDS_Edge, face: TopoDS_Face, surface) -> float | None:

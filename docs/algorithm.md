@@ -1094,7 +1094,39 @@ that as six holes, which is the failure this check exists to make unreachable.
 
 Extending it changes nothing where correspondence genuinely holds: both
 committed golden samples come back at 0 mm³ with unchanged solid counts and
-file sizes, and this part declines exactly **one** cap.
+file sizes.
+
+**`SpiralTest.step` no longer flags that cap, and the reason is worth knowing
+before reading the paragraph above as current.** §7.2's residual repair — the
+local-block re-trim and the containment drop — changed which junctions are
+rebuilt per half-strut, and at `cc=5, t=1` the part now flags **no**
+boundary-to-boundary cap at all (6 unpaired, 0 mismatched, 0 unweldable). The
+case above is still what the check is *for*, and it remains the clearest
+statement of the mechanism; it is simply no longer reproduced by that input.
+`TD_HX_rehearsal_test` at `cc=5, t=1` flags exactly one, which is the only
+committed part that currently exercises this at all.
+
+**A flagged cap is fused, not simply declined, and that is a correction to what
+this section used to claim.** Declining withdraws *both* keys, so
+`finalize_pieces` keeps *both* sides' cap faces — and where the two sides are
+coincident, as they are whenever the disagreement is about subdivision rather
+than extent, that is two sheets at one nominal quad. It costs "an extra solid"
+only if the decline separates the bodies; where the two pieces stay connected
+through their other interfaces the duplicate lands *inside* one solid, as
+material counted twice. Measured on `TD_HX_rehearsal_test` at `cc=5, t=1`: one
+flagged cap, both sides planar and 7.368093e-01 mm², and the two mesh edges
+between them are the only defects in that body attributable to this generator
+(`tools/prototypes/RESULTS.md` G23).
+
+That is the same hazard §7.1's `fuse_disagreeing_pairs` already exists to avoid
+for a *mismatched* cap, so it gets the same repair: the pieces on either side
+are fused into one solid, which presents one region and needs no interface.
+Interfaces are then resolved again and correspondence re-checked, one bounded
+extra pass. **Unlike a mismatched cap this one has a safe fallback** — the
+decline that stood before — so a fuse that does not return a single solid leaves
+the group untouched and the cap is declined exactly as it used to be, rather
+than failing the run. `stats["fused_unweldable_clusters"]` reports how often the
+repair fires.
 
 **Stitching.** The interior shell and the surviving trimmed boundary pieces are
 then sewn together. Two cross-checks follow:
@@ -2055,7 +2087,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | A COMMON that returns its operand is re-derived per half-strut (§7.2) | Correctness, not speed. The kernel can return a junction untrimmed while reporting `IsDone`, leaving material up to 1.29 mm outside the body — 8 of 2,073 junctions on `SpiralTest`, and **not** detectable with another boolean, since `Cut` agrees with `Common`. The detector is self-validating: it fires on any result equal to the operand, and the re-trim keeps the original whenever every half-strut really is whole. 9.2 % reach the check, 0.4 % are changed, ~+11 % on a worker-parallel stage |
-| Interface correspondence checked on boundary-to-boundary caps too (§8) | Correctness. Sewing pairs edges, so two rings describing the same quad with six edges against four cannot close — and the area test §7.1 applies passes such a cap exactly. Declining costs an extra solid, never a hole; both golden samples unchanged |
+| Interface correspondence checked on boundary-to-boundary caps too (§8) | Correctness. Sewing pairs edges, so two rings describing the same quad with six edges against four cannot close — and the area test §7.1 applies passes such a cap exactly. A cap whose two sides do not correspond is now *fused* with the same local boolean a mismatched cap gets, and declined only where that fuse cannot merge them — because declining a **coincident** pair keeps both sides' cap faces, which is duplicate material wherever the two pieces stay connected by their other interfaces (G23); both golden samples unchanged |
 | Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10). Guarded by an exact area bar and a structural one, never by volume — OCCT cannot integrate the volume of the unrepaired piece, because the pinhole is exactly the free boundary its precondition excludes (§7, G19) |
 | Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is finding the faces to repair, on a sound layer (§8, G11, G12) |
 | That scan run as a parallel batch filter over a compound (§8) | The second stage to use OCCT's own threads rather than this project's process pool, and for the same two reasons as `validate`: it returns a verdict rather than geometry, and the call has a flag. **44.1 s → 22.6 s** in a controlled pair, same 19 faces repaired, output byte-identical; chunked at 20,000 faces because the analyzer holds ~14 kB per face. The predicate has to be re-evaluated per face *as the repair reaches it*, not once up front: repairs widen shared tolerances, so a neighbour can be fixed for free, and asking too early counted 15 such faces as unrepaired |

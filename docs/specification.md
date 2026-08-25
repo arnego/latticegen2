@@ -526,23 +526,61 @@ export-side family of repairs: this is the pattern of
 pattern the `Greatest` tolerance setting fixes (§11). Writer settings are not
 where the fix is.
 
-**The 26 are two different faults, and neither is uniformly micron-scale:**
+**What the 26 are is measured, not inferred, and only 2 of them are this
+generator's doing** (`tools/prototypes/RESULTS.md` G23). Each bad mesh edge is
+traced to the face and the B-rep edge that produced it, via
+`BRep_Tool.PolygonOnTriangulation_s`:
 
-| kind | count | where |
+| kind | count | what it is |
 |---|---|---|
-| edges used **once** — holes | 14 | four tight micron-scale groups, plus one at [2002.836, -60, 927] with edges **1.4–2.2 mm long** |
-| edges used **four times** — overlapping material | 12 | including a group ~1.3 mm from the cap `weld.unweldable` declines at [2056.81, -87.5, 967.548] |
+| **T** — two coincident but distinct `TopoDS_Edge`s, two faces each | **2** | genuine duplicate material |
+| **M** — one *shared* edge whose two faces discretize it differently | 9 | no hole exists in the B-rep |
+| **interior** — a segment no B-rep edge claims | 14 | inside one face's own triangulation |
+| **one-face** — a B-rep edge used by one face | **0** | a real hole would appear here |
 
-A 2.2 mm free edge is a real hole in a `t = 1` mm lattice rather than a rounding
-artefact, and the four-times group sitting beside a declined cap is the first
-thing to check: declining an interface leaves an extra solid by design, and
-material counted twice there is the failure mode that design exists to avoid.
+**There are no holes.** An earlier revision of this item read the 14 used-once
+edges as holes, and singled out a 2.2 mm one as "a real hole in a `t = 1` mm
+lattice rather than a rounding artefact". Every one of those is `M`: the B-rep
+edge carries **two** faces, and only one contributed that segment. The
+instrument's positive control pins what a hole actually looks like — removing
+one face from a sound solid reports its edges as `one-face` — and solid 0 has
+none. That inference was reasonable and wrong, which is the sixth time in this
+project's history the first convincing reading has not survived measurement.
 
-**Do not reach for the input's seam gaps first.** The failure message cites them
-and the reading is real — 8.1162e-03 mm at [1869.577, 92.830, 983.105], on 54 of
-1043 shared edges — but **none of the 26 bad edges is at that coordinate**. The
-citation names a family, not a location, and treating it as a localisation would
-repeat the mistake §11 records four times over.
+**The 2 that are real are the declined cap.** Both `T` edges implicate faces
+121454 and 531940 — both `Plane`, both area 7.368093e-01 mm², identical: the two
+coincident cap sheets `weld.unweldable` leaves when it declines
+[2056.81, -87.5, 967.548]. `InterfaceSet.decline` withdraws *both* keys and
+`finalize_pieces` keeps *both* sides' cap faces. Because the run assembles **14**
+solids rather than 15, the two pieces stay connected through their other
+interfaces, so the duplicate sheets end up *inside* one solid — which is exactly
+why "declining costs an extra solid, never a hole" does not hold here. This is
+the same hazard `fuse_disagreeing_pairs` already exists to avoid for
+`mismatched` caps, on the path that does not use it.
+
+**The rest is valid geometry OCCT's own mesher discretizes inconsistently.**
+`BRepCheck_Analyzer` passes all 18 implicated faces; face tolerances are 1e-07
+throughout, so this is not the fat-tolerance family §8's repair rungs address.
+Meshed alone in a compound with no neighbour, every implicated `ConicalSurface`
+reproduces its own fold, and all eight share one property: their `v` range
+begins at exactly **-1.7321 = -√3**, the cone's apex, where the whole u-range
+collapses to one point. Excluding bad edges incident to the image of a
+**degenerate** edge accounts for **9 of 25** — a real but partial explanation,
+and the third place in this codebase where degenerate edges have been counted as
+defects (`shell_defects` always skipped them; `free_edges` did not until G21).
+Recorded rather than applied, since it changes a correctness gate's verdict.
+
+**So repairing the declined cap removes 2 of 26 and the part still does not
+ship.** The remaining 14 are neither `T` nor pole-adjacent, and
+`spiral-island-unwritable.brep` — known to be genuinely unwritable — shows the
+same `M` and `interior` classes (8 and 2, with 0 `T`), so neither class can be
+dismissed as noise and no narrowing of the gate is defensible on two parts.
+
+**Do not reach for the input's seam gaps.** The failure message cites them and
+the reading is real — 8.1162e-03 mm at [1869.577, 92.830, 983.105], on 54 of
+1043 shared edges — but **none of the 26 bad edges is at that coordinate**, and
+the faces carrying them are valid with 1e-07 tolerances. The citation names a
+family, not a location.
 
 **§7.3's predictor does not point at this body, and that is a finding about the
 predictor.** It flags four bodies, ranked by the fraction of their boundary
@@ -581,6 +619,9 @@ measured rather than asserted.
 solid 0 reaching 0 non-manifold edges is the bar. The in-memory tessellation of
 `temp/*/unify_0_out.brep` is the cheaper inner loop — 2 minutes against 93, and
 the same number — so iterate there and confirm on the full run.
+`tools/prototypes/g23_bad_edge_provenance.py` is what classifies the result;
+run it on the sibling solids as well, since an instrument that only ever agrees
+on sound geometry proves nothing (G10).
 
 ---
 

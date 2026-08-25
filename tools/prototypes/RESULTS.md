@@ -1664,3 +1664,108 @@ it measures a shape the pipeline never sees. The cross-check that caught it was
 the production run's own evidence line — which is the general form of the
 lesson G8 and G9 already left twice: the gate's scale was not the problem this
 time, its *inputs* were.
+
+## G23 — what are the 26 bad edges on the rehearsal's dominant body? ✅ MEASURED
+
+`TD_HX_rehearsal_test.step` at `cc=5, t=1` is refused at `export truth`: solid
+0, the 583,894-face dominant body, tessellates into 1,427,670 triangles carrying
+26 edges not used by exactly two of them. Two exonerations were already on
+record — the STEP write (the same 26 appear in memory) and `simplify` (the
+pre-unification solid gives the same 26 in 1,509,507 triangles). So the defect
+is already in the shell `weld.assemble` proved watertight.
+
+**That is the tension this gate resolves.** `weld.shell_defects` proves every
+*B-rep* edge is used exactly twice, keyed on `TopoDS_Shape::IsSame`.
+`occ.exported_mesh_defects` counts *mesh* edges keyed on coordinates rounded to
+1e-7 mm. `tools/prototypes/g23_bad_edge_provenance.py` records, per bad mesh
+edge, which face and which B-rep edge produced it — via
+`BRep_Tool.PolygonOnTriangulation_s`, which maps every boundary segment to its
+edge exactly, with no tolerance and no search — and classifies it:
+
+| kind | meaning |
+|---|---|
+| **T** | two coincident but *distinct* `TopoDS_Edge`s, each used by two faces — duplicate material |
+| **M** | one *shared* edge whose two faces discretize it differently — no hole exists in the B-rep |
+| **one-face** | a B-rep edge genuinely used by one face — a real hole, and a contradiction of `assemble` |
+| **interior** | a segment no B-rep edge claims, i.e. inside one face's own triangulation |
+
+### The result, and it refutes the documented reading
+
+    1x/M 9    1x/interior 4    4x/T 2    4x/interior 10      one-face 0
+
+**There are no holes.** docs/specification.md §10 recorded the 14 used-once
+edges as holes, including "a 2.2 mm free edge is a real hole in a `t = 1` mm
+lattice rather than a rounding artefact". Every one of those edges is `M`: the
+B-rep edge carries **two** faces and only one of them contributed that segment.
+The inference was reasonable and it was wrong, which is the sixth time in this
+project's history (G9–G12, the pcurve chapter) that the first convincing reading
+did not survive being measured.
+
+**Only 2 of the 26 are a generator defect.** Both are `T`, at
+[2055.604, −88.617, 968.389] and [2055.885, −88.396, 968.858], and they
+implicate faces 121454 and 531940 — **both `Plane`, both area 7.368093e-01 mm²,
+identical**. Those are the two coincident cap sheets left by `weld.unweldable`
+declining the cap at [2056.81, −87.5, 967.548]: `InterfaceSet.decline` withdraws
+*both* keys and `finalize_pieces` then keeps *both* sides' cap faces. The run
+assembled **14** solids, not 15, so the two pieces stayed connected through
+their other interfaces and the duplicate sheets ended up *inside* one solid —
+which is why "declining costs an extra solid, never a hole" did not hold here.
+
+### The controls, because an instrument that only agrees on sound geometry proves nothing (G10)
+
+* **C1 negative** — the 13 sibling solids the same run measured clean come back
+  at **0**, with triangle counts matching the production log exactly (348, 84,
+  68 …).
+* **C2 positive** — removing one face from a sound solid yields exactly its 4
+  non-degenerate B-rep edges as 7 used-once mesh segments, **all classified
+  `one-face`**. So a genuine hole is known to read as `one-face` — and solid 0
+  has none.
+* **Polygon coverage** — 2,516,915 edge/face pairs carry a polygon and **0** do
+  not, so `interior` means "no B-rep edge claims this", not "the mapping failed".
+
+### The faces are all valid, and the tolerances are tight
+
+`BRepCheck_Analyzer` passes **all 18** implicated faces. Face tolerances are
+1e-07 throughout and max edge tolerances run 1e-07 to 8.7e-04. **This is not a
+fat-tolerance defect**, which rules out the family §8's two repair rungs address.
+
+### The `interior` folds are a cone-apex degeneracy, and they reproduce alone
+
+Meshed on its own, in a compound with no neighbour, **every implicated
+`ConicalSurface` face reproduces its own over-used edge**; the planar and
+cylindrical ones do not. All eight folding cones share one property: their `v`
+range begins at exactly **−1.7321 = −√3**, the cone's apex, where the whole
+u-range collapses to a single 3D point. The same three faces recur at
+lattice-periodic positions (504823 / 558350 / 581848, identical to seven
+figures), which is why the coordinates repeat at Δy = 45.0 and 95.0.
+
+Marking mesh nodes that are the image of a **degenerate** edge and excluding bad
+edges incident to one accounts for **9 of the 25**, leaving 16. It does not
+account for the other 14, so the apex is a real but partial explanation.
+
+**This is the same counting bug this project has now found three times.**
+`shell_defects` has always skipped degenerate edges; `free_edges` counted them
+until G21 (10 phantom holes on this very part); `exported_mesh_defects` has
+never had the test. The control is clean — `spiral-island-unwritable.brep`, the
+one body known to be genuinely unwritable, has **0 pole nodes**, so all 10 of
+its defects survive the exclusion untouched. Recorded rather than applied: it
+changes a correctness gate's verdict, and per §5.1 a gate is only as trustworthy
+as the quantity it compares, so the decision is the user's.
+
+### What this does and does not settle
+
+Settled: there are no holes; the "holes" reading in §10 is withdrawn; the
+declined cap really does leave duplicate material inside one solid; and the
+faces carrying the rest are valid geometry that OCCT's own mesher discretizes
+inconsistently.
+
+Not settled: the 14 readings that are neither `T` nor pole-adjacent. They sit on
+valid faces with tight tolerances, and `spiral-island-unwritable.brep` — a body
+known to be genuinely broken — shows the **same** `M` and `interior` classes
+(8 `M`, 2 `interior`, 0 `T`). So neither class can be dismissed as noise on the
+strength of the rehearsal alone, and no narrowing of the gate is defensible on
+two data points.
+
+**Consequence for planning:** repairing the declined cap removes 2 of 26. The
+part does not ship on the strength of that fix, and the remaining readings are
+not something `boundary` or `weld` can repair.

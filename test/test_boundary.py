@@ -352,7 +352,10 @@ def test_fuse_disagreeing_pairs_produces_one_agreed_solid(lp, disagreeing_pieces
     a, b, piece_a, piece_b = disagreeing_pieces
     mismatched = resolve_interfaces(lp, nodes(), [piece_a, piece_b]).mismatched
 
-    fused, n_groups = fuse_disagreeing_pairs(lp, [piece_a, piece_b], mismatched)
+    fused, n_groups, invented = fuse_disagreeing_pairs(
+        lp, [piece_a, piece_b], mismatched
+    )
+    assert invented == []
     assert n_groups == 1
     assert len(fused) == 1
     merged = fused[0]
@@ -387,7 +390,8 @@ def test_fuse_disagreeing_pairs_produces_one_agreed_solid(lp, disagreeing_pieces
 def test_fuse_disagreeing_pairs_is_a_no_op_without_mismatches(lp):
     a = piece(lp, (0, 0, 0), [0])
     b = piece(lp, across((0, 0, 0), 0), [OPPOSITE_HALF[0]])
-    fused, n_groups = fuse_disagreeing_pairs(lp, [a, b], [])
+    fused, n_groups, invented = fuse_disagreeing_pairs(lp, [a, b], [])
+    assert invented == []
     assert n_groups == 0
     assert fused == [a, b]
 
@@ -872,3 +876,46 @@ def test_the_probe_leaves_a_sound_junction_completely_alone(spiral_case, spiral_
     assert sum(v for _f, _t, v in with_probe.pieces) == pytest.approx(
         sum(v for _f, _t, v in without.pieces), rel=1e-12
     )
+
+
+def test_fuse_disagreeing_pairs_accepts_bare_keys_and_can_decline(lp, disagreeing_pieces):
+    """The `unweldable` caller's two differences from the `mismatched` one.
+
+    A cap whose two rings do not correspond is reported as a bare ``(node, h)``
+    rather than as the 4-tuple `resolve_interfaces` builds for a mismatched cap,
+    and it has a safe fallback the mismatched case does not: the decline that
+    stood before this repair existed. So the same function has to take the
+    shorter key, and under ``strict=False`` it must leave a group it cannot fuse
+    alone rather than failing the run (docs/algorithm.md §8, §11).
+    """
+    a, _b, piece_a, piece_b = disagreeing_pieces
+
+    fused, n_groups, invented = fuse_disagreeing_pairs(
+        lp, [piece_a, piece_b], [(a, 0)], strict=False
+    )
+    assert (n_groups, invented) == (1, [])
+    assert len(fused) == 1
+    assert fused[0].volume == pytest.approx(
+        piece_a.volume + piece_b.volume, rel=1e-9
+    )
+
+
+def test_a_group_that_cannot_be_fused_is_left_alone_rather_than_failing(lp):
+    """``strict=False`` degrades to "do more work", never to a failed run.
+
+    Two pieces that share no cap at all cannot be merged into one solid. Under
+    the mismatched caller that is a hard failure, because keeping both sides of
+    a *partially* agreeing cap leaves overlap and a hole. Under the unweldable
+    caller it is not: declining is a sound fallback, so the pieces must come
+    back untouched and the count must say nothing was fused.
+    """
+    a = piece(lp, (0, 0, 0), [0])
+    b = piece(lp, (40, 40, 40), [OPPOSITE_HALF[0]])
+    before = [a, b]
+
+    fused, n_groups, invented = fuse_disagreeing_pairs(
+        lp, before, [(a.node, 0)], strict=False
+    )
+    assert n_groups == 0, "nothing was merged"
+    assert invented == []
+    assert fused == before, "both pieces survive, so the caller can still decline"

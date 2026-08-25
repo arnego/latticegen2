@@ -681,8 +681,58 @@ gets more than one triangle, which is what makes a non-manifold edge visible
 at all."""
 
 
+_QUANTUM = 1e7
+"""Reciprocal of the grid mesh points are interned on: 1e-7 mm, OCCT's own
+confusion."""
+
+_EDGE_STRIDE = 4_294_967_296
+"""Multiplier packing two point ids into one integer edge key."""
+
+
 MESH_DEFECT_SAMPLES = 10
 """How many defect positions :func:`exported_mesh_defects` reports."""
+
+
+MESH_REFINEMENT_LADDER: tuple[float, ...] = (0.01, 0.002, 0.0005, 0.0001)
+"""Deflections :func:`refine_until_manifold` re-measures a flagged body at.
+
+`tools/prototypes/RESULTS.md` G24's own sweep, less the 0.05 mm rung
+:data:`DEFAULT_MESH_DEFLECTION` has already run. The bottom rung is where the
+one sound production body known to reach here finally reads 0.
+"""
+
+
+MESH_REFINEMENT_TRIANGLE_MAX = 5_000_000
+"""Above this many triangles on one rung, refinement gives up as *unmeasured*.
+
+A guard on the neighbourhood, not a bar on the body: the extract is a few dozen
+faces, so reaching this means a face is refusing to converge and the next rung
+would be worse. Giving up refuses the body -- never clears it.
+"""
+
+
+class Refinement(NamedTuple):
+    """What re-measuring a flagged body at a finer ruler showed.
+
+    **The question this answers is not "is the body clean".** It is whether the
+    readings :func:`exported_mesh_defects` found *at 0.05 mm* survive being
+    looked at more closely, which is a different and much narrower question. A
+    defect that first appears below 0.05 mm is outside this gate's window --
+    exactly as it is outside the single-pass gate's window.
+
+    ``resolved`` is true **only** on an exact zero, and that is the whole rule
+    (see :func:`refine_until_manifold`). ``counts`` is the ladder that produced
+    it, in order, so a log line or a failure message can quote the shape of the
+    convergence rather than only its verdict. ``reason`` says why the ladder
+    stopped, and every value of it other than ``"resolved"`` means the body is
+    refused.
+    """
+
+    resolved: bool
+    counts: list[tuple[float, int]]
+    core_faces: int
+    extract_faces: int
+    reason: str
 
 
 class MeshDefects(NamedTuple):
@@ -712,6 +762,17 @@ class MeshDefects(NamedTuple):
     construction that has not counted them cannot quietly report none: this
     project has recorded more than once what it costs when an unmeasured
     quantity reads as a measured zero.
+
+    ``implicated`` is which faces -- as indices in ``_explore`` order -- carry a
+    triangle contributing one of the ``bad`` readings. Empty exactly when
+    ``bad`` is 0; empty *while* ``bad`` is non-zero is an instrument fault, and
+    :func:`refine_until_manifold` refuses on it rather than treating it as
+    nothing to look at.
+
+    ``refinement`` is ``None`` when the second pass was **not attempted**,
+    which happens exactly when ``bad`` is 0. It never means "attempted and
+    found clean" -- that is ``Refinement.resolved``. Both fields carry **no
+    default**, for the same reason ``degenerate`` does not.
     """
 
     triangles: int
@@ -719,6 +780,8 @@ class MeshDefects(NamedTuple):
     by_use: dict[int, int]
     where: list[tuple[float, float, float]]
     degenerate: int
+    implicated: frozenset[int]
+    refinement: Refinement | None
 
 
 def exported_mesh_defects(
@@ -779,34 +842,106 @@ def exported_mesh_defects(
     nobody looks at is exactly where an unwritable description would do the most
     damage. Points are interned to integers and edges counted by integer key
     rather than by tuples of floats, which is the one concession made to the
-    size of shape this now has to survive; the cost at rehearsal scale is
-    **not yet measured** and is expected to be tens of minutes.
+    size of shape this now has to survive.
+
+    **A reading here is not yet a verdict.** A tessellation can fail to close
+    for two quite different reasons -- the body's description is broken, or the
+    body carries features finer than the ruler -- and no rule about the *kind*
+    of reading separates them (G23 measured the one genuinely unwritable body
+    carrying the same classes as a sound one). So a body with readings is
+    handed to :func:`refine_until_manifold`, which re-measures it at finer
+    deflections over a neighbourhood of the faces that carry them and clears it
+    only on an exact zero. That second pass rides the failing path alone: a
+    body reading 0 comes back with ``refinement`` set to ``None`` and costs
+    exactly what it did before this existed.
     """
     write_step(shape, path, "export-truth-probe")
     shipped = read_step(path)
-    BRepMesh_IncrementalMesh(shipped, deflection, False, 0.2, True)
-    # A point is interned to a small integer and an edge to one integer built
-    # from its two endpoints, rather than keeping tuples of floats as keys. On a
-    # lattice this is the difference between a dict of a few hundred megabytes
-    # and one of several gigabytes, and the check now runs on solids of ~600,000
-    # faces where it used to be skipped.
+    tally = _mesh_and_count(shipped, deflection)
+    bad = [(e, n) for e, n in tally.counts.items() if n != 2]
+    by_use: dict[int, int] = {}
+    for _e, n in bad:
+        by_use[n] = by_use.get(n, 0) + 1
+    # Positions for the sampled defects only. The interned key *is* the point,
+    # rounded to `_QUANTUM`, so one pass over the table recovers exactly the ids
+    # needed -- rather than carrying a parallel dict of coordinates for every
+    # mesh point, which would give back much of what interning to integers buys
+    # on a solid of this size.
+    sample = sorted(bad)[:MESH_DEFECT_SAMPLES]
+    needed = {i for e, _n in sample for i in divmod(e, _EDGE_STRIDE)}
+    point_of = {i: k for k, i in tally.point_id.items() if i in needed}
+    where = []
+    for e, _n in sample:
+        lo, hi = divmod(e, _EDGE_STRIDE)
+        a, b = point_of[lo], point_of[hi]
+        where.append(
+            tuple(round((a[i] + b[i]) / (2 * _QUANTUM), 3) for i in range(3))
+        )
+    # The second pass costs a walk of the triangulation and is paid only where
+    # the first one found something, so a clean body is exactly as cheap as it
+    # was before this existed.
+    implicated: frozenset[int] = frozenset()
+    refinement: Refinement | None = None
+    if bad:
+        implicated = _implicated_faces(shipped, tally, {e for e, _n in bad})
+        refinement = refine_until_manifold(shipped, implicated)
+    return MeshDefects(tally.triangles, len(bad), by_use, where,
+                       tally.degenerate, implicated, refinement)
+
+
+class _Tally(NamedTuple):
+    """One tessellation, counted. See :func:`_mesh_and_count`."""
+
+    triangles: int
+    degenerate: int
+    counts: dict[int, int]
+    point_id: dict[tuple[int, int, int], int]
+    core_keys: set[int] | None
+
+
+def _mesh_and_count(
+    shape: TopoDS_Shape,
+    deflection: float,
+    core: TopTools_IndexedMapOfShape | None = None,
+) -> _Tally:
+    """Tessellate ``shape`` and tally how many triangles use each mesh edge.
+
+    Split out of :func:`exported_mesh_defects` so the second pass can re-measure
+    without repeating the STEP round trip, which is the expensive half by two
+    orders: the write and re-read of a production part's dominant body is tens
+    of minutes where the tessellation is ~100 s.
+
+    The mesh is compared on **rounded coordinates** rather than on topology,
+    deliberately: what breaks in a reader is that two triangles which should
+    share an edge do not, and that is a question about points, not about the
+    B-rep's opinion of them. Points are interned to small integers and each edge
+    to one integer built from its two endpoints -- on a lattice the difference
+    between a dict of a few hundred megabytes and one of several gigabytes.
+
+    ``core``, when given, is a set of faces to track separately: ``core_keys``
+    comes back holding every edge key at least one of those faces contributed.
+    That is what lets :func:`refine_until_manifold` measure a cut-out
+    neighbourhood without the neighbourhood's own cut boundary drowning it.
+    """
     point_id: dict[tuple[int, int, int], int] = {}
     counts: dict[int, int] = {}
+    core_keys: set[int] | None = set() if core is not None else None
     triangles = 0
     degenerate = 0
-    quantum = 1e7                       # 1e-7 mm, OCCT's own confusion
-    for f in _explore(shipped, TopAbs_ShapeEnum.TopAbs_FACE):
+    BRepMesh_IncrementalMesh(shape, deflection, False, 0.2, True)
+    for f in _explore(shape, TopAbs_ShapeEnum.TopAbs_FACE):
         face = TopoDS.Face_s(f)
         loc = TopLoc_Location()
         tri = BRep_Tool.Triangulation_s(face, loc)
         if tri is None:
             continue
+        is_core = core is not None and core.Contains(face)
         trsf = loc.Transformation()
         ids = []
         for i in range(1, tri.NbNodes() + 1):
             p = tri.Node(i).Transformed(trsf)
-            key = (round(p.X() * quantum), round(p.Y() * quantum),
-                   round(p.Z() * quantum))
+            key = (round(p.X() * _QUANTUM), round(p.Y() * _QUANTUM),
+                   round(p.Z() * _QUANTUM))
             got = point_id.get(key)
             if got is None:
                 got = point_id[key] = len(point_id)
@@ -846,28 +981,225 @@ def exported_mesh_defects(
             for lo, hi in ((ia, ib), (ib, ic), (ic, ia)):
                 if lo > hi:
                     lo, hi = hi, lo
-                edge = lo * 4_294_967_296 + hi
+                edge = lo * _EDGE_STRIDE + hi
                 counts[edge] = counts.get(edge, 0) + 1
-    bad = [(e, n) for e, n in counts.items() if n != 2]
-    by_use: dict[int, int] = {}
-    for _e, n in bad:
-        by_use[n] = by_use.get(n, 0) + 1
-    # Positions for the sampled defects only. The interned key *is* the point,
-    # rounded to `quantum`, so one pass over the table recovers exactly the ids
-    # needed -- rather than carrying a parallel dict of coordinates for every
-    # mesh point, which would give back much of what interning to integers buys
-    # on a solid of this size.
-    sample = sorted(bad)[:MESH_DEFECT_SAMPLES]
-    needed = {i for e, _n in sample for i in divmod(e, 4_294_967_296)}
-    point_of = {i: k for k, i in point_id.items() if i in needed}
-    where = []
-    for e, _n in sample:
-        lo, hi = divmod(e, 4_294_967_296)
-        a, b = point_of[lo], point_of[hi]
-        where.append(
-            tuple(round((a[i] + b[i]) / (2 * quantum), 3) for i in range(3))
-        )
-    return MeshDefects(triangles, len(bad), by_use, where, degenerate)
+                if is_core:
+                    core_keys.add(edge)
+    return _Tally(triangles, degenerate, counts, point_id, core_keys)
+
+
+def _implicated_faces(
+    shape: TopoDS_Shape, tally: _Tally, bad_keys: set[int]
+) -> frozenset[int]:
+    """Which faces carry a triangle contributing one of ``bad_keys``.
+
+    Indices are positions in ``_explore(shape, TopAbs_FACE)`` order, which is
+    the order :func:`_extract_neighbourhood` builds its adjacency in, so the two
+    agree on what a face index means.
+
+    **A second walk, rather than provenance recorded during the first.** Keeping
+    a map from every mesh-edge key to the faces using it -- what
+    ``tools/prototypes/g23_bad_edge_provenance.py`` does -- is millions of
+    Python lists on a 1.4-million-triangle body, which is precisely why that
+    script is a prototype run on extracts. Here the bad set is a handful of
+    integers, every point is already interned, and the walk is lookups only.
+
+    A lookup that misses means the triangulation changed between the two walks,
+    which would make the answer meaningless; it raises rather than skipping,
+    because a face quietly omitted here is a face the refinement never looks at.
+    """
+    found: set[int] = set()
+    for fi, f in enumerate(_explore(shape, TopAbs_ShapeEnum.TopAbs_FACE)):
+        face = TopoDS.Face_s(f)
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(face, loc)
+        if tri is None:
+            continue
+        trsf = loc.Transformation()
+        ids = []
+        for i in range(1, tri.NbNodes() + 1):
+            p = tri.Node(i).Transformed(trsf)
+            key = (round(p.X() * _QUANTUM), round(p.Y() * _QUANTUM),
+                   round(p.Z() * _QUANTUM))
+            got = tally.point_id.get(key)
+            if got is None:
+                raise ProcessingError(
+                    "the tessellation changed while its defects were being "
+                    "attributed to faces"
+                )
+            ids.append(got)
+        for i in range(1, tri.NbTriangles() + 1):
+            a, b, c = tri.Triangle(i).Get()
+            ia, ib, ic = ids[a - 1], ids[b - 1], ids[c - 1]
+            if ia == ib or ib == ic or ia == ic:
+                continue
+            hit = False
+            for lo, hi in ((ia, ib), (ib, ic), (ic, ia)):
+                if lo > hi:
+                    lo, hi = hi, lo
+                if lo * _EDGE_STRIDE + hi in bad_keys:
+                    hit = True
+                    break
+            if hit:
+                found.add(fi)
+                break
+    return frozenset(found)
+
+
+def _extract_neighbourhood(
+    shape: TopoDS_Shape, core: frozenset[int]
+) -> tuple[TopoDS_Compound, TopTools_IndexedMapOfShape, int]:
+    """``core`` and every face sharing an edge with it, as one compound.
+
+    Returns the compound, a map of the core faces for :func:`_mesh_and_count`'s
+    ``core`` argument, and how many faces the compound holds.
+
+    **One ring is enough, and what makes it enough is the core-incidence filter
+    rather than the geometry.** Every B-rep edge of a core face has all of its
+    users inside this compound by construction, so no core face has a cut
+    boundary of its own; the compound's own cut boundary lies entirely on the
+    outer edges of the ring, where only ring faces touch it. A reading is
+    therefore discarded as cut boundary exactly by requiring that a core face
+    contributed it -- no bookkeeping of which edges were cut, and no second ring
+    to hold the first one away from the edge.
+
+    That distinction is worth stating because measuring a cut-out patch naively
+    does not work at all: ``tools/prototypes/RESULTS.md`` G24 records 150 of an
+    extract's 166 readings being its own cut boundary, climbing with refinement
+    for reasons that concern neither body.
+
+    Adjacency is built with an edge map rather than
+    ``TopExp::MapShapesAndAncestors``, whose ``TopTools_ListOfShape`` OCP
+    exposes with no iterator.
+    """
+    faces = [TopoDS.Face_s(f)
+             for f in _explore(shape, TopAbs_ShapeEnum.TopAbs_FACE)]
+    edge_index = TopTools_IndexedMapOfShape()
+    edges_of = [[edge_index.Add(e)
+                 for e in _explore(face, TopAbs_ShapeEnum.TopAbs_EDGE)]
+                for face in faces]
+    by_edge: dict[int, list[int]] = {}
+    for fi, ids in enumerate(edges_of):
+        for ei in ids:
+            by_edge.setdefault(ei, []).append(fi)
+    keep = set(core)
+    for fi in core:
+        for ei in edges_of[fi]:
+            keep.update(by_edge[ei])
+    builder = BRep_Builder()
+    comp = TopoDS_Compound()
+    builder.MakeCompound(comp)
+    core_map = TopTools_IndexedMapOfShape()
+    for j in sorted(keep):
+        builder.Add(comp, faces[j])
+        if j in core:
+            core_map.Add(faces[j])
+    return comp, core_map, len(keep)
+
+
+def refine_until_manifold(
+    shape: TopoDS_Shape,
+    implicated: frozenset[int],
+    ladder: tuple[float, ...] = MESH_REFINEMENT_LADDER,
+) -> Refinement:
+    """Do the readings on ``implicated`` survive being measured more closely?
+
+    :func:`exported_mesh_defects` counts mesh edges not used by exactly two
+    triangles, and a reading there has two possible causes that no rule about
+    the *kind* of reading separates -- ``tools/prototypes/RESULTS.md`` G23
+    measured the one genuinely unwritable body this project has produced
+    carrying the same classes as a sound one. The separation is on mechanism:
+
+    * a body whose **description** is broken disagrees with itself *more* the
+      harder it is looked at, because what disagrees is the geometry;
+    * a body merely carrying features **finer than the ruler** agrees as soon as
+      the ruler is finer than the features.
+
+    Measured at 0.05 / 0.01 / 0.002 / 0.0005 / 0.0001 mm: the rehearsal's
+    dominant body reads 13, 8, 4, 4, **0**, while ``spiral-island-unwritable``
+    reads 10, 13, 17, 21, **39** (G24).
+
+    **The rule is the terminus, not the slope**, and that distinction is
+    load-bearing twice over. The sound body's own ladder *plateaus* at 4, so a
+    "must strictly decrease" rule would refuse it; and a slope is exactly the
+    two-point ranking G24 warned against promoting to a calibration, which this
+    project has done wrongly before. So:
+
+        A body clears only if some rung reads **exactly zero**. Nothing else
+        clears it -- not a small count, and not a falling one.
+
+    What that rests on is a statement about ``BRepMesh`` rather than about two
+    parts: a triangulation that fails *only* because the ruler is coarser than
+    the feature completes once the ruler is finer, and a genuine hole never
+    completes at any deflection. G23's control is the check on that -- a cone
+    with its base disk removed reports all 63 segments of the hole, and refining
+    only ever finds more of them.
+
+    **What this does not ask is whether the body is clean at 1e-4 mm.** It asks
+    whether the readings found at :data:`DEFAULT_MESH_DEFLECTION` survive, which
+    is narrower. A defect first appearing below that is outside this gate's
+    window, exactly as it is outside the single-pass gate's window.
+
+    Every other outcome refuses, and refuses as **unresolved** rather than as
+    clean: a plateau above zero, an exhausted ladder, an extract that will not
+    build, a rung that raises, a rung past
+    :data:`MESH_REFINEMENT_TRIANGLE_MAX`, and an empty ``implicated`` -- which is
+    an instrument fault and has to read as one rather than as nothing to look
+    at.
+
+    A rung **larger** than its predecessor stops the ladder early. That is a
+    cost optimisation and not part of the criterion: it is what lets a body that
+    is genuinely coming apart be refused at the first rung instead of paying for
+    all four.
+    """
+    if not implicated:
+        return Refinement(False, [], 0, 0,
+                          "unmeasured: no face carries the readings")
+    try:
+        comp, core_map, n_faces = _extract_neighbourhood(shape, implicated)
+    except Exception as exc:                    # pragma: no cover - defensive
+        return Refinement(
+            False, [], len(implicated), 0,
+            f"unmeasured: the neighbourhood would not build ({exc})")
+    counts: list[tuple[float, int]] = []
+    for deflection in ladder:
+        # The compound shares its faces with ``shape``, so without this a rung
+        # would happily reuse the triangulation the previous one left on them.
+        BRepTools.Clean_s(comp)
+        try:
+            tally = _mesh_and_count(comp, deflection, core_map)
+        except Exception as exc:                # pragma: no cover - defensive
+            return Refinement(
+                False, counts, len(implicated), n_faces,
+                f"unmeasured: meshing at {deflection} mm raised ({exc})")
+        if tally.triangles > MESH_REFINEMENT_TRIANGLE_MAX:
+            return Refinement(
+                False, counts, len(implicated), n_faces,
+                f"unmeasured: {tally.triangles} triangle(s) at {deflection} mm "
+                f"is past the guard")
+        assert tally.core_keys is not None
+        bad = sum(1 for e, n in tally.counts.items()
+                  if n != 2 and e in tally.core_keys)
+        counts.append((deflection, bad))
+        if bad == 0:
+            return Refinement(True, counts, len(implicated), n_faces, "resolved")
+        # Rung to rung, and deliberately never against the count
+        # :func:`exported_mesh_defects` found. That one is over the whole solid
+        # where these are the readings a *core* face contributed to a cut-out
+        # neighbourhood -- two different quantities, and comparing two
+        # different quantities is the mistake docs/algorithm.md S11 records
+        # this project making four times. The first rung therefore has nothing
+        # to be compared with, which costs the island one extra rung and costs
+        # correctness nothing.
+        if len(counts) > 1 and bad > counts[-2][1]:
+            return Refinement(
+                False, counts, len(implicated), n_faces,
+                "increased: the body disagrees with itself more the more "
+                "closely it is measured")
+    return Refinement(
+        False, counts, len(implicated), n_faces,
+        f"ladder exhausted: still {counts[-1][1]} reading(s) at "
+        f"{counts[-1][0]} mm")
 
 
 def _pcurve_deviation(edge: TopoDS_Edge, face: TopoDS_Face, surface) -> float | None:

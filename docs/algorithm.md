@@ -1706,6 +1706,91 @@ program builds itself.
   **86** non-manifold edges, one per apex. It now reads 0, with 86
   degenerate triangles skipped (`tools/prototypes/RESULTS.md` G24).
 
+  **A reading is not yet a verdict, and the second pass is what turns it into
+  one.** Counting edges not used by exactly two triangles answers "does this
+  tessellation close", and there are two quite different reasons it may not:
+  the body's *description* can be broken, or the body can simply carry features
+  finer than the ruler used to measure it. No rule about the **kind** of reading
+  separates those — G23 measured the one genuinely unwritable body this project
+  has produced carrying the same classes as a sound one, which is why the
+  attempt to narrow the gate by kind was abandoned.
+
+  What separates them is what happens when the ruler gets finer:
+
+  > A body whose description is broken disagrees with itself **more** the
+  > harder it is looked at. A body merely finer than the ruler agrees as soon
+  > as the ruler is finer than its features.
+
+  Measured at 0.05 / 0.01 / 0.002 / 0.0005 / 0.0001 mm (G24):
+
+  | | 0.05 | 0.01 | 0.002 | 0.0005 | 0.0001 |
+  |---|---|---|---|---|---|
+  | `TD_HX_rehearsal_test`'s dominant body | 13 | 8 | 4 | 4 | **0** |
+  | `spiral-island-unwritable.brep` | 10 | 13 | 17 | 21 | **39** |
+
+  So `occ.refine_until_manifold` re-measures a flagged body along
+  `MESH_REFINEMENT_LADDER`, and:
+
+  > A body clears only if some rung reads **exactly zero**. Nothing else clears
+  > it — not a small count, and not a falling one.
+
+  **The rule is the terminus and deliberately not the slope**, which is
+  load-bearing twice. The sound body's own ladder *plateaus* at 4, so "must
+  strictly decrease" would refuse it. And a slope is precisely the two-point
+  ranking G24 warned against promoting to a calibration — the mistake §11
+  records four times. The terminus instead rests on a statement about
+  `BRepMesh`: a triangulation that fails *only* because the ruler is coarser
+  than the feature completes once the ruler is finer, and **a genuine hole
+  never completes at any deflection**. G23's control is the check on that — a
+  cone with its base disk removed reports all 63 segments of the hole, and
+  refining finds 71 then 158 of them, never zero.
+
+  Everything else refuses, and refuses as *unresolved* rather than as clean: a
+  plateau above zero, an exhausted ladder, a neighbourhood that will not build,
+  a rung that raises, a rung past `MESH_REFINEMENT_TRIANGLE_MAX`, and a reading
+  no face claims — which is an instrument fault and has to read as one. A rung
+  larger than its predecessor stops the ladder early; that is a cost decision,
+  not part of the criterion, and it is what lets a body coming apart be refused
+  at the first rung rather than paying for all four.
+
+  **What the second pass costs is a neighbourhood, not the body.** Refining a
+  583,894-face solid four times over is not affordable, and it is not needed:
+  the readings sit on a handful of faces, so `_implicated_faces` records which
+  ones — one extra walk of the triangulation, on the failing path only, with
+  every point already interned — and `_extract_neighbourhood` cuts those faces
+  plus everything sharing an edge with them into one compound. G24 measured a
+  **68-face** extract reproducing every reading of that body exactly, meshing
+  in 0.0 s against ~3 minutes. **The STEP round trip is never repeated**, which
+  is what matters: it, not the meshing, is the tens of minutes.
+
+  **A cut-out patch cannot simply be counted, and the exclusion is a filter
+  rather than bookkeeping.** An open patch's own cut boundary is used once
+  everywhere — 150 of an extract's 166 readings, climbing with refinement for
+  reasons that concern neither body. The rule that removes it is:
+
+  > A reading counts only if at least one of its uses came from a **core** face.
+
+  That *is* the cut-boundary exclusion, by construction. Every B-rep edge of a
+  core face has all its users inside the compound, so no core face has a cut
+  boundary of its own; the compound's cut boundary lies entirely on the ring's
+  outer edges, touched by ring faces only; and a reading on the core/ring
+  interface is used once from each side, so it is not a reading at all. One
+  ring therefore suffices, and no record of which edges were cut is needed.
+
+  **There is no size bound and no second route.** The extract of a small solid
+  is at most the solid itself, so this route is available and affordable for
+  every body. A size test would be a second, rarely-exercised path running only
+  on the bodies nobody looks at — the shape of the bound this section already
+  removed once, relocated from the gate to the escalation. The whole-solid
+  refinement survives only as a test oracle, where `test_export_truth.py`
+  requires the two routes to agree on the **per-rung counts** rather than
+  merely on the verdict.
+
+  **What the second pass does not ask is whether the body is clean at 1e-4 mm.**
+  It asks whether the readings found at the coarse ruler survive, which is
+  narrower. A defect first appearing below 0.05 mm is outside this gate's
+  window — exactly as it is outside the single-pass gate's window.
+
   Three cheaper quantities were tried as the gate before this one. `SpiralTest`
   at `cc=5, t=1` produces two solids — the 27,864 mm³ lattice, sound, and the
   4.17 mm³ island, not — and on that part alone two of the three look decisive:
@@ -2122,6 +2207,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | The exported file declares the shape's **greatest** tolerance, not the average (§9) | Correctness. AP214 carries one tolerance per file, and OCCT's Average default is pathological on a lattice — ~99 % exact interior edges pull it to the floor and clamp the boundary trims that actually need slack. `SpiralTest`'s dominant body tessellates with **0** broken edges in memory and came back from its own round trip with **2**; declaring the greatest tolerance takes it to **0** and lets the part ship. Free, and self-scaling: a body needing nothing declares nothing |
 | Export truth measured on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
 | Degenerate triangles skipped in that count (§9) | Correctness of the *quantity*, not of any body, and the third time this project has found the same counting bug: `shell_defects` always skipped degenerate edges, `free_edges` was corrected in G21, this counter never had the test. Mesh points are interned by rounded coordinate, so at a pole a whole parametric range collapses to one id and such a triangle contributes the real edge twice — a closed fan reading as `4x`. Keyed on interned-id equality rather than area, because the defect is created by the interning. Without it the gate reports `TD_HX_rehearsal_test.step`'s **own input** as carrying 86 non-manifold edges, one per apex of its 54 apex-touching cones, and a plain sphere and cone as broken. Cannot hide a hole: a triangle bounding nothing is not one, and a cone with its base removed still reports all 63 segments. The rehearsal's dominant body falls 26 → 13 (G23, G24) |
+| A reading re-measured at a finer ruler before it refuses (§9) | Correctness, and the thing that finally separates the two causes of a non-manifold reading. No rule about the *kind* of reading works — G23 measured the genuinely unwritable body carrying the same classes as a sound one — but the mechanism separates cleanly: a broken description disagrees with itself more the harder it is looked at, where a body merely finer than the ruler agrees once the ruler is finer. Measured across 0.05→0.0001 mm, the rehearsal's dominant body reads 13, 8, 4, 4, **0** while `spiral-island-unwritable` reads 10, 13, 17, 21, **39**. **The rule is the terminus, not the slope**: only an exact zero clears, because the sound ladder plateaus and because a slope is the two-point calibration §11 records going wrong four times. Safe because a genuine hole can never reach zero — refining subdivides its boundary rather than closing it (63 → 71 → 158 on G23's control). Costs a **68-face neighbourhood**, not the body, and never a second STEP round trip; readings the neighbourhood's own cut boundary produces are excluded by requiring that a core face contributed them, which needs one ring and no bookkeeping. No size bound — bounding it is the sin this gate already removed once |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
@@ -2203,7 +2289,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind that budget: logical core count (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the two export-truth measurements — tolerance against feature size (§7.3) and pcurve-versus-3D-curve deviation (§9) |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the export-truth measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |

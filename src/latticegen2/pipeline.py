@@ -837,7 +837,8 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
     took it out of the deciding seat.
     """
     started = _dt.datetime.now()
-    broken: list[tuple[int, int, int]] = []
+    broken: list[tuple[int, int, int, occ.Refinement]] = []
+    refined: list[tuple[int, int, float]] = []
     worst = 0.0
     fraction = 0.0
     loose_faces = 0
@@ -874,25 +875,59 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
                 f"    by use count {dict(sorted(defects.by_use.items()))}; "
                 f"positions {[list(p) for p in defects.where]}"
             )
-            broken.append((i, bad, triangles))
+            fine = defects.refinement
+            ladder = " ".join(f"{d}:{n}" for d, n in fine.counts) or "none"
+            rl.line(
+                f"    on {fine.core_faces} face(s); re-measured over a "
+                f"{fine.extract_faces}-face neighbourhood at {ladder} "
+                f"-- {fine.reason}"
+            )
+            if fine.resolved:
+                # Deliberately *not* the sentence a solid reading 0 at the
+                # coarse ruler prints. This body did carry readings; what the
+                # ladder establishes is that they were the ruler and not the
+                # geometry, and a reader has to be able to tell the two runs
+                # apart afterwards.
+                refined.append((i, bad, fine.counts[-1][0]))
+            else:
+                broken.append((i, bad, triangles, fine))
     rl.substage("export truth", len(solids), len(solids))
     elapsed = (_dt.datetime.now() - started).total_seconds()
     stats["export_truth_s"] = round(elapsed, 2)
     stats["worst_pcurve_deviation_mm"] = f"{worst:.3e}"
     stats["loose_area_fraction"] = f"{fraction:.3e}"
     stats["loose_faces"] = loose_faces
+    if refined:
+        # Greppable afterwards, because "cleared by refinement" and "was clean"
+        # are different runs and a summary that conflates them would hide the
+        # only bodies this second pass has ever been asked about.
+        stats["export_truth_refined"] = "; ".join(
+            f"solid {i}: {bad} reading(s) at "
+            f"{occ.DEFAULT_MESH_DEFLECTION} mm, none at {d} mm"
+            for i, bad, d in refined
+        )
     rl.line(
         f"export truth: all {len(solids)} solid(s) round-tripped and tessellated; "
         f"worst pcurve-vs-3D deviation {worst:.4e} mm over {pairs} edge/face "
         f"pair(s) [{elapsed:.1f}s]"
+        + (f"; {len(refined)} solid(s) cleared only after being re-measured at "
+           f"a finer deflection" if refined else "")
     )
     if broken:
-        first, bad, triangles = broken[0]
+        first, bad, triangles, fine = broken[0]
+        ladder = " -> ".join(f"{n} at {d} mm" for d, n in fine.counts) or "none"
         raise ProcessingError(
             f"Solid {first} does not survive being written to STEP: after a "
             f"round trip its {triangles} triangles carry {bad} edge(s) not used "
             f"by exactly two of them, so nothing downstream can tessellate it "
             f"consistently"
+            # The ladder, not just the count. "13 -> 8 -> 4 -> 4, still 4 at
+            # 0.0001 mm" says the readings are geometry; "10 -> 13 -> 17" says
+            # the body comes apart the more closely it is measured. A bare
+            # total says neither, and this project spent two gates and a
+            # 93-minute run recovering that distinction by hand.
+            + f". Re-measured over a {fine.extract_faces}-face neighbourhood: "
+            f"{ladder} ({fine.reason})"
             + (f" ({len(broken)} solid(s) affected)" if len(broken) > 1 else "")
             + f". STEP AP214 declares one tolerance for a whole file where this "
             f"B-rep carries one per subshape, so a body whose validity rests on "

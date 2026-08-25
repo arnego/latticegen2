@@ -1793,9 +1793,16 @@ had the test. The controls are clean: the 13 sibling solids read 0 both ways,
 `spiral-island-unwritable.brep` — the one body known to be genuinely unwritable
 — meshes with **0** degenerate triangles, so all 10 of its defects are untouched.
 
-**It does not make the part ship**, and that is the point to carry: 16 readings
-remain — 9 `M`, 4 `interior`, 2 `T` and 1 `4x/interior` — on faces
-`BRepCheck_Analyzer` calls valid.
+**Confirmed end to end**, on a full run carrying this skip *and* §8's fused
+cap: solid 0 reports **13** where it reported 26, with `by_use {1: 13}` and
+`9 degenerate triangle(s) skipped`. The arithmetic closes exactly — 26 less the
+1 collapsed key, less the 9 pole readings, less the 2 `T` and the one
+`4x/interior` beside them at the fused cap. **Every survivor is used once**, so
+no duplicate material remains in the body at all.
+
+**It does not make the part ship**, and that is the point to carry: 13 readings
+remain — the 9 `M` and 4 `interior` — on faces `BRepCheck_Analyzer` calls valid.
+`validate` took 33 m 09 s of a run that still exits 4.
 
 ### What this does and does not settle
 

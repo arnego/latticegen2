@@ -77,7 +77,6 @@ from OCP.BRep import BRep_Tool, BRep_Builder
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
-from OCP.BRepTools import BRepTools
 from OCP.GProp import GProp_GProps
 from OCP.TopAbs import TopAbs_ShapeEnum
 from OCP.TopLoc import TopLoc_Location

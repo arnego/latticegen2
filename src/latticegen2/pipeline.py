@@ -1133,7 +1133,13 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool]:
         merged = occ.unify_same_domain(merged, unify_edges=True, unify_faces=False)
     except Standard_Failure:
         pass
-    if not occ.is_valid(merged):
+    # `parallel=False` because this runs *inside* a worker: the pool around it
+    # already occupies the whole `--cores` budget, and OCCT's own thread pool is
+    # deliberately left unbounded there (`parallel.set_thread_budget` is not
+    # called in the worker initializer), so asking for threads here would be W
+    # processes x W threads on W cores -- the over-subscription
+    # docs/algorithm.md S9 keeps the *gate* on the master to avoid.
+    if not occ.is_valid(merged, parallel=False):
         return solid, ran, True
     return merged, ran, False
 

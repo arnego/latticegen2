@@ -113,7 +113,10 @@ def test_an_invalid_merge_keeps_the_un_unified_solid(monkeypatch):
     solid = two_boxes_sharing_a_face()
     faces_in, edges_in = occ.count_subshapes(solid)
 
-    monkeypatch.setattr(occ, "is_valid", lambda shape: False)
+    # Signature-faithful: `_unify_one` asks for `parallel=False` because it
+    # runs inside a worker, and a stub that did not accept it would pass
+    # while the real call raised.
+    monkeypatch.setattr(occ, "is_valid", lambda shape, parallel=True: False)
     merged, ran, degraded = _unify_one(solid)
 
     assert ran, "the kernel did run -- it is the result that did not hold up"
@@ -122,6 +125,27 @@ def test_an_invalid_merge_keeps_the_un_unified_solid(monkeypatch):
         "the un-unified solid is what is kept, so the output is larger and not "
         "different"
     )
+
+
+def test_the_workers_validity_check_does_not_ask_occt_for_threads(monkeypatch):
+    """`--cores` is honoured exactly, and this call is inside a worker.
+
+    docs/algorithm.md S9 keeps the *gate* on the master precisely because W
+    worker processes each launching W OCCT threads is W^2 threads on W cores,
+    and `parallel.set_thread_budget` is deliberately not called in the worker
+    initializer -- so OCCT's default pool there sizes itself to the machine.
+    A degrade check that asked for threads would reinstate exactly that.
+    """
+    seen = []
+
+    def record(shape, parallel=True):
+        seen.append(parallel)
+        return True
+
+    monkeypatch.setattr(occ, "is_valid", record)
+    _unify_one(two_boxes_sharing_a_face())
+
+    assert seen == [False], "the worker must ask for a single-threaded check"
 
 
 def test_a_valid_merge_is_not_degraded():

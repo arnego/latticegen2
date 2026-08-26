@@ -152,7 +152,7 @@ def bounding_box(shape: TopoDS_Shape, tol: float = 0.0) -> tuple[np.ndarray, np.
     return np.array([xmin, ymin, zmin]), np.array([xmax, ymax, zmax])
 
 
-def is_valid(shape: TopoDS_Shape) -> bool:
+def is_valid(shape: TopoDS_Shape, parallel: bool = True) -> bool:
     """OCCT's exact B-rep validity check.
 
     This is an *exact* check on the B-rep itself, not a mesh-based approximation
@@ -176,11 +176,21 @@ def is_valid(shape: TopoDS_Shape) -> bool:
 
     Thread count is bounded by :func:`latticegen2.parallel.set_thread_budget`
     so ``--cores`` keeps meaning what specification.md §3 says it means. That
-    bound is why this call is made on the master rather than in a worker
+    bound is why the *gate* runs on the master rather than in a worker
     (docs/algorithm.md §9): W worker processes each launching W OCCT threads
     would be W² threads on W cores.
+
+    **``parallel=False`` is for the one caller that is already inside a
+    worker.** `simplify` checks its own unified result before handing it back
+    (:func:`latticegen2.pipeline._unify_one`), and there the surrounding process
+    pool is already using every core the budget allows —
+    `set_thread_budget` is deliberately *not* called in the worker initializer,
+    so OCCT's default pool would size itself to the **machine** and reinstate
+    exactly the W² over-subscription the paragraph above exists to avoid. A
+    worker asking for one thread is not giving up a speedup; it is declining to
+    take cores its siblings are already running on.
     """
-    return BRepCheck_Analyzer(shape, True, True).IsValid()
+    return BRepCheck_Analyzer(shape, True, parallel).IsValid()
 
 
 FACE_SCAN_CHUNK = 20_000
@@ -1172,15 +1182,20 @@ def refine_until_manifold(
             return Refinement(
                 False, counts, len(implicated), n_faces,
                 f"unmeasured: meshing at {deflection} mm raised ({exc})")
+        assert tally.core_keys is not None
+        bad = sum(1 for e, n in tally.counts.items()
+                  if n != 2 and e in tally.core_keys)
+        # Recorded before the guard is consulted, so a ladder that stops here
+        # still reports the rung that stopped it. The whole point of carrying
+        # `counts` is that "13 -> 8 -> 4" is a usable bug report where a bare
+        # verdict is not, and dropping the last rung is dropping the one that
+        # explains the refusal.
+        counts.append((deflection, bad))
         if tally.triangles > MESH_REFINEMENT_TRIANGLE_MAX:
             return Refinement(
                 False, counts, len(implicated), n_faces,
                 f"unmeasured: {tally.triangles} triangle(s) at {deflection} mm "
                 f"is past the guard")
-        assert tally.core_keys is not None
-        bad = sum(1 for e, n in tally.counts.items()
-                  if n != 2 and e in tally.core_keys)
-        counts.append((deflection, bad))
         if bad == 0:
             return Refinement(True, counts, len(implicated), n_faces, "resolved")
         # Rung to rung, and deliberately never against the count

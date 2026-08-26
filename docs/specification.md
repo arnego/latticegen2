@@ -441,51 +441,6 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### `TD_HX_rehearsal_test` at `cc=7, t=1.4` fails the validity gate
-
-**Found 2026-08-26**, while looking for a third part to measure the
-export-truth refinement rule against (§11). Not investigated, because it is a
-different gate and a different stage from the item that session closed.
-
-    stage validate: 29.67s
-    FAILED: 1 of 33 output solids failed OCCT's BRepCheck_Analyzer validity check.
-
-**The offending body is the dominant one** — `unify_0_out.brep`, 193,721 faces,
-330,607.6434 mm³ — identified by running `occ.is_valid` over the kept temp
-folder's 33 unified solids, where it is the only one that fails.
-
-**And it tessellates perfectly**, which is what makes it worth recording rather
-than assuming it is the same family as anything already closed. Measured in
-memory at the export-truth gate's own 0.05 mm: 550,728 triangles, 8 degenerate
-skipped, and **0** non-manifold edges. All 32 sibling bodies are valid and read
-0 as well. So this is the *opposite* shape to the `cc=5, t=1` item: there the
-body was sound and the instrument was coarse; here the body tessellates like a
-sound one and `BRepCheck_Analyzer` refuses it.
-
-Everything upstream reports normally — 33 watertight solids from `assemble`,
-`vertex tolerances corrected on 15 sewn boundary face(s)` with **no residual**,
-unification 281,341 → 194,975 faces at a volume drift of 6.20e-06. The one-line
-note that the boundary sew's seam-only split was redone with a full unsplit sew
-(`expected 34840 free edge(s), seam-only split gave 92156`) is the documented
-fallback of docs/algorithm.md §8, not a fault.
-
-**Where to start.** `occ.invalid_faces` on that body names the faces, and §8's
-two repair rungs are calibrated on exactly this symptom — a recorded tolerance
-being wrong rather than geometry being wrong. The run reports **no** residual
-faces after `fix_vertex_tolerances`, so either the fault is not on a *face* the
-scan examines, or it appears only after `simplify` re-describes the boundary,
-which is a stage later than the repair. That distinction is the first thing to
-measure, and the cheap way is to ask `is_valid` of the pre-unification solid as
-well as the post-unification one; §11 records that same-domain unification is a
-representation change that must never become a geometry change, and this is a
-case where the two can be told apart.
-
-**How to verify a fix.** `python src/main.py -i test/TD_HX_rehearsal_test.step
--cc 7 -t 1.4 --cores 6 -v` must reach `export truth` and write its STEP. The run
-is ~20 minutes, far cheaper than the `cc=5, t=1` rehearsal, which makes this
-part/parameter pair a better inner loop than that one for anything touching
-`validate`.
-
 ### `TD_HX_rehearsal_test` at `cc=5, t=1` is refused at `export truth`
 
 **The part does not produce output.** The run reaches `validate` in ~93 minutes
@@ -693,6 +648,84 @@ open patch's own cut boundary dominates its readings.
 ---
 
 ## 11. Closed — kept for the reasoning, not as work
+
+
+### Two guards that refused sound geometry before `export truth` could speak
+
+**Found and closed 2026-08-26**, both while looking for a third part to measure
+the export-truth refinement rule against (§11 above, `tools/prototypes/RESULTS.md`
+G25). Neither is a regression — both bars had been there since they were
+written, and these are simply the first parts to reach them. They are recorded
+together because they are the same mistake at one remove from each other, and
+because each stops a run at an *earlier* gate, so the export-truth check never
+gets a word in.
+
+#### A quadrature result compared with `!=`
+
+`occ.only_inner_wires_dropped` is the structural guard that replaced the pinhole
+repair's volume bar (§11, G19). It makes four checks, and **three of them are
+exact because their subject is exact**: object identity, orientation, wire
+membership. Area is not. `BRepGProp` integrates over a face's wires, so dropping
+one reorders the summation and the last ulp of a *correct* answer can move.
+
+`test-cylinder.STEP` at `cc=4, t=0.5` was refused over
+
+    0.58210678118654791 -> 0.58210678118654779 mm^2
+
+— one ulp, **2.1e-16** relative, on a face whose enclosed region had not changed
+at all. It now uses the relative bar the module already declares for this
+quantity (`PINHOLE_AREA_TOL`, 1e-12), which keeps the test's whole purpose by two
+orders: a pinhole wire is one edge under `PINHOLE_WIRE_TOL` (3e-5 mm), so the
+largest region it could possibly enclose is `L²/4π` ≈ 7e-11 mm² — 1.2e-10
+relative on that face, **120×** the bar. A wire that really bounded something
+still cannot get through.
+
+**This is the third time a bar aimed at the wrong quantity has refused correct
+input here, and the second time on this very repair** (G19's volume bar, G20's
+unification bar). The rule that keeps emerging is narrower than "prefer exact
+tests": a test may be exact only where the thing it measures is exact. Identity
+is; an integral is not.
+
+#### Unification can return an invalid solid without throwing
+
+docs/algorithm.md §9 already names the validity gate as the **stronger** of the
+guards on same-domain unification — "merging faces that are not the same surface
+moves the boundary, which shows up as an invalid solid long before it shows up
+as a changed volume". What it did not do was *act* on that: the run simply
+failed at `validate`, which is the one response §11 forbids for a step whose
+only job is to make the output smaller.
+
+Measured on `TD_HX_rehearsal_test` at `cc=7, t=1.4`:
+
+| | faces | `BRepCheck_Analyzer` | tessellation at 0.05 mm |
+|---|---|---|---|
+| before `simplify` | 279,358 | **valid** | 637,100 tri, 16 degenerate, **0 bad** |
+| after | 193,721 | **invalid** — one face, 3.426439 mm² | 550,728 tri, 8 degenerate, 0 bad |
+
+**Both volume guards are blind to it** — the drift is 6.20e-06 relative, well
+inside the 1e-4 pre-filter — and so is the export-truth tessellation, which is
+clean on both. So this is a fault *only* the in-context validity predicate
+detects, which is exactly what §9 claims for it and the first time that claim
+has been exercised on real geometry.
+
+`_unify_one` now checks its result and keeps the un-unified input when it does
+not hold up, so the failure mode is a larger file exactly as it already is for a
+kernel that throws, and the run says so. The check costs one whole-solid
+`is_valid` per solid, in the worker where the solid already lives and parallel
+across solids — **23.3 s** on that 193,721-face body. The input is deliberately
+*not* also checked: an input that is itself invalid gains nothing from being
+kept, and `validate` refuses it exactly as before, so paying 34.7 s to find that
+out would buy nothing.
+
+**Result.** `python src/main.py -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4
+--cores 6` now writes a 990 MB STEP: 33 solids, 280,612 faces, every solid valid
+and every one reading 0 non-manifold edges. `test-cylinder.STEP` at
+`cc=4, t=0.5` writes 5 solids, likewise all clean.
+
+**One trap worth the line it takes.** `WorkerPool.run` takes its peak-RSS
+reading from `rss_index=-1`. A flag appended to the worker's result tuple
+*after* that reading is silently read as a memory figure; the existing
+dispatch test caught it, reporting a peak of 0.
 
 ### Re-fitting the pcurve cannot keep the body — the gap is in the input file
 

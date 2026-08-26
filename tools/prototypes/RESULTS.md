@@ -1946,3 +1946,96 @@ the counter's own arithmetic at the input's cone apexes (#36), and the remaining
 produces. Nothing in `boundary`, `weld` or `simplify` needs to change — and
 §7.3's predictor, which ranks this body *lowest* of four, was right not to flag
 it.
+
+---
+
+## G25 — how often does the export-truth gate actually fire? ✅ MEASURED
+
+**Run 2026-08-26**, to find G24 a third data point before its convergence
+discriminator became a rule. G24 measured the rehearsal's dominant body
+converging (13 → 8 → 4 → 4 → 0) against `spiral-island-unwritable.brep`
+diverging (10 → 13 → 17 → 21 → 39) and closed with the warning that two parts is
+two points, and that this project has promoted a two-point ranking to a
+calibration before (G9–G12).
+
+**The third point was not found, and looking for it produced a more useful
+number.** A usable point needs a *sound* body that produces a reading at the
+gate's own 0.05 mm — and across five completed runs of four committed parts, **46**
+production bodies were measured and **not one of them produced a single reading**.
+
+| run | bodies | readings at 0.05 mm | outcome |
+|---|---|---|---|
+| `test-cylinder` `cc=5, t=0.6` | 5 | 0 | ships |
+| `SpiralTest` `cc=4, t=0.8` | 2 | 0 | ships |
+| `80mm-test-ball` `cc=5, t=0.6` | 1 | 0 | ships |
+| `test-cylinder` `cc=4, t=0.5` | 5 | 0 | ships (after #A below) |
+| `TD_HX_rehearsal_test` `cc=7, t=1.4` | 33 | 0 | ships (after #B below) |
+
+Bodies were measured in memory with `occ._mesh_and_count` at
+`DEFAULT_MESH_DEFLECTION` — no STEP round trip, since the question is only
+whether the coarse ruler produces a reading at all.
+
+**What that says about the rule's risk.** The refinement pass can only ever be
+wrong about a body it is asked about, and it is asked about a body only when
+pass 1 fires. On this evidence that is rare: 46 sound production bodies, from four parts across five parameter sets, including three dominant bodies of 193,721, 222,338 and 279,358 faces — and every one of them reads 0 at 0.05 mm. The only body this project has ever seen produce readings *and* be sound is the one G24 measured. The exposure the
+terminus rule carries is correspondingly narrow, and the controls that bound it
+are on mechanism rather than on a ranking — a genuine hole never reaches zero at
+any deflection (G23's cone-minus-base, re-measured here across the whole ladder
+at 63 → 71 → 158), and the island rises from its first rung.
+
+### Two guards refused sound geometry on the way, and both are fixed
+
+Neither is a regression; both bars had been there since they were written, and
+these are the first parts to reach them. Both matter to G25 specifically because
+each stops a run at an *earlier* gate, so export truth never gets a word in.
+
+**#A — the pinhole repair's per-face area test compared a quadrature result with
+`!=`.** `occ.only_inner_wires_dropped` makes four checks; three are exact
+because their subject is exact (object identity, orientation, wire membership).
+Area is not. `BRepGProp` integrates over a face's wires, so dropping one
+reorders the summation and the last ulp of a correct answer can move.
+`test-cylinder.STEP` at `cc=4, t=0.5` was refused over
+
+    0.58210678118654791 -> 0.58210678118654779 mm^2
+
+— one ulp, 2.1e-16 relative, on a face whose enclosed region had not changed.
+Now compared against the relative bar the module already declares for this
+quantity (`PINHOLE_AREA_TOL`, 1e-12), which keeps the test's purpose by two
+orders: a pinhole wire is one edge under 3e-5 mm, so the largest region it could
+enclose is `L²/4π` ≈ 7e-11 mm², or 1.2e-10 relative on that face — **120×** the
+bar. Third time a bar aimed at the wrong quantity has refused correct input
+here, second time on this repair (G19, G20).
+
+**#B — same-domain unification can hand back an invalid solid without
+throwing.** docs/algorithm.md §9 already names the validity gate as the
+*stronger* guard on that step, but the response was to **fail** at `validate` —
+the one response §11 forbids for a step whose only job is to make the output
+smaller. Measured on `TD_HX_rehearsal_test` at `cc=7, t=1.4`:
+
+| | faces | `BRepCheck_Analyzer` | mesh at 0.05 |
+|---|---|---|---|
+| before `simplify` (`unify_0.brep`) | 279,358 | **valid** | 637,100 tri, 16 degen, **0 bad** |
+| after (`unify_0_out.brep`) | 193,721 | **invalid** — 1 face, 3.426439 mm² | 550,728 tri, 8 degen, 0 bad |
+
+The volume guards cannot see it: drift 6.20e-06 relative, well inside the 1e-4
+pre-filter, and the *tessellation* is clean on both — so this is a fault only
+the in-context validity predicate detects, which is exactly what §9 claims for
+it and the first time that claim has been exercised.
+
+With that, `TD_HX_rehearsal_test` at `cc=7, t=1.4` **ships**: 33 solids,
+280,612 faces, a 990 MB STEP, every solid `BRepCheck_Analyzer`-valid and
+every one reading 0 non-manifold edges.
+
+`_unify_one` now checks its result and keeps the input when it does not hold up,
+so the failure mode is a larger file exactly as it already is for a kernel that
+throws. Cost is one whole-solid `is_valid` per solid, in the worker where the
+solid already lives and parallel across solids — measured **23.3 s** on that
+193,721-face body, against **34.7 s** for the un-unified one. The input is
+deliberately *not* also checked: an input that is itself invalid gains nothing
+from being kept, and `validate` refuses it exactly as before.
+
+**One trap, recorded so it is not re-introduced.** `WorkerPool.run` takes its
+peak-RSS reading from `rss_index=-1`. A flag appended to the worker's result
+tuple *after* that reading is silently read as a memory figure — which is how
+`test_unify_only_dispatches_to_the_pool_when_eligible` caught it, reporting a
+peak of 0.

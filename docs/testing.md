@@ -253,34 +253,42 @@ For reference, the two committed scenarios on a 6-core / 32 GB workstation:
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
 | `SpiralTest`, `cc=5 t=1` | 11 min | boundary trim (6 min), validate (1 m 53 s, mostly export truth) |
 | test cylinder, `cc=10 t=1.5` | ~40 s | simplify, boundary trim, stitch |
-| `TD_HX_rehearsal_test`, `cc=5 t=1` | ~93 min, 19.0 GB peak, **refused at `export truth`** — 13 readings on solid 0, every one used once (specification.md §10) | validate (36 m 32 s, mostly export truth), boundary trim, simplify, stitch |
+| `TD_HX_rehearsal_test`, `cc=5 t=1` | **91 min, 18.65 GB peak, 2.15 GB written** — 14 solids, 584,114 faces (specification.md §11) | validate (35 m 05 s, 95 % of it export truth), boundary trim, simplify, stitch |
+| `TD_HX_rehearsal_test`, `cc=7 t=1.4` | **~20 min, 8.76 GB peak, 990 MB written** — 33 solids, 280,612 faces. The cheapest real part for anything touching `validate` | validate (11 m 24 s), boundary trim, simplify |
 
 **The rehearsal row is not comparable with the others, and not with its own
 past figures.** It is a single run rather than a controlled pair, and most of
 what separates it from the ~52 min this part used to take is one stage:
-`validate` carries the unbounded export-truth check, 34.5 min of it
+`validate` carries the unbounded export-truth check, **2,003 s of its 2,105 s**
 (docs/algorithm.md §9). Read it as the current cost of the whole part, not as a
 performance measurement. **Prefer a controlled pair run back to back on the same
 machine** for any performance claim here — the standard this file holds itself
 to, because untouched stages have swung 25-36 % between sessions on machine load
 alone.
 
-**What is refused there is now decomposed, which changes what a later session
-should do with this row.** Of the original 26 readings, 3 were real duplicate
-material at a declined cap (#34), 9 plus a collapsed key were the counter
-miscounting a cone apex (#36), and the remaining **13** are sound faces the
-gate's own 0.05 mm mesh does not fully cover — 51 %, 69 % and 87 % on three
-`BRepCheck`-valid faces. They converge to 0 as the deflection is refined while
-`spiral-island-unwritable.brep` diverges from 10 to 39 over the same sweep,
-which is a discriminator on mechanism rather than on defect kind (G24). The
-dominant body itself is sound; what is unresolved is what the gate meshes at.
+**The part ships, and what used to be refused there is worth knowing before
+touching that gate.** Of the 26 readings its dominant body once carried, 3 were
+real duplicate material at a declined cap (#34), 9 plus a collapsed key were the
+counter miscounting a cone apex (#36), and the remaining **13** are sound faces
+the gate's own 0.05 mm mesh does not fully cover — 51 %, 69 % and 87 % on three
+`BRepCheck`-valid faces (G24). The gate now re-measures those over a
+neighbourhood of the faces carrying them and clears the body only on an exact
+zero; on this part that reads `0.01:8 0.002:4 0.0005:4 0.0001:0 -- resolved`,
+which is G24's whole-solid sweep reproduced by the cheap route.
 
-**The cheap inner loop for that residue is a 68-face extract**, not the
-583,894-face solid: `g24_residual_coverage.py --extract` lifts the three
-residual clusters plus their edge-neighbours out of `unify_0_out.brep` and
-reproduces every remaining reading in 0.0 s against ~3 minutes for the whole
-body. Do not `--sweep` an extract — it is open, so its own cut boundary
-dominates.
+**Use `cc=7, t=1.4` as the inner loop, not `cc=5, t=1`.** It is the same part,
+exercises the same gates, and takes ~20 minutes against ~91. It is also the only
+committed case that exercises the unification degrade (docs/specification.md
+§11): its dominant body is valid at 279,358 faces, unification returns an
+invalid one at 193,721, and the run keeps the un-unified solid and says so.
+
+**Cheaper still, for the export-truth gate specifically**, are the committed
+fixtures — `spiral-island-unwritable.brep` (refused, 13 → 17) and a cone with
+its base disk removed (a genuine hole, 63 → 71 → 158, never resolved). Both run
+in `test_export_truth.py` in seconds, and between them they pin both directions
+of the rule. `g24_residual_coverage.py --extract` remains the way to cut a
+neighbourhood out of a production body by hand; do not `--sweep` an extract, as
+it is open and its own cut boundary dominates.
 
 The cylinder's ~45 s → ~40 s since comes from two changes, measured together as
 a controlled pair on `dense-lattice` (**50.30 s → 40.50 s, −19.5 %**, output

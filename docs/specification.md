@@ -441,117 +441,43 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-### `TD_HX_rehearsal_test` at `cc=5, t=1` is refused at `export truth`
+**Nothing is open here.** The last item — `TD_HX_rehearsal_test` at `cc=5, t=1`
+being refused at `export truth` — was closed 2026-08-26 and is the first chapter
+of §11, together with the two guards found while closing it. Every committed
+part now writes its output at every parameter set this project has run.
+`docs/testing.md` names the cheapest inner loop for anything touching
+`validate`, which is that part at `cc=7, t=1.4` (~20 minutes) rather than at
+`cc=5, t=1` (~91).
 
-**The part does not produce output.** The run reaches `validate` in ~93 minutes
-and fails there (exit 4), with nothing written and the temporary folder kept:
+## 11. Closed — kept for the reasoning, not as work
 
-    solid 0: 583894 faces -> 1427670 triangle(s) after a STEP round trip,
-             26 non-manifold edge(s)
 
-The other 13 solids carry **0** each. Everything upstream is sound — 21,955
-boundary pieces from 19,552 junctions, 122,181 interfaces, 389,492 interior
-faces, unification drift 1.60e-07, and `assemble` proving all 14 solids
-watertight — so this is one body's description failing, not the pipeline losing
-its way.
+### `TD_HX_rehearsal_test` at `cc=5, t=1` — the readings were the ruler, not the body
 
-**The defect is in the geometry, not in the file, and that is measured rather
-than inferred.** Tessellating `unify_0_out.brep` from the kept temp folder
-directly — no STEP, no round trip — gives the **same 1,427,670 triangles and the
-same 26 bad edges**. The write is therefore exonerated, which rules out the whole
-export-side family of repairs: this is the pattern of
-`spiral-island-unwritable.brep`, broken before it is written, and **not** the
-pattern the `Greatest` tolerance setting fixes (§11). Writer settings are not
-where the fix is.
+**Opened 2026-08-23, closed 2026-08-26**, and the answer is the opposite of what
+the item assumed for most of its life. The part reached `validate` and failed
+there (exit 4) with nothing written, on 26 non-manifold readings in its
+583,894-face dominant body. It now ships. **Nothing in `boundary`, `weld` or
+`simplify` was changed to make that happen** — the body was sound the whole
+time, and what was wrong was the instrument.
 
-**What the 26 are is measured, not inferred, and only 2 of them are this
-generator's doing** (`tools/prototypes/RESULTS.md` G23). Each bad mesh edge is
-traced to the face and the B-rep edge that produced it, via
-`BRep_Tool.PolygonOnTriangulation_s`:
+The 26 decomposed into three unrelated things, each found by a separate
+measurement and each closed separately:
 
-| kind | count | what it is |
-|---|---|---|
-| **T** — two coincident but distinct `TopoDS_Edge`s, two faces each | **2** | genuine duplicate material |
-| **M** — one *shared* edge used by two faces, only one contributing | 9 | no hole exists in the B-rep (and the two faces do **not** discretize it differently — G24 below) |
-| **interior** — a segment no B-rep edge claims | 14 | inside one face's own triangulation |
-| **one-face** — a B-rep edge used by one face | **0** | a real hole would appear here |
+| | count | what it was | closed by |
+|---|---|---|---|
+| **T**, duplicate material | 3 | two coincident cap sheets `weld.unweldable` left when it declined a cap | #34 — fuse the flagged cap instead of declining it (§8) |
+| pole arithmetic | 9 + 1 | a triangle with two vertices at one interned point contributes the real edge twice, so a closed fan at a cone apex reads as four uses | #36 — skip degenerate triangles (G23) |
+| **the 13** | 13 | sound faces the gate's own 0.05 mm mesh does not cover | this change (G24) |
 
-**There are no holes.** An earlier revision of this item read the 14 used-once
-edges as holes, and singled out a 2.2 mm one as "a real hole in a `t = 1` mm
-lattice rather than a rounding artefact". Every one of those is `M`: the B-rep
-edge carries **two** faces, and only one contributed that segment. The
-instrument's positive control pins what a hole actually looks like — removing
-one face from a sound solid reports its edges as `one-face` — and solid 0 has
-none. That inference was reasonable and wrong, which is the sixth time in this
-project's history the first convincing reading has not survived measurement.
+**Only the last needed a decision, and it is the one worth reading.**
 
-**The 2 that are real are the declined cap.** Both `T` edges implicate faces
-121454 and 531940 — both `Plane`, both area 7.368093e-01 mm², identical: the two
-coincident cap sheets `weld.unweldable` leaves when it declines
-[2056.81, -87.5, 967.548]. `InterfaceSet.decline` withdraws *both* keys and
-`finalize_pieces` keeps *both* sides' cap faces. Because the run assembles **14**
-solids rather than 15, the two pieces stay connected through their other
-interfaces, so the duplicate sheets end up *inside* one solid — which is exactly
-why "declining costs an extra solid, never a hole" does not hold here. This is
-the same hazard `fuse_disagreeing_pairs` already exists to avoid for
-`mismatched` caps, on the path that does not use it.
+#### What the 13 were
 
-**The rest is valid geometry OCCT's own mesher does not fully cover** — recorded here as "discretizes inconsistently" until G24 measured it, and the distinction turns out to matter.
-`BRepCheck_Analyzer` passes all 18 implicated faces; face tolerances are 1e-07
-throughout, so this is not the fat-tolerance family §8's repair rungs address.
-Meshed alone in a compound with no neighbour, every implicated `ConicalSurface`
-reproduces its own fold, and all eight share one property: their `v` range
-begins at exactly **-1.7321 = -√3**, the cone's apex, where the whole u-range
-collapses to one point.
-
-**That -√3 is inherited, not generated, and reading it the other way sent this
-item looking in the wrong module.** `TD_HX_rehearsal_test.step` contains **54
-apex-touching conical faces** — drill points and countersink tips — every one
-with `RefRadius = 1.5`, `SemiAngle = π/3` and `v₀ = -√3`, at which
-`RefRadius + v·sin(SemiAngle)` is exactly zero. The trimmed patches carry the
-input's own parametrization, so nothing about the lattice put an apex there and
-no change to `boundary` or `junction` can take it away (G24).
-
-**Nine of those readings were the gate's own arithmetic and are now gone.** At
-a pole a whole parametric range maps to one point, so distinct parametric nodes
-intern to one id, and a triangle with two vertices there contributes its
-collapsed key once *and the real edge twice* — a closed fan reading as four
-uses. `occ.exported_mesh_defects` now skips triangles with two coincident
-vertices, which is the same reasoning `shell_defects` and `free_edges` already
-apply to degenerate *edges* one level down (`free_edges` counted them until
-G21). Measured on the artefact, the count falls **25 → 16**: exactly 9
-degenerate triangles are skipped, every pole-incident reading disappears and no
-`M` or `T` edge does.
-The smallest statement of that bug is that a plain `BRepPrimAPI_MakeSphere`
-reported 4 defects and a `MakeCone` 2 — sound closed solids this gate would
-have refused (`tools/prototypes/RESULTS.md` G23).
-
-**Measured end to end, solid 0 now reads 13 rather than 26** — the two repairs
-together, since the declined-cap fuse removes the `T` pair and the
-`4x/interior` edge beside it at the same cap:
-
-    solid 0: 583892 faces -> 1427664 triangle(s) after a STEP round trip,
-             13 non-manifold edge(s) (9 degenerate triangle(s) skipped)
-        by use count {1: 13}
-
-**Every survivor is used once**, so no duplicate material remains anywhere in
-the body: the 13 are the 9 `M` and 4 `interior` readings, on faces
-`BRepCheck_Analyzer` calls valid with 1e-07 tolerances.
-
-**The item stays open: the part still does not ship.**
-`spiral-island-unwritable.brep`, known to be genuinely unwritable, shows the
-same `M` and `interior` classes (8 and 2, with 0 `T`) and carries **0**
-degenerate triangles, so neither class can be dismissed as noise and no
-narrowing of the gate **by defect kind** is defensible on two parts.
-
-#### What the 13 are: the ruler, not the body (G24)
-
-**`M` is not two faces discretizing a shared edge differently.** That reading is
-withdrawn. Dumping both faces' `PolygonOnTriangulation` for every implicated
-edge gives **bit-identical** node coordinates, interning to identical keys —
-nothing disagrees. What actually happens is that the triangulation **does not
-cover the face**, measured as exact trimmed area against summed triangle area at
-the gate's own 0.05 mm deflection:
+G24 measured it rather than inferring it: at 0.05 mm the triangulation **does
+not cover the face**. Exact trimmed area against summed triangle area, on the
+three faces carrying the residue — all three `BRepCheck_Analyzer`-valid, with
+1e-07 tolerances:
 
 | face | surface | area | mesh covers |
 |---|---|---|---|
@@ -559,96 +485,142 @@ the gate's own 0.05 mm deflection:
 | 77748 | Cylinder | 4.226842e-07 mm² | **68.75 %** |
 | 500747 | Cylinder | 8.372943e-07 mm² | **87.50 %** |
 
-One per cluster, all three `BRepCheck_Analyzer`-valid. The boundary segments in
-the un-meshed part are exactly what read as used-once. It is purely a function
-of deflection — identical meshed alone or in context, to five decimals — and
-each face recovers once the deflection drops below its own feature size. Across
-the whole residual the count falls 13 → 8 → 4 → 4 → **0** at 0.05, 0.01, 0.002,
-0.0005 and 0.0001.
+The boundary segments in the un-meshed part are exactly what read as used-once,
+which is also why every survivor was used once and none over-used.
 
-**The discriminator this leaves is on mechanism rather than defect kind**, which
-is precisely what the paragraph above says is missing. Run the same sweep on the
-island and it goes the other way — **10 → 13 → 17 → 21 → 39**. A body whose
-*description* is broken disagrees with itself more the harder you look; a body
-merely finer than the ruler agrees as soon as the ruler is fine enough. The
-island's pcurve regenerating 2.118e-02 mm from its own 3D curve on a 0.05 mm²
-face is what that divergence is made of.
+#### The rule, and why it is the terminus rather than the slope
 
-**Recorded, not applied.** It changes what the gate *meshes at* rather than what
-the generator builds, and it turns a one-part measurement into a two-part one.
-It is the strongest candidate for closing this item and should be measured
-against a third part before it becomes a rule — this project has promoted a
-two-point ranking to a calibration before (§11, G9–G12).
+A reading has two possible causes and **no rule about the kind of reading
+separates them** — G23 measured `spiral-island-unwritable.brep`, known to be
+genuinely unwritable, carrying the same `M` and `interior` classes as the sound
+body. What separates them is what happens when the ruler gets finer:
 
-**Two cheap explanations were ruled out on the way.** The gate meshes with
-`isInParallel=True`, and an `M` is exactly the shape of fault a per-face
-parallel mesher could produce: measured on solid 0 both ways, **25 bad edges,
-identical `{4x: 12, 1x: 13}`**. And face 317973 has a vertex 4.013e-04 mm from a
-non-adjacent edge of its own wire whose tolerance is 3.346e-04 mm — the same
-order, and a convincing story for a face the mesher abandons half of — but it is
-**outside** that tolerance by 1.2×, and the deflection sweep is what actually
-explains the face.
-
-**Do not reach for the input's seam gaps.** The failure message cites them and
-the reading is real — 8.1162e-03 mm at [1869.577, 92.830, 983.105], on 54 of
-1043 shared edges — but **none of the 26 bad edges is at that coordinate**, and
-the faces carrying them are valid with 1e-07 tolerances. The citation names a
-family, not a location.
-
-**§7.3's predictor does not point at this body, and that is a finding about the
-predictor.** It flags four bodies, ranked by the fraction of their boundary
-junctions whose trim needed a tolerance comparable to the feature it bounds:
-
-| body | volume | flagged | fraction | tessellates? |
-|---|---|---|---|---|
-| 0 | 330,314.68 mm³ | 136 / 21,649 | **0.6 %** | **no — 26 bad edges, now 13** |
-| 138 | 1.5805 mm³ | 2 / 3 | **66.7 %** | yes |
-| 151 | 1.5805 mm³ | 2 / 3 | **66.7 %** | yes |
-| 163 | 2.9110 mm³ | 1 / 5 | 20.0 % | yes |
-
-The ordering looked inverted: the body with the lowest fraction is the one
-refused, and both highest pass cleanly. **G24 reverses that reading** — solid 0
-is sound, and the predictor was right not to flag it, so what the table shows is
-the two 66.7 % bodies being over-flagged rather than solid 0 being missed. Either
-way the conclusion for §7.3 is unchanged and is the one that matters:
-docs/algorithm.md §7.3 already says the fraction is one part's measurement and
-not a bar, a two-junction component reaches 100 % trivially, and **the fraction
-must not become a gate**.
-
-**What the check costs, which is the other half of what this item settles.**
-
-| | without the gate | with it |
+| deflection | rehearsal residue | the island |
 |---|---|---|
-| `validate` | 3 m 44.9 s | **36 m 32.2 s** |
-| of which `export_truth_s` | — | **2,068.9 s (34.5 min)** |
-| peak tree RSS | 19,291 MB | **18,951 MB** |
+| 0.05 | 13 | 10 |
+| 0.01 | 8 | 13 |
+| 0.002 | 4 | 17 |
+| 0.0005 | 4 | 21 |
+| 0.0001 | **0** | **39** |
 
-The cost lands where docs/algorithm.md §9 expected — tens of minutes, more than
-the 22-minute re-import that was removed to make room for it. **Memory was never
-the risk**: interning mesh points to integers and counting edges by integer key
-holds a 583,894-face solid inside the run's existing peak, so that argument is
-measured rather than asserted.
+So `occ.refine_until_manifold` re-measures a flagged body along a ladder and:
 
-**How to verify a fix.** `python src/main.py -i test/TD_HX_rehearsal_test.step
--cc 5 -t 1 --cores 6 -v`, and read the per-solid lines under `export truth`;
-solid 0 reaching 0 non-manifold edges is the bar. The in-memory tessellation of
-`temp/*/unify_0_out.brep` is the cheaper inner loop — 2 minutes against 93, and
-the same number — so iterate there and confirm on the full run.
-**The cheap inner loop is a 68-face extract, not the 486 MB body**: the residual
-clusters plus their edge-neighbours, cut out with
-`tools/prototypes/g24_residual_coverage.py --extract`, reproduce every remaining
-reading exactly and mesh in **0.0 s** against ~3 minutes. Confirm on
-`unify_0_out.brep`, then on the full run.
-`tools/prototypes/g23_bad_edge_provenance.py` is what classifies the result and
-`g24_residual_coverage.py --coverage` is what shows whether a face is covered at
-all; run both on the sibling solids as well, since an instrument that only ever
-agrees on sound geometry proves nothing (G10). Do not `--sweep` an extract — an
-open patch's own cut boundary dominates its readings.
+> clears it only if some rung reads **exactly zero**. Nothing else clears it —
+> not a small count, and not a falling one.
 
----
+**The terminus, not the slope, and that distinction is load-bearing twice.**
+The sound body's own ladder *plateaus* at 4, so "must strictly decrease" would
+have refused the very body this change exists to pass. And a slope is exactly
+the two-point ranking G24 warned against promoting to a calibration — the
+mistake this section already records four times over (G9–G12).
 
-## 11. Closed — kept for the reasoning, not as work
+What the terminus rests on instead is a statement about `BRepMesh` rather than
+about two parts: a triangulation that fails *only* because the ruler is coarser
+than the feature completes once the ruler is finer, and **a genuine hole never
+completes at any deflection**. G23's control is the check on that, and it is
+now measured across the whole ladder: a cone with its base disk removed reads
+63, then **71, then 158**. Refining subdivides a hole's boundary; it never
+closes it.
 
+#### What it costs, which is nearly nothing
+
+The second pass rides the failing path alone — a body reading 0 is not
+re-measured at all, and `MeshDefects.refinement` is `None` rather than a
+`Refinement` that happens to say clean. And it never repeats the STEP round
+trip, which is the expensive half by two orders: the write and re-read of the
+486 MB body is tens of minutes where meshing it is ~100 s.
+
+It also re-measures a **neighbourhood** rather than the body. The readings sit
+on a handful of faces, so `_implicated_faces` records which — one extra walk of
+the triangulation, every point already interned — and `_extract_neighbourhood`
+cuts those plus everything sharing an edge with them into one compound. G24
+measured a **68-face** extract reproducing every reading of the 583,894-face
+solid exactly, meshing in 0.0 s against ~3 minutes.
+
+**A cut-out patch cannot simply be counted**, and the exclusion turned out to be
+a filter rather than bookkeeping. An open patch's own cut boundary is used once
+everywhere — 150 of an extract's 166 readings, and climbing with refinement for
+reasons that concern neither body. The rule that removes it is that **a reading
+counts only if a core face contributed it**, which *is* the cut-boundary
+exclusion by construction: every B-rep edge of a core face has all its users
+inside the compound, the compound's own cut boundary lies on ring faces only,
+and a reading on the core/ring interface is used once from each side and so is
+not a reading. One ring suffices and nothing has to remember which edges were
+cut.
+
+**No size bound and no second route.** The extract of a small solid is at most
+the solid itself, so this route is available for every body. A size test would
+be a second, rarely-exercised path running only on the bodies nobody looks at —
+the shape of the bound §9 already removed once, relocated from the gate to the
+escalation. The whole-solid refinement survives only as a test oracle, where
+`test_export_truth.py` requires the two routes to agree on the **per-rung
+counts** rather than merely on the verdict.
+
+#### The third point, because two is not a calibration
+
+G24 recorded the discriminator and deliberately did not apply it, on the
+grounds that two parts is two points. Three parts and five parameter sets were
+run to find a third. **None produced a
+reading at all**: 46 sound production bodies were measured at 0.05 mm — three of
+them dominant bodies of 193,721, 222,338 and 279,358 faces — and every one read
+0 (`tools/prototypes/RESULTS.md` G25). Two of those runs were blocked by
+unrelated guards refusing sound geometry, both of which are fixed and recorded
+in the chapter above.
+
+**That is a weaker answer than a third point and a more useful one.** The
+refinement pass can only ever be wrong about a body it is *asked* about, and it
+is asked only when the coarse ruler fires. On this evidence that is rare, and
+the only body this project has seen produce readings and be sound is the one
+G24 measured. What bounds the rule is therefore not a third data point but the
+controls, which are about mechanism rather than about a ranking: a genuine hole
+never reaches zero at any deflection — 63 → 71 → 158 on G23's cone-minus-base,
+measured across the whole ladder — and the island rises from its first rung.
+
+**The one measurement that did land is the strongest available.** Run inside the
+pipeline on the real body, the automatically-derived neighbourhood returns
+G24's whole-solid sweep exactly:
+
+    solid 0: 583892 faces -> 1427664 triangle(s), 13 non-manifold edge(s)
+      on 11 face(s); re-measured over a 53-face neighbourhood at
+      0.01:8 0.002:4 0.0005:4 0.0001:0 -- resolved
+
+11 core faces where G24 chose 3 by hand, 53 faces in the extract where G24 cut
+68 — and the same count at every rung. The cheap route agrees with the oracle on
+the counts, not merely on the verdict.
+
+
+#### What the part does now
+
+    Duration 1h 31m 10.5s, peak 18.65 GB
+    14 solids, 584,114 faces, 2,518,001 edges, 330,346.9858 mm^3
+    2,148,943,726 bytes written
+    export_truth_s: 2003.07
+
+**It ships.** `validate` is 2,105 s of a 5,456 s run and the export-truth gate
+is 2,003 s of that — 37 % of the whole run, spent writing, re-reading and
+tessellating every output solid with no size bound, which is the deliberate
+trade docs/algorithm.md §9 records. The second pass is not part of that cost:
+it runs once, over 53 faces, and is unmeasurable beside it.
+
+The full profile is the 2026-08-26 entry in docs/profiling-reports.md, and it is
+a single run rather than a controlled pair — so it prices the part and is not a
+performance claim.
+
+#### The lesson, and it is the seventh
+
+The first convincing reading of these 26 was that 14 of them were **holes** —
+including "a 2.2 mm free edge is a real hole in a `t = 1` mm lattice rather than
+a rounding artefact". Every one of those was a face the mesh had not finished
+covering. The reading before that was that the folding cone apexes were
+something the *generator* put there; they are the input file's own
+parametrization, on 54 apex-touching faces it ships with. And the reading before
+*that* was that the parallel mesher was at fault, which measured identical both
+ways.
+
+Each fitted the symptom. None survived being measured. What settled it, once
+again, was an instrument sharing no machinery with the thing under test —
+comparing each face's **exact trimmed area** against the area its own triangles
+covered.
 
 ### Two guards that refused sound geometry before `export truth` could speak
 

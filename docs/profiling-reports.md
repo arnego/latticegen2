@@ -611,6 +611,16 @@ untouched stages here (`boundary` 1,158 s against 798 s, `stitch` 588 s against
 652 s) move in *both* directions, which is the signature of variance rather than
 of a change.
 
+**One caveat on `simplify`'s 1,115 s.** This run predates the code-review fix
+that stops the worker-side validity check asking OCCT for a thread pool: at the
+time, six workers each launched six threads on six cores. The verdict is
+unaffected (G18 measured `BRepCheck_Analyzer` returning the same answer either
+way), so the geometry and every other figure here stand — but that stage's time
+was measured under an over-subscription that no longer happens, and would need
+re-measuring before it is quoted as a cost. It is 204 of 1000 in the bar, so
+being somewhat wrong about it moves the bar by less than the single-run basis
+already does.
+
 **Downstream consumer.** `src/latticegen2/gui/weights.py` takes its per-mille
 shares from this table's Duration column. The previous shares gave `validate`
 **35** of 1000; it is **385** here, so the bar would otherwise have sat still for

@@ -441,6 +441,51 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
+### `TD_HX_rehearsal_test` at `cc=7, t=1.4` fails the validity gate
+
+**Found 2026-08-26**, while looking for a third part to measure the
+export-truth refinement rule against (§11). Not investigated, because it is a
+different gate and a different stage from the item that session closed.
+
+    stage validate: 29.67s
+    FAILED: 1 of 33 output solids failed OCCT's BRepCheck_Analyzer validity check.
+
+**The offending body is the dominant one** — `unify_0_out.brep`, 193,721 faces,
+330,607.6434 mm³ — identified by running `occ.is_valid` over the kept temp
+folder's 33 unified solids, where it is the only one that fails.
+
+**And it tessellates perfectly**, which is what makes it worth recording rather
+than assuming it is the same family as anything already closed. Measured in
+memory at the export-truth gate's own 0.05 mm: 550,728 triangles, 8 degenerate
+skipped, and **0** non-manifold edges. All 32 sibling bodies are valid and read
+0 as well. So this is the *opposite* shape to the `cc=5, t=1` item: there the
+body was sound and the instrument was coarse; here the body tessellates like a
+sound one and `BRepCheck_Analyzer` refuses it.
+
+Everything upstream reports normally — 33 watertight solids from `assemble`,
+`vertex tolerances corrected on 15 sewn boundary face(s)` with **no residual**,
+unification 281,341 → 194,975 faces at a volume drift of 6.20e-06. The one-line
+note that the boundary sew's seam-only split was redone with a full unsplit sew
+(`expected 34840 free edge(s), seam-only split gave 92156`) is the documented
+fallback of docs/algorithm.md §8, not a fault.
+
+**Where to start.** `occ.invalid_faces` on that body names the faces, and §8's
+two repair rungs are calibrated on exactly this symptom — a recorded tolerance
+being wrong rather than geometry being wrong. The run reports **no** residual
+faces after `fix_vertex_tolerances`, so either the fault is not on a *face* the
+scan examines, or it appears only after `simplify` re-describes the boundary,
+which is a stage later than the repair. That distinction is the first thing to
+measure, and the cheap way is to ask `is_valid` of the pre-unification solid as
+well as the post-unification one; §11 records that same-domain unification is a
+representation change that must never become a geometry change, and this is a
+case where the two can be told apart.
+
+**How to verify a fix.** `python src/main.py -i test/TD_HX_rehearsal_test.step
+-cc 7 -t 1.4 --cores 6 -v` must reach `export truth` and write its STEP. The run
+is ~20 minutes, far cheaper than the `cc=5, t=1` rehearsal, which makes this
+part/parameter pair a better inner loop than that one for anything touching
+`validate`.
+
 ### `TD_HX_rehearsal_test` at `cc=5, t=1` is refused at `export truth`
 
 **The part does not produce output.** The run reaches `validate` in ~93 minutes

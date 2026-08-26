@@ -1704,16 +1704,35 @@ def remove_pinhole_wires(shape: TopoDS_Shape, tol: float) -> tuple[TopoDS_Shape,
 
 
 def only_inner_wires_dropped(
-    before: TopoDS_Shape, after: TopoDS_Shape, n_removed: int
+    before: TopoDS_Shape, after: TopoDS_Shape, n_removed: int,
+    area_tol: float = 1e-12,
 ) -> str | None:
     """``None`` when ``after`` is ``before`` minus exactly ``n_removed`` inner wires.
 
     Returns a human-readable reason otherwise. This is the guard on
-    :func:`remove_pinhole_wires`, and it is deliberately **structural and exact**
-    rather than a comparison of two measured quantities: it asks whether the
-    region the piece encloses is the same object-for-object, which is a question
-    with a bit-exact answer, where volume is a question OCCT can only answer with
-    a bias while the defect is still present (see that function, and G19).
+    :func:`remove_pinhole_wires`, and it is deliberately **structural** rather
+    than a comparison of two measured quantities: it asks whether the region the
+    piece encloses is the same object-for-object, which is a question with a
+    bit-exact answer, where volume is a question OCCT can only answer with a
+    bias while the defect is still present (see that function, and G19).
+
+    **Three of the four tests below are exact because their subject is exact --
+    object identity, orientation, wire membership. Area is not, and comparing it
+    exactly was a bug.** ``BRepGProp`` integrates over a face's wires, so
+    dropping one reorders the summation and the last ulp of a *correct* answer
+    can move. Measured: `test-cylinder.STEP` at ``cc=4, t=0.5`` refused a sound
+    repair over 0.58210678118654791 against 0.58210678118654779 mm^2 -- one ulp,
+    2.1e-16 relative, on a face whose enclosed region had not changed at all.
+    That is the third time this project has refused correct input with a bar
+    aimed at the wrong quantity (docs/specification.md §11, G19 and G20), and
+    the second time on this very repair.
+
+    ``area_tol`` is therefore a *relative* bar, and it keeps the test's whole
+    purpose because the thing it exists to catch is orders larger. A pinhole
+    wire is one edge under ``PINHOLE_WIRE_TOL`` (3e-5 mm), so the largest region
+    it could possibly enclose is ``L^2 / 4pi`` ~ 7e-11 mm^2 -- on the 0.58 mm^2
+    face above that is 1.2e-10 relative, **120x** the default bar. A wire that
+    really bounded something still cannot get through.
 
     Four things are required of every face, and together they pin the enclosed
     region completely:
@@ -1757,11 +1776,12 @@ def only_inner_wires_dropped(
         if f.Orientation() != src.Orientation():
             return "a face changed orientation"
         a_src, a_out = area(src), area(f)
-        if a_out != a_src:
+        if abs(a_out - a_src) > area_tol * max(abs(a_src), 1e-30):
             return (
-                f"a face's area changed, {a_src:.17g} -> {a_out:.17g} mm^2; a wire "
-                f"that bounds no area cannot change it, so one that bounded "
-                f"something was removed"
+                f"a face's area changed, {a_src:.17g} -> {a_out:.17g} mm^2 "
+                f"({abs(a_out - a_src) / max(abs(a_src), 1e-30):.3e} relative, "
+                f"tolerance {area_tol:g}); a wire that bounds no area cannot "
+                f"change it, so one that bounded something was removed"
             )
         kept = TopTools_IndexedMapOfShape()
         for w in _explore(src, TopAbs_ShapeEnum.TopAbs_WIRE):

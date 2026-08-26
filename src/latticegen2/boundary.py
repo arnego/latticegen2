@@ -101,7 +101,17 @@ that carried it, so unlike same-domain unification (docs/algorithm.md §9) there
 is no larger merged region to re-integrate and no quadrature noise to absorb.
 Measured on the piece this was built for, the drift is 0.0 — bit-identical, not
 merely small. This bar exists to catch a wire that turned out to bound
-something, which is the only way this repair could go wrong."""
+something, which is the only way this repair could go wrong.
+
+It is also handed to :func:`latticegen2.occ.only_inner_wires_dropped` for its
+**per-face** area test, which compared bit-exactly until that refused a sound
+repair on `test-cylinder.STEP` at ``cc=4, t=0.5`` over a single ulp
+(0.58210678118654791 against ...79, 2.1e-16 relative). Area is a quadrature
+result rather than a structural fact, and dropping a wire reorders the
+integration; the three genuinely structural tests beside it stay exact. The bar
+still catches what it is for by two orders: the largest region a
+``PINHOLE_WIRE_TOL`` wire could enclose is ~7e-11 mm², which on that face is
+1.2e-10 relative — 120× this figure."""
 
 # There is deliberately no volume tolerance here, and the absence is
 # load-bearing enough to be worth a note where the one that used to live here
@@ -642,7 +652,9 @@ def _remove_pinholes(node_pos: np.ndarray, solid):
             f"it, so one that bounded something was removed."
         )
 
-    reason = occ.only_inner_wires_dropped(solid, cleaned, n_removed)
+    reason = occ.only_inner_wires_dropped(
+        solid, cleaned, n_removed, PINHOLE_AREA_TOL
+    )
     if reason is not None:
         raise ProcessingError(
             f"Removing {n_removed} pinhole wire(s) from the junction at "

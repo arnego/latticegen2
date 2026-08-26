@@ -44,7 +44,7 @@ def two_boxes_sharing_a_face():
 def test_unification_merges_the_redundant_partition():
     solid = two_boxes_sharing_a_face()
     before, _ = occ.count_subshapes(solid)
-    merged, ran = _unify_one(solid)
+    merged, ran, _degraded = _unify_one(solid)
     after, _ = occ.count_subshapes(merged)
     assert ran
     assert after < before
@@ -64,7 +64,7 @@ def test_split_unification_matches_a_single_combined_call():
     """
     solid = two_boxes_sharing_a_face()
     combined = occ.unify_same_domain(solid)
-    split, ran = _unify_one(solid)
+    split, ran, _degraded = _unify_one(solid)
 
     assert ran
     assert occ.count_subshapes(split) == occ.count_subshapes(combined)
@@ -88,11 +88,79 @@ def test_a_failing_edge_pass_keeps_the_face_merge(monkeypatch):
         return real(shape, unify_edges=False)
 
     monkeypatch.setattr(occ, "unify_same_domain", refuse_edge_merging)
-    merged, ran = _unify_one(solid)
+    merged, ran, _degraded = _unify_one(solid)
     faces, _ = occ.count_subshapes(merged)
     assert seen == [(False, True), (True, False)]
     assert ran  # the kernel did run, just not the edge pass
     assert faces == 6
+
+
+def test_an_invalid_merge_keeps_the_un_unified_solid(monkeypatch):
+    """A kernel that does not throw can still hand back an invalid solid.
+
+    docs/algorithm.md §9 names the validity gate as the *stronger* guard on this
+    step -- the volume bars cannot see a bad merge, and on
+    `TD_HX_rehearsal_test` at ``cc=7, t=1.4`` they did not: a sound 279,358-face
+    body unified to 193,721 faces with one invalid face of 3.426439 mm², at a
+    volume drift of 6.20e-06, comfortably inside the 1e-4 pre-filter. The run
+    then *failed* at `validate`, which is the one response §11 forbids for a
+    step whose only job is to make the output smaller.
+
+    So the result is checked and the input kept. What is asserted here is the
+    behaviour, not the plumbing: the solid that comes back is the one that went
+    in, and the run is told so.
+    """
+    solid = two_boxes_sharing_a_face()
+    faces_in, edges_in = occ.count_subshapes(solid)
+
+    # Signature-faithful: `_unify_one` asks for `parallel=False` because it
+    # runs inside a worker, and a stub that did not accept it would pass
+    # while the real call raised.
+    monkeypatch.setattr(occ, "is_valid", lambda shape, parallel=True: False)
+    merged, ran, degraded = _unify_one(solid)
+
+    assert ran, "the kernel did run -- it is the result that did not hold up"
+    assert degraded, "and the run has to be able to say so"
+    assert occ.count_subshapes(merged) == (faces_in, edges_in), (
+        "the un-unified solid is what is kept, so the output is larger and not "
+        "different"
+    )
+
+
+def test_the_workers_validity_check_does_not_ask_occt_for_threads(monkeypatch):
+    """`--cores` is honoured exactly, and this call is inside a worker.
+
+    docs/algorithm.md S9 keeps the *gate* on the master precisely because W
+    worker processes each launching W OCCT threads is W^2 threads on W cores,
+    and `parallel.set_thread_budget` is deliberately not called in the worker
+    initializer -- so OCCT's default pool there sizes itself to the machine.
+    A degrade check that asked for threads would reinstate exactly that.
+    """
+    seen = []
+
+    def record(shape, parallel=True):
+        seen.append(parallel)
+        return True
+
+    monkeypatch.setattr(occ, "is_valid", record)
+    _unify_one(two_boxes_sharing_a_face())
+
+    assert seen == [False], "the worker must ask for a single-threaded check"
+
+
+def test_a_valid_merge_is_not_degraded():
+    """The control beside it: an ordinary merge must still merge.
+
+    A degrade that fired on sound geometry would quietly double every output
+    file, which is the failure this project would notice last.
+    """
+    solid = two_boxes_sharing_a_face()
+    faces_in, _ = occ.count_subshapes(solid)
+    merged, ran, degraded = _unify_one(solid)
+    faces_out, _ = occ.count_subshapes(merged)
+
+    assert ran and not degraded
+    assert faces_out < faces_in, "the redundant partition is still merged away"
 
 
 def test_an_already_minimal_solid_is_not_reported_as_a_refusal():

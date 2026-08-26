@@ -515,3 +515,114 @@ after that fix, and reports the original 19 with no residual.
 unsplit sew gives 73984` says the seam-only split is genuinely wrong on this
 part by a factor of 2.6 — and that the unsplit sew now meets the expectation
 exactly, where before the degenerate-edge fix it read 73,994 and could not.
+
+## What changed between the previous entry and the next
+
+Two things, and only the first is a performance change at all.
+
+**`validate` now carries the export-truth gate on every solid, with no size
+bound** (docs/algorithm.md §9). The 2026-08-18 pair predates that gate
+entirely, so the `validate` row below is not comparable with the one above it,
+and neither is the whole-run total.
+
+**The gate gained a second pass** (`occ.refine_until_manifold`): a body that
+produces readings at 0.05 mm is re-measured at finer deflections over a
+neighbourhood of the faces carrying them, and clears only on an exact zero. It
+runs on the failing path alone. Here it runs once, on solid 0, over a 53-face
+neighbourhood, and costs nothing measurable against the 2,003 s the gate's first
+pass spends writing, re-reading and tessellating a 583,892-face body.
+
+Also in this branch, and visible in the run log rather than the table:
+same-domain unification now keeps the un-unified solid when its result is
+invalid, and the pinhole repair's per-face area test compares an integral with a
+relative bar instead of `!=` (docs/specification.md §11).
+
+## 2026-08-26 — the branch, `TD_HX_rehearsal_test` at `cc=5, t=1`, single run
+
+**This is one run, not a controlled pair.** Every performance claim in this file
+that matters is made from a pair run back to back on the same machine; this is
+not one, and it is not offered as a performance measurement. What it is for is
+pricing the part end to end now that it *completes*, and supplying the shares in
+`src/latticegen2/gui/weights.py`.
+
+```
+run started : 2026-08-26 09:45:13
+samples     : 2683  (09:45:14 -> 11:16:24)
+stages      : 12
+cores       : 6 physical (100% CPU == 1 core)
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 0% | 0% | 0.00 | 233 MB | 233 MB | 1 | 0 MB | 0 MB |
+| tessellate | 3.0s | 114% | 114% | 1.14 | 272 MB | 272 MB | 1 | 0 MB | 0 MB |
+| classify | 30.0s | 532% | 589% | 5.32 | 1,804 MB | 1,823 MB | 7 | 294 MB | 4 MB |
+| boundary | 1,158.0s | 557% | 592% | 5.57 | 2,069 MB | 2,410 MB | 7 | 154 MB | 158 MB |
+| connect | 33.0s | 100% | 101% | 1.00 | 2,592 MB | 2,621 MB | 7 | 0 MB | 0 MB |
+| stitch | 588.0s | 116% | 584% | 1.16 | 3,727 MB | 4,318 MB | 7 | 383 MB | 358 MB |
+| instance | 41.0s | 102% | 151% | 1.02 | 4,246 MB | 4,654 MB | 7 | 0 MB | 0 MB |
+| assemble | 20.0s | 99% | 100% | 0.99 | 4,430 MB | 4,430 MB | 7 | 0 MB | 0 MB |
+| simplify | 1,115.0s | 106% | 582% | 1.06 | 7,970 MB | 16,006 MB | 7 | 941 MB | 940 MB |
+| validate | 2,105.0s | 109% | 586% | 1.09 | 14,910 MB | 21,123 MB | 7 | 2,007 MB | 2,007 MB |
+| export | 362.0s | 99% | 101% | 0.99 | 13,260 MB | 21,182 MB | 7 | 2,007 MB | 4,056 MB |
+
+total to last stage : 5,456.0s (90.9 min)
+peak tree RSS       : 21,182 MB
+min system available: 335 MB
+total written       : 7,563 MB
+total read          : 5,886 MB
+```
+
+**The part writes its STEP for the first time.** Run log: 1 h 31 m 10.5 s,
+2,148,943,726 bytes, 14 solids, 584,114 faces, 2,518,001 edges, lattice volume
+330,346.9858 mm³, peak 18.65 GB. `export_truth_s: 2003.07` — **95 % of the
+`validate` stage**, and 37 % of the whole run.
+
+The line this entry exists for:
+
+```
+solid 0: 583892 faces -> 1427664 triangle(s) after a STEP round trip,
+         13 non-manifold edge(s) (9 degenerate triangle(s) skipped)
+  by use count {1: 13}; positions [...]
+  on 11 face(s); re-measured over a 53-face neighbourhood at
+  0.01:8 0.002:4 0.0005:4 0.0001:0 -- resolved
+```
+
+**Those four numbers are G24's whole-solid sweep, reproduced by the cheap
+route.** G24 measured the entire 583,892-face body at the same four deflections
+and got 8, 4, 4, 0. The neighbourhood is derived automatically here — 11 core
+faces rather than the 3 G24 picked by hand, 53 faces in the extract rather than
+68 — and it returns the same counts at every rung. That is the oracle agreeing
+on the *counts*, not merely on the verdict, on the one production body this has
+ever been asked about.
+
+**`validate` at 1.09 cores is not a parallelism opportunity**, and the
+"Parallelization candidates" section at the foot of the report is wrong about it
+for a reason worth stating: the stage is one `write -> read -> tessellate` per
+solid and the run's 14 solids are one dominant body plus 13 scraps, so the floor
+is that body however the work is spread. It is the same shape of finding as
+`simplify`'s, which docs/specification.md §11 records at length.
+
+**Reading this against the 2026-08-18 pair is a mistake**, and the numbers are
+far enough apart to invite it. That pair totals 3,176 s against this run's
+5,456 s, but 2,003 s of the difference is a correctness gate that did not exist
+then, and the rest is one run's worth of machine variance against a pair's. The
+untouched stages here (`boundary` 1,158 s against 798 s, `stitch` 588 s against
+652 s) move in *both* directions, which is the signature of variance rather than
+of a change.
+
+**One caveat on `simplify`'s 1,115 s.** This run predates the code-review fix
+that stops the worker-side validity check asking OCCT for a thread pool: at the
+time, six workers each launched six threads on six cores. The verdict is
+unaffected (G18 measured `BRepCheck_Analyzer` returning the same answer either
+way), so the geometry and every other figure here stand — but that stage's time
+was measured under an over-subscription that no longer happens, and would need
+re-measuring before it is quoted as a cost. It is 204 of 1000 in the bar, so
+being somewhat wrong about it moves the bar by less than the single-run basis
+already does.
+
+**Downstream consumer.** `src/latticegen2/gui/weights.py` takes its per-mille
+shares from this table's Duration column. The previous shares gave `validate`
+**35** of 1000; it is **385** here, so the bar would otherwise have sat still for
+thirty-five minutes and then jumped. If the rehearsal is re-profiled again, that
+table has to be recomputed with it.

@@ -14,6 +14,7 @@ solving a problem that no longer exists, and this test is what would say so.
 See docs/algorithm.md §7.3 and §9.
 """
 
+import io
 import math
 import os
 
@@ -479,6 +480,313 @@ def test_the_gate_does_not_refuse_its_own_input(tmp_path):
     )
     assert defects.bad == 0, "the user's own input is not a defective body"
     assert defects.by_use == {} and defects.where == []
+
+
+# --- what the run says about a body the second pass cleared ------------------
+
+
+def _report_export_truth(tmp_path, defects):
+    """Drive `pipeline._check_export_truth` with one canned reading.
+
+    The reporting path around a *resolved* body cannot otherwise be reached
+    without a 583,894-face solid and a 93-minute run, which is precisely the
+    kind of code that gets a typo into it. The geometry here is a box; what is
+    under test is what the run says, not what the gate measured.
+    """
+    from latticegen2 import pipeline
+    from latticegen2.runlog import RunLog
+
+    box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    rl = RunLog(str(tmp_path / "run.log")).open()
+    stats = {}
+    real = occ.exported_mesh_defects
+    occ.exported_mesh_defects = lambda solid, probe: defects
+    try:
+        error = None
+        try:
+            pipeline._check_export_truth(rl, [box], str(tmp_path), stats)
+        except pipeline.ProcessingError as exc:
+            error = str(exc)
+    finally:
+        occ.exported_mesh_defects = real
+        rl.close()
+    return io.open(str(tmp_path / "run.log"), encoding="utf-8").read(), stats, error
+
+
+def test_a_body_cleared_by_refinement_does_not_read_as_one_that_was_clean(tmp_path):
+    """Two different runs must not produce the same sentence.
+
+    A body that read 0 at the coarse ruler and a body whose readings were shown
+    to be the ruler are different outcomes, and only the second one has ever
+    been asked a question. The run has to say so -- in the log, and in a stats
+    key that survives into the summary so it is greppable afterwards.
+    """
+    resolved = occ.Refinement(
+        True, [(0.01, 8), (0.002, 4), (0.0005, 4), (0.0001, 0)], 3, 68, "resolved"
+    )
+    defects = occ.MeshDefects(
+        1427670, 13, {1: 13}, [(1.0, 2.0, 3.0)], 9, frozenset({1, 2, 3}), resolved
+    )
+    log, stats, error = _report_export_truth(tmp_path, defects)
+
+    assert error is None, "a resolved body must not stop the run"
+    assert "68-face neighbourhood" in log
+    assert "0.0001:0" in log and "resolved" in log
+    assert "export_truth_refined" in stats
+    assert "none at 0.0001 mm" in stats["export_truth_refined"]
+    assert "cleared only after being re-measured" in log
+
+
+def test_a_body_that_did_not_resolve_is_refused_with_its_ladder(tmp_path):
+    """The failure message carries the shape of the ladder, not just a total.
+
+    "13 -> 8 -> 4 -> 4, still 4" and "10 -> 13 -> 17" are different bug
+    reports; a bare count is neither. Recovering that distinction by hand cost
+    this project two prototype gates and a 93-minute run.
+    """
+    unresolved = occ.Refinement(
+        False, [(0.01, 13), (0.002, 17)], 4, 26,
+        "increased: the body disagrees with itself more the more closely it is "
+        "measured",
+    )
+    defects = occ.MeshDefects(
+        148, 10, {1: 7, 3: 3}, [(1.0, 2.0, 3.0)], 0, frozenset({0, 1, 2, 3}),
+        unresolved,
+    )
+    log, stats, error = _report_export_truth(tmp_path, defects)
+
+    assert error is not None, "a body that did not resolve must stop the run"
+    assert "26-face neighbourhood" in error
+    assert "13 at 0.01 mm -> 17 at 0.002 mm" in error
+    assert "increased" in error
+    assert "export_truth_refined" not in stats, "nothing was cleared"
+
+
+# --- the second pass: is a reading the ruler, or the body? -------------------
+
+
+def holed_cone():
+    """A cone with its base disk removed -- a genuine hole, on the apex face.
+
+    G23's blind-spot control, reused here as the control that makes the
+    terminus rule safe. A hole is the one thing refinement must never resolve:
+    a finer ruler finds *more* of its boundary polyline, never less.
+    """
+    cone = BRepPrimAPI_MakeCone(5.0, 0.0, 10.0).Shape()
+    lateral = [
+        f for f in occ.faces(cone)
+        if any(BRep_Tool.Degenerated_s(TopoDS.Edge_s(e))
+               for e in occ._explore(f, TopAbs_ShapeEnum.TopAbs_EDGE))
+    ]
+    assert len(lateral) == 1
+    builder = BRep_Builder()
+    shell = TopoDS_Shell()
+    builder.MakeShell(shell)
+    for f in lateral:
+        builder.Add(shell, f)
+    return shell
+
+
+def test_a_clean_body_never_pays_for_the_second_pass(tmp_path):
+    """``refinement is None`` means *not attempted*, and that is the cheap path.
+
+    The whole cost argument for the second pass is that it rides the failing
+    path only. A body reading 0 must therefore come back with ``None`` rather
+    than with a ``Refinement`` that happens to say ``resolved`` -- those are
+    different claims, and only one of them was measured.
+    """
+    box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    defects = occ.exported_mesh_defects(box, str(tmp_path / "box.step"))
+    assert defects.bad == 0
+    assert defects.refinement is None, "nothing to re-measure, nothing measured"
+    assert defects.implicated == frozenset(), "and no face is implicated"
+
+
+def test_the_readings_are_attributed_to_the_faces_that_carry_them(tmp_path):
+    """Every reading lands on a face, and an unattributed one is a fault.
+
+    ``implicated`` is what the second pass cuts its neighbourhood around, so a
+    reading nobody claims would be a reading refinement never looks at. On the
+    island all 10 land on 4 of its 36 faces; the holed cone's 63 all land on
+    its single face.
+    """
+    island = load_island()
+    defects = occ.exported_mesh_defects(island, str(tmp_path / "island.step"))
+    assert defects.bad == 10
+    assert len(defects.implicated) == 4, "the 10 readings sit on 4 faces"
+    assert defects.implicated <= set(range(len(occ.faces(island))))
+
+    holed = occ.exported_mesh_defects(holed_cone(), str(tmp_path / "holed.step"))
+    assert holed.bad == 63
+    assert holed.implicated == frozenset({0}), "one face, and it is the one there is"
+
+
+def test_the_neighbourhood_is_the_core_plus_one_ring(tmp_path):
+    """The extract is the core faces and everything sharing an edge with them.
+
+    Pinned on the island because it is committed and small. The property that
+    matters is not the number but that the core is a strict subset of a ring
+    that is a strict subset of the body: a neighbourhood equal to the core
+    would have a cut boundary running through the readings, and one equal to
+    the body would not be an optimisation at all.
+    """
+    island = load_island()
+    defects = occ.exported_mesh_defects(island, str(tmp_path / "island.step"))
+    comp, core_map, n_faces = occ._extract_neighbourhood(island, defects.implicated)
+    assert core_map.Size() == len(defects.implicated)
+    assert len(defects.implicated) < n_faces < len(occ.faces(island))
+    assert n_faces == len(occ.faces(comp)), "the compound holds what it counted"
+
+
+def test_the_island_is_refused_because_it_comes_apart_under_refinement(tmp_path):
+    """The positive control, and the reason the rule is about mechanism.
+
+    ``spiral-island-unwritable.brep`` carries the *same* reading classes as a
+    sound body (G23), so no rule about the kind of reading separates them. What
+    separates them is what happens when the ruler gets finer: this body's count
+    **rises**, because what disagrees is its geometry -- a pcurve regenerating
+    2.118e-02 mm from its own 3D curve on a 0.05 mm² face.
+
+    The ladder stops at the first increase, which is why the numbers below are
+    the first two rungs and not all four. That early stop is a cost decision,
+    not the criterion; the criterion is that no rung ever read zero.
+    """
+    island = load_island()
+    defects = occ.exported_mesh_defects(island, str(tmp_path / "island.step"))
+    fine = defects.refinement
+    assert fine is not None, "a body with readings must be re-measured"
+    assert fine.resolved is False
+    assert fine.reason.startswith("increased")
+    assert [n for _d, n in fine.counts] == [13, 17], (
+        "13 then 17 -- and these are exactly G24's whole-solid sweep at the "
+        "same two deflections, which is what says the neighbourhood route "
+        "measures the same thing the whole body does"
+    )
+    assert all(n > 0 for _d, n in fine.counts)
+
+
+def test_a_real_hole_is_never_resolved_by_looking_harder(tmp_path):
+    """The control the terminus rule rests on.
+
+    The rule clears a body on an exact zero at some rung. That is only safe if
+    a genuine hole can never reach zero -- and it cannot, because refining
+    subdivides the hole's boundary polyline rather than closing it. Measured
+    over the whole ladder, so this is not one rung's luck.
+    """
+    defects = occ.exported_mesh_defects(holed_cone(), str(tmp_path / "holed.step"))
+    fine = defects.refinement
+    assert fine is not None
+    assert fine.resolved is False, "a hole must never clear"
+    assert all(n > 0 for _d, n in fine.counts), "and never read zero at any rung"
+    assert fine.counts[0][1] > defects.bad, "refining finds more of it, not less"
+
+
+def test_the_neighbourhood_route_counts_what_the_whole_solid_counts(tmp_path):
+    """The oracle: the cheap route must not merely agree on the verdict.
+
+    Refinement measures a cut-out neighbourhood, discarding any reading no core
+    face contributed. That is only the cut-boundary exclusion if it selects the
+    *same readings* a whole-solid measurement selects -- so this compares the
+    per-rung counts, not the yes/no.
+
+    The island is small enough to afford both. The whole-solid route is kept
+    here and nowhere in production, because on a 583,894-face body it is the
+    cost the neighbourhood exists to avoid.
+    """
+    island = load_island()
+    defects = occ.exported_mesh_defects(island, str(tmp_path / "island.step"))
+    rungs = [d for d, _n in defects.refinement.counts]
+
+    whole = []
+    for deflection in rungs:
+        BRepTools.Clean_s(island)
+        tally = occ._mesh_and_count(island, deflection)
+        whole.append(sum(1 for n in tally.counts.values() if n != 2))
+    BRepTools.Clean_s(island)
+
+    assert whole == [n for _d, n in defects.refinement.counts]
+
+
+def test_the_attribution_agrees_with_the_pcurve_route(tmp_path):
+    """A second opinion on ``implicated``, sharing no machinery with the first.
+
+    ``_implicated_faces`` works from the interned mesh points. OCCT will also
+    say, per (edge, face) pair, exactly which triangulation nodes an edge's
+    boundary polyline used -- ``BRep_Tool.PolygonOnTriangulation_s``, which is
+    how ``tools/prototypes/g23_bad_edge_provenance.py`` classified these
+    readings. Where the two can both speak they must agree.
+
+    It is a **subset** relation and not equality, deliberately: a reading lying
+    inside one face's own triangulation is claimed by no B-rep edge at all
+    (G23's ``interior`` class), so the polygon route cannot see it while the
+    mesh route can. Requiring equality would be requiring the weaker instrument
+    to be complete.
+    """
+    island = load_island()
+    defects = occ.exported_mesh_defects(island, str(tmp_path / "island.step"))
+
+    # Re-mesh the island itself at the same ruler and re-derive the readings,
+    # then attribute them through the polygons rather than through the points.
+    BRepTools.Clean_s(island)
+    tally = occ._mesh_and_count(island, occ.DEFAULT_MESH_DEFLECTION)
+    bad_keys = {e for e, n in tally.counts.items() if n != 2}
+    assert len(bad_keys) == defects.bad
+
+    from OCP.TopLoc import TopLoc_Location
+
+    claimed = set()
+    for fi, f in enumerate(occ._explore(island, TopAbs_ShapeEnum.TopAbs_FACE)):
+        face = TopoDS.Face_s(f)
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(face, loc)
+        if tri is None:
+            continue
+        trsf = loc.Transformation()
+        ids = []
+        for i in range(1, tri.NbNodes() + 1):
+            pt = tri.Node(i).Transformed(trsf)
+            ids.append(tally.point_id[(
+                round(pt.X() * occ._QUANTUM),
+                round(pt.Y() * occ._QUANTUM),
+                round(pt.Z() * occ._QUANTUM),
+            )])
+        for e in occ._explore(face, TopAbs_ShapeEnum.TopAbs_EDGE):
+            poly = BRep_Tool.PolygonOnTriangulation_s(TopoDS.Edge_s(e), tri, loc)
+            if poly is None:
+                continue
+            nodes = [ids[poly.Node(k) - 1] for k in range(1, poly.NbNodes() + 1)]
+            for a, b in zip(nodes, nodes[1:]):
+                lo, hi = (a, b) if a <= b else (b, a)
+                if lo != hi and lo * occ._EDGE_STRIDE + hi in bad_keys:
+                    claimed.add(fi)
+    BRepTools.Clean_s(island)
+
+    assert claimed, "the polygon route must see something, or it proves nothing"
+    assert claimed <= defects.implicated
+
+
+def test_an_unmeasured_refinement_never_reads_as_clean(tmp_path):
+    """Not measured and measured-clean must not be the same value.
+
+    Every way the second pass can fail to answer -- no face carries the
+    readings, the neighbourhood will not build, a rung raises, a rung is past
+    the triangle guard -- refuses the body. This project has recorded more than
+    once what it costs when an unmeasured quantity reads as a measured zero.
+    """
+    island = load_island()
+    nothing = occ.refine_until_manifold(island, frozenset())
+    assert nothing.resolved is False
+    assert nothing.reason.startswith("unmeasured")
+    assert nothing.counts == []
+
+    defects = occ.exported_mesh_defects(island, str(tmp_path / "island.step"))
+    starved = occ.refine_until_manifold(
+        island, defects.implicated, ladder=(0.01,)
+    )
+    assert starved.resolved is False
+    assert starved.reason.startswith("increased") or starved.reason.startswith(
+        "ladder exhausted"
+    ), "a ladder that ran out has not cleared anything"
 
 
 def test_the_cheaper_proxies_do_not_decide():

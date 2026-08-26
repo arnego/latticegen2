@@ -4,17 +4,28 @@ The twelve stages differ by three orders of magnitude in cost, so a bar that
 advanced one twelfth per stage would sit at 42 % for the twenty minutes
 ``simplify`` takes and then jump. These shares come from a real run instead.
 
-**Provenance.** The 2026-08-18 controlled pair in docs/profiling-reports.md —
+**Provenance.** The 2026-08-26 entry in docs/profiling-reports.md —
 `TD_HX_rehearsal_test` at ``cc=5, t=1`` on the 6-core development workstation,
-the two halves run on the same machine with every untouched stage agreeing to
-within 1.5 %, which is what makes averaging their columns legitimate rather than
-optimistic. ``template`` and ``import`` measure 0 s there (the profiler samples
-every 2 s) and are given a floor of one part per thousand, which the rounding
-absorbs exactly.
+90.9 minutes end to end. ``template`` measures 0 s (the profiler samples every
+2 s) and ``import``/``tessellate`` round below one part per thousand; all three
+are given a floor of 1, and the two largest stages absorb the two parts that
+costs.
+
+**This one is a single run, not a controlled pair, and that is a weaker basis
+than the table it replaces** — the 2026-08-18 pair could be averaged precisely
+because its untouched stages agreed to within 1.5 %. It is used anyway because
+the alternative is worse: the previous shares gave ``validate`` **35** of 1000
+when it is now the largest stage in the run at **385**, so the bar would sit
+still for thirty-five minutes and then jump. A weighting measured once is wrong
+about the margins; the one it replaces was wrong about the shape.
 
 **What this table is not.** It is one part's shape, on one machine. A small part
 is boundary- and export-dominated — on ``80mm-test-ball`` ``simplify`` is
-trivial — so the bar will visibly jump there. That is the accepted trade: a
+trivial — so the bar will visibly jump there. ``validate``'s 385 is dominated by
+the export-truth gate (docs/algorithm.md §9), which writes, re-reads and
+tessellates **every** output solid: 2,003 s of that stage's 2,105 s here. On a
+part whose bodies are small that gate is seconds, and the bar will run through
+``validate`` almost at once. That is the accepted trade: a
 fixed weighting is monotone and never lies about what has finished, where a
 time-based estimate would sit at 100 % of a stage that had not ended. Read the
 bar as "how far through the work", never as an ETA.
@@ -33,15 +44,15 @@ STAGE_PERMILLE: dict[str, int] = {
     "template": 1,
     "import": 1,
     "tessellate": 1,
-    "classify": 13,
-    "boundary": 250,
-    "connect": 4,
-    "stitch": 207,
-    "instance": 14,
-    "assemble": 7,
-    "simplify": 360,
-    "validate": 35,
-    "export": 107,
+    "classify": 5,
+    "boundary": 211,
+    "connect": 6,
+    "stitch": 108,
+    "instance": 8,
+    "assemble": 4,
+    "simplify": 204,
+    "validate": 385,
+    "export": 66,
 }
 
 #: Where each stage's band begins, in the same units.

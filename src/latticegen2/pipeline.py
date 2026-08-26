@@ -567,6 +567,17 @@ def _run_with_pool(
             f"{simplify_stats['unmerged_solids']} of {len(result_solids)} solid(s); "
             f"they are exported as built. The output is larger, not different."
         )
+    if simplify_stats["invalid_merges"]:
+        # Unconditional, like the "declined to unify" note above it: a run whose
+        # output is larger than it should be has to say why, and this one says
+        # the kernel produced something the validity gate would have refused.
+        rl.always(
+            f"note: unifying {simplify_stats['invalid_merges']} of "
+            f"{len(result_solids)} solid(s) produced an invalid result, so the "
+            f"un-unified solid was kept instead (docs/algorithm.md S9). The "
+            f"output is larger, not different -- and this is the one guard on "
+            f"that step the volume bars cannot stand in for."
+        )
     if simplify_stats["max_worker_rss"]:
         rl.note_worker_rss(simplify_stats["max_worker_rss"])
         rl.line(f"peak simplify worker memory: {format_bytes(simplify_stats['max_worker_rss'])}")
@@ -574,6 +585,7 @@ def _run_with_pool(
     stats["output_faces"] = simplify_stats["output_faces"]
     stats["output_edges"] = simplify_stats["output_edges"]
     stats["unmerged_solids"] = simplify_stats["unmerged_solids"]
+    stats["invalid_merges"] = simplify_stats["invalid_merges"]
 
     with Timer(rl, "validate"):
         invalid, total_volume = _validate(result_solids, report=rl.substage)
@@ -837,7 +849,8 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
     took it out of the deciding seat.
     """
     started = _dt.datetime.now()
-    broken: list[tuple[int, int, int]] = []
+    broken: list[tuple[int, int, int, occ.Refinement]] = []
+    refined: list[tuple[int, int, float]] = []
     worst = 0.0
     fraction = 0.0
     loose_faces = 0
@@ -874,25 +887,66 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
                 f"    by use count {dict(sorted(defects.by_use.items()))}; "
                 f"positions {[list(p) for p in defects.where]}"
             )
-            broken.append((i, bad, triangles))
+            # `exported_mesh_defects` always re-measures a body with
+            # readings, so `None` here would mean the instrument did not run.
+            # That is refused rather than crashed on: an unmeasured body must
+            # never reach the *clean* branch, and it must not take the run down
+            # with it either.
+            fine = defects.refinement or occ.Refinement(
+                False, [], len(defects.implicated), 0,
+                "unmeasured: the body was never re-measured")
+            ladder = " ".join(f"{d}:{n}" for d, n in fine.counts) or "none"
+            rl.line(
+                f"    on {fine.core_faces} face(s); re-measured over a "
+                f"{fine.extract_faces}-face neighbourhood at {ladder} "
+                f"-- {fine.reason}"
+            )
+            if fine.resolved:
+                # Deliberately *not* the sentence a solid reading 0 at the
+                # coarse ruler prints. This body did carry readings; what the
+                # ladder establishes is that they were the ruler and not the
+                # geometry, and a reader has to be able to tell the two runs
+                # apart afterwards.
+                refined.append((i, bad, fine.counts[-1][0]))
+            else:
+                broken.append((i, bad, triangles, fine))
     rl.substage("export truth", len(solids), len(solids))
     elapsed = (_dt.datetime.now() - started).total_seconds()
     stats["export_truth_s"] = round(elapsed, 2)
     stats["worst_pcurve_deviation_mm"] = f"{worst:.3e}"
     stats["loose_area_fraction"] = f"{fraction:.3e}"
     stats["loose_faces"] = loose_faces
+    if refined:
+        # Greppable afterwards, because "cleared by refinement" and "was clean"
+        # are different runs and a summary that conflates them would hide the
+        # only bodies this second pass has ever been asked about.
+        stats["export_truth_refined"] = "; ".join(
+            f"solid {i}: {bad} reading(s) at "
+            f"{occ.DEFAULT_MESH_DEFLECTION} mm, none at {d} mm"
+            for i, bad, d in refined
+        )
     rl.line(
         f"export truth: all {len(solids)} solid(s) round-tripped and tessellated; "
         f"worst pcurve-vs-3D deviation {worst:.4e} mm over {pairs} edge/face "
         f"pair(s) [{elapsed:.1f}s]"
+        + (f"; {len(refined)} solid(s) cleared only after being re-measured at "
+           f"a finer deflection" if refined else "")
     )
     if broken:
-        first, bad, triangles = broken[0]
+        first, bad, triangles, fine = broken[0]
+        ladder = " -> ".join(f"{n} at {d} mm" for d, n in fine.counts) or "none"
         raise ProcessingError(
             f"Solid {first} does not survive being written to STEP: after a "
             f"round trip its {triangles} triangles carry {bad} edge(s) not used "
             f"by exactly two of them, so nothing downstream can tessellate it "
             f"consistently"
+            # The ladder, not just the count. "13 -> 8 -> 4 -> 4, still 4 at
+            # 0.0001 mm" says the readings are geometry; "10 -> 13 -> 17" says
+            # the body comes apart the more closely it is measured. A bare
+            # total says neither, and this project spent two gates and a
+            # 93-minute run recovering that distinction by hand.
+            + f". Re-measured over a {fine.extract_faces}-face neighbourhood: "
+            f"{ladder} ({fine.reason})"
             + (f" ({len(broken)} solid(s) affected)" if len(broken) > 1 else "")
             + f". STEP AP214 declares one tolerance for a whole file where this "
             f"B-rep carries one per subshape, so a body whose validity rests on "
@@ -1003,7 +1057,7 @@ one, and ``BRepCheck_Analyzer`` at `validate`.
 """
 
 
-def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
+def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool]:
     """Unify one solid, giving up on the parts of the job that will not run.
 
     Returns the solid and whether the kernel ran at all, so the caller reports
@@ -1046,15 +1100,48 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool]:
     this tool legitimately produces; now that it runs last and alone, a refusal
     costs only the edge concatenation, where the old ladder threw away a
     completed face merge and paid for a second one.
+
+    **A kernel that does not throw can still hand back an invalid solid, and
+    that is degraded from rather than shipped.** docs/algorithm.md §9 already
+    names the validity gate as the *stronger* of the guards on this step —
+    "merging faces that are not the same surface moves the boundary, which shows
+    up as an invalid solid long before it shows up as a changed volume" — but
+    until this the run simply *failed* there, which is the one response §11
+    forbids for a step whose only job is to make the output smaller. Measured on
+    `TD_HX_rehearsal_test` at ``cc=7, t=1.4``: the 279,358-face dominant body is
+    `BRepCheck_Analyzer`-valid and tessellates with **0** non-manifold edges,
+    unification takes it to 193,721 faces with exactly **one** invalid face of
+    3.426439 mm², and the run died at `validate` having discarded the sound
+    solid it started from. The volume guards cannot see it — the drift is
+    6.20e-06 relative, well inside the 1e-4 pre-filter.
+
+    So the result is checked and the *input* is kept when it does not hold up.
+    The failure mode becomes a larger file, exactly as it already is for a
+    kernel that throws. The check costs one whole-solid ``is_valid`` per solid,
+    in the worker where the solid already lives and parallel across solids —
+    23.3 s on that 193,721-face body. It is deliberately **not** compared
+    against the input's validity: an input that is itself invalid gains nothing
+    from being kept, and `validate` refuses it exactly as it did before, so
+    paying 34.7 s to find that out would buy nothing.
     """
+    ran = True
     try:
         merged = occ.unify_same_domain(solid, unify_edges=False)
     except Standard_Failure:
-        return solid, False
+        return solid, False, False
     try:
-        return occ.unify_same_domain(merged, unify_edges=True, unify_faces=False), True
+        merged = occ.unify_same_domain(merged, unify_edges=True, unify_faces=False)
     except Standard_Failure:
-        return merged, True
+        pass
+    # `parallel=False` because this runs *inside* a worker: the pool around it
+    # already occupies the whole `--cores` budget, and OCCT's own thread pool is
+    # deliberately left unbounded there (`parallel.set_thread_budget` is not
+    # called in the worker initializer), so asking for threads here would be W
+    # processes x W threads on W cores -- the over-subscription
+    # docs/algorithm.md S9 keeps the *gate* on the master to avoid.
+    if not occ.is_valid(merged, parallel=False):
+        return solid, ran, True
+    return merged, ran, False
 
 
 def _check_unify_result(
@@ -1131,6 +1218,7 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
     faces_after = edges_after = 0
     worst_drift = 0.0
     skipped = 0
+    invalid_merges = 0
     out: list[TopoDS_Shape] = []
     for done, solid in enumerate(solids):
         if report is not None:
@@ -1140,9 +1228,11 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
         edges_before += e
         pre_volume = occ.volume(solid)
 
-        merged, ran = _unify_one(solid)
+        merged, ran, degraded = _unify_one(solid)
         if not ran:
             skipped += 1
+        if degraded:
+            invalid_merges += 1
         produced = occ.solids(merged)
         post_volume = occ.volume(produced[0]) if len(produced) == 1 else float("nan")
         worst_drift = max(worst_drift, _check_unify_result(
@@ -1162,6 +1252,7 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
         "output_edges": edges_after,
         "volume_drift": worst_drift,
         "unmerged_solids": skipped,
+        "invalid_merges": invalid_merges,
         "max_worker_rss": 0,
     }
 
@@ -1179,7 +1270,7 @@ def _worker_unify(job):
     faces_before, edges_before = occ.count_subshapes(solid)
     pre_volume = occ.volume(solid)
 
-    merged, ran = _unify_one(solid)
+    merged, ran, degraded = _unify_one(solid)
     produced = occ.solids(merged)
     n_produced = len(produced)
     if n_produced == 1:
@@ -1195,8 +1286,11 @@ def _worker_unify(job):
     from .runlog import peak_rss_bytes
 
     return (
+        # `degraded` goes before the RSS reading, not after: `WorkerPool.run`
+        # takes the peak from `rss_index=-1`, so anything appended past it is
+        # silently read as a memory figure.
         out_path, faces_before, edges_before, faces_after, edges_after,
-        pre_volume, post_volume, n_produced, ran, peak_rss_bytes(),
+        pre_volume, post_volume, n_produced, ran, degraded, peak_rss_bytes(),
     )
 
 
@@ -1232,12 +1326,16 @@ def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str, r
     faces_after = edges_after = 0
     worst_drift = 0.0
     skipped = 0
+    invalid_merges = 0
     out: list[TopoDS_Shape] = []
-    for (out_path, fb, eb, fa, ea, pre_volume, post_volume, n_produced, ran, _rss) in results:
+    for (out_path, fb, eb, fa, ea, pre_volume, post_volume, n_produced, ran,
+         degraded, _rss) in results:
         faces_before += fb
         edges_before += eb
         if not ran:
             skipped += 1
+        if degraded:
+            invalid_merges += 1
         # Read back only if the pre-filter trips: the shape is loaded a few
         # lines below anyway on the path that does not, so this costs a second
         # read solely on the path that is already about to fail.
@@ -1256,6 +1354,7 @@ def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str, r
         "output_edges": edges_after,
         "volume_drift": worst_drift,
         "unmerged_solids": skipped,
+        "invalid_merges": invalid_merges,
         "max_worker_rss": max_rss,
     }
 

@@ -45,12 +45,14 @@ User will run /code-review manually or ask for it explicitly when needed.
 
 ### Testing Procedures
 
-Read @docs/testing.md 
+Before running, adding or changing tests, and before any performance work, read
+docs/testing.md. The gate for a change is `python -m pytest test -q`, then
+`python tools/e2e.py`.
 
 ### Releases
 
 Offline release bundles and the tag-driven GitHub Actions workflow that
-publishes them are documented in @docs/release.md. The version is single-sourced
+publishes them are documented in docs/release.md. The version is single-sourced
 from `src/latticegen2/__init__.py`; `pyproject.toml` derives it. Dependency pins
 live in `requirements-bundle.txt` and must stay in sync with
 `licenses/LICENSES.md`.

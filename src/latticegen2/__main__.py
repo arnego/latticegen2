@@ -19,7 +19,7 @@ import sys
 from . import progress
 from .cli import HelpRequested, USAGE, parse_args, preflight_checks
 from .errors import CancelledError, LatticeGenError
-from .runlog import STAGES, RunLog
+from .runlog import RunLog, stages_for
 
 
 #: How often the run looks for its cancel sentinel. Fast enough that Stop feels
@@ -101,6 +101,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED: -i/--input is required.\n\n{USAGE}", file=sys.stderr)
         return 2
 
+    # The window's helper for drawing the input on the print bed
+    # (latticegen2.preview). Transport, like `--progress-stream`: no log, no
+    # temp folder, no pipeline.
+    if argv[:1] == ["--preview-mesh"]:
+        from .preview import main as preview_main
+
+        return preview_main(argv[1:])
+
     try:
         args = parse_args(argv)
     except HelpRequested:
@@ -128,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     from .pipeline import run_pipeline
 
     rl = RunLog(args.log_path, verbose=args.verbose).open()
+    rl.stage_names = stages_for(args.support)
 
     def finish(status: str, code: int, reason: "str | None") -> int:
         if rl.emit is not None:
@@ -152,11 +161,17 @@ def main(argv: list[str] | None = None) -> int:
             rl.emit = progress.NdjsonEmitter(sys.stdout, t0=rl.t0)
             rl.emit(
                 progress.HELLO, v=progress.SCHEMA_VERSION, pid=os.getpid(),
-                stages=list(STAGES), output=args.output, log=args.log_path,
+                stages=list(rl.stage_names), output=args.output, log=args.log_path,
                 workers=args.workers,
             )
             _watch_for_cancel(args.log_path)
         rl.header(args.as_dict())
+        if args.support:
+            from .cli import overhang_warning
+
+            warning = overhang_warning(args.overhang)
+            if warning:
+                rl.always(f"WARNING: {warning}")
         stats = run_pipeline(args, rl)
         rl.summary(args.as_dict(), stats)
         return finish(progress.OK, 0, None)

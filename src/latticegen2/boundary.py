@@ -161,6 +161,12 @@ class BoundaryPiece:
     this is a list per key, not a single face. Keyed by node as well as
     half-strut id because a piece :func:`fuse_disagreeing_pairs` has merged can
     hold caps belonging to either of the nodes it spans."""
+    support: bool = False
+    """Whether this piece carries print support (docs/algorithm.md §14.5).
+
+    Such a piece is one lattice cell's junction fused with the support passing
+    through it. It is attached to the wall by design, so the component it
+    belongs to is exempt from the floating-body rule (specification.md §5)."""
     caps: frozenset[tuple[NodeKey, int]] = frozenset()
     """``(node, half-strut id)`` pairs whose cap face this piece gave up as an
     interface.
@@ -821,7 +827,14 @@ def _owning_cap(
         if h is None:
             continue
         ideal = pos + half_strut_offset(lp, h)
-        d = float(np.linalg.norm(centre - ideal))
+        # The face must lie within this node's own cell face, not merely in its
+        # plane. For a bare cap the nearest-centre rule below already implies
+        # it; a support cross-section (docs/algorithm.md §14.5) can sit anywhere
+        # on the cell face, where "nearest cap centre" stops being decisive.
+        rel = centre - ideal
+        if any(abs(float(rel @ lp.e[k])) > lp.a / 2.0 + 1e-6 for k in range(3)):
+            continue
+        d = float(np.linalg.norm(rel))
         if best is None or d < best_d:
             best, best_d = (node, h), d
     return best
@@ -829,7 +842,7 @@ def _owning_cap(
 
 def _fuse_group(
     lp: LatticeParams, group: list[BoundaryPiece]
-) -> tuple[BoundaryPiece, list[tuple[NodeKey, int]]]:
+) -> tuple[list[BoundaryPiece], list[tuple[NodeKey, int]]]:
     """Fuse one cluster of mutually disagreeing pieces into a single solid.
 
     Rebuilds each piece as a solid, fuses them with one ``BRepAlgoAPI_Fuse``
@@ -856,33 +869,44 @@ def _fuse_group(
             f"local repair boolean did not complete."
         )
     result_solids = occ.solids(fuse.Shape())
-    if len(result_solids) != 1:
+    supported = any(p.support for p in group)
+    # Lattice junctions on either side of one cap fuse into one solid or the
+    # repair has not worked. Supported cells are different: one cell can hold
+    # several disconnected pieces, all presenting material in the same cell
+    # plane, so the group legitimately fuses into more than one solid — each
+    # of which is simply a piece (docs/algorithm.md §14.5).
+    if len(result_solids) != 1 and not (supported and result_solids):
         raise ProcessingError(
             f"Fusing the disagreeing boundary pieces at {involved} produced "
             f"{len(result_solids)} solid(s) instead of 1. The two pieces do not "
             f"even overlap consistently, which is beyond what this repair can fix."
         )
-    solid = result_solids[0]
 
-    group_nodes = np.array([p.node for p in group], dtype=np.int64)
-    node_positions = list(zip((p.node for p in group), nodes(lp, group_nodes)))
-    # Re-measured on the fused result rather than inherited from the group: the
-    # fuse rebuilds faces along the seam it closes, so the operands' readings
-    # describe geometry that no longer exists (docs/algorithm.md §7.3).
-    fused_faces = occ.faces(solid)
-    tf = occ.tolerance_feature_ratio(fused_faces)
-    merged = BoundaryPiece(
-        node=group[0].node,
-        volume=occ.volume(solid),
-        tolerance_ratio=tf.ratio,
-        tolerance_evidence=(tf.tolerance, tf.face_area, tf.where),
-    )
-    for face in fused_faces:
-        tag = _owning_cap(lp, face, node_positions)
-        if tag is None:
-            merged.faces.append(face)
-        else:
-            merged.cap_faces.setdefault(tag, []).append(face)
+    group_nodes = np.array(sorted({p.node for p in group}), dtype=np.int64)
+    node_positions = list(zip(map(tuple, group_nodes.tolist()),
+                              nodes(lp, group_nodes)))
+    merged_pieces = []
+    for solid in result_solids:
+        # Re-measured on the fused result rather than inherited from the group:
+        # the fuse rebuilds faces along the seam it closes, so the operands'
+        # readings describe geometry that no longer exists (docs/algorithm.md
+        # §7.3).
+        fused_faces = occ.faces(solid)
+        tf = occ.tolerance_feature_ratio(fused_faces)
+        merged = BoundaryPiece(
+            node=group[0].node,
+            volume=occ.volume(solid),
+            tolerance_ratio=tf.ratio,
+            tolerance_evidence=(tf.tolerance, tf.face_area, tf.where),
+            support=supported,
+        )
+        for face in fused_faces:
+            tag = _owning_cap(lp, face, node_positions)
+            if tag is None:
+                merged.faces.append(face)
+            else:
+                merged.cap_faces.setdefault(tag, []).append(face)
+        merged_pieces.append(merged)
 
     # `_owning_cap` tests one axis per half-strut, so it can pass for more than
     # one node in the group and its centroid tie-break is only as good as the
@@ -898,8 +922,8 @@ def _fuse_group(
     # failure without that evidence would risk refusing correct input, which
     # docs/algorithm.md §11 forbids more strongly than it asks for any gate.
     presented = {key for p in group for key in p.cap_faces}
-    invented = sorted(set(merged.cap_faces) - presented)
-    return merged, invented
+    invented = sorted({k for m in merged_pieces for k in m.cap_faces} - presented)
+    return merged_pieces, invented
 
 
 def fuse_disagreeing_pairs(
@@ -973,6 +997,7 @@ def fuse_disagreeing_pairs(
         groups.setdefault(uf.find(i), []).append(i)
 
     fused: list[BoundaryPiece] = []
+    n_fuses = 0
     invented: list[tuple[NodeKey, int]] = []
     gave_up: set[int] = set()
     for idxs in groups.values():
@@ -1001,12 +1026,13 @@ def fuse_disagreeing_pairs(
             # closed. "Do more work", never "produce a wrong result" (§11).
             gave_up.update(idxs)
             continue
-        fused.append(merged)
+        fused.extend(merged)
+        n_fuses += 1
         invented.extend(bad_keys)
 
     touched -= gave_up
     kept = [p for i, p in enumerate(pieces) if i not in touched]
-    return kept + fused, len(fused), invented
+    return kept + fused, n_fuses, invented
 
 
 # --- Worker-process plumbing ------------------------------------------------
@@ -1046,8 +1072,8 @@ def _worker_trim(job):
     worker process by :class:`latticegen2.parallel.WorkerPool`'s own initializer
     rather than once per job.
     """
-    (body_path, cc, t, node_batch, out_path, mesh_path, margin) = job
-    lp = lattice_params(cc, t)
+    (body_path, cc, t, node_batch, out_path, mesh_path, margin, orient) = job
+    lp = lattice_params(cc, t, orient)
     tpl = build_template(lp)
     body = _read_brep(body_path)
     probe = _worker_probe(mesh_path, margin)
@@ -1200,7 +1226,8 @@ def trim_boundary(
     batches = _split_batches(boundary_nodes, workers)
     jobs = [
         (body_path, lp.cc, lp.t, nb.tolist(),
-         os.path.join(tmpdir, f"boundary_{bi}.brep"), mesh_path, outside_margin)
+         os.path.join(tmpdir, f"boundary_{bi}.brep"), mesh_path, outside_margin,
+         lp.orient)
         for bi, nb in enumerate(batches)
     ]
 

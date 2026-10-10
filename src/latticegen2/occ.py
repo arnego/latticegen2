@@ -1334,7 +1334,8 @@ def make_solid(shell: TopoDS_Shell) -> TopoDS_Shape:
 
 
 def unify_same_domain(
-    shape: TopoDS_Shape, unify_edges: bool = True, unify_faces: bool = True
+    shape: TopoDS_Shape, unify_edges: bool = True, unify_faces: bool = True,
+    keep_curved: bool = False,
 ) -> TopoDS_Shape:
     """Merge adjacent faces (and edges) that lie on the same underlying surface.
 
@@ -1358,6 +1359,15 @@ def unify_same_domain(
     the geometry rather than just how it is described.
     """
     upgrade = ShapeUpgrade_UnifySameDomain(shape, unify_edges, unify_faces, False)
+    if keep_curved:
+        # ``KeepShape`` on an edge forbids merging the faces either side of it,
+        # so protecting every edge of every non-planar face restricts the merge
+        # to planar faces (:func:`latticegen2.pipeline._unify_one`).
+        for face in faces(shape):
+            if is_planar(face):
+                continue
+            for edge in _explore(face, TopAbs_ShapeEnum.TopAbs_EDGE):
+                upgrade.KeepShape(edge)
     upgrade.Build()
     return upgrade.Shape()
 

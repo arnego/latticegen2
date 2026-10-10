@@ -38,6 +38,11 @@ STEP file. All angles are computed from expressions (`arcsin`, `arccos`, `sqrt`,
 
 ### 2.1 Strut directions
 
+**"+Z" throughout §2 and §3 is the canonical frame.** The pipeline turns that
+frame to the print bed (§14.0): every statement below holds with the bed's
+normal `b` standing where `Z` stands, and at the default orientation `0 0 0`
+the two are the same vector.
+
 The lattice is a simple cubic lattice of node points, rotated so its `[1,1,1]`
 body diagonal is aligned with +Z (a cube "standing on its tip" per spec §4.1).
 Three strut directions emanate from every node, at azimuths 120° apart around Z,
@@ -215,6 +220,11 @@ flowchart TD
     on W worker processes, drop interface cap faces]
     I -->|worker failure| E3[Exit 4: geometry processing error
     keep temp for analysis]
+    I -->|--support| SU[Detect inner overhangs, place supports on the
+    surviving lattice, rebuild every cell a support reaches,
+    prove coverage - section 14]
+    SU -->|overhang left uncovered| E3
+    SU --> J
     I --> J[Build junction graph, find components,
     drop floating bodies under t cubed]
     J --> K[Sew the boundary layer to itself,
@@ -2302,4 +2312,281 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/progress.py`](../src/latticegen2/progress.py) | §10 (the NDJSON event schema, its emitter and its reader, plus the cancel-sentinel path both processes derive) |
 | [`src/latticegen2/gui/`](../src/latticegen2/gui/) | specification.md §3.1 (the window, the subprocess runner and the stage weights) — imports no geometry module and no OCP |
 | [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration), §5.4 (dispatching the classification sweep), §9 (parallel unification, and the master-side validity gate) |
+| [`src/latticegen2/orient.py`](../src/latticegen2/orient.py) | §14.0 (the three angles, the rotation, the build direction) — pure NumPy, shared by the command line, the lattice maths and the window |
+| [`src/latticegen2/support/`](../src/latticegen2/support/) | §14.1–§14.6 (overhang detection, primitives and their clip, placement, the per-cell build and its coverage proof) — imported only under `--support` |
+| [`src/latticegen2/preview.py`](../src/latticegen2/preview.py) | specification.md §3.1 (the coarse mesh of the input the window draws on the print bed) |
 | [`src/latticegen2/__main__.py`](../src/latticegen2/__main__.py) | Entry point, failure reporting, exit codes |
+
+---
+
+## 14. Print orientation and print supports
+
+Two additions that share one input. The **print orientation** turns the lattice
+to the print bed and applies to every run (specification.md §4.5). **Print
+supports** are an opt-in stage that backs every inner overhang of the input
+with permanent, solid, self-supporting material (specification.md §4.6); with
+`--support` absent none of that code is loaded.
+
+Extra symbols: `b` build direction, `φ` maximum overhang angle from `b`,
+`τ = tan φ`, `t_s` minimum support thickness, `Ω` the input body, `n` its
+outward normal, `h_s` the overhang sample pitch.
+
+### 14.0 Orientation
+
+Three angles in degrees turn the *part* relative to the bed, about the bed's
+fixed X, then Y, then Z axis:
+
+```python
+R = Rz(rz) @ Ry(ry) @ Rx(rx)        # p_bed = R @ p_part
+b = R.T @ (0, 0, 1)                 # the bed's normal, in part coordinates
+e_k' = R.T @ e_k                    # the lattice frame, in part coordinates
+u_k  = normalize(cross(b, e_k'))    # §3.1, with b where z stood
+v_k  = cross(e_k', u_k)
+```
+
+The body is never transformed, so the output stays in the input's coordinate
+system. Every identity of §2.3 holds about `b` instead of `z`
+(`test/test_orient.py`). `node(0,0,0)` stays at the part's origin, so the
+lattice turns about it.
+
+**There is no identity bypass.** `R` is built and applied on every run, `0 0 0`
+included, and nothing asks whether it is the identity. An unrotated run
+reproduces the lattice it always produced because `cos 0 = 1` and `sin 0 = 0`
+exactly, which makes `R` exactly `I` and every frame vector a sum of products
+with exact ones and zeros — asserted element for element in
+`test/test_orient.py`, and by both golden samples at 0 mm³ through this path.
+
+**Candidate nodes are bounded by the surface mesh, not by the body's box.**
+§2.4 maps the eight corners of the world AABB through `B⁻¹`. That is correct for
+any basis and loose for most: the index-space box of a world box is larger than
+the body inside it, by a multiple once the lattice is rotated. The pipeline
+bounds the classification mesh's own vertices in index space instead
+(`lattice.index_range_of_points`), padded exactly as §2.4 pads. It is safe by
+the same argument — the body lies within the hull of its mesh inflated by
+`d ≤ a/4`, a junction reaches `a/2`, and a world distance `x` is at most `x/a`
+in any index coordinate, together under one cell against a pad of two — and it
+only ever removes candidates that classify OUTSIDE, in the same order, so the
+interior and boundary sets and everything built from them are unchanged.
+Measured on `dense-lattice`: 23,064 candidates → **10,608**, of which the 594
+interior and 968 boundary nodes are the same ones; both golden samples still
+compare at 0 mm³. (§5.4's figures predate this and count the box.)
+
+### 14.1 Overhang detection
+
+A point of `∂Ω` is an inner overhang iff
+
+```
+n · b  >  sin φ
+```
+
+— the surface acts as a ceiling of the volume and the shell beyond it overhangs
+the lattice core more flatly than the limit. A flat ceiling (`n = b`) always
+qualifies, a vertical wall never does, and a wall leaning inward by `ω`
+qualifies iff `ω > φ`. The underside of the body is an *outside* overhang and is
+never examined. The lattice is not analysed.
+
+Three kinds of sample are produced (`support/overhang.py`):
+
+* **Faces** — sampled on the **true surface** with its exact normal, by
+  refining each face's classification triangulation in UV to pitch
+  `h_s = clamp(min(t, t_s)/2, 0.25, 1.0)` mm. Triangle normals are not used:
+  §5.1's 0.2 rad angular deflection would smear a region's border by 11°. Each
+  triangle is sampled along its longest side and across its height separately,
+  because the mesher makes long thin triangles and sampling at the square of the
+  long side put 300 samples on every mm² of `test-cylinder.STEP`.
+* **Edges** — a concave edge of the body is a ridge of shell hanging into the
+  volume. The outward normals between its two faces sweep an arc, and it
+  overhangs iff that arc contains a direction over the bar while neither face
+  does: the ridge runs flatter than the limit, between two faces that are each
+  steep enough.
+* **Vertices** — a vertex lower than everything attached to it with the body
+  directly beneath: the tip of a stalactite.
+
+Everything with `n·b ≥ sin(φ − Δ)`, `Δ = 5°`, is reported. The margin is
+conservative, and it is what keeps a support face from meeting the wall
+tangentially at the border of an overhang region — §7's grazing-trim regime.
+
+**The configured limit is checked against the lattice's own angles**, as a
+warning. Strut ridge edges recline at `θ` (54.74°) and strut faces at `90° − θ`
+(35.26°) from `b`. Below 54.74° the command line and the window warn that the
+lattice's edges exceed the limit, below 35.26° that its faces do too
+(`cli.overhang_warning`); the default of 60° is silent. The run proceeds either
+way.
+
+### 14.2 Why the result is self-supporting
+
+Let `K(s)` be the upward 8-sided pyramid with apex `s`, axis `b` and **ridge
+edges at exactly `φ`**. Its faces are then at `atan(τ·cos(π/8))` — 58.0° at the
+60° default — so neither a face nor an edge of it exceeds the limit.
+
+> **Cone lemma.** `K(s) ∩ Ω` is self-supporting whenever `s` lies in grounded
+> material or outside `Ω`. Every point `x` of it reaches `s` along a segment
+> inside `K(s)`. That segment either ends at `s`, in material, or leaves `Ω`
+> through a wall point `y` with `(x − s)·n(y) < 0`, which forces the wall's own
+> tilt at `y` below `φ`: a wall that supports itself.
+
+So the whole support is a union of such pyramids, each rooted in material that
+exists, intersected with `Ω`. There is no visibility test, every support surface
+is inside the limit by construction, and every interface to wall or lattice is
+solid because the apex is buried.
+
+A sample `p` is covered by apex `s` iff, with `δ = (p − s)·b` and `ρ` the
+horizontal distance,
+
+```
+ρ + h_s + d  ≤  δ · τ · cos(π/8)
+```
+
+— the *inscribed* cone, shrunk so the sample's whole neighbourhood is inside.
+Every surface point is within `h_s + d` of a sample, so covering samples this
+way covers the surface, and neighbouring capitals overlap with positive area at
+the wall instead of kissing along a line.
+
+### 14.3 Primitives
+
+Two convex polyhedra, held as vertex arrays and face loops
+(`support/polyhedra.py`):
+
+| Primitive | Geometry |
+|---|---|
+| **Capital** | `K(s)` truncated at a height above `s` |
+| **Post** | `K(q)` ∩ a vertical octagonal prism, across-flats `t_s` — a pencil on its tip |
+
+`t_s` governs free-standing members, which are the posts. A capital is at least
+`t_s` across its top, and where it is rooted in a strut it is as thick at its
+root as that strut.
+
+Each primitive gets its own azimuth phase from a fixed low-discrepancy
+sequence, kept at least 2° from every lattice face and cap azimuth, so that no
+two support faces and no support and lattice faces are coplanar in a regular
+array; and an apex is nudged **downward** — always safe, `K` only grows — until
+no primitive vertex lies within `2e-3·a` of a lattice cell plane.
+
+### 14.4 Placement
+
+Kernel-free (`support/plan.py`). **The lattice is the trunk system**: apexes are
+taken from
+
+1. **strut stations** at fractions `0.15, 0.3, 0.42, 0.58, 0.72, 0.86` of `a`
+   from a node along each of its struts — never 0.5, which is a cell plane. The
+   stations past 0.5 lie on the neighbouring node's half and matter most: a
+   strut that runs up to an overhanging ceiling ends above it, so its upper half
+   is where the lattice comes closest to the surface;
+2. **king posts** — a post from a node straight up its cell's body diagonal,
+   which is vertical and free of struts for `a·√3`, carrying a capital. Needed
+   because a strut reclines at 54.74° and moves sideways as fast as a cone
+   grows: below `φ ≈ 56.8°` the area under a node lying just above the ceiling
+   cannot be reached from the struts leading to it at all;
+3. **drop columns** — a post straight down to the wall. Going down from a
+   ceiling point always leaves the body through an up-facing surface, so this
+   fallback always exists.
+
+Anchoring is evaluated against the lattice the boundary trim actually left. A
+node may root a support only if it is **grounded** — from it there is a way
+down one of its three lower struts, either to a grounded lower node joined
+across an accepted interface, or to where that strut emerges from a part of the
+wall that is not itself an overhang — and, for a boundary node, only if its
+trim left exactly one piece whose centre is clear of the surface by `r + d`. A
+station is usable only where the strut is whole from the node to it, and past
+the cap only where the neighbour exists and was joined.
+
+Selection is two rounds. First every sample proposes its cheapest feasible
+apex, cheap meaning depth below the sample (a capital's volume per covered area
+grows linearly with depth), floored at `0.3·a`: the true minimum-volume answer
+is an unbounded number of vanishing capitals, each of them more faces to fuse.
+Then a greedy set cover over the proposed apexes maximises **samples covered
+per unit of material**, each capital also carrying the fixed cost of one at the
+floor depth. By count alone the deepest capital always wins and the ceiling
+ends up backed almost solid — measured on `test-cylinder.STEP`, 837 primitives
+and 17,060 mm³ of support by count against 406 and 10,270 mm³ by material.
+
+### 14.5 Building it — one lattice cell at a time
+
+Fusing supports into a finished lattice is one boolean against hundreds of
+thousands of faces, the operation this architecture exists to avoid (§12). The
+lattice already provides the partition: node `n` owns the cube
+
+```
+Q_n = { x : |e_k · (x − n)| ≤ a/2,  k = 0, 1, 2 }
+```
+
+which contains `J_n` and whose faces **are** the junction's cap planes. For
+every cell a primitive reaches (`support/build.py`):
+
+1. each primitive is clipped to `Q_n` **analytically** — a convex polyhedron
+   against six planes, exact to floating point, and pieces lying wholly inside
+   another piece are dropped;
+2. one local fuse of `J_n` with the clipped pieces, its coplanar faces merged;
+3. one intersection with `Ω`, one object operand at a time (§7), skipped where
+   no part of the surface is near the cell;
+4. faces in the cube's planes are tagged exactly as a trimmed junction's caps.
+
+The result is an ordinary boundary piece that replaces the cell's lattice-only
+one, and §7.1, §8 and §9 then treat a support cross-section in a cap plane as
+they always treated a trimmed cap. A supported node that was INTERIOR leaves
+the instanced set. A cell a primitive's bounding box reaches but the primitive
+does not keeps the piece it had.
+
+**It is two-pass on purpose.** The boundary trim runs first, untouched;
+placement sees the lattice that survived; only supported cells are rebuilt.
+
+Four things had to change for support cross-sections to pass through the
+existing interface machinery, each measured on `test-cylinder.STEP`:
+
+* **The edge-for-edge interface check ignores edges along the cell's own
+  border** (`weld._within_cell_face`). A bare cap sits well inside its cell
+  face; a support cross-section can reach the border, and an edge there is
+  where two of a piece's interface faces meet — after both are given up it is
+  either no free edge at all or one whose partner belongs to a third cell,
+  legitimately different on the two sides. 124 of 3,683 interfaces were
+  rejected for it, every one with matching areas; with it, 1 of 3,680 is, and
+  the local fuse of §8 repairs that one.
+* **A fused group of supported cells may be several solids**
+  (`boundary._fuse_group`): one cell can hold disconnected pieces that all
+  present material in one plane.
+* **Enclosed voids are filled** (`support.build.fill_voids`). Overlapping
+  capitals can seal off a pocket; its wall is a second closed surface in the
+  same shell, which is not a connected shell, and the pocket could never be
+  emptied of powder. Every edge-connected group of faces other than the
+  outermost must enclose negative volume and is dropped. Measured while the placement
+  was still choosing by count: 5 pockets totalling 0.076 mm³ on that part. The
+  placement of §14.4 leaves none there, and 4 inside single cells on the 80 mm
+  ball, which the cell's own build fills.
+* **Unification gained a planar-only rung** (§9, `pipeline._unify_one`). Where
+  many cells' contact patches lie side by side on one cylindrical wall,
+  `ShapeUpgrade_UnifySameDomain` builds the merged face and leaves some of the
+  originals beside it — 7 edges on four faces and 35 on one. That is detected
+  between the two passes, where it costs a fraction of a second against an edge
+  pass of 159 s over the broken topology, and the merge is retried across
+  planar faces only: 32,756 → 19,339 faces, valid, in 14 s.
+
+### 14.6 Safeguards
+
+* **Coverage is proven per cell against the real B-rep.** Every sample, moved
+  2e-3 mm into the body, must classify IN or ON the piece the kernel produced.
+  A miss retries the cell with the operands in the other order, then fails the
+  run (exit 4) naming the location.
+* A supported cell reaching outside the body, judged by §7.2's `OutsideProbe`,
+  fails the run.
+* A component carrying support is exempt from the floating-body rule
+  (specification.md §5): it is attached to the wall by design.
+* §8's every-edge-twice proof, the validity gate and the export-truth gate
+  apply unchanged to the combined body.
+* `tools/verify_geometry.py` asks both questions again of the written file,
+  independently of placement: `overhang_coverage` and `self_supporting`.
+
+### 14.7 Cost, and what is parallel
+
+Measured on `test-cylinder.STEP` at `cc=10, t=1.5`, six cores: 62 s without
+supports, **123 s with** — 5,718 mm² of overhang, 406 primitives, 585 cells
+rebuilt, 10,270 mm³ of support on 43,574 mm³ of lattice.
+
+| Stage | Time | Parallel |
+|---|---|---|
+| `overhang` | 1.4 s | no — seconds beside the booleans |
+| `plan` | 12 s | station clearance checks across the pool (21 → 12 s); selection serial |
+| `support` | 21 s | one job per batch of cells across the pool; 60 core-seconds of it the fuse |
+
+Not yet done, and stated rather than implied: the selection half of `plan` is
+serial, and supported boundary cells are trimmed twice — once by `boundary`,
+once here.

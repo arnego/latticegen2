@@ -29,9 +29,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+import math
+
+from . import orient as _orient
 from . import sysinfo
 from .errors import InputGeometryError, OutputError, ParamError
-from .lattice import format_param
+from .lattice import THETA, format_param, variant_suffix
 
 #: The ranges specification.md §3's flag table declares, as data.
 #:
@@ -43,6 +46,46 @@ from .lattice import format_param
 CC_RANGE = (0.4, 50.0)
 T_RANGE = (0.4, 20.0)
 CORES_RANGE = (1, 128)
+ORIENT_RANGE = (-360.0, 360.0)
+OVERHANG_RANGE = (15.0, 80.0)
+SUPPORT_THICKNESS_RANGE = (0.2, 20.0)
+OVERHANG_DEFAULT = 60.0
+#: Degrees inside the limit at which a surface is already treated as an
+#: overhang (docs/algorithm.md §14.1). Here rather than with the detection
+#: code, which needs the geometry kernel, because the window tints its preview
+#: with the same bar and must not import one.
+OVERHANG_MARGIN = 5.0
+SUPPORT_THICKNESS_DEFAULT = 1.0
+
+#: The lattice's own two angles from the build direction, in degrees: strut
+#: ridge edges recline at ``THETA`` and strut faces at its complement
+#: (docs/algorithm.md §2.1, §14). Expressions, not literals.
+LATTICE_EDGE_ANGLE = math.degrees(THETA)
+LATTICE_FACE_ANGLE = 90.0 - LATTICE_EDGE_ANGLE
+
+
+def overhang_warning(overhang: float) -> str | None:
+    """A warning when the limit is stricter than the lattice's own geometry.
+
+    One function for the command line and the window, so the two cannot word
+    it — or decide it — differently (specification.md §4.6). It is evaluated
+    from the value the user configured and it is a warning only: the lattice is
+    not analysed for overhang and is generated as specified either way.
+    """
+    if overhang >= LATTICE_EDGE_ANGLE:
+        return None
+    what = (
+        f"strut edges ({LATTICE_EDGE_ANGLE:.2f} deg from vertical) and strut "
+        f"faces ({LATTICE_FACE_ANGLE:.2f} deg)"
+        if overhang < LATTICE_FACE_ANGLE
+        else f"strut edges ({LATTICE_EDGE_ANGLE:.2f} deg from vertical)"
+    )
+    return (
+        f"the maximum overhang angle of {format_param(overhang)} deg is "
+        f"stricter than the lattice itself: its {what} exceed it. Supports are "
+        f"generated for the input geometry only; the lattice is left as it is."
+    )
+
 
 USAGE = """\
 latticegen2 - generate a diamond-strut lattice filling an input STEP volume
@@ -61,6 +104,17 @@ Optional:
                         (default: <input_stem>-lattice-cc<cc>t<t>.step)
   --cores <n>           Maximum cores to use (1-128), one worker process per
                         core. Default: this machine's logical core count.
+  --orient <rx> <ry> <rz>
+                        Print orientation of the input geometry relative to the
+                        print bed, in degrees (-360-360 each, default 0 0 0):
+                        rotations about the bed's X, then Y, then Z axis. The
+                        lattice is oriented to the bed.
+  --support             Generate print supports for inner overhangs
+  --overhang <deg>      Maximum overhang angle from vertical (15-80,
+                        default 60). Requires --support.
+  --support-thickness <mm>
+                        Minimum support thickness (0.2-20, default 1).
+                        Requires --support.
   -v, --verbose         Verbose console output (a full .log is always written)
   -h, --help            Show this message and exit
 
@@ -98,6 +152,28 @@ class Args:
     in specification.md §3.1 instead, with the rest of the front-end.
     """
 
+    orient: tuple[float, float, float] = _orient.IDENTITY
+    """Print orientation ``(rx, ry, rz)`` in degrees (specification.md §4.5)."""
+    support: bool = False
+    overhang: float = OVERHANG_DEFAULT
+    support_thickness: float = SUPPORT_THICKNESS_DEFAULT
+
+    @property
+    def name_overhang(self) -> float | None:
+        """The overhang angle as names carry it: ``None`` unless support is on."""
+        return self.overhang if self.support else None
+
+    def params_extra(self) -> str:
+        """Orientation and support parameters for the STEP header, when in force."""
+        out = ""
+        if _orient.is_rotated(self.orient):
+            out += ("orient=" + " ".join(format_param(a) for a in self.orient)
+                    + " deg, ")
+        if self.support:
+            out += (f"support overhang={format_param(self.overhang)} deg, "
+                    f"support thickness={format_param(self.support_thickness)} mm, ")
+        return out
+
     def as_dict(self) -> dict:
         """The parameter block the run header and summary report.
 
@@ -106,7 +182,7 @@ class Args:
         differed depending on whether a window was open would be misleading in
         exactly the place operators compare two runs.
         """
-        return {
+        out = {
             "input": self.input,
             "output": self.output,
             "cc": f"{format_param(self.cc)} mm",
@@ -114,6 +190,15 @@ class Args:
             "workers": self.workers,
             "cores": self.cores if self.cores is not None else "auto",
         }
+        # Added only when in force, so an unrotated, unsupported run's parameter
+        # block is the one it has always had.
+        if _orient.is_rotated(self.orient):
+            out["orient"] = " ".join(format_param(a) for a in self.orient) + " deg"
+        if self.support:
+            out["support"] = "enabled"
+            out["overhang"] = f"{format_param(self.overhang)} deg"
+            out["support_thickness"] = f"{format_param(self.support_thickness)} mm"
+        return out
 
 
 class HelpRequested(Exception):
@@ -178,8 +263,13 @@ def default_workers(cores: int | None) -> int:
     return max(1, cores)
 
 
-def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: float):
+def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: float,
+                         orient=_orient.IDENTITY, overhang: float | None = None):
     """``(step_path, log_path)`` per specification.md §3.
+
+    ``orient`` and ``overhang`` add ``-rotx<rx>y<ry>z<rz>`` and
+    ``-sup<overhang>`` to the default name, each only when it applies
+    (:func:`latticegen2.lattice.variant_suffix`).
 
     Default name is ``<input_stem>-lattice-cc<cc>t<t>.step`` beside the input.
     The ``-lattice-`` marks the file as this tool's output rather than another
@@ -199,7 +289,8 @@ def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: 
         directory = os.path.dirname(input_path) or "."
         step_path = os.path.join(
             directory,
-            f"{stem}-lattice-cc{format_param(cc)}t{format_param(t)}.step",
+            f"{stem}-lattice-cc{format_param(cc)}t{format_param(t)}"
+            f"{variant_suffix(orient, overhang)}.step",
         )
     else:
         # The validated string is the one used. Trailing space is stripped
@@ -257,6 +348,9 @@ def parse_args(argv: list[str]) -> Args:
     cc = t = cores = None
     verbose = False
     progress_stream = False
+    orient = None
+    support = False
+    overhang = thickness = None
 
     i = 0
     while i < len(argv):
@@ -274,6 +368,22 @@ def parse_args(argv: list[str]) -> Args:
         elif a == "--cores":
             v, i = _value(argv, i, a)
             cores = _as_int(a, v)
+        elif a == "--orient":
+            if i + 3 >= len(argv):
+                raise ParamError(
+                    "--orient needs three values: <rx> <ry> <rz> in degrees"
+                )
+            orient = tuple(_as_float(a, v) for v in argv[i + 1:i + 4])
+            i += 4
+        elif a == "--support":
+            support = True
+            i += 1
+        elif a == "--overhang":
+            v, i = _value(argv, i, a)
+            overhang = _as_float(a, v)
+        elif a == "--support-thickness":
+            v, i = _value(argv, i, a)
+            thickness = _as_float(a, v)
         elif a in ("-v", "--verbose"):
             verbose = True
             i += 1
@@ -308,8 +418,32 @@ def parse_args(argv: list[str]) -> Args:
     # stitches junctions along stay intact for the whole of `t < a` — see
     # `latticegen2.junction.build_template`, which verifies it geometrically at
     # the run's actual parameters anyway.
-    step_path, log_path = resolve_output_paths(input_path, output, cc, t)
+    if orient is None:
+        orient = _orient.IDENTITY
+    for axis, angle in zip("xyz", orient):
+        _in_range(f"--orient r{axis}", angle, *ORIENT_RANGE)
+    if not support:
+        # Refused rather than ignored: a support parameter that silently does
+        # nothing would leave the user believing supports had been generated.
+        for flag, value in (("--overhang", overhang),
+                            ("--support-thickness", thickness)):
+            if value is not None:
+                raise ParamError(f"{flag} requires --support.")
+    if overhang is None:
+        overhang = OVERHANG_DEFAULT
+    if thickness is None:
+        thickness = SUPPORT_THICKNESS_DEFAULT
+    _in_range("--overhang", overhang, *OVERHANG_RANGE)
+    _in_range("--support-thickness", thickness, *SUPPORT_THICKNESS_RANGE)
+
+    step_path, log_path = resolve_output_paths(
+        input_path, output, cc, t, orient, overhang if support else None
+    )
     return Args(
+        orient=orient,
+        support=support,
+        overhang=overhang,
+        support_thickness=thickness,
         input=input_path,
         output=step_path,
         log_path=log_path,

@@ -61,6 +61,10 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | -v --verbose | flag | optional | NA | NA | disabled | Enable verbose console diagnostics while always writing a full `.log` file. |
 | --gui | flag | optional | NA | NA | NA | Open the graphical front-end (§3.1) instead of running. Implied when the launcher is started with **no arguments at all** and a display is available. |
 | --cores | int | optional | count | 1 - 128 | logical cores on the machine | Maximum CPU cores this run may use. One worker process per core, honoured exactly — the master needs none reserved for it, being blocked waiting on results for effectively the whole boundary stage. Since workers always run at below-normal priority, this exists to further protect the response time of the system for other tasks. |
+| --orient | 3 × float | optional | degrees | -360 - 360 each | 0 0 0 | Print orientation `<rx> <ry> <rz>` of the input geometry relative to the print bed (§4.5). Orients the lattice to the bed. Usable with or without `--support`. |
+| --support | flag | optional | NA | NA | disabled | Generate print supports for inner overhangs (§4.6). |
+| --overhang | float | optional | degrees | 15 - 80 | 60 | Maximum overhang angle, measured from the vertical axis (the print bed's normal). Requires `--support`. |
+| --support-thickness | float | optional | mm | 0.2 - 20 | 1 | Minimum support thickness. Requires `--support`. |
 
 `--cores` is an optional **budget** and resolves to a concrete figure either
 way: an explicit value is honoured exactly, and an omitted one is taken from
@@ -124,6 +128,21 @@ can sit in a corner of the screen.
   field, and recomputed as the input, `cc` or `t` change.
 * **cc**, **t**, **cores** — spin controls bounded by the same constants
   `cli.parse_args` enforces, defaulting `cores` to the machine's logical count.
+* **Print orientation** — always shown, because the orientation applies with or
+  without support (§4.5): three spin controls, `rot X`, `rot Y`, `rot Z`, in
+  degrees with 5° steps, beside a small 3D view of the print bed. The view draws
+  the bed as a gridded plate, the part's X/Y/Z axes, and the **input geometry
+  itself standing on the bed** the way the three angles say it will. Dragging
+  the view turns the part and the three boxes follow; editing the boxes turns
+  the part.
+* **Generate support** — a tick box, with **Max overhang** (1° steps, default
+  60) and **Min thickness** (0.1 mm steps, default 1) beside it. Both fields are
+  always visible and are **greyed out while the box is unticked**; unticked, no
+  support argument reaches the run, which then loads no support code (§4.6).
+  With the box ticked, every part of the previewed surface that overhangs at
+  the current orientation and limit is **tinted**, and the tint is recomputed on
+  every change of either — boxes, steppers and mouse drag alike — so what will
+  be supported can be checked before an hour-long run is started.
 * **verbose** — a tick box beside `cores`, controlling the log pane described
   below. It is the window's equivalent of `-v`, and like `-v` it changes only
   what is *shown*: the `.log` is written in full either way, and so is the
@@ -137,6 +156,21 @@ Every field is validated by calling `cli.parse_args` and `cli.preflight_checks`
 on the command line the window is about to run — not by a second copy of those
 rules. `Start!` is disabled while anything is invalid and the parser's own
 message is shown, so `t < cc/√2` is a greyed-out button rather than a failed run.
+
+**A warning is not an error.** When the maximum overhang angle is stricter than
+the lattice's own angles (§4.6) the window shows the same sentence the command
+line prints, from the same function, in amber under the fields — and `Start!`
+stays enabled.
+
+**How the input gets drawn.** The window loads no geometry kernel, so it cannot
+read a STEP file. It starts a short-lived helper — `src/main.py --preview-mesh
+<input> <npz>`, transport like `--progress-stream` and equally absent from §3's
+table — which tessellates the input coarsely (at most 4,000 triangles) and
+writes plain arrays; the view shows the axes alone until that arrives. The
+preview is a `tkinter.Canvas` and a painter's sort, so it adds no dependency.
+While the mouse is down a reduced copy is drawn so the drag stays smooth. The
+tint is an indication from that coarse mesh; a run measures overhang on the
+true surface (docs/algorithm.md §14.1).
 
 **While a run is in flight** the fields go inactive but stay readable, `Start!`
 becomes `Stop!`, and two bars appear:
@@ -270,6 +304,61 @@ Since this involves computational geometry:
   template, computed once per run and instanced at every node (algorithm.md §3.2)
 - If caching to disk is used, put the files in a temporary folder `temp/<date><time>` where the output file is generated to. Clean up after a sucessful run. Leave for error analysis if the run fails.
 
+### 4.5 Print orientation
+
+The orientation of the struts and of the junction template is
+determined by the orientation of the **print bed**, not by the coordinate system
+of the input geometry. Everything §4.1 says about the Z-axis holds about the
+bed's normal (the *build direction*) instead.
+
+- **Input:** three angles in degrees, `rx ry rz`, rotating the input geometry
+  relative to the bed about the bed's fixed X, then Y, then Z axis:
+  `R = Rz·Ry·Rx`, `p_bed = R·p_part`, bed normal `+Z`. The build direction in
+  the part's own coordinates is therefore `b = Rᵀẑ`.
+- **Independent of support generation.** It can be set with or without
+  `--support`.
+- **No identity bypass.** The rotation is applied on every run, `0 0 0`
+  included. An unrotated run must still reproduce the golden samples.
+- The input body is never transformed, and the output stays in the input's
+  coordinate system (§1).
+- **File and part name:** `-rotx<rx>y<ry>z<rz>` (part name `+rotx…`) is added
+  after `t<t>` when any angle is non-zero.
+
+### 4.6 Print support generation
+
+An opt-in stage that creates support structures, as used for
+3D printing, for the inner overhangs of the input geometry.
+
+- **Bypassed entirely unless enabled.** No support code is loaded by a run
+  without `--support`.
+- **Detection.** The input geometry is analysed where the maximum overhang
+  angle of a surface **or edge** is exceeded *on the inside of the input body* —
+  the regions of its surface acting as a ceiling of the volume, where the
+  enveloping shell overhangs the lattice core. Outside overhangs are neither
+  detected nor supported. The lattice itself is not analysed.
+- **Coverage is full.** After generation no inner surface exceeds the limit;
+  there is no "maximum unsupported span" parameter.
+- **Anchoring.** Supports may attach to the wall of the input geometry or to the
+  generated lattice, so the lattice is generated first.
+- **Self-supporting.** No support surface or edge exceeds the maximum overhang
+  angle.
+- **Thickness.** No free-standing support member is thinner than the minimum
+  support thickness.
+- **Volume.** Supports take as little volume as possible and nearby supports
+  combine.
+- **Integral.** Supports are a permanent part of the produced body, with solid
+  interfaces and no feature designed to ease removal.
+- **Shape.** Faceted, 8-sided, all-planar like the lattice.
+- **Warning, not rejection.** When the configured maximum overhang angle is
+  stricter than the lattice's own angles — strut ridge edges at
+  `arcsin(sqrt(2/3))` ≈ 54.74° and strut faces at ≈ 35.26° from the build
+  direction — the command line and the window warn, and the run proceeds.
+- **File and part name:** `-sup<overhang>` (part name `+sup<overhang>`) is added
+  last when support is enabled.
+- **Parallelisation** is used wherever a run-time reduction above 5 % is likely.
+
+The normative algorithm is docs/algorithm.md §14.
+
 ---
 
 ## 5. STEP Output Requirements
@@ -286,6 +375,11 @@ Since this involves computational geometry:
   a boolean intersection can leave sub-threshold junction wedges that are
   genuinely *connected* material, and reading the rule as an unconditional
   "volume < t³ → delete" would punch holes in the output.
+
+  **A wall-attached support is not a floating body.** A
+  component carrying print support (§4.6) is attached to the wall of the input
+  geometry by design, so it is exempt from this rule; the rule keeps applying to
+  lattice-only crumbs.
   
 - **No body is ever dropped to make an export succeed, and the run fails
   instead.** A body the generator cannot write faithfully is a hard failure
@@ -367,6 +461,9 @@ body loses 2 edges to the file under-declaring what the geometry needs.
 | smoke-fast | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | generation < 10 minutes. **Measured: 6.4 s.** |
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
 | dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
+| oriented-lattice | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 | valid STEP through every §6.2 check with the lattice turned to the bed; the orientation recorded in the log and no support stage run. No golden sample. |
+| support-tilted | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 --support | as above, plus the two support checks of §6.2: a curved overhang, tilted. No golden sample. |
+| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --support | valid STEP, both support checks, the existing lattice golden sample contained in the output, generation < 20 minutes. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-sup60-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 | spiral-stress | -i test/SpiralTest.step -cc 5 -t 1 --cores 6 | valid STEP, no golden sample, generation < 20 minutes. **Measured: 11 m 01 s**, both solids `BRepCheck_Analyzer`-valid with 0 non-manifold edges after a round trip. Containment falls back to point sampling — the dominant body is past `verify_geometry.CUT_MAX_FACES` — and is reported as the weaker check, never as an unmeasured pass. |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
@@ -378,7 +475,11 @@ For every scenario the harness must verify, without human intervention:
 - Geometry is a valid closed manifold solid (no open edges / non-manifold edges).
 - **Geometry passes OCCT's exact B-rep validity check** (`BRepCheck_Analyzer`) —
   an exact test on the B-rep itself, not an inference from a tessellation.
-- No self-intersections.
+- No self-intersections. A crossing found between two triangles at the default
+  deflection is re-asked at an eighth of it before it is believed: where a strut
+  ends on a curved wall, the wall's chords sag below the true surface and can
+  cross the strut's own triangles, which a finer mesh resolves and real
+  self-intersection does not.
 - **No generated material lies outside the input body** (boolean cut of output
   against input leaves ~zero volume) — a direct check of §1's "fits exactly
   within the user's boundary geometry", independent of any golden sample.
@@ -387,6 +488,14 @@ For every scenario the harness must verify, without human intervention:
   distance between the two representations against the area of the face carrying
   it. This is asked of the *artefact* rather than of the process that wrote it,
   which is the only version the downstream tools see.
+- **With `--support`: every inner overhang of the input is backed by material
+  in the output.** The input's overhangs are sampled afresh, each sample is
+  moved a hair into the body, and the *written file's* own tessellation is asked
+  whether that point is inside it — independently of how the supports were
+  placed or built.
+- **With `--support`: no support surface faces down more flatly than the
+  limit.** Every facet of the written file that is neither on the input's own
+  surface nor a lattice strut face must be inside the maximum overhang angle.
 - Bounding box of output matches requested `--input` within tolerance.
 - Runtime stays under an agreed performance budget: `smoke-fast` and
   `dense-lattice` < 10 minutes, `smoke-verified` < 20 minutes.
@@ -437,7 +546,43 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-**Nothing is open here.** The last item — `TD_HX_rehearsal_test` at `cc=5, t=1`
+**Open, all from print support (§4.6, v3.2.0).** None of them is a known
+defect in the output; each is something measured or left undone that a later
+session should know about before touching that stage.
+
+* **Print support has not been run at production scale.** Every figure in
+  docs/algorithm.md §14 is from `test-cylinder.STEP` at `cc=10, t=1.5`
+  (~2 minutes) and the 80 mm ball. `TD_HX_rehearsal_test` at `cc=5, t=1` —
+  91 minutes without supports — has not been run with them. The per-cell fuse
+  is 60 core-seconds for 585 cells on the cylinder; how that, and the rate of
+  interface repairs (3 of 3,680 there), scale is unmeasured. *Verify by:*
+  running the rehearsal's inner loop, `cc=7, t=1.4`, with `--support`.
+* **Supported boundary cells are trimmed twice** — once by `boundary`, once by
+  `support`, which rebuilds the cell with its support. Estimated at 1–9 % of a
+  run depending on how much of the surface is ceiling. The fix is to place
+  supports from *predicted* anchors before `boundary` and verify them after
+  `connect`; it was deliberately left until the two-pass version was proven,
+  because it changes when anchors are known.
+* **The selection half of `plan` is serial** (about 10 s of the cylinder's
+  12 s stage after the station checks were moved to the pool). It is pure NumPy
+  over sample cells and would take the same strided dispatch.
+* **Supports near the border of an overhang region are films.** Everything
+  within 5° of the limit is covered (docs/algorithm.md §14.1), and where the
+  wall's tilt is that close to a support face's own the two diverge slowly:
+  measured on the cylinder, material 0.01–0.06 mm thick under 9 of 51,156
+  samples, all between 55° and 56° on a 60° limit. It is fused to the wall and
+  is not a free thin feature, and the 5° margin exists to keep support faces
+  from meeting the wall tangentially — but a narrower margin, or thickening
+  such a film to `t_s`, has not been evaluated.
+* **No apex is rooted in the wall as such.** The plan describes wall gussets;
+  what is implemented reaches a wall only through a drop column, whose post
+  starts beyond the surface. No committed part uses one (0 drop columns on the
+  cylinder and the ball), so the fallback is covered by unit tests alone.
+* **The window has not been looked at on a screen in this session.** Its widget
+  states and the orientation view's drawing were checked programmatically (the
+  canvas was rasterised to an image), not by eye in a running window.
+
+**Otherwise nothing is open here.** The last item — `TD_HX_rehearsal_test` at `cc=5, t=1`
 being refused at `export truth` — was closed 2026-08-26 and is the first chapter
 of §11, together with the two guards found while closing it. Every committed
 part now writes its output at every parameter set this project has run.

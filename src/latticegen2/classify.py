@@ -1006,7 +1006,7 @@ def classify_slice(
 # and the parameters are fixed. Module scope is what makes it survive between
 # jobs: `WorkerPool` dispatches with `imap(chunksize=1)`, so a worker is called
 # once per slice and holds no other state across those calls.
-_WORKER_INDEX: dict[tuple[str, float, float], tuple[TriMesh, "_ClassifyIndex"]] = {}
+_WORKER_INDEX: dict[tuple[str, float, float, tuple], tuple[TriMesh, "_ClassifyIndex"]] = {}
 
 
 def _worker_classify(job):
@@ -1034,9 +1034,9 @@ def _worker_classify(job):
     either way, so this is wall clock only — measured at 0.37 s per rebuild
     against a 122.6 s serial sweep at rehearsal scale (docs/algorithm.md §5.4).
     """
-    (mesh_path, nodes_path, cc, t, offset, stride) = job
-    key = (mesh_path, cc, t)
-    lp = lattice_params(cc, t)
+    (mesh_path, nodes_path, cc, t, offset, stride, orient) = job
+    key = (mesh_path, cc, t, orient)
+    lp = lattice_params(cc, t, orient)
     cached = _WORKER_INDEX.get(key)
     if cached is None:
         mesh = load_mesh(mesh_path)
@@ -1092,7 +1092,7 @@ def _classify_parallel(
 
     stride = max(1, min(len(candidates), pool.workers * 4))
     jobs = [
-        (mesh_path, nodes_path, lp.cc, lp.t, offset, stride) for offset in range(stride)
+        (mesh_path, nodes_path, lp.cc, lp.t, offset, stride, lp.orient) for offset in range(stride)
     ]
     results, max_rss = pool.run(
         _worker_classify, jobs,

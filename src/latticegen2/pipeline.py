@@ -43,7 +43,7 @@ from .connect import build_components
 from .errors import InputGeometryError, OutputError, ProcessingError
 from .interior import build_interior_shell, extract_template_mesh
 from .junction import build_template
-from .lattice import candidate_nodes, lattice_params, neighbor_step, part_name
+from .lattice import candidate_nodes_of_points, lattice_params, neighbor_step, part_name
 from .lattice import node as lattice_node
 from .parallel import WorkerPool, set_thread_budget
 from .parallel import read_brep as _read_brep
@@ -87,7 +87,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     # specification.md §3). Set once here, on the master, which is the only
     # process that asks OCCT for threads.
     set_thread_budget(args.workers)
-    lp = lattice_params(args.cc, args.t)
+    lp = lattice_params(args.cc, args.t, args.orient)
     stats: dict[str, object] = {}
     rl.line(f"temp directory: {tmpdir}")
 
@@ -156,7 +156,10 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     pool.__enter__()
     try:
         with Timer(rl, "classify"):
-            candidates = candidate_nodes(lp, lo, hi)
+            # Bounded by the body's own surface points in index space rather
+            # than by its axis-aligned box: correct for every print orientation
+            # and tight for all of them (docs/algorithm.md §2.4).
+            candidates = candidate_nodes_of_points(lp, mesh.verts)
             classification = classify_nodes(
                 lp, mesh, candidates, tmpdir=tmpdir, mesh_path=mesh_path,
                 pool=pool, report=rl.substage,
@@ -189,7 +192,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         return _run_with_pool(
             args, rl, tmpdir, lp, tpl, tmesh, body, body_path, stats,
             interior_nodes, boundary_nodes, pool, mesh_path, mesh.deviation,
-            seam_gap,
+            seam_gap, mesh,
         )
     finally:
         pool.__exit__(*sys.exc_info())
@@ -211,6 +214,7 @@ def _run_with_pool(
     mesh_path: str,
     mesh_deviation: float,
     seam_gap,
+    mesh=None,
 ) -> dict:
     """The boundary-through-export span of :func:`_run`, run under one shared pool.
 
@@ -301,6 +305,21 @@ def _run_with_pool(
         rl.line(f"peak worker memory: {format_bytes(boundary.max_worker_rss)}")
         stats["peak_worker_memory"] = format_bytes(boundary.max_worker_rss)
 
+    if args.support:
+        # The one hook print support has in this pipeline, and the only place
+        # its code is imported (specification.md §4.6): a run without
+        # `--support` never loads `latticegen2.support` at all. It runs here
+        # because anchoring is evaluated against the lattice the boundary trim
+        # actually left, and it hands back the same two things this function
+        # already carries forward -- the piece list and the interior nodes --
+        # so everything below is unchanged (docs/algorithm.md §14).
+        from .support import run_support
+
+        boundary.pieces, interior_nodes = run_support(
+            args, rl, lp, mesh, body, body_path, mesh_path, tmpdir, pool,
+            interior_nodes, boundary, 2.0 * mesh_deviation, stats,
+        )
+
     with Timer(rl, "connect"):
         interior_set = {(int(a), int(b), int(c)) for a, b, c in interior_nodes} \
             if len(interior_nodes) else set()
@@ -376,6 +395,17 @@ def _run_with_pool(
         )
         threshold = lp.t ** 3
         dropped = comps.dropped(threshold)
+        # A component carrying print support is attached to the wall by design
+        # and is not a floating body (specification.md §5); the rule keeps
+        # applying to lattice-only crumbs.
+        dropped -= {
+            cid for cid in dropped
+            if any(
+                comps.vertices[v].piece_index >= 0
+                and boundary.pieces[comps.vertices[v].piece_index].support
+                for v in comps.members[cid]
+            )
+        }
         keep_labels = set(comps.volumes) - dropped
         _check_component_tolerance(rl, comps, keep_labels, boundary.pieces, stats)
     if n_fused:
@@ -533,6 +563,19 @@ def _run_with_pool(
     with Timer(rl, "assemble"):
         rl.substage("assembling shells", 0, None)
         shells = weld.assemble(interior.shells, boundary_faces)
+        if args.support:
+            from .support.build import fill_voids
+
+            shells, n_voids, void_volume = fill_voids(shells)
+            if n_voids:
+                rl.always(
+                    f"note: {n_voids} enclosed void(s) between overlapping "
+                    f"supports, {void_volume:.4f} mm^3 in total, were filled "
+                    f"(docs/algorithm.md §14.5). An enclosed pocket cannot be "
+                    f"emptied of powder."
+                )
+            stats["support_voids_filled"] = n_voids
+            stats["support_void_volume_mm3"] = round(void_volume, 4)
         result_solids, _ = weld.close_shells(shells)
     rl.line(f"assembled {len(result_solids)} watertight solid(s)")
 
@@ -594,6 +637,12 @@ def _run_with_pool(
             # here needs no argument about what the file would do with it, and
             # reporting the export check instead would name the second-order
             # symptom of a fault BRepCheck has already found.
+            # Kept beside the other intermediates: the temp folder survives a
+            # failure precisely so it can be analysed (specification.md §4.4),
+            # and the one thing that analysis needs here is the solid itself.
+            for i in invalid:
+                _write_brep(result_solids[i],
+                            os.path.join(tmpdir, f"invalid_solid_{i}.brep"))
             raise ProcessingError(
                 f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
                 f"BRepCheck_Analyzer validity check."
@@ -603,7 +652,7 @@ def _run_with_pool(
     stats["solids_written"] = len(result_solids)
     stats["lattice_volume_mm3"] = round(total_volume, 4)
 
-    name = part_name(args.input, args.cc, args.t)
+    name = part_name(args.input, args.cc, args.t, args.orient, args.name_overhang)
     with Timer(rl, "export"):
         # One opaque `STEPControl_Writer` call over the whole result, so there is
         # nothing to count — 10.7 % of the rehearsal's clock with no fraction to
@@ -612,7 +661,8 @@ def _run_with_pool(
         shape = result_solids[0] if len(result_solids) == 1 else occ.compound(result_solids)
         occ.write_step(shape, args.output, name)
         rewrite_step_header(
-            args.output, name, generation_params_text(args.input, args.cc, args.t)
+            args.output, name,
+            generation_params_text(args.input, args.cc, args.t, args.params_extra()),
         )
     if not os.path.isfile(args.output) or os.path.getsize(args.output) == 0:
         raise OutputError(f"Output STEP file was not written or is empty: {args.output}")
@@ -1057,6 +1107,37 @@ one, and ``BRepCheck_Analyzer`` at `validate`.
 """
 
 
+def _shell_is_broken(shape: TopoDS_Shape) -> bool:
+    """Whether any real edge of ``shape`` is not shared by exactly two faces.
+
+    The topological half of a validity check, and the half a face merge can
+    break: measured on `test-cylinder.STEP` with print supports, where many
+    cells' contact patches lie side by side on one cylindrical wall,
+    ``ShapeUpgrade_UnifySameDomain`` builds the merged face *and leaves some of
+    the originals in the shell beside it* — 7 edges on four faces and 35 on one,
+    out of 56,822. Asked here, between the two passes, because it costs a
+    fraction of a second where discovering the same thing at the end cost an
+    edge pass of 159 s over the broken topology (against 4.5 s over a sound
+    one).
+    """
+    from OCP.BRep import BRep_Tool
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp
+    from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+
+    owners = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(
+        shape, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, owners
+    )
+    for i in range(1, owners.Extent() + 1):
+        if owners.FindFromIndex(i).Size() != 2 and not BRep_Tool.Degenerated_s(
+            TopoDS.Edge_s(owners.FindKey(i))
+        ):
+            return True
+    return False
+
+
 def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool]:
     """Unify one solid, giving up on the parts of the job that will not run.
 
@@ -1129,6 +1210,19 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool]:
         merged = occ.unify_same_domain(solid, unify_edges=False)
     except Standard_Failure:
         return solid, False, False
+    if _shell_is_broken(merged):
+        # The merge across curved faces is what breaks (see `_shell_is_broken`),
+        # and it is also the small part of the job: the lattice and the supports
+        # are planar. So the second rung merges planar faces only, by forbidding
+        # a merge across any edge of a curved face, and keeps nearly all of the
+        # reduction. Only if that fails too is the solid exported as built.
+        try:
+            merged = occ.unify_same_domain(
+                solid, unify_edges=False, keep_curved=True)
+        except Standard_Failure:
+            return solid, False, False
+        if _shell_is_broken(merged):
+            return solid, ran, True
     try:
         merged = occ.unify_same_domain(merged, unify_edges=True, unify_faces=False)
     except Standard_Failure:

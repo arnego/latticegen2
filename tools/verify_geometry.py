@@ -31,11 +31,16 @@ from latticegen2.classify import (
 from latticegen2.lattice import lattice_params
 
 
-def mesh_of(path: str, cc: float, t: float) -> TriMesh:
-    """Re-read a STEP file and tessellate it for the mesh-based checks."""
+def mesh_of(path: str, cc: float, t: float, refine: float = 1.0) -> TriMesh:
+    """Re-read a STEP file and tessellate it for the mesh-based checks.
+
+    ``refine`` divides the chordal deflection. It exists for one caller: a
+    crossing found at the default deflection is re-asked at a finer one before
+    it is believed (:func:`tools.e2e.geometry_checks`).
+    """
     shape = occ.read_step(path)
     lp = lattice_params(cc, t)
-    occ.mesh_shape(shape, chordal_target(lp))
+    occ.mesh_shape(shape, chordal_target(lp) / refine)
     verts, tris, offset = [], [], 0
     for face in occ.faces(shape):
         got = occ.face_triangulation(face)
@@ -655,3 +660,178 @@ def bounding_box_within(candidate_path: str, input_path: str, tol: float) -> boo
     lo_c, hi_c = occ.bounding_box(occ.read_step(candidate_path))
     lo_i, hi_i = occ.bounding_box(occ.read_step(input_path))
     return bool(np.all(lo_c >= lo_i - tol) and np.all(hi_c <= hi_i + tol))
+
+
+# --- print supports (specification.md §4.6, §6.2) ----------------------------
+
+SUPPORT_MESH_DEFLECTION = 0.02
+"""Millimetres. Chordal deviation of the meshes the two support checks use.
+
+Much finer than the classification mesh, because both checks ask about material
+within a few hundredths of a millimetre of a curved surface."""
+
+SUPPORT_INWARD_STEP = 0.06
+"""Millimetres an overhang sample is moved into the body before it is asked
+whether the output has material there: three times the mesh deflection, so a
+point that is really inside is not put outside by the mesh's own error."""
+
+
+SUPPORT_EXACT_STEP = 2e-3
+"""Millimetres. Probe depth for the exact re-check of a mesh miss — the depth
+the pipeline's own coverage proof uses."""
+
+EXACT_RECHECK_MAX = 2000
+"""Most mesh misses the exact classifier is asked about. Past this the misses
+are reported as they stand: that many is a real gap, not a thin wedge."""
+
+
+def _oriented_mesh(shape, deflection: float):
+    """``(verts, tris, normals)`` with every triangle's normal pointing out of
+    the solid — `face_triangulation` reports a face's triangles in the surface's
+    own sense, which a reversed face inverts."""
+    from OCP.TopAbs import TopAbs_Orientation
+
+    occ.mesh_shape(shape, deflection)
+    verts, tris, offset = [], [], 0
+    for face in occ.faces(shape):
+        got = occ.face_triangulation(face)
+        if got is None:
+            continue
+        v, f = got
+        if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+            f = f[:, ::-1]
+        verts.append(v)
+        tris.append(f + offset)
+        offset += len(v)
+    v = np.vstack(verts)
+    f = np.vstack(tris)
+    n = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
+    area = 0.5 * np.linalg.norm(n, axis=1)
+    keep = area > 0.0
+    return v, f[keep], n[keep] / (2.0 * area[keep])[:, None], area[keep]
+
+
+def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
+                      orient, overhang: float, thickness: float) -> dict:
+    """Is every inner overhang of the input backed by material in the output?
+
+    Asked of the **written file**, and independently of how the supports were
+    placed or built: the input's overhangs are sampled afresh, each sample is
+    moved a hair into the body, and the output's own tessellation is asked
+    whether that point is inside it. Nothing here reads the plan.
+    """
+    from latticegen2.classify import PointInside, tessellate_surface
+    from latticegen2.support import overhang as oh
+
+    lp = lattice_params(cc, t, orient)
+    body = occ.read_step(input_path)
+    tessellate_surface(body, lp)
+    samples = oh.detect(body, lp.b, overhang, oh.sample_pitch(t, thickness))
+    out = occ.read_step(candidate_path)
+    v, f, _n, _a = _oriented_mesh(out, SUPPORT_MESH_DEFLECTION)
+    v, f = _weld(v, f)
+    inside = PointInside(TriMesh(verts=v, tris=f))
+    probe = samples.points + SUPPORT_INWARD_STEP * samples.inward
+    covered = inside(probe)
+    # **A miss on the mesh is contradicted against the exact solid before it is
+    # reported.** The mesh needs a probe well clear of its own deflection, and
+    # near the border of an overhang region the support under the wall is a
+    # wedge thinner than that: the wall's tilt is within a few degrees of the
+    # support's own face there, so the two diverge slowly. Measured on
+    # `test-cylinder.STEP`: 9 of 51,156 probes fall out of the bottom of a
+    # wedge 0.01-0.06 mm thick, every one of them on a sample the solid touches
+    # (distance exactly 0) and contains 2e-3 mm below. The exact classifier is
+    # asked at that depth, the same one the pipeline's own proof uses
+    # (docs/algorithm.md §14.6); it costs tens of milliseconds a point, which
+    # is why it is the second question and not the first.
+    doubtful = np.nonzero(~covered)[0]
+    thin = 0
+    if 0 < len(doubtful) <= EXACT_RECHECK_MAX:
+        from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+        from OCP.TopAbs import TopAbs_State
+        from OCP.gp import gp_Pnt
+
+        classifiers = [BRepClass3d_SolidClassifier(s) for s in occ.solids(out)]
+        for i in doubtful:
+            q = samples.points[i] + SUPPORT_EXACT_STEP * samples.inward[i]
+            for classifier in classifiers:
+                classifier.Perform(gp_Pnt(*q), 1e-7)
+                if classifier.State() in (TopAbs_State.TopAbs_IN, TopAbs_State.TopAbs_ON):
+                    covered[i] = True
+                    thin += 1
+                    break
+    missing = samples.points[~covered]
+    return {
+        "samples": int(len(probe)),
+        "uncovered": int(len(missing)),
+        "thin": thin,
+        "area_mm2": float(samples.area),
+        "where": [np.round(p, 3).tolist() for p in missing[:5]],
+    }
+
+
+def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
+                    orient, overhang: float, tol_deg: float = 0.05) -> dict:
+    """Does any free surface of the output face down more flatly than the limit?
+
+    A facet is exempt only for one of two reasons, both geometric: it lies on
+    the input's own surface, where the output is closed against the wall rather
+    than hanging free; or it is a lattice strut face, which is recognised by its
+    normal and which the limit does not apply to (specification.md §4.6 — the
+    lattice is not analysed). Everything else is support, and a single such
+    facet over the limit is a failure.
+    """
+    from latticegen2.classify import PointInside  # noqa: F401  (same import cost)
+
+    lp = lattice_params(cc, t, orient)
+    b = lp.b
+    out = occ.read_step(candidate_path)
+    v, f, n, area = _oriented_mesh(out, SUPPORT_MESH_DEFLECTION)
+    bar = float(np.sin(np.radians(overhang + tol_deg)))
+    down = -(n @ b)
+    suspect = np.nonzero(down > bar)[0]
+
+    strut = np.array([s * (su * lp.u[k] + sv * lp.v[k]) / np.sqrt(2.0)
+                      for k in range(3) for su in (1, -1) for sv in (1, -1)
+                      for s in (1,)])
+    is_strut = (np.abs(n[suspect] @ strut.T) > 1.0 - 1e-9).any(axis=1)
+    suspect = suspect[~is_strut]
+
+    body = occ.read_step(input_path)
+    occ.mesh_shape(body, SUPPORT_MESH_DEFLECTION)
+    bv, bf = [], []
+    offset = 0
+    for face in occ.faces(body):
+        got = occ.face_triangulation(face)
+        if got is None:
+            continue
+        bv.append(got[0])
+        bf.append(got[1] + offset)
+        offset += len(got[0])
+    bv, bf = _weld(np.vstack(bv), np.vstack(bf))
+    wall = TriMesh(verts=bv, tris=bf)
+    sh = SpatialHash(wall, min_cell=1.0)
+    bad_area = 0.0
+    where = []
+    worst = 0.0
+    for i in suspect:
+        centre = v[f[i]].mean(axis=0)
+        if _distance_to_mesh(wall, sh, centre) <= 3.0 * SUPPORT_MESH_DEFLECTION:
+            continue                      # closed against the wall
+        bad_area += float(area[i])
+        worst = max(worst, float(np.degrees(np.arcsin(min(1.0, down[i])))))
+        if len(where) < 5:
+            where.append(np.round(centre, 3).tolist())
+    return {
+        "triangles": int(len(f)),
+        "bad_area_mm2": bad_area,
+        "worst_deg": worst,
+        "where": where,
+    }
+
+
+def contained_in(inner_path: str, outer_path: str) -> float:
+    """Volume of ``inner`` lying outside ``outer``, in mm³ — exact, one way."""
+    inner = occ.read_step(inner_path)
+    outer = occ.read_step(outer_path)
+    return _cut_volume(inner, outer)

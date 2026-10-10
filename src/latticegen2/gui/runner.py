@@ -80,12 +80,15 @@ def main_script() -> str:
 
 
 def build_argv(*, input_path: str, output_path: str, cc: str, t: str,
-               cores: int) -> list[str]:
+               cores: int, extra: list[str] | None = None) -> list[str]:
     """The exact command line the child is given.
 
     ``-v`` is never passed. Every log line crosses as an event carrying whether
     a CLI run would have shown it, so verbosity is something the window filters
     on its own side and can change while the run is going.
+
+    ``extra`` is the orientation and support arguments, exactly as the window
+    validated them with :func:`latticegen2.cli.parse_args`.
     """
     return [
         child_python(), "-u", main_script(),
@@ -94,8 +97,48 @@ def build_argv(*, input_path: str, output_path: str, cc: str, t: str,
         "-t", t,
         "-o", output_path,
         "--cores", str(cores),
+        *(extra or []),
         "--progress-stream",
     ]
+
+
+class Preview:
+    """One helper child tessellating the input for the orientation view.
+
+    Runs :mod:`latticegen2.preview` and reports the ``.npz`` it wrote — or
+    ``None`` — on :attr:`events`, which the window drains from its own loop like
+    a run's. A preview nobody is waiting for any more is simply abandoned: it is
+    seconds of work with no side effect beyond a file in a temp folder.
+    """
+
+    def __init__(self, input_path: str, out_path: str):
+        self.input_path = input_path
+        self.out_path = out_path
+        self.events: queue.Queue = queue.Queue()
+        creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        self._proc = subprocess.Popen(
+            [child_python(), main_script(), "--preview-mesh", input_path, out_path],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=creation,
+        )
+        threading.Thread(target=self._wait, daemon=True, name="preview-wait").start()
+
+    def _wait(self) -> None:
+        code = self._proc.wait()
+        ok = code == 0 and os.path.isfile(self.out_path)
+        self.events.put(self.out_path if ok else None)
+
+    def abandon(self) -> None:
+        """Stop the helper and remove whatever it had already written."""
+        try:
+            self._proc.kill()
+            self._proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            os.remove(self.out_path)
+        except OSError:
+            pass
 
 
 class Run:

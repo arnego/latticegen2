@@ -132,12 +132,18 @@ def _is_blank_schema(entity: str) -> bool:
     return re.search(r"\(\s*'\s*'\s*\)", entity) is not None
 
 
-def generation_params_text(input_path: str, cc: float, t: float) -> str:
-    """The parameter string embedded into FILE_DESCRIPTION (specification.md §5)."""
+def generation_params_text(input_path: str, cc: float, t: float,
+                           extra: str = "") -> str:
+    """The parameter string embedded into FILE_DESCRIPTION (specification.md §5).
+
+    ``extra`` carries the orientation and support parameters when they are in
+    force, already formatted and comma-terminated; it is empty for an
+    unrotated, unsupported run, whose header is then what it always was.
+    """
     stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return (
         f"latticegen2 generation parameters: input={input_path}, "
-        f"cc={format_param(cc)} mm, t={format_param(t)} mm, generated={stamp}"
+        f"cc={format_param(cc)} mm, t={format_param(t)} mm, {extra}generated={stamp}"
     )
 
 

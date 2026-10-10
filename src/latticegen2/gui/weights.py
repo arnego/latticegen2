@@ -66,8 +66,32 @@ del _running, _name
 assert set(STAGE_PERMILLE) == set(STAGES), "a stage has no share of the bar"
 assert sum(STAGE_PERMILLE.values()) == 1000
 
+#: Shares of the three stages a run with print supports adds, in the same units
+#: as :data:`STAGE_PERMILLE` *before* the whole is renormalised to 1000.
+#:
+#: **Provenance, and it is thin:** one run of `test-cylinder.STEP` at
+#: ``cc=10, t=1.5`` on the development workstation, where ``plan`` took 12 s and
+#: ``support`` 21 s beside a 7.4 s ``boundary``. That part's whole run is two
+#: minutes, so these are a shape, not a calibration — read them the way the
+#: table above says to read it.
+SUPPORT_SHARES: dict[str, int] = {"overhang": 10, "plan": 150, "support": 400}
 
-def overall_permille(stage: str | None, fraction: float | None) -> int:
+
+def _bands(stages) -> tuple[dict, dict]:
+    """``(share, start)`` per stage for a run that announced ``stages``."""
+    raw = {name: STAGE_PERMILLE.get(name, SUPPORT_SHARES.get(name, 1))
+           for name in stages}
+    total = float(sum(raw.values())) or 1.0
+    share, start, running = {}, {}, 0.0
+    for name in stages:
+        start[name] = running
+        share[name] = raw[name] * 1000.0 / total
+        running += share[name]
+    return share, start
+
+
+def overall_permille(stage: str | None, fraction: float | None,
+                     stages=None) -> int:
     """Where the top bar should sit while ``stage`` is ``fraction`` complete.
 
     ``fraction`` is ``None`` for a stage with no countable work — ``export``'s
@@ -78,6 +102,16 @@ def overall_permille(stage: str | None, fraction: float | None) -> int:
     holding still while a label names the stage is the honest version of not
     knowing.
     """
+    if stages is not None and tuple(stages) != STAGES:
+        # A run with print supports goes through more stages than the plain
+        # pipeline; it says which in its `hello`, and the bar is laid out over
+        # exactly those. The plain pipeline keeps the table above untouched.
+        if stage is None or stage not in stages:
+            return 0
+        share, begin = _bands(tuple(stages))
+        if fraction is None:
+            return int(round(begin[stage]))
+        return int(round(begin[stage] + share[stage] * min(max(fraction, 0.0), 1.0)))
     if stage is None or stage not in STAGE_PERMILLE:
         return 0
     start = BAND_START[stage]

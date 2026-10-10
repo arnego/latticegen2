@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -25,8 +26,14 @@ from .. import __version__, progress
 from ..cli import (
     CC_RANGE,
     CORES_RANGE,
+    ORIENT_RANGE,
+    OVERHANG_DEFAULT,
+    OVERHANG_RANGE,
+    SUPPORT_THICKNESS_DEFAULT,
+    SUPPORT_THICKNESS_RANGE,
     T_RANGE,
     USAGE,
+    overhang_warning,
     parse_args,
     resolve_output_paths,
 )
@@ -34,7 +41,8 @@ from ..errors import LatticeGenError
 from ..sysinfo import logical_core_count
 from . import model
 from .model import RunState
-from .runner import GRACE_SECONDS, LaunchError, Run, build_argv
+from .orientview import OrientationView
+from .runner import GRACE_SECONDS, LaunchError, Preview, Run, build_argv
 
 POLL_MS = 100
 BAR_HEIGHT = 16
@@ -49,6 +57,13 @@ latticegen2 fills the solid body of a STEP file with a diamond-strut lattice \
 and writes the result as a single AP214 STEP, in the same coordinate system and \
 trimmed exactly to the input's surfaces. Struts stand on their tip, three to a \
 node, reclined about 55° from vertical.
+
+"Vertical" is the print bed's normal: the three orientation angles turn the \
+part on the bed, about the bed's X, then Y, then Z axis, and the lattice is \
+oriented to the bed. With Generate support ticked, every part of the inner \
+surface that overhangs more flatly than the maximum overhang angle (measured \
+from vertical) is backed by permanent, solid, self-supporting supports rooted \
+in the lattice and the wall; those surfaces are tinted in the preview.
 
 The output sits beside a .log recording the parameters, the per-stage timings, \
 the run's characteristics and its peak memory — written every run, whether or \
@@ -159,8 +174,20 @@ class App:
         self.t_var = tk.StringVar(value="1.5")
         self.cores_var = tk.StringVar(value=str(logical_core_count()))
         self.verbose_var = tk.BooleanVar(value=False)
+        self.rx_var = tk.StringVar(value="0")
+        self.ry_var = tk.StringVar(value="0")
+        self.rz_var = tk.StringVar(value="0")
+        self.support_var = tk.BooleanVar(value=False)
+        self.overhang_var = tk.StringVar(value=f"{OVERHANG_DEFAULT:g}")
+        self.thickness_var = tk.StringVar(value=f"{SUPPORT_THICKNESS_DEFAULT:g}")
         self.derived_var = tk.StringVar(value="—")
         self.message_var = tk.StringVar(value="")
+        self.warning_var = tk.StringVar(value="")
+        #: The helper tessellating the current input for the orientation view,
+        #: the input it is for, and where its files go.
+        self._preview: Preview | None = None
+        self._preview_for: str | None = None
+        self._preview_dir: str | None = None
         #: What the log pane was last drawn from — the number of lines that have
         #: arrived and the filter in force. Redrawing only when that changes
         #: keeps the 10 Hz poll from rebuilding a 400-line widget for nothing.
@@ -168,8 +195,12 @@ class App:
 
         self._build(root)
         for var in (self.input_var, self.cc_var, self.t_var, self.cores_var,
-                    self.outdir_var):
+                    self.outdir_var, self.rx_var, self.ry_var, self.rz_var,
+                    self.support_var, self.overhang_var, self.thickness_var):
             var.trace_add("write", lambda *_a: self._revalidate())
+        self.input_var.trace_add("write", lambda *_a: self._request_preview())
+        self.support_var.trace_add("write", lambda *_a: self._sync_support_fields())
+        self._sync_support_fields()
         self.verbose_var.trace_add("write", lambda *_a: self._render_log())
         self._revalidate()
         root.protocol("WM_DELETE_WINDOW", self._on_exit)
@@ -227,12 +258,57 @@ class App:
                                              variable=self.verbose_var)
         self.verbose_check.grid(row=0, column=6, sticky="w", padx=(12, 0))
 
+        # --- print orientation and support (specification.md §3.1) ---------
+        # Always shown: the orientation applies with or without support. Only
+        # the two support fields depend on the tick box, and they are greyed
+        # out rather than hidden while it is unticked.
+        bed = ttk.Frame(outer)
+        bed.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 2))
+        self.view = OrientationView(bed, on_drag=self._dragged)
+        self.view.grid(row=0, column=0, rowspan=7, sticky="nw")
+        side = ttk.Frame(bed)
+        side.grid(row=0, column=1, sticky="nw", padx=(10, 0))
+        ttk.Label(side, text="Print orientation (°)").grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        self.orient_spins = []
+        for row, (label, var) in enumerate(
+                (("rot X", self.rx_var), ("rot Y", self.ry_var),
+                 ("rot Z", self.rz_var)), start=1):
+            ttk.Label(side, text=label).grid(row=row, column=0, sticky="w", pady=1)
+            spin = ttk.Spinbox(side, textvariable=var, width=8, increment=5,
+                               from_=ORIENT_RANGE[0], to=ORIENT_RANGE[1])
+            spin.grid(row=row, column=1, sticky="w", padx=(6, 0), pady=1)
+            self.orient_spins.append(spin)
+        self.support_check = ttk.Checkbutton(side, text="Generate support",
+                                             variable=self.support_var)
+        self.support_check.grid(row=4, column=0, columnspan=2, sticky="w",
+                                pady=(8, 1))
+        ttk.Label(side, text="Max overhang (°)").grid(row=5, column=0, sticky="w")
+        self.overhang_spin = ttk.Spinbox(
+            side, textvariable=self.overhang_var, width=8, increment=1,
+            from_=OVERHANG_RANGE[0], to=OVERHANG_RANGE[1])
+        self.overhang_spin.grid(row=5, column=1, sticky="w", padx=(6, 0), pady=1)
+        ttk.Label(side, text="Min thickness (mm)").grid(row=6, column=0, sticky="w")
+        self.thickness_spin = ttk.Spinbox(
+            side, textvariable=self.thickness_var, width=8, increment=0.1,
+            from_=SUPPORT_THICKNESS_RANGE[0], to=SUPPORT_THICKNESS_RANGE[1])
+        self.thickness_spin.grid(row=6, column=1, sticky="w", padx=(6, 0), pady=1)
+        #: Frozen with every other parameter while a run is in flight. The two
+        #: support spins are in here too, and `_sync_support_fields` then
+        #: decides between them and the tick box once the run is over.
+        self.fields += [*self.orient_spins, self.support_check,
+                        self.overhang_spin, self.thickness_spin]
+
         self.message = ttk.Label(outer, textvariable=self.message_var,
                                  foreground="#a11", wraplength=WIDTH - 24)
-        self.message.grid(row=5, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        self.message.grid(row=6, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        # A warning is not an error: amber, and `Start!` stays enabled.
+        self.warning = ttk.Label(outer, textvariable=self.warning_var,
+                                 foreground="#a60", wraplength=WIDTH - 24)
+        self.warning.grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
         buttons = ttk.Frame(outer)
-        buttons.grid(row=6, column=0, columnspan=3, sticky="ew")
+        buttons.grid(row=8, column=0, columnspan=3, sticky="ew")
         buttons.columnconfigure(0, weight=1)
         buttons.columnconfigure(1, weight=1)
         self.start = ttk.Button(buttons, text="Start!", command=self._on_start)
@@ -306,6 +382,20 @@ class App:
         if path:
             self.outdir_var.set(os.path.abspath(path))
 
+    def _extra_argv(self) -> list[str]:
+        """The orientation and support arguments the fields describe.
+
+        The support arguments are passed only when the box is ticked, so an
+        unticked run is a run without `--support` and loads none of that code.
+        """
+        extra = ["--orient", self.rx_var.get().strip(), self.ry_var.get().strip(),
+                 self.rz_var.get().strip()]
+        if self.support_var.get():
+            extra += ["--support",
+                      "--overhang", self.overhang_var.get().strip(),
+                      "--support-thickness", self.thickness_var.get().strip()]
+        return extra
+
     def _pending_argv(self) -> list[str]:
         """The command line the current field values describe."""
         return [
@@ -313,7 +403,88 @@ class App:
             "-cc", self.cc_var.get().strip(),
             "-t", self.t_var.get().strip(),
             "--cores", self.cores_var.get().strip(),
+            *self._extra_argv(),
         ]
+
+    def _sync_support_fields(self) -> None:
+        """Grey the two support fields out while the box is unticked."""
+        if self.run is not None:
+            return
+        state = ["!disabled"] if self.support_var.get() else ["disabled"]
+        self.overhang_spin.state(state)
+        self.thickness_spin.state(state)
+
+    def _dragged(self, angles) -> None:
+        """The part was turned with the mouse: show the angles it now has."""
+        for var, angle in zip((self.rx_var, self.ry_var, self.rz_var), angles):
+            text = f"{angle:g}"
+            if var.get() != text:
+                var.set(text)
+
+    def _update_view(self) -> None:
+        """Push the orientation and the overhang limit into the view.
+
+        Read straight from the boxes rather than from a parsed command line, so
+        the view follows while another field is still invalid.
+        """
+        try:
+            orient = tuple(float(v.get()) for v in
+                           (self.rx_var, self.ry_var, self.rz_var))
+        except ValueError:
+            return
+        overhang = None
+        if self.support_var.get():
+            try:
+                overhang = float(self.overhang_var.get())
+            except ValueError:
+                overhang = None
+        self.view.set_state(orient, overhang)
+
+    def _request_preview(self) -> None:
+        """Start tessellating the chosen input for the orientation view."""
+        path = self.input_var.get().strip()
+        if path == self._preview_for:
+            return
+        self._preview_for = path
+        if self._preview is not None:
+            self._preview.abandon()
+            self._preview = None
+        self.view.set_mesh(None, None)
+        if not path or not os.path.isfile(path):
+            return
+        if self._preview_dir is None:
+            self._preview_dir = tempfile.mkdtemp(prefix="latticegen2-preview-")
+        try:
+            self._preview = Preview(
+                path, os.path.join(self._preview_dir, f"{time.monotonic_ns()}.npz"))
+        except (LaunchError, OSError):
+            self._preview = None      # no preview is not a reason to stop anyone
+
+    def _poll_preview(self) -> None:
+        preview = self._preview
+        if preview is None:
+            return
+        try:
+            result = preview.events.get_nowait()
+        except Exception:
+            return
+        self._preview = None
+        if result is None or preview.input_path != self._preview_for:
+            return
+        try:
+            import numpy as np
+
+            with np.load(result) as z:
+                self.view.set_mesh(z["verts"], z["tris"])
+        except Exception:                                      # noqa: BLE001
+            self.view.set_mesh(None, None)
+        finally:
+            # The arrays are in the view now; the file has no further use, and
+            # a long session would otherwise keep one per input it was shown.
+            try:
+                os.remove(result)
+            except OSError:
+                pass
 
     def _revalidate(self) -> None:
         """Re-check the fields with the *parser*, not with a copy of its rules.
@@ -324,9 +495,11 @@ class App:
         would refuse, and the user meeting the difference as a failed run rather
         than as a disabled button.
         """
+        self._update_view()
         if self.run is not None:
             return
         self.message_var.set("")
+        self.warning_var.set("")
         try:
             args = parse_args(self._pending_argv())
         except LatticeGenError as exc:
@@ -335,6 +508,12 @@ class App:
             self.message_var.set(first if self.input_var.get().strip() else "")
             self.start.state(["disabled"])
             return
+
+        if args.support:
+            # The same sentence the command line prints, from the same
+            # function. A warning: the run is allowed to proceed.
+            warning = overhang_warning(args.overhang)
+            self.warning_var.set(f"Warning: {warning}" if warning else "")
 
         name = os.path.basename(args.output)
         self.derived_var.set(f"→ {name}")
@@ -350,7 +529,7 @@ class App:
         """
         args = parse_args(self._pending_argv())
         default_step, _log = resolve_output_paths(
-            args.input, None, args.cc, args.t)
+            args.input, None, args.cc, args.t, args.orient, args.name_overhang)
         folder = self.outdir_var.get().strip() or os.path.dirname(args.input)
         return os.path.join(os.path.abspath(folder), os.path.basename(default_step))
 
@@ -380,6 +559,7 @@ class App:
                     input_path=args.input, output_path=output,
                     cc=self.cc_var.get().strip(), t=self.t_var.get().strip(),
                     cores=int(self.cores_var.get().strip()),
+                    extra=self._extra_argv(),
                 ),
                 log_path=os.path.splitext(output)[0] + ".log",
             )
@@ -396,9 +576,10 @@ class App:
         self.start.configure(text="Stop!")
         for widget in self.fields:
             widget.state(["disabled"])
+        self.view.set_enabled(False)
         self.result_label.configure(text="")
         self.open_button.grid_forget()
-        self.panel.grid(row=7, column=0, columnspan=3, sticky="ew")
+        self.panel.grid(row=9, column=0, columnspan=3, sticky="ew")
         self._refresh()
 
     def _on_stop(self) -> None:
@@ -421,6 +602,12 @@ class App:
                 return
             self.run.cancel()
             self.run.force_stop()
+        if self._preview is not None:
+            self._preview.abandon()
+        if self._preview_dir is not None:
+            import shutil
+
+            shutil.rmtree(self._preview_dir, ignore_errors=True)
         self.root.destroy()
 
     # -- the event loop ----------------------------------------------------
@@ -431,6 +618,7 @@ class App:
         The only place events reach Tk, and it runs on the main thread by
         construction because ``after`` schedules it there.
         """
+        self._poll_preview()
         run = self.run
         if run is not None:
             drained = False
@@ -526,6 +714,8 @@ class App:
         self.start.configure(text="Start!")
         for widget in self.fields:
             widget.state(["!disabled"])
+        self.view.set_enabled(True)
+        self._sync_support_fields()
         self._refresh()
 
         text = state.result_text()

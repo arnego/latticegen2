@@ -17,7 +17,7 @@ import json
 import pytest
 
 from latticegen2 import progress
-from latticegen2.cli import resolve_output_paths
+from latticegen2.cli import parse_args, resolve_output_paths
 from latticegen2.gui import model, runner, weights
 from latticegen2.runlog import STAGES
 
@@ -686,3 +686,131 @@ def test_stderr_and_kernel_chatter_are_shown_whatever_the_box_says(tmp_path, tk_
     assert not app.verbose_var.get()
     assert "Intel oneMKL FATAL ERROR" in app.log_text.get("1.0", "end")
     assert app.log_frame.grid_info()
+
+
+# --- print orientation and support (specification.md §3.1) -----------------
+
+
+def test_a_supported_run_lays_the_bar_out_over_the_stages_it_announced():
+    """Three more stages than the plain pipeline, and the bar still ends at 1000."""
+    from latticegen2.runlog import stages_for
+
+    plain, held = stages_for(False), stages_for(True)
+    assert plain == STAGES
+    assert held[held.index("boundary") + 1:held.index("connect")] == (
+        "overhang", "plan", "support")
+    marks = [weights.overall_permille(s, 0.0, held) for s in held]
+    assert marks == sorted(marks) and marks[0] == 0
+    assert weights.overall_permille(held[-1], 1.0, held) == 1000
+    # The plain pipeline's table is untouched by any of this.
+    assert weights.overall_permille("export", 1.0, plain) == 1000
+    assert weights.overall_permille("boundary", 0.0, plain) == weights.BAND_START["boundary"]
+
+    state = model.reduce_stream([
+        event(progress.HELLO, v=1, pid=1, stages=list(held),
+              output="o.step", log="o.log", workers=1),
+        event(progress.STAGE_BEGIN, name="support", i=held.index("support"),
+              n=len(held)),
+    ])
+    assert state.stage_text() == f"support  ({held.index('support') + 1} of {len(held)})"
+
+
+def test_orientation_and_support_reach_the_child_and_the_parser_accepts_them(tmp_path):
+    step = tmp_path / "in.step"
+    step.write_text("x")
+    extra = ["--orient", "30", "0", "-45", "--support", "--overhang", "50",
+             "--support-thickness", "1.2"]
+    argv = runner.build_argv(input_path=str(step), output_path=str(tmp_path / "o.step"),
+                             cc="10", t="1.5", cores=2, extra=extra)
+    args = parse_args(argv[3:])
+    assert args.orient == (30.0, 0.0, -45.0)
+    assert args.support and args.overhang == 50.0 and args.support_thickness == 1.2
+    assert "-v" not in argv and argv[-1] == "--progress-stream"
+
+
+def test_the_view_rests_the_part_on_the_bed_and_marks_what_overhangs():
+    import numpy as np
+
+    from latticegen2 import orient
+    from latticegen2.gui import view3d
+
+    # A unit cube far from its own origin, as CAD parts usually are.
+    verts = np.array([[x, y, z] for x in (100, 101) for y in (50, 51)
+                      for z in (20, 21)], dtype=float)
+    for angles in ((0.0, 0.0, 0.0), (30.0, 20.0, -110.0)):
+        placed, _shift = view3d.place_on_bed(verts, orient.rotation_matrix(angles))
+        assert placed[:, 2].min() == pytest.approx(0.0, abs=1e-9)
+        assert placed[:, :2].min(axis=0) == pytest.approx(-placed[:, :2].max(axis=0))
+
+    normals = np.array([[0, 0, 1], [0, 0, -1], [1, 0, 0]], dtype=float)
+    # Upright: the lid is a ceiling of the volume, the floor and a wall are not.
+    assert view3d.overhang_mask(normals, (0, 0, 0), 60.0).tolist() == [True, False, False]
+    # Turned upside down, the old floor is the ceiling.
+    assert view3d.overhang_mask(normals, (180, 0, 0), 60.0).tolist() == [False, True, False]
+    # On its side (+X up), the wall is.
+    assert view3d.overhang_mask(normals, (0, -90, 0), 60.0).tolist() == [False, False, True]
+
+
+def test_dragging_turns_the_part_and_reports_angles_that_reproduce_it():
+    import numpy as np
+
+    from latticegen2 import orient
+    from latticegen2.gui import view3d
+
+    R = orient.rotation_matrix((10.0, 20.0, 30.0))
+    for dx, dy in ((40, 0), (0, -25), (13, 31)):
+        R = view3d.drag_rotation(R, dx, dy)
+        assert np.allclose(R @ R.T, np.eye(3), atol=1e-12)
+        again = orient.rotation_matrix(view3d.snapped_angles(R))
+        assert np.allclose(again, R, atol=5e-3)        # tenth-of-a-degree boxes
+    # A horizontal drag is a turn about the bed's normal: +Z stays +Z.
+    turned = view3d.drag_rotation(np.eye(3), 50, 0)
+    assert np.allclose(turned @ [0, 0, 1], [0, 0, 1], atol=1e-12)
+
+
+def test_the_orientation_panel_is_always_there_and_support_fields_grey_out(tmp_path, tk_root):
+    from latticegen2.gui.app import App
+
+    step = tmp_path / "part.step"
+    step.write_text("x")
+    app = App(tk_root)
+    try:
+        tk_root.update()
+        # Always shown: the orientation boxes and the view are gridded at once.
+        assert app.view.winfo_manager() == "grid"
+        assert all(s.winfo_manager() == "grid" for s in app.orient_spins)
+        assert app.overhang_spin.winfo_manager() == "grid"
+        # Greyed out, not hidden, while support is off.
+        assert app.overhang_spin.instate(["disabled"])
+        assert app.thickness_spin.instate(["disabled"])
+        assert app.overhang_var.get() == "60"
+
+        app.input_var.set(str(step))
+        app.cc_var.set("10")
+        app.t_var.set("1.5")
+        app.rx_var.set("30")
+        tk_root.update()
+        assert "--support" not in app._pending_argv()
+        assert app.derived_var.get().endswith("part-lattice-cc10t1.5-rotx30y0z0.step")
+
+        app.support_var.set(True)
+        tk_root.update()
+        assert app.overhang_spin.instate(["!disabled"])
+        assert app.thickness_spin.instate(["!disabled"])
+        assert app._pending_argv()[-5:] == ["--support", "--overhang", "60",
+                                            "--support-thickness", "1"]
+        assert app.derived_var.get().endswith("-rotx30y0z0-sup60.step")
+        assert app.warning_var.get() == ""
+
+        # Stricter than the lattice's own edges: a warning, and Start stays live.
+        app.overhang_var.set("45")
+        tk_root.update()
+        assert "strut edges" in app.warning_var.get()
+        assert app.start.instate(["!disabled"])
+
+        # A drag reports angles straight into the three boxes.
+        app._dragged((12.5, -3.0, 90.0))
+        assert (app.rx_var.get(), app.ry_var.get(), app.rz_var.get()) == ("12.5", "-3", "90")
+    finally:
+        if app._preview is not None:
+            app._preview.abandon()

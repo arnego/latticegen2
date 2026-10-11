@@ -21,6 +21,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import orient as _orient
+
 # --- Strut recline angle (docs/algorithm.md §2.1) --------------------------
 
 THETA = float(np.arcsin(np.sqrt(2.0 / 3.0)))
@@ -73,18 +75,42 @@ class LatticeParams:
     v: np.ndarray
     """Vertical-plane profile axis per direction (docs/algorithm.md §3.1)."""
     B: np.ndarray
+    orient: tuple[float, float, float] = _orient.IDENTITY
+    """Print orientation ``(rx, ry, rz)`` in degrees (specification.md §4.5).
+
+    Carried so a worker process can rebuild exactly this frame from plain
+    numbers, the same way it rebuilds it from ``cc`` and ``t``."""
+    b: np.ndarray = None  # type: ignore[assignment]
+    """Build direction in part coordinates: the "vertical" every ``Z`` of
+    docs/algorithm.md §2-§3 refers to once the part is oriented on the bed."""
 
 
-def lattice_params(cc: float, t: float) -> LatticeParams:
-    """Build a :class:`LatticeParams` from the two CLI geometry parameters."""
+def lattice_params(cc: float, t: float, orient=_orient.IDENTITY) -> LatticeParams:
+    """Build a :class:`LatticeParams` from the CLI geometry parameters.
+
+    ``orient`` is the print orientation. The lattice frame is the canonical one
+    of docs/algorithm.md §2.1 rotated into the part's coordinates,
+    ``e_k' = R.T @ e_k``, and the profile frame is then derived from it exactly
+    as it always was, with the bed's normal ``b`` standing where ``z`` stood.
+
+    **There is no identity special case** (specification.md §4.5). At
+    ``(0, 0, 0)`` ``R`` is exactly the identity and ``b`` exactly ``(0, 0, 1)``,
+    so every expression below evaluates to what it evaluated to before the
+    orientation existed — which ``test/test_lattice.py`` asserts element for
+    element rather than leaving to this comment.
+    """
+    orient = (float(orient[0]), float(orient[1]), float(orient[2]))
     a = cube_edge(cc)
-    e = np.array([strut_direction(k) for k in range(3)], dtype=float)
-    zhat = np.array([0.0, 0.0, 1.0])
-    u = np.array([_normalize(np.cross(zhat, e[k])) for k in range(3)], dtype=float)
+    R = _orient.rotation_matrix(orient)
+    canonical = np.array([strut_direction(k) for k in range(3)], dtype=float)
+    # Row k is (R.T @ e_k).T == e_k.T @ R.
+    e = canonical @ R
+    b = R.T @ np.array([0.0, 0.0, 1.0])
+    u = np.array([_normalize(np.cross(b, e[k])) for k in range(3)], dtype=float)
     v = np.array([np.cross(e[k], u[k]) for k in range(3)], dtype=float)
     B = a * np.column_stack([e[0], e[1], e[2]])
     return LatticeParams(cc=float(cc), t=float(t), a=a, r=float(t) / np.sqrt(2.0),
-                         e=e, u=u, v=v, B=B)
+                         e=e, u=u, v=v, B=B, orient=orient, b=b)
 
 
 def _normalize(x: np.ndarray) -> np.ndarray:
@@ -193,6 +219,40 @@ def candidate_nodes(lp: LatticeParams, lo: np.ndarray, hi: np.ndarray) -> np.nda
     return np.stack([g.ravel() for g in grid], axis=1)
 
 
+def index_range_of_points(lp: LatticeParams, points: np.ndarray):
+    """Inclusive node-index bounds covering a point cloud, padded as §2.4 pads.
+
+    The tight counterpart of :func:`index_range`. Mapping an axis-aligned box's
+    corners through ``B^-1`` is correct for any basis but loose for most of
+    them: the box of a box is larger than the body inside it, and once the
+    lattice is rotated on the print bed (specification.md §4.5) it is larger by
+    a multiple. Bounding the body's own surface points in index space instead
+    removes only candidates that would have classified OUTSIDE.
+
+    Safe by the same argument as §2.4: the body lies within the convex hull of
+    its surface mesh inflated by the mesh's deviation ``d <= a/4``, a junction
+    reaches ``a/2`` from its node, and a world distance ``x`` is at most ``x/a``
+    in any index coordinate — together under one cell, against a pad of at
+    least two.
+    """
+    idx = np.linalg.solve(lp.B, np.asarray(points, dtype=float).T).T
+    pad = int(np.ceil(lp.r / lp.a)) + 1
+    lo_idx = np.floor(idx.min(axis=0)).astype(np.int64) - pad
+    hi_idx = np.ceil(idx.max(axis=0)).astype(np.int64) + pad
+    return lo_idx, hi_idx
+
+
+def candidate_nodes_of_points(lp: LatticeParams, points: np.ndarray) -> np.ndarray:
+    """Every node index in :func:`index_range_of_points`, ordered as
+    :func:`candidate_nodes` orders them (last index fastest)."""
+    lo_idx, hi_idx = index_range_of_points(lp, points)
+    ii = np.arange(lo_idx[0], hi_idx[0] + 1, dtype=np.int64)
+    jj = np.arange(lo_idx[1], hi_idx[1] + 1, dtype=np.int64)
+    kk = np.arange(lo_idx[2], hi_idx[2] + 1, dtype=np.int64)
+    grid = np.meshgrid(ii, jj, kk, indexing="ij")
+    return np.stack([g.ravel() for g in grid], axis=1)
+
+
 def format_param(x: float) -> str:
     """Format a float for file names and part names without trailing zeros.
 
@@ -203,16 +263,36 @@ def format_param(x: float) -> str:
     return repr(float(x)).rstrip("0").rstrip(".")
 
 
-def part_name(input_path: str, cc: float, t: float) -> str:
+def variant_suffix(orient=_orient.IDENTITY, overhang: float | None = None,
+                   sep: str = "-") -> str:
+    """The rotation and support tags a name carries, each only when it applies.
+
+    ``-rotx<rx>y<ry>z<rz>`` when any angle is non-zero, then ``-sup<overhang>``
+    when support is enabled (specification.md §4.5, §4.6). An unrotated,
+    unsupported run therefore keeps exactly the name it always had.
+    """
+    out = ""
+    if _orient.is_rotated(orient):
+        out += (f"{sep}rotx{format_param(orient[0])}y{format_param(orient[1])}"
+                f"z{format_param(orient[2])}")
+    if overhang is not None:
+        out += f"{sep}sup{format_param(overhang)}"
+    return out
+
+
+def part_name(input_path: str, cc: float, t: float, orient=_orient.IDENTITY,
+              overhang: float | None = None) -> str:
     """STEP part name ``<input_stem>+lattice+cc<cc>+t<t>`` (specification.md §5).
 
     It carries the same four components as the default output file name, in the
     same order, differing in punctuation alone: specification.md §5 fixes ``+``
     between every component here, where the file name uses ``-`` and runs ``cc``
     and ``t`` together — ``ball-lattice-cc20t4.step`` carries
-    ``ball+lattice+cc20+t4``.
+    ``ball+lattice+cc20+t4``. The rotation and support tags follow when they
+    apply (:func:`variant_suffix`).
     """
     import os
 
     stem = os.path.splitext(os.path.basename(input_path))[0]
-    return f"{stem}+lattice+cc{format_param(cc)}+t{format_param(t)}"
+    return (f"{stem}+lattice+cc{format_param(cc)}+t{format_param(t)}"
+            + variant_suffix(orient, overhang, "+"))

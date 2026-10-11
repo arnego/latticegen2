@@ -374,8 +374,12 @@ def test_fuse_disagreeing_pairs_produces_one_agreed_solid(lp, disagreeing_pieces
     # plain one-axis `is_cap_plane_face` test alone cannot tell node a's caps
     # from node b's for any half-strut whose axis is orthogonal to the one
     # separating them.
+    #
+    # What is left of a's cap 0 -- the part facing b's notch, with nothing
+    # behind it -- is exterior surface of the merged solid and no longer a cap:
+    # its neighbour across that plane is part of the same solid.
     remaining = set(merged.cap_faces)
-    assert remaining == {(a, h) for h in range(6)} | {
+    assert remaining == {(a, h) for h in range(6) if h != 0} | {
         (b, h) for h in range(6) if h != OPPOSITE_HALF[0]
     }
 
@@ -919,3 +923,24 @@ def test_a_group_that_cannot_be_fused_is_left_alone_rather_than_failing(lp):
     assert n_groups == 0, "nothing was merged"
     assert invented == []
     assert fused == before, "both pieces survive, so the caller can still decline"
+
+
+@pytest.mark.parametrize("orient", [(0.0, 0.0, 0.0), (180.0, 0.0, 0.0), (35.0, 20.0, -110.0)])
+def test_a_cap_between_two_nodes_of_a_group_belongs_to_the_side_its_material_is_on(orient):
+    """The plane between two nodes is a cap plane of both, with one ideal
+    centre, so only the face's outward normal can say whose cap it is."""
+    from latticegen2 import boundary, occ
+    from latticegen2.junction import build_template, is_cap_plane_face
+    from latticegen2.lattice import lattice_params, nodes
+
+    lp = lattice_params(7.0, 1.4, orient)
+    tpl = build_template(lp)
+    keys = [(3, -2, 5), (4, -2, 5)]
+    pos = nodes(lp, np.array(keys))
+    listed = list(zip(keys, pos))
+    for mine, other, h in ((0, 1, 0), (1, 0, 3)):
+        solid = tpl.solid.Moved(occ.translation(pos[mine]))
+        cap = [f for f in occ.faces(solid) if is_cap_plane_face(lp, f, pos[mine]) == h][0]
+        assert is_cap_plane_face(lp, cap, pos[other]) is not None      # ambiguous by plane
+        assert boundary._owning_cap(lp, cap, listed) == (keys[mine], h)
+        assert boundary._owning_cap(lp, cap, listed[::-1]) == (keys[mine], h)

@@ -47,7 +47,9 @@ from OCP.BRep import BRep_Tool
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Fuse
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
 from OCP.BRepTools import BRepTools
-from OCP.TopAbs import TopAbs_ShapeEnum
+from OCP.BRepAdaptor import BRepAdaptor_Surface
+from OCP.GeomAbs import GeomAbs_SurfaceType
+from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
 from OCP.TopoDS import TopoDS, TopoDS_Shape, TopoDS_Shell
 from OCP.gp import gp_Pnt
 from OCP.TopTools import TopTools_ListOfShape
@@ -161,6 +163,22 @@ class BoundaryPiece:
     this is a list per key, not a single face. Keyed by node as well as
     half-strut id because a piece :func:`fuse_disagreeing_pairs` has merged can
     hold caps belonging to either of the nodes it spans."""
+    support: bool = False
+    """Whether this piece carries print support (docs/algorithm.md §14.5).
+
+    Such a piece is one lattice cell's junction fused with the support passing
+    through it. It is attached to the wall by design, so the component it
+    belongs to is exempt from the floating-body rule (specification.md §5)."""
+    spans: frozenset = frozenset()
+    """Every node whose cell this piece holds material of, when that is more
+    than ``node`` alone: set by :func:`_fuse_group` on a merged piece.
+
+    A merged piece can be fused again, and re-tagging its faces then has to
+    know every cell they may belong to. ``node`` is one representative, and
+    reading the group's cells off it alone lost the others: on
+    `TD_HX_rehearsal_test` with supports, 17 sound caps of twice-fused pieces
+    were tagged as plain faces -- each found facing a partner of exactly its
+    own area -- and 156 edges were left unclosed at `stitch`."""
     caps: frozenset[tuple[NodeKey, int]] = frozenset()
     """``(node, half-strut id)`` pairs whose cap face this piece gave up as an
     interface.
@@ -600,7 +618,19 @@ def trim_junction(
     return TrimResult(out, n_pinholes, tolerances, retrimmed, localized, outside_mm)
 
 
-def _remove_pinholes(node_pos: np.ndarray, solid):
+FUSE_PINHOLE_WIRE_TOL = 1e-3
+"""Millimetres. :data:`PINHOLE_WIRE_TOL` for the result of a repair fuse.
+
+A fuse leaves the same defect a grazing trim does, an inner wire of one edge
+whose ends do not meet, and leaves it longer: 3.7e-04 mm on a 13.5 mm² face of
+the piece fused around node (240, -277, -280) of `TD_HX_rehearsal_test` with
+supports, which was the single unaccounted edge `stitch` refused that run for.
+The bar is not what makes removal safe -- only an inner wire whose edges are
+already unpaired is ever dropped, and the area and structure checks below must
+still hold exactly -- so it can sit where the defect is."""
+
+
+def _remove_pinholes(node_pos: np.ndarray, solid, tol: float | None = None):
     """Drop this piece's zero-area pinhole wires, proving nothing else moved.
 
     Returns ``(solid, n_removed)``. A pinhole is an inner wire of a few microns
@@ -632,7 +662,8 @@ def _remove_pinholes(node_pos: np.ndarray, solid):
     indication of where, which is exactly the failure it exists to prevent.
     """
     try:
-        cleaned, n_removed = occ.remove_pinhole_wires(solid, PINHOLE_WIRE_TOL)
+        cleaned, n_removed = occ.remove_pinhole_wires(
+            solid, PINHOLE_WIRE_TOL if tol is None else tol)
     except Exception as exc:                                   # noqa: BLE001
         raise ProcessingError(
             f"Pinhole-wire removal failed for the junction at {tuple(node_pos)}: {exc}"
@@ -798,6 +829,21 @@ def _rebuild_solid(piece: BoundaryPiece) -> TopoDS_Shape:
     return occ.make_solid(shell)
 
 
+def _outward_normal(face) -> np.ndarray | None:
+    """The outward normal of a planar face of a solid, or ``None`` if not planar."""
+    surf = BRepAdaptor_Surface(face)
+    if surf.GetType() != GeomAbs_SurfaceType.GeomAbs_Plane:
+        return None
+    pln = surf.Plane()
+    d = pln.Axis().Direction()
+    normal = np.array([d.X(), d.Y(), d.Z()])
+    if not pln.Direct():
+        normal = -normal
+    if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+        normal = -normal
+    return normal
+
+
 def _owning_cap(
     lp: LatticeParams, face, node_positions: list[tuple[NodeKey, np.ndarray]]
 ) -> tuple[NodeKey, int] | None:
@@ -816,20 +862,102 @@ def _owning_cap(
     best = None
     best_d = None
     centre = occ.centroid(face)
+    outward = _outward_normal(face)
     for node, pos in node_positions:
         h = is_cap_plane_face(lp, face, pos)
         if h is None:
             continue
         ideal = pos + half_strut_offset(lp, h)
-        d = float(np.linalg.norm(centre - ideal))
+        # The plane between two nodes of the group is a cap plane of *both*,
+        # with one and the same ideal centre, so neither test below can tell
+        # them apart and the first node listed used to win. What does tell them
+        # apart is which side the material is on: a cell's cap faces outward
+        # along its own half-strut. Measured on `TD_HX_rehearsal_test` with
+        # supports: 25 caps left "disagreeing" after the repair, each of them
+        # two pieces of one cell tagged as if they faced each other (0.479 mm^2
+        # against 10.168), and 193 unclosed edges at `stitch` behind them.
+        if outward is not None and float(outward @ half_strut_offset(lp, h)) <= 0.0:
+            continue
+        # The face must lie within this node's own cell face, not merely in its
+        # plane. For a bare cap the nearest-centre rule below already implies
+        # it; a support cross-section (docs/algorithm.md §14.5) can sit anywhere
+        # on the cell face, where "nearest cap centre" stops being decisive.
+        rel = centre - ideal
+        if any(abs(float(rel @ lp.e[k])) > lp.a / 2.0 + 1e-6 for k in range(3)):
+            continue
+        d = float(np.linalg.norm(rel))
         if best is None or d < best_d:
             best, best_d = (node, h), d
     return best
 
 
+FUSE_VOLUME_REL_TOL = 1e-4
+"""How far a repair fuse's volume may differ from the sum of its operands'.
+
+The operands are pieces of different lattice cells, or separate pieces of one,
+so they meet on faces and never overlap: the fused volume is the plain sum
+(docs/algorithm.md §3.2). The failures this catches are gross — below, 0.84 mm³
+returned for 54.9 mm³ of operands."""
+
+
+def _fuse_solids(solids: list, involved) -> list:
+    """The solids of ``solids`` fused, checked against their own volume.
+
+    One call over all of them first. **That call can return garbage while
+    reporting success**: on `TD_HX_rehearsal_test` at ``cc=7, t=1.4`` with
+    supports, turned over, the five pieces around node (240, -277, -280) —
+    each valid, 54.9 mm³ together — fuse in one call to a single 0.84 mm³
+    solid, which is one of the operands. Every *pair* of them fuses correctly,
+    and so does folding them in one at a time, in any of four orders tried,
+    to 54.07 + 0.84 mm³. So a result whose volume is not the operands' sum is
+    redone as that fold, each step checked the same way.
+    """
+    volumes = [occ.volume(s) for s in solids]
+
+    def fuse(objects, tools):
+        algo = BRepAlgoAPI_Fuse()
+        args = TopTools_ListOfShape()
+        for s in objects:
+            args.Append(s)
+        tool_list = TopTools_ListOfShape()
+        for s in tools:
+            tool_list.Append(s)
+        algo.SetArguments(args)
+        algo.SetTools(tool_list)
+        algo.Build()
+        if not algo.IsDone():
+            raise ProcessingError(
+                f"Could not fuse the disagreeing boundary pieces at {involved}: the "
+                f"local repair boolean did not complete."
+            )
+        return occ.solids(algo.Shape())
+
+    def adds_up(result, want):
+        got = sum(occ.volume(s) for s in result)
+        return abs(got - want) <= FUSE_VOLUME_REL_TOL * abs(want)
+
+    result = fuse(solids[:1], solids[1:])
+    if adds_up(result, sum(volumes)):
+        return result
+    current, total = [solids[0]], volumes[0]
+    for solid, volume in zip(solids[1:], volumes[1:]):
+        total += volume
+        current = fuse(current, [solid])
+        if not adds_up(current, total):
+            raise ProcessingError(
+                f"Fusing the disagreeing boundary pieces at {involved} does not "
+                f"preserve their volume, in one call or one piece at a time "
+                f"({sum(occ.volume(s) for s in current):.6f} mm^3 where "
+                f"{total:.6f} was expected), which is beyond what this repair "
+                f"can fix."
+            )
+    return current
+
+
 def _fuse_group(
-    lp: LatticeParams, group: list[BoundaryPiece]
-) -> tuple[BoundaryPiece, list[tuple[NodeKey, int]]]:
+    lp: LatticeParams, group: list[BoundaryPiece],
+    held_outside: frozenset = frozenset(),
+) -> tuple[list[BoundaryPiece], list[tuple[NodeKey, int]]]:
     """Fuse one cluster of mutually disagreeing pieces into a single solid.
 
     Rebuilds each piece as a solid, fuses them with one ``BRepAlgoAPI_Fuse``
@@ -838,51 +966,80 @@ def _fuse_group(
     neighbours survives the fuse correctly tagged, while the disagreeing cap
     itself simply stops existing as a boundary face: it is now interior
     material shared by construction, needing no interface at all.
+
+    ``held_outside`` is every cap key some piece *not* in the group presents.
     """
     solids = [_rebuild_solid(p) for p in group]
-    fuse = BRepAlgoAPI_Fuse()
-    args = TopTools_ListOfShape()
-    args.Append(solids[0])
-    tools = TopTools_ListOfShape()
-    for s in solids[1:]:
-        tools.Append(s)
-    fuse.SetArguments(args)
-    fuse.SetTools(tools)
-    fuse.Build()
     involved = [p.node for p in group]
-    if not fuse.IsDone():
-        raise ProcessingError(
-            f"Could not fuse the disagreeing boundary pieces at {involved}: the "
-            f"local repair boolean did not complete."
-        )
-    result_solids = occ.solids(fuse.Shape())
-    if len(result_solids) != 1:
+    result_solids = _fuse_solids(solids, involved)
+    supported = any(p.support for p in group)
+    # Lattice junctions on either side of one cap fuse into one solid or the
+    # repair has not worked. Supported cells are different: one cell can hold
+    # several disconnected pieces, all presenting material in the same cell
+    # plane, so the group legitimately fuses into more than one solid — each
+    # of which is simply a piece (docs/algorithm.md §14.5).
+    if len(result_solids) != 1 and not (supported and result_solids):
         raise ProcessingError(
             f"Fusing the disagreeing boundary pieces at {involved} produced "
             f"{len(result_solids)} solid(s) instead of 1. The two pieces do not "
             f"even overlap consistently, which is beyond what this repair can fix."
         )
-    solid = result_solids[0]
 
-    group_nodes = np.array([p.node for p in group], dtype=np.int64)
-    node_positions = list(zip((p.node for p in group), nodes(lp, group_nodes)))
-    # Re-measured on the fused result rather than inherited from the group: the
-    # fuse rebuilds faces along the seam it closes, so the operands' readings
-    # describe geometry that no longer exists (docs/algorithm.md §7.3).
-    fused_faces = occ.faces(solid)
-    tf = occ.tolerance_feature_ratio(fused_faces)
-    merged = BoundaryPiece(
-        node=group[0].node,
-        volume=occ.volume(solid),
-        tolerance_ratio=tf.ratio,
-        tolerance_evidence=(tf.tolerance, tf.face_area, tf.where),
-    )
-    for face in fused_faces:
-        tag = _owning_cap(lp, face, node_positions)
-        if tag is None:
-            merged.faces.append(face)
-        else:
-            merged.cap_faces.setdefault(tag, []).append(face)
+    spanned = frozenset(n for p in group for n in (p.spans or (p.node,)))
+    group_nodes = np.array(sorted(spanned), dtype=np.int64)
+    node_positions = list(zip(map(tuple, group_nodes.tolist()),
+                              nodes(lp, group_nodes)))
+    presented = {key for p in group for key in p.cap_faces}
+    merged_pieces = []
+    for solid in result_solids:
+        # The trim workers remove pinhole wires from what they produce (§7);
+        # a piece made here has been through no worker.
+        solid, _removed = _remove_pinholes(
+            node_positions[0][1], solid, FUSE_PINHOLE_WIRE_TOL)
+        # Re-measured on the fused result rather than inherited from the group:
+        # the fuse rebuilds faces along the seam it closes, so the operands'
+        # readings describe geometry that no longer exists (docs/algorithm.md
+        # §7.3).
+        fused_faces = occ.faces(solid)
+        tf = occ.tolerance_feature_ratio(fused_faces)
+        merged = BoundaryPiece(
+            node=group[0].node,
+            volume=occ.volume(solid),
+            tolerance_ratio=tf.ratio,
+            tolerance_evidence=(tf.tolerance, tf.face_area, tf.where),
+            support=supported,
+            spans=spanned,
+        )
+        for face in fused_faces:
+            tag = _owning_cap(lp, face, node_positions)
+            # A face left in a plane **both sides of which were in the group**
+            # is not a cap. The fuse has already merged whatever the two sides
+            # share there, so what remains is surface with nothing behind it --
+            # where one cell's support cross-section reaches past the other's --
+            # and it is exterior surface of the result. Tagged as a cap it
+            # would be offered to a neighbour that is part of this very solid:
+            # measured on `TD_HX_rehearsal_test` with supports, 0.016 mm^2 on
+            # one side of such a plane against 0.672 on the other, reported as
+            # a cap the repair "could not reconcile".
+            #
+            # "Both sides in the group" is a statement about cap *keys*, not
+            # about nodes. A supported cell can hold several pieces, and only
+            # those party to a disagreement join the group; a first version of
+            # this rule asked whether the neighbouring *node* was in the group
+            # and demoted 19 sound caps on that part, each facing a piece of
+            # the neighbouring cell that was never fused -- found as a plain
+            # face of exactly the partner's area, and as 161 unclosed edges.
+            if tag is not None:
+                opposite = (_neighbour(tag[0], tuple(int(x) for x in neighbor_step(tag[1]))),
+                            OPPOSITE_HALF[tag[1]])
+                if (opposite in presented and tag in presented
+                        and tag not in held_outside and opposite not in held_outside):
+                    tag = None
+            if tag is None:
+                merged.faces.append(face)
+            else:
+                merged.cap_faces.setdefault(tag, []).append(face)
+        merged_pieces.append(merged)
 
     # `_owning_cap` tests one axis per half-strut, so it can pass for more than
     # one node in the group and its centroid tie-break is only as good as the
@@ -897,9 +1054,8 @@ def _fuse_group(
     # production run has yet been shown to invent one. Promoting this to a hard
     # failure without that evidence would risk refusing correct input, which
     # docs/algorithm.md §11 forbids more strongly than it asks for any gate.
-    presented = {key for p in group for key in p.cap_faces}
-    invented = sorted(set(merged.cap_faces) - presented)
-    return merged, invented
+    invented = sorted({k for m in merged_pieces for k in m.cap_faces} - presented)
+    return merged_pieces, invented
 
 
 def fuse_disagreeing_pairs(
@@ -952,10 +1108,27 @@ def fuse_disagreeing_pairs(
     steps = [tuple(int(x) for x in neighbor_step(h)) for h in range(6)]
     uf = UnionFind(len(pieces))
     touched: set[int] = set()
+    settled = 0
     for entry in mismatched:
         node, h = entry[0], entry[1]
         other = _neighbour(node, steps[h])
         idxs = holders.get((node, h), []) + holders.get((other, OPPOSITE_HALF[h]), [])
+        if len(set(idxs)) == 1 and (node, h) in holders and (
+                other, OPPOSITE_HALF[h]) in holders:
+            # One piece holds both sides. It has been merged across this plane
+            # already, in an earlier round, while some other piece still held
+            # one of the two keys -- so what it kept there was rightly left
+            # tagged then. With that piece since merged in, these are faces of
+            # one solid looking at each other across a gap: exterior surface,
+            # by the rule `_fuse_group` applies, and there is nothing to fuse.
+            # Left as caps they are reported as a disagreement forever, the
+            # group being one piece -- measured, 8 rounds without change.
+            piece = pieces[idxs[0]]
+            for key in ((node, h), (other, OPPOSITE_HALF[h])):
+                piece.faces.extend(piece.cap_faces.pop(key))
+                del holders[key]
+            settled += 1
+            continue
         if not idxs:
             if not strict:
                 continue
@@ -972,7 +1145,11 @@ def fuse_disagreeing_pairs(
     for i in touched:
         groups.setdefault(uf.find(i), []).append(i)
 
+    def group_pieces(idxs):
+        return [pieces[i] for i in idxs]
+
     fused: list[BoundaryPiece] = []
+    n_fuses = 0
     invented: list[tuple[NodeKey, int]] = []
     gave_up: set[int] = set()
     for idxs in groups.values():
@@ -990,7 +1167,11 @@ def fuse_disagreeing_pairs(
             gave_up.update(idxs)
             continue
         try:
-            merged, bad_keys = _fuse_group(lp, [pieces[i] for i in idxs])
+            members = set(idxs)
+            outside = frozenset(
+                key for p in group_pieces(idxs) for key in p.cap_faces
+                if any(i not in members for i in holders[key]))
+            merged, bad_keys = _fuse_group(lp, [pieces[i] for i in idxs], outside)
         except ProcessingError:
             if strict:
                 raise
@@ -1001,12 +1182,13 @@ def fuse_disagreeing_pairs(
             # closed. "Do more work", never "produce a wrong result" (§11).
             gave_up.update(idxs)
             continue
-        fused.append(merged)
+        fused.extend(merged)
+        n_fuses += 1
         invented.extend(bad_keys)
 
     touched -= gave_up
     kept = [p for i, p in enumerate(pieces) if i not in touched]
-    return kept + fused, len(fused), invented
+    return kept + fused, n_fuses + settled, invented
 
 
 # --- Worker-process plumbing ------------------------------------------------
@@ -1046,8 +1228,8 @@ def _worker_trim(job):
     worker process by :class:`latticegen2.parallel.WorkerPool`'s own initializer
     rather than once per job.
     """
-    (body_path, cc, t, node_batch, out_path, mesh_path, margin) = job
-    lp = lattice_params(cc, t)
+    (body_path, cc, t, node_batch, out_path, mesh_path, margin, orient) = job
+    lp = lattice_params(cc, t, orient)
     tpl = build_template(lp)
     body = _read_brep(body_path)
     probe = _worker_probe(mesh_path, margin)
@@ -1200,7 +1382,8 @@ def trim_boundary(
     batches = _split_batches(boundary_nodes, workers)
     jobs = [
         (body_path, lp.cc, lp.t, nb.tolist(),
-         os.path.join(tmpdir, f"boundary_{bi}.brep"), mesh_path, outside_margin)
+         os.path.join(tmpdir, f"boundary_{bi}.brep"), mesh_path, outside_margin,
+         lp.orient)
         for bi, nb in enumerate(batches)
     ]
 

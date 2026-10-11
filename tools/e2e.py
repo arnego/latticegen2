@@ -101,8 +101,25 @@ def geometry_checks(rep: Report, output: str, input_path: str, cc: float, t: flo
     rep.check("mesh is a closed manifold", manifold_ok,
               f"{len(mesh.tris)} triangles" + ("" if manifold_ok else f", {bad_edges} bad edges"))
     no_cross, pairs = vg.self_intersection_check(mesh)
-    rep.check("no self-intersections", no_cross,
-              "0 crossing pairs" if no_cross else f"{len(pairs)}+ crossing pairs")
+    detail = "0 crossing pairs"
+    if not no_cross:
+        # A crossing between two *triangles* is only a crossing between two
+        # *faces* if it survives a finer ruler. Where a strut ends on a curved
+        # wall, the wall patch is meshed by chords that sag below the true
+        # surface while the strut's lateral triangles end on it, so at a coarse
+        # deflection the two can cross with no vertex in common. Measured on
+        # the 80 mm ball at `cc=20, t=4` with the lattice rotated: 3 pairs at
+        # the default 0.4 mm, 0 at 0.1, 0.02 and 0.005 mm, on a solid
+        # `BRepCheck_Analyzer` calls valid. Geometry that really intersects
+        # itself does so at every deflection — the same rule docs/algorithm.md
+        # §9 uses to turn a non-manifold *reading* into a verdict.
+        coarse = len(pairs)
+        no_cross, pairs = vg.self_intersection_check(vg.mesh_of(output, cc, t, 8.0))
+        detail = (f"{coarse} crossing pair(s) at the default deflection, 0 when "
+                  f"re-measured at an eighth of it" if no_cross
+                  else f"{len(pairs)}+ crossing pairs at an eighth of the default "
+                       f"deflection ({coarse}+ at the default)")
+    rep.check("no self-intersections", no_cross, detail)
 
 
 def outside_check(rep: Report, output: str, input_path: str, t: float) -> None:
@@ -394,6 +411,146 @@ def scenario_spiral_stress(outdir: str) -> Report:
     return rep
 
 
+CYLINDER_SUPPORT_GOLDEN = os.path.join(
+    TESTDIR, "test-cylinder-cc10t1.5-sup60-golden-sample.step")
+
+
+def support_checks(rep: Report, output: str, input_path: str, cc: float, t: float,
+                   orient, overhang: float, thickness: float) -> None:
+    """specification.md §6.2's two support checks, asked of the written file."""
+    cov = vg.overhang_coverage(output, input_path, cc, t, orient, overhang, thickness)
+    rep.check("every inner overhang is backed by material",
+              cov["samples"] > 0 and cov["uncovered"] == 0,
+              f"{cov['samples']} sample(s) over {cov['area_mm2']:.0f} mm^2, "
+              f"{cov['uncovered']} uncovered"
+              + (f" ({cov['thin']} over material thinner than the mesh probe, "
+                 f"confirmed by exact classification)" if cov["thin"] else "")
+              + (f", first at {cov['where'][0]}" if cov["where"] else ""))
+    ss = vg.self_supporting(output, input_path, cc, t, orient, overhang)
+    rep.check("no support surface exceeds the overhang limit",
+              ss["bad_area_mm2"] == 0.0,
+              f"{ss['triangles']} triangles"
+              + (f", {ss['bad_area_mm2']:.3f} mm^2 over the limit, worst "
+                 f"{ss['worst_deg']:.2f} deg at {ss['where'][0]}"
+                 if ss["bad_area_mm2"] else ""))
+
+
+def scenario_oriented_lattice(outdir: str) -> Report:
+    """Print orientation on its own (specification.md §4.5), without support.
+
+    The lattice frame is rotated to the bed and nothing else changes, so every
+    §6.2 check applies as it stands. The run must also load no support code and
+    announce no support stage.
+    """
+    rep = Report("oriented-lattice")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "oriented-lattice.step")
+    proc, elapsed = run_generator(
+        ["-i", BALL, "-cc", "20", "-t", "4", "-o", out, "--cores", "4",
+         "--orient", "35", "20", "-110"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+    rep.check("runtime under 10 minutes", elapsed < 600, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        geometry_checks(rep, out, BALL, 20.0, 4.0)
+        log = open(os.path.splitext(out)[0] + ".log", encoding="utf-8").read()
+        rep.check("the orientation is recorded and no support stage ran",
+                  "orient: 35 20 -110 deg" in log and "stage overhang" not in log)
+    return rep
+
+
+def scenario_support_tilted(outdir: str) -> Report:
+    """Orientation and support together, on the ball: a curved overhang, tilted."""
+    rep = Report("support-tilted")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "support-tilted.step")
+    orient = (35.0, 20.0, -110.0)
+    proc, elapsed = run_generator(
+        ["-i", BALL, "-cc", "20", "-t", "4", "-o", out, "--cores", "4",
+         "--orient", "35", "20", "-110", "--support"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+    rep.check("runtime under 10 minutes", elapsed < 600, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        geometry_checks(rep, out, BALL, 20.0, 4.0)
+        support_checks(rep, out, BALL, 20.0, 4.0, orient, 60.0, 1.0)
+    return rep
+
+
+def scenario_support_cylinder(outdir: str) -> Report:
+    """Print support on the test cylinder, prepared for a golden sample.
+
+    Default overhang (60 deg) and thickness (1 mm), unrotated. Two things are
+    checked beyond the usual: the two support checks of §6.2, and that the
+    **existing lattice golden sample is contained in the output** — supports
+    only ever add material, and every lattice cell a support reaches is rebuilt
+    by a boolean, so this is what says the rebuild lost none of the lattice.
+
+    **No golden sample exists yet, deliberately** (docs/testing.md): one is only
+    worth having once a human has inspected the output it pins. `golden_check`
+    reports `SKIP` until `test-cylinder-cc10t1.5-sup60-golden-sample.step` is
+    committed, and compares against it from then on.
+    """
+    rep = Report("support-cylinder")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "support-cylinder.step")
+    proc, elapsed = run_generator(
+        ["-i", CYLINDER, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "6",
+         "--support"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+    rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        geometry_checks(rep, out, CYLINDER, 10.0, 1.5)
+        support_checks(rep, out, CYLINDER, 10.0, 1.5, (0.0, 0.0, 0.0), 60.0, 1.0)
+        if os.path.isfile(CYLINDER_GOLDEN):
+            lost = vg.contained_in(CYLINDER_GOLDEN, out)
+            rep.check("the lattice golden sample is contained in the output",
+                      lost < 1.5 ** 3, f"{lost:.6g} mm^3 of it outside")
+        golden_check(rep, out, CYLINDER_SUPPORT_GOLDEN, 10.0, 1.5)
+    return rep
+
+
+REHEARSAL = os.path.join(TESTDIR, "TD_HX_rehearsal_test.step")
+REHEARSAL_SUPPORT_GOLDEN = os.path.join(
+    TESTDIR, "TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup60-golden-sample.step")
+
+
+def scenario_rehearsal_support(outdir: str) -> Report:
+    """Print support at production scale: the rehearsal part, turned over.
+
+    `TD_HX_rehearsal_test.step` at `cc=7, t=1.4` is the cheapest real part
+    docs/testing.md names for anything touching `validate`, and with
+    `--orient 180 0 0` what was its floor becomes its ceiling. This is the only
+    scenario that puts the support stages through a part of that size, with
+    its grazing trims, its tiled boundary sew and its per-half-strut re-trims.
+
+    Much the slowest scenario — tens of minutes for the run and more for the
+    checks — so it is **opt-in** (:data:`OPT_IN`): it runs only when named with
+    `--only`. Pass `--keep <dir>` with it to write into a folder that outlives
+    the harness, since a run this long is not one to repeat for its log.
+
+    **No golden sample exists yet** (docs/testing.md): `golden_check` reports
+    `SKIP` until an inspected output is committed.
+    """
+    rep = Report("rehearsal-support")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "rehearsal-support.step")
+    orient = (180.0, 0.0, 0.0)
+    proc, elapsed = run_generator(
+        ["-i", REHEARSAL, "-cc", "7", "-t", "1.4", "-o", out, "--cores", "6",
+         "--support", "--orient", "180", "0", "0", "--overhang", "60",
+         "--support-thickness", "1"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-600:])
+    rep.check("runtime under 3 hours", elapsed < 10800, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        geometry_checks(rep, out, REHEARSAL, 7.0, 1.4)
+        support_checks(rep, out, REHEARSAL, 7.0, 1.4, orient, 60.0, 1.0)
+        golden_check(rep, out, REHEARSAL_SUPPORT_GOLDEN, 7.0, 1.4)
+    return rep
+
+
 SCENARIOS = {
     "smoke-fast": scenario_smoke_fast,
     "invalid-input": scenario_invalid_input,
@@ -401,19 +558,33 @@ SCENARIOS = {
     "smoke-verified": scenario_smoke_verified,
     "dense-lattice": scenario_dense_lattice,
     "spiral-stress": scenario_spiral_stress,
+    "oriented-lattice": scenario_oriented_lattice,
+    "support-tilted": scenario_support_tilted,
+    "support-cylinder": scenario_support_cylinder,
+    "rehearsal-support": scenario_rehearsal_support,
 }
+
+
+#: Scenarios that run only when asked for by name with `--only`.
+OPT_IN = {"rehearsal-support"}
 
 
 def main(argv: list[str]) -> int:
     only = None
     if "--only" in argv:
         only = set(argv[argv.index("--only") + 1].split(","))
+    keep = argv[argv.index("--keep") + 1] if "--keep" in argv else None
     occ.quiet_kernel()
 
     reports = []
     with tempfile.TemporaryDirectory(prefix="latticegen2-e2e-") as outdir:
+        if keep:
+            os.makedirs(keep, exist_ok=True)
+            outdir = os.path.abspath(keep)
         for name, fn in SCENARIOS.items():
             if only and name not in only:
+                continue
+            if name in OPT_IN and not (only and name in only):
                 continue
             reports.append(fn(outdir))
             print(flush=True)

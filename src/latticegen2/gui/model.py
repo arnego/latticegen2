@@ -73,6 +73,10 @@ class RunState:
     #: run would stop updating the pane at exactly the point there is most to
     #: read.
     lines_seen: int = 0
+    #: The stages this run announced in its ``hello``. A run with print supports
+    #: goes through three more than the plain pipeline, and both the stage
+    #: counter and the bar are laid out over what was announced.
+    stages: tuple = STAGES
 
     def add_line(self, text: str, source: str) -> None:
         """Record one line the child produced. ``source`` is :data:`LOG` or
@@ -112,7 +116,7 @@ class RunState:
     def stage_text(self) -> str:
         if self.stage is None:
             return "starting…" if not self.finished else ""
-        return f"{self.stage}  ({self.stage_number} of {len(STAGES)})"
+        return f"{self.stage}  ({self.stage_number} of {len(self.stages)})"
 
     def sub_text(self) -> str:
         """The line drawn over the sub-bar."""
@@ -157,13 +161,16 @@ class RunState:
         if ev == progress.HELLO:
             self.output = event["output"]
             self.log = event["log"]
+            announced = event.get("stages")
+            if announced:
+                self.stages = tuple(str(s) for s in announced)
 
         elif ev == progress.STAGE_BEGIN:
             self.stage = event["name"]
             self.stage_number = event["i"] + 1
             self.label = ""
             self.done = self.total = None
-            self._advance(overall_permille(self.stage, 0.0))
+            self._advance(overall_permille(self.stage, 0.0, self.stages))
 
         elif ev == progress.STAGE_END:
             self.peak_rss = max(self.peak_rss, int(event.get("max_rss") or 0))
@@ -171,7 +178,7 @@ class RunState:
             # the next one's. Done here rather than on the next `stage_begin`
             # so the bar reflects completed work even if the run stops between
             # two stages.
-            self._advance(overall_permille(event["name"], 1.0))
+            self._advance(overall_permille(event["name"], 1.0, self.stages))
             self.label = ""
             self.done = self.total = None
 
@@ -182,7 +189,7 @@ class RunState:
             self.done = event["done"]
             self.total = event["total"]
             self._advance(overall_permille(event["stage"] or self.stage,
-                                           self.sub_fraction))
+                                           self.sub_fraction, self.stages))
 
         elif ev == progress.LOG:
             self.add_line(event["msg"], LOG)

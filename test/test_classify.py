@@ -236,17 +236,17 @@ def test_worker_reuses_one_classify_index_across_the_slices_it_is_given(tmp_path
         stride = 4
         parts = [
             classify_mod._worker_classify(
-                (mesh_path, nodes_path, lp.cc, lp.t, offset, stride)
+                (mesh_path, nodes_path, lp.cc, lp.t, offset, stride, lp.orient)
             )[0]
             for offset in range(stride)
         ]
         assert len(classify_mod._WORKER_INDEX) == 1, "one index, not one per slice"
-        cached = classify_mod._WORKER_INDEX[(mesh_path, lp.cc, lp.t)]
+        cached = classify_mod._WORKER_INDEX[(mesh_path, lp.cc, lp.t, lp.orient)]
 
         # And the cache is what the slices actually ran against, not a spare
         # copy built beside them: re-running a slice must hand back that object.
-        classify_mod._worker_classify((mesh_path, nodes_path, lp.cc, lp.t, 0, stride))
-        assert classify_mod._WORKER_INDEX[(mesh_path, lp.cc, lp.t)] is cached
+        classify_mod._worker_classify((mesh_path, nodes_path, lp.cc, lp.t, 0, stride, lp.orient))
+        assert classify_mod._WORKER_INDEX[(mesh_path, lp.cc, lp.t, lp.orient)] is cached
 
         # Reuse must not have changed the answer.
         serial = classify_nodes(lp, mesh, cand).node_class

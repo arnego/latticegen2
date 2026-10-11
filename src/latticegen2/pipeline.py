@@ -43,13 +43,54 @@ from .connect import build_components
 from .errors import InputGeometryError, OutputError, ProcessingError
 from .interior import build_interior_shell, extract_template_mesh
 from .junction import build_template
-from .lattice import candidate_nodes, lattice_params, neighbor_step, part_name
+from .lattice import candidate_nodes_of_points, lattice_params, neighbor_step, part_name
 from .lattice import node as lattice_node
 from .parallel import WorkerPool, set_thread_budget
 from .parallel import read_brep as _read_brep
 from .parallel import write_brep as _write_brep
 from .runlog import RunLog, Timer, format_bytes
 from .stepout import generation_params_text, rewrite_step_header
+
+INTERFACE_REPAIR_ROUNDS = 8
+"""How many times `connect` fuses and re-resolves before giving up."""
+
+
+def _raise_still_disagreeing(iface, pieces, interior_set, tmpdir):
+    """Fail naming the caps, with both areas, and keep the pieces: "2 caps
+    disagree" on a part of 20,000 junctions is not something anybody can act on."""
+    from .lattice import HALF_STRUTS
+
+    def side(n):
+        if n in interior_set:
+            return "interior"
+        return f"{sum(1 for p in pieces if p.node == n)} piece(s)"
+
+    named, wanted = [], set()
+    for node, h, area_a, area_b in iface.mismatched[:8]:
+        k, s = HALF_STRUTS[h]
+        other = list(node)
+        other[k] += s
+        other = tuple(other)
+        named.append(
+            f"{node} h{h} ({side(node)}) presents {area_a:.6f} mm^2 "
+            f"and {other} ({side(other)}) {area_b:.6f}")
+        wanted.update((node, other))
+    kept = 0
+    for i, piece in enumerate(pieces):
+        if piece.node in wanted:
+            faces = list(piece.faces)
+            for group in piece.cap_faces.values():
+                faces.extend(group)
+            name = "disagree_%d_%d_%d_%d.brep" % (*piece.node, i)
+            BRepTools.Write_s(occ.compound(faces), os.path.join(tmpdir, name))
+            kept += 1
+    raise ProcessingError(
+        f"{len(iface.mismatched)} cap(s) still disagree after "
+        f"{INTERFACE_REPAIR_ROUNDS} rounds of fusing the junctions on either "
+        f"side; the local repair could not reconcile them: " + "; ".join(named)
+        + f". The {kept} piece(s) on either side are kept as disagree_*.brep."
+    )
+
 
 def _make_tmpdir(output_path: str) -> str:
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -87,7 +128,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     # specification.md §3). Set once here, on the master, which is the only
     # process that asks OCCT for threads.
     set_thread_budget(args.workers)
-    lp = lattice_params(args.cc, args.t)
+    lp = lattice_params(args.cc, args.t, args.orient)
     stats: dict[str, object] = {}
     rl.line(f"temp directory: {tmpdir}")
 
@@ -156,7 +197,10 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
     pool.__enter__()
     try:
         with Timer(rl, "classify"):
-            candidates = candidate_nodes(lp, lo, hi)
+            # Bounded by the body's own surface points in index space rather
+            # than by its axis-aligned box: correct for every print orientation
+            # and tight for all of them (docs/algorithm.md §2.4).
+            candidates = candidate_nodes_of_points(lp, mesh.verts)
             classification = classify_nodes(
                 lp, mesh, candidates, tmpdir=tmpdir, mesh_path=mesh_path,
                 pool=pool, report=rl.substage,
@@ -189,7 +233,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
         return _run_with_pool(
             args, rl, tmpdir, lp, tpl, tmesh, body, body_path, stats,
             interior_nodes, boundary_nodes, pool, mesh_path, mesh.deviation,
-            seam_gap,
+            seam_gap, mesh,
         )
     finally:
         pool.__exit__(*sys.exc_info())
@@ -211,6 +255,7 @@ def _run_with_pool(
     mesh_path: str,
     mesh_deviation: float,
     seam_gap,
+    mesh=None,
 ) -> dict:
     """The boundary-through-export span of :func:`_run`, run under one shared pool.
 
@@ -301,73 +346,98 @@ def _run_with_pool(
         rl.line(f"peak worker memory: {format_bytes(boundary.max_worker_rss)}")
         stats["peak_worker_memory"] = format_bytes(boundary.max_worker_rss)
 
+    if args.support:
+        # The one hook print support has in this pipeline, and the only place
+        # its code is imported (specification.md §4.6): a run without
+        # `--support` never loads `latticegen2.support` at all. It runs here
+        # because anchoring is evaluated against the lattice the boundary trim
+        # actually left, and it hands back the same two things this function
+        # already carries forward -- the piece list and the interior nodes --
+        # so everything below is unchanged (docs/algorithm.md §14).
+        from .support import run_support
+
+        boundary.pieces, interior_nodes = run_support(
+            args, rl, lp, mesh, body, body_path, mesh_path, tmpdir, pool,
+            interior_nodes, boundary, 2.0 * mesh_deviation, stats,
+        )
+
     with Timer(rl, "connect"):
+        rl.substage("resolving interfaces", 0, None)
         interior_set = {(int(a), int(b), int(c)) for a, b, c in interior_nodes} \
             if len(interior_nodes) else set()
         iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
         n_fused = 0
         n_weld_fused = 0
         n_invented = 0
-        if iface.mismatched:
-            # Declining a mismatched cap is not a safe degradation on its own:
-            # where the two sides present *different* partial regions, keeping
-            # both keeps the overlap as non-manifold material and the remainder
-            # as an unfilled hole (docs/algorithm.md §7.1). The repair falls back
-            # to the kernel's own general boolean and fuses the two disagreeing
-            # junctions into one solid, then interfaces are resolved again —
-            # the merged piece presents one agreed region, so nothing is
-            # declined there the second time.
-            boundary.pieces, n_fused, invented = fuse_disagreeing_pairs(
-                lp, boundary.pieces, iface.mismatched
-            )
-            n_invented += len(invented)
-            iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
-            if iface.mismatched:
-                raise ProcessingError(
-                    f"{len(iface.mismatched)} cap(s) still disagree after fusing "
-                    f"the junctions on either side; the local repair could not "
-                    f"reconcile them."
-                )
-        # Weldability is settled here, while a rejection still costs only an
-        # extra solid or a local fuse: once a cap face has been given up,
-        # putting it back is an undo, and the caps are given up in
+        # Declining a mismatched cap is not a safe degradation on its own:
+        # where the two sides present *different* partial regions, keeping
+        # both keeps the overlap as non-manifold material and the remainder
+        # as an unfilled hole (docs/algorithm.md §7.1). The repair falls back
+        # to the kernel's own general boolean and fuses the two disagreeing
+        # junctions into one solid, then interfaces are resolved again — the
+        # merged piece presents one agreed region, so nothing is declined
+        # there the second time.
+        #
+        # Weldability is settled in the same loop, while a rejection still
+        # costs only an extra solid or a local fuse: once a cap face has been
+        # given up, putting it back is an undo, and the caps are given up in
         # `finalize_pieces` below.
-        rejected = weld.unweldable(
-            lp, tmesh, interior_set, boundary.pieces, iface.interfaces
-        )
+        #
         # **Declining is not free where the two sides are coincident**, which is
-        # the case this repair exists for. `decline` withdraws both keys and
-        # `finalize_pieces` then keeps *both* sides' cap faces — two sheets at
-        # the same nominal quad. That costs "an extra solid" only when the
+        # the case the second repair exists for. `decline` withdraws both keys
+        # and `finalize_pieces` then keeps *both* sides' cap faces — two sheets
+        # at the same nominal quad. That costs "an extra solid" only when the
         # decline actually separates the bodies; where the two pieces stay
         # connected through their other interfaces the duplicate ends up inside
         # one solid, as material counted twice. Measured on
         # `TD_HX_rehearsal_test` at `cc=5, t=1`: one declined cap, both sides
         # 7.368093e-01 mm² and planar, and the two mesh edges between them are
         # the only defects in that body this generator is responsible for
-        # (tools/prototypes/RESULTS.md G23).
+        # (tools/prototypes/RESULTS.md G23). It gets the same fuse — non-strict,
+        # since unlike a mismatched cap this one has a safe fallback: the
+        # decline that stood before, which is what happens to any group the
+        # fuse cannot merge.
         #
-        # It is the same hazard `fuse_disagreeing_pairs` already exists to avoid
-        # for a mismatched cap, so it gets the same repair — non-strict, since
-        # unlike a mismatched cap this one has a safe fallback: the decline that
-        # stood before, which is what happens to any group the fuse cannot merge.
-        if rejected:
-            boundary.pieces, n_weld_fused, invented = fuse_disagreeing_pairs(
+        # **It is a loop because one repair can expose the next.** A fuse
+        # re-describes the faces of every piece in its group, so a cap that
+        # corresponded edge for edge before can stop doing so after, and a
+        # merged piece can disagree with a neighbour neither operand disagreed
+        # with. Lattice-only parts settle in one pass; with print supports,
+        # whose cross-sections fill cell faces, `TD_HX_rehearsal_test` at
+        # `cc=7, t=1.4` needs three. Groups only ever grow, so it terminates;
+        # the bound is there so a repair that does not converge is reported
+        # rather than waited for.
+        rejected: list = []
+        for attempt in range(INTERFACE_REPAIR_ROUNDS + 1):
+            last = attempt == INTERFACE_REPAIR_ROUNDS
+            if attempt:
+                # No countable total: how many rounds a part needs is what the
+                # loop is finding out. The label says which one it is on, so
+                # three and a half minutes here do not look like a stall.
+                rl.substage(f"repairing interfaces, round {attempt}", 0, None)
+            if iface.mismatched:
+                if last:
+                    _raise_still_disagreeing(iface, boundary.pieces, interior_set, tmpdir)
+                boundary.pieces, extra, invented = fuse_disagreeing_pairs(
+                    lp, boundary.pieces, iface.mismatched
+                )
+                n_fused += extra
+                n_invented += len(invented)
+                iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
+                continue
+            rejected = weld.unweldable(
+                lp, tmesh, interior_set, boundary.pieces, iface.interfaces
+            )
+            if not rejected or last:
+                break
+            boundary.pieces, extra, invented = fuse_disagreeing_pairs(
                 lp, boundary.pieces, rejected, strict=False
             )
             n_invented += len(invented)
-            if n_weld_fused:
-                iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
-                if iface.mismatched:
-                    boundary.pieces, extra, invented = fuse_disagreeing_pairs(
-                        lp, boundary.pieces, iface.mismatched
-                    )
-                    n_fused += extra
-                    n_invented += len(invented)
-                    iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
-                rejected = weld.unweldable(
-                    lp, tmesh, interior_set, boundary.pieces, iface.interfaces
-                )
+            if not extra:
+                break
+            n_weld_fused += extra
+            iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
         for node, h in rejected:
             iface.decline(node, h)
         finalize_pieces(boundary.pieces, iface.interfaces)
@@ -376,6 +446,17 @@ def _run_with_pool(
         )
         threshold = lp.t ** 3
         dropped = comps.dropped(threshold)
+        # A component carrying print support is attached to the wall by design
+        # and is not a floating body (specification.md §5); the rule keeps
+        # applying to lattice-only crumbs.
+        dropped -= {
+            cid for cid in dropped
+            if any(
+                comps.vertices[v].piece_index >= 0
+                and boundary.pieces[comps.vertices[v].piece_index].support
+                for v in comps.members[cid]
+            )
+        }
         keep_labels = set(comps.volumes) - dropped
         _check_component_tolerance(rl, comps, keep_labels, boundary.pieces, stats)
     if n_fused:
@@ -530,13 +611,39 @@ def _run_with_pool(
         f"{istats['interior_open_edges']} open edges"
     )
 
+    n_split_off = 0
     with Timer(rl, "assemble"):
         rl.substage("assembling shells", 0, None)
         shells = weld.assemble(interior.shells, boundary_faces)
+        if args.support:
+            from .support.build import fill_voids
+
+            shells, n_voids, void_volume, split_off = fill_voids(shells)
+            n_split_off = len(split_off)
+            if split_off:
+                rl.always(
+                    f"note: {len(split_off)} fragment(s) of support, "
+                    f"{sum(split_off):.4f} mm^3 in total (largest "
+                    f"{max(split_off):.4f}), are cut off from the rest by the "
+                    f"input body's own wall and are written as separate bodies "
+                    f"(docs/algorithm.md §14.5). They lie against that wall, "
+                    f"which is what specification.md §5 means by a wall-attached "
+                    f"support."
+                )
+            stats["support_fragments"] = len(split_off)
+            if n_voids:
+                rl.always(
+                    f"note: {n_voids} enclosed void(s) between overlapping "
+                    f"supports, {void_volume:.4f} mm^3 in total, were filled "
+                    f"(docs/algorithm.md §14.5). An enclosed pocket cannot be "
+                    f"emptied of powder."
+                )
+            stats["support_voids_filled"] = n_voids
+            stats["support_void_volume_mm3"] = round(void_volume, 4)
         result_solids, _ = weld.close_shells(shells)
     rl.line(f"assembled {len(result_solids)} watertight solid(s)")
 
-    if len(result_solids) != len(keep_labels):
+    if len(result_solids) != len(keep_labels) + n_split_off:
         raise ProcessingError(
             f"Assembly produced {len(result_solids)} solids where the junction "
             f"graph proves there are {len(keep_labels)} connected components. The "
@@ -594,6 +701,12 @@ def _run_with_pool(
             # here needs no argument about what the file would do with it, and
             # reporting the export check instead would name the second-order
             # symptom of a fault BRepCheck has already found.
+            # Kept beside the other intermediates: the temp folder survives a
+            # failure precisely so it can be analysed (specification.md §4.4),
+            # and the one thing that analysis needs here is the solid itself.
+            for i in invalid:
+                _write_brep(result_solids[i],
+                            os.path.join(tmpdir, f"invalid_solid_{i}.brep"))
             raise ProcessingError(
                 f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
                 f"BRepCheck_Analyzer validity check."
@@ -603,7 +716,7 @@ def _run_with_pool(
     stats["solids_written"] = len(result_solids)
     stats["lattice_volume_mm3"] = round(total_volume, 4)
 
-    name = part_name(args.input, args.cc, args.t)
+    name = part_name(args.input, args.cc, args.t, args.orient, args.name_overhang)
     with Timer(rl, "export"):
         # One opaque `STEPControl_Writer` call over the whole result, so there is
         # nothing to count — 10.7 % of the rehearsal's clock with no fraction to
@@ -612,7 +725,8 @@ def _run_with_pool(
         shape = result_solids[0] if len(result_solids) == 1 else occ.compound(result_solids)
         occ.write_step(shape, args.output, name)
         rewrite_step_header(
-            args.output, name, generation_params_text(args.input, args.cc, args.t)
+            args.output, name,
+            generation_params_text(args.input, args.cc, args.t, args.params_extra()),
         )
     if not os.path.isfile(args.output) or os.path.getsize(args.output) == 0:
         raise OutputError(f"Output STEP file was not written or is empty: {args.output}")
@@ -1057,6 +1171,37 @@ one, and ``BRepCheck_Analyzer`` at `validate`.
 """
 
 
+def _shell_is_broken(shape: TopoDS_Shape) -> bool:
+    """Whether any real edge of ``shape`` is not shared by exactly two faces.
+
+    The topological half of a validity check, and the half a face merge can
+    break: measured on `test-cylinder.STEP` with print supports, where many
+    cells' contact patches lie side by side on one cylindrical wall,
+    ``ShapeUpgrade_UnifySameDomain`` builds the merged face *and leaves some of
+    the originals in the shell beside it* — 7 edges on four faces and 35 on one,
+    out of 56,822. Asked here, between the two passes, because it costs a
+    fraction of a second where discovering the same thing at the end cost an
+    edge pass of 159 s over the broken topology (against 4.5 s over a sound
+    one).
+    """
+    from OCP.BRep import BRep_Tool
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp
+    from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+
+    owners = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(
+        shape, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, owners
+    )
+    for i in range(1, owners.Extent() + 1):
+        if owners.FindFromIndex(i).Size() != 2 and not BRep_Tool.Degenerated_s(
+            TopoDS.Edge_s(owners.FindKey(i))
+        ):
+            return True
+    return False
+
+
 def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool]:
     """Unify one solid, giving up on the parts of the job that will not run.
 
@@ -1129,6 +1274,19 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool]:
         merged = occ.unify_same_domain(solid, unify_edges=False)
     except Standard_Failure:
         return solid, False, False
+    if _shell_is_broken(merged):
+        # The merge across curved faces is what breaks (see `_shell_is_broken`),
+        # and it is also the small part of the job: the lattice and the supports
+        # are planar. So the second rung merges planar faces only, by forbidding
+        # a merge across any edge of a curved face, and keeps nearly all of the
+        # reduction. Only if that fails too is the solid exported as built.
+        try:
+            merged = occ.unify_same_domain(
+                solid, unify_edges=False, keep_curved=True)
+        except Standard_Failure:
+            return solid, False, False
+        if _shell_is_broken(merged):
+            return solid, ran, True
     try:
         merged = occ.unify_same_domain(merged, unify_edges=True, unify_faces=False)
     except Standard_Failure:

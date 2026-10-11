@@ -143,6 +143,21 @@ flight, because every line reaches the window either way and the box only
 filters them: tick it forty minutes in — or after a failure, to read what led
 to it — and the pane fills in what was hidden.
 
+**Print orientation** is always on screen: three boxes, `rot X`, `rot Y` and
+`rot Z`, stepping by 5°, beside a small 3D view of the print bed with the part's
+axes and the input geometry standing on it. Drag the view to turn the part and
+the boxes follow; edit the boxes and the part turns. The lattice is oriented to
+the bed, with or without support.
+
+Tick **Generate support** to back every inner overhang with permanent supports.
+**Max overhang** (1° steps, default 60°, measured from vertical) and **Min
+thickness** (0.1 mm steps, default 1 mm) are greyed out until it is ticked. With
+it ticked, the parts of the surface that overhang at the current orientation and
+limit are tinted in the view, and the tint follows every change — so the
+orientation can be checked before a long run is started. If the limit is
+stricter than the lattice's own strut angles the window says so in amber and
+still lets the run start.
+
 The window is deliberately small and plain, so it can sit in a corner of the
 screen for the hour a large part takes. It adds nothing the command line cannot
 do; it is the same `src/main.py`, run as a child process. Full behaviour is in
@@ -190,11 +205,38 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `-t` | float | yes | mm | 0.4 – 20 | — | Side length of the diamond strut profile |
 | `-o`, `--output` | path | no | — | — | `<input_stem>-lattice-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing |
 | `--cores` | int | no | count | 1 – 128 | logical cores on the machine | Maximum cores this run may use — one worker process per core, honoured exactly, in the shared pool used across every process-parallel stage (classification, boundary trim, boundary sew, same-domain unification). It also caps OCCT's *own* native thread pool, which the validity check uses instead of the process pool, so the total stays within the budget either way |
+| `--orient` | 3 × float | no | degrees | −360 – 360 each | `0 0 0` | Print orientation `<rx> <ry> <rz>` of the input relative to the print bed: rotations about the bed's X, then Y, then Z axis. The lattice is oriented to the bed. Works with or without `--support` |
+| `--support` | flag | no | — | — | off | Generate print supports for inner overhangs |
+| `--overhang` | float | no | degrees | 15 – 80 | 60 | Maximum overhang angle, measured from vertical (the bed's normal). Requires `--support` |
+| `--support-thickness` | float | no | mm | 0.2 – 20 | 1 | Minimum support thickness. Requires `--support` |
 | `-v`, `--verbose` | flag | no | — | — | off | Verbose console output (a full `.log` is always written) |
 | `-h`, `--help` | flag | no | — | — | — | Usage |
 
 `-t` must be smaller than the cell edge `a = cc/√2`; a thicker strut cannot fit
 inside one cell. That is the only cross-constraint.
+
+**Print orientation.** The cell stands on its tip relative to the *print bed*,
+so that its struts support themselves in the build direction. `--orient 30 0 0`
+tips the part 30° about the bed's X axis; the lattice turns with the bed and
+the output stays in the input's own coordinate system. A rotated run adds
+`-rotx<rx>y<ry>z<rz>` to the default file name.
+
+**Print support.** With `--support`, every part of the input's inner surface
+that acts as a ceiling flatter than `--overhang` is backed by solid, permanent,
+self-supporting supports: flared eight-sided "capitals" rooted in the lattice's
+struts and nodes, on thin posts where the lattice does not reach, and trimmed
+flush against the wall. They are part of the same body as the lattice, no
+support face or edge exceeds the limit, and after generation no inner surface
+does either. A supported run adds `-sup<overhang>` to the default file name:
+
+```bash
+python src/main.py -i part.step -cc 10 -t 1.5 --orient 30 0 0 --support --overhang 60
+# -> part-lattice-cc10t1.5-rotx30y0z0-sup60.step
+```
+
+The lattice itself is left as it is. Its strut edges recline 54.74° and its
+strut faces 35.26° from vertical, so an `--overhang` below those is stricter
+than the lattice; the run then prints a warning and carries on.
 
 `--cores` is an optional budget; it resolves to a concrete figure from the
 machine when omitted. There used to be a second budget, `--ram`, but it was
@@ -307,6 +349,11 @@ halving the face count and the file size.
 | Same-domain unification before export | Instancing merges nothing, so coplanar faces meet unmerged at every strut interface; unifying them halves the face count and file size — and makes the run *faster*, since export then handles half as much. It dispatches across the shared worker pool rather than threads: OCP holds the GIL around the call (measured, `tools/prototypes/RESULTS.md` G7) |
 | Validity checked with OCCT's own threads | The validity gate is the one heavy call with an internal parallel flag, and the one heavy stage returning a number rather than geometry — so neither the GIL result nor the shared-topology result applies to it. Run on the master with that flag rather than dispatched per solid: measured 1.60×, verdict identical on every known-bad face, and it deletes a serialization round trip that existed only to reach the workers (`RESULTS.md` G18) |
 | Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |
+| Lattice oriented to the print bed | The frame is rotated into the part's coordinates and the body is never transformed, so the output stays where the input is. One code path: the rotation is applied even at `0 0 0`, where it is exactly the identity, and both golden samples still compare at 0 mm³ through it |
+| Candidates bounded by the surface, not its box | The body's own mesh vertices are bounded in lattice index space instead of the corners of its axis-aligned box — 23,064 → 10,608 candidates on the test cylinder, the same interior and boundary nodes |
+| Supports built one lattice cell at a time | Each node owns the cube whose faces are its cap planes; supports are clipped to it analytically and fused with that one junction, so no boolean ever sees more than a cell ([docs/algorithm.md](docs/algorithm.md) §14.5) |
+| Supports placed by coverage per unit of material | Choosing capitals by how much they cover always picks the deepest and backs the ceiling almost solid; per unit of material it took 837 primitives and 17,060 mm³ down to 406 and 10,270 mm³ on the test cylinder |
+| Coverage proven against the result | Every overhang sample is classified against the piece the kernel actually produced; a miss fails the run by name rather than shipping an unsupported overhang |
 
 ### Memory
 
@@ -325,6 +372,12 @@ Measured on a 6-core / 32 GB Windows workstation:
 |---|---|---|---|---|
 | 80 mm ball, `cc=20 t=4` | 27 / 176 | 1,338 | 4.7 MB | **6 s** |
 | test cylinder, `cc=10 t=1.5` | 594 / 968 | 15,966 | 52.6 MB | **~40 s** |
+
+With `--support` at the defaults the cylinder takes **~2 min**: 5,718 mm² of
+inner overhang, 406 support primitives, 585 lattice cells rebuilt, and
+10,270 mm³ of support on 43,574 mm³ of lattice (single run, six cores). The
+three support stages are 34 s of that; the rest is the heavier body going
+through stitching, validation and export.
 
 Both match their golden samples with a symmetric-difference volume of 0 mm³, put
 0 mm³ of material outside the input body, and pass `BRepCheck_Analyzer` with zero

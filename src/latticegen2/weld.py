@@ -290,10 +290,48 @@ def unweldable(
         elif h >= 3:
             continue  # boundary-to-boundary: decide each pair once
         else:
-            expected = ring_of_faces(caps_at.get((node, h), []))
-        if match_rings(expected, ring_of_faces(caps_at.get(other, []))) is None:
+            expected = _within_cell_face(
+                lp, ring_of_faces(caps_at.get((node, h), [])), node, h)
+        got = _within_cell_face(lp, ring_of_faces(caps_at.get(other, [])), node, h)
+        if match_rings(expected, got) is None:
             rejected.append((node, h))
     return rejected
+
+
+def _within_cell_face(lp: LatticeParams, ring: Ring, node: NodeKey, h: int) -> Ring:
+    """``ring`` without the edges lying along the border of the lattice cell face.
+
+    A bare cap sits well inside its cell face (``t < a``), so for a lattice
+    junction this removes nothing. A print support's cross-section can reach
+    the border, and there the comparison this ring is used for stops being a
+    statement about one interface: an edge along the cell's own edge is where
+    *two* of a piece's interface faces meet, and after both are given up it is
+    either no free edge at all or one whose partner belongs to a third cell.
+    Which of those it is differs legitimately between the two sides, so those
+    edges are left to the sew and to the every-edge-twice proof after it
+    (docs/algorithm.md §14.5).
+    """
+    if any(p is None for p in ring.points):
+        return ring
+    k = h % 3
+    base = lp.B @ np.array(node, dtype=float)
+    centre = base + (lp.a / 2.0) * (1.0 if h < 3 else -1.0) * lp.e[k]
+    out = Ring()
+    for edge, verts, pts in zip(ring.edges, ring.verts, ring.points):
+        rel = pts - centre
+        on_border = False
+        for j in range(3):
+            if j == k:
+                continue
+            d = np.abs(rel @ lp.e[j]) - lp.a / 2.0
+            if bool((np.abs(d) <= WELD_TOL).all()):
+                on_border = True
+                break
+        if not on_border:
+            out.edges.append(edge)
+            out.verts.append(verts)
+            out.points.append(pts)
+    return out
 
 
 # --- step 1: sew the boundary layer -----------------------------------------

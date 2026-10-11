@@ -37,6 +37,21 @@ STAGES: tuple[str, ...] = (
     "stitch", "instance", "assemble", "simplify", "validate", "export",
 )
 
+#: The extra stages a run with ``--support`` goes through, between ``boundary``
+#: and ``connect`` (docs/algorithm.md §14). Kept out of :data:`STAGES` so a run
+#: without support announces, logs and weights exactly the stages it always
+#: has.
+SUPPORT_STAGES: tuple[str, ...] = ("overhang", "plan", "support")
+
+
+def stages_for(support: bool) -> tuple[str, ...]:
+    """The stages one run goes through, in order."""
+    if not support:
+        return STAGES
+    at = STAGES.index("boundary") + 1
+    return STAGES[:at] + SUPPORT_STAGES + STAGES[at:]
+
+
 #: Shortest gap between two sub-stage events, in seconds.
 #:
 #: Not polish. ``boundary``'s sequential path calls its progress callback once
@@ -137,6 +152,10 @@ class RunLog:
     tmpdir: "str | None" = None
     _stage: "str | None" = field(default=None, repr=False)
     _last_substage: float = field(default=0.0, repr=False)
+    #: The stages *this* run goes through (:func:`stages_for`). The default is
+    #: the plain pipeline, so nothing that constructs a ``RunLog`` without
+    #: saying otherwise changes meaning.
+    stage_names: tuple = STAGES
 
     def open(self) -> "RunLog":
         self._fh = open(self.path, "w", encoding="utf-8")
@@ -201,14 +220,16 @@ class RunLog:
         """
         self._stage = name
         self._last_substage = 0.0
-        self._emit(progress.STAGE_BEGIN, name=name, i=STAGES.index(name), n=len(STAGES))
+        self._emit(progress.STAGE_BEGIN, name=name,
+                   i=self.stage_names.index(name), n=len(self.stage_names))
 
     def stage(self, name: str, elapsed: float) -> None:
         self.stages.append((name, elapsed))
         self.observe_rss()
         self.line(f"stage {name}: {format_duration(elapsed)}", console=self.verbose)
         self._emit(
-            progress.STAGE_END, name=name, i=STAGES.index(name), n=len(STAGES),
+            progress.STAGE_END, name=name, i=self.stage_names.index(name),
+            n=len(self.stage_names),
             elapsed=elapsed, max_rss=self.max_rss,
         )
         self._stage = None
@@ -283,7 +304,7 @@ class Timer:
     """Context manager that records one pipeline stage's wall time."""
 
     def __init__(self, rl: RunLog, name: str):
-        if name not in STAGES:
+        if name not in rl.stage_names:
             raise ValueError(
                 f"unknown pipeline stage {name!r}. Add it to runlog.STAGES and "
                 f"give it a share in latticegen2.gui.weights, or the progress "

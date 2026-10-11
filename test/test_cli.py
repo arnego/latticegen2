@@ -253,3 +253,67 @@ def test_preflight_accepts_a_writable_target(tmp_path):
     args = parse_args(["-i", str(src), "-cc", "10", "-t", "1.5",
                        "-o", str(tmp_path / "out.step")])
     preflight_checks(args)
+
+
+# --- print orientation and support (specification.md §4.5, §4.6) -----------
+
+
+def _args(*extra):
+    return parse_args(["-i", "part.step", "-cc", "10", "-t", "1.5", *extra])
+
+
+def test_orientation_and_support_default_to_off():
+    args = _args()
+    assert args.orient == (0.0, 0.0, 0.0)
+    assert args.support is False
+    assert os.path.basename(args.output) == "part-lattice-cc10t1.5.step"
+    assert "orient" not in args.as_dict() and "support" not in args.as_dict()
+
+
+def test_orientation_is_accepted_without_support_and_named():
+    args = _args("--orient", "30", "0", "-22.5")
+    assert args.orient == (30.0, 0.0, -22.5)
+    assert args.support is False
+    assert os.path.basename(args.output) == "part-lattice-cc10t1.5-rotx30y0z-22.5.step"
+    assert args.as_dict()["orient"] == "30 0 -22.5 deg"
+
+
+def test_support_defaults_and_names():
+    args = _args("--support")
+    assert args.support and args.overhang == 60.0 and args.support_thickness == 1.0
+    assert os.path.basename(args.output) == "part-lattice-cc10t1.5-sup60.step"
+    both = _args("--orient", "30", "0", "0", "--support", "--overhang", "45")
+    assert os.path.basename(both.output) == "part-lattice-cc10t1.5-rotx30y0z0-sup45.step"
+    assert os.path.basename(both.log_path) == "part-lattice-cc10t1.5-rotx30y0z0-sup45.log"
+
+
+@pytest.mark.parametrize("extra", [
+    ("--overhang", "45"),
+    ("--support-thickness", "2"),
+    ("--orient", "10", "20"),
+    ("--orient", "400", "0", "0"),
+    ("--support", "--overhang", "10"),
+    ("--support", "--overhang", "85"),
+    ("--support", "--support-thickness", "0.1"),
+])
+def test_bad_orientation_and_support_arguments_are_rejected(extra):
+    with pytest.raises(ParamError):
+        _args(*extra)
+
+
+def test_overhang_warning_follows_the_configured_value():
+    """Evaluated from the input, against the lattice's own two angles."""
+    from latticegen2.cli import (
+        LATTICE_EDGE_ANGLE,
+        LATTICE_FACE_ANGLE,
+        overhang_warning,
+    )
+
+    assert LATTICE_EDGE_ANGLE == pytest.approx(54.7356, abs=1e-4)
+    assert LATTICE_FACE_ANGLE == pytest.approx(35.2644, abs=1e-4)
+    assert overhang_warning(60.0) is None                 # the default is silent
+    assert overhang_warning(LATTICE_EDGE_ANGLE) is None
+    edges = overhang_warning(45.0)
+    assert "strut edges" in edges and "strut faces" not in edges
+    both = overhang_warning(30.0)
+    assert "strut edges" in both and "strut faces" in both

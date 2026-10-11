@@ -51,6 +51,47 @@ from .parallel import write_brep as _write_brep
 from .runlog import RunLog, Timer, format_bytes
 from .stepout import generation_params_text, rewrite_step_header
 
+INTERFACE_REPAIR_ROUNDS = 8
+"""How many times `connect` fuses and re-resolves before giving up."""
+
+
+def _raise_still_disagreeing(iface, pieces, interior_set, tmpdir):
+    """Fail naming the caps, with both areas, and keep the pieces: "2 caps
+    disagree" on a part of 20,000 junctions is not something anybody can act on."""
+    from .lattice import HALF_STRUTS
+
+    def side(n):
+        if n in interior_set:
+            return "interior"
+        return f"{sum(1 for p in pieces if p.node == n)} piece(s)"
+
+    named, wanted = [], set()
+    for node, h, area_a, area_b in iface.mismatched[:8]:
+        k, s = HALF_STRUTS[h]
+        other = list(node)
+        other[k] += s
+        other = tuple(other)
+        named.append(
+            f"{node} h{h} ({side(node)}) presents {area_a:.6f} mm^2 "
+            f"and {other} ({side(other)}) {area_b:.6f}")
+        wanted.update((node, other))
+    kept = 0
+    for i, piece in enumerate(pieces):
+        if piece.node in wanted:
+            faces = list(piece.faces)
+            for group in piece.cap_faces.values():
+                faces.extend(group)
+            name = "disagree_%d_%d_%d_%d.brep" % (*piece.node, i)
+            BRepTools.Write_s(occ.compound(faces), os.path.join(tmpdir, name))
+            kept += 1
+    raise ProcessingError(
+        f"{len(iface.mismatched)} cap(s) still disagree after "
+        f"{INTERFACE_REPAIR_ROUNDS} rounds of fusing the junctions on either "
+        f"side; the local repair could not reconcile them: " + "; ".join(named)
+        + f". The {kept} piece(s) on either side are kept as disagree_*.brep."
+    )
+
+
 def _make_tmpdir(output_path: str) -> str:
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     tmpdir = os.path.join(os.path.dirname(output_path) or ".", "temp", stamp)
@@ -327,66 +368,70 @@ def _run_with_pool(
         n_fused = 0
         n_weld_fused = 0
         n_invented = 0
-        if iface.mismatched:
-            # Declining a mismatched cap is not a safe degradation on its own:
-            # where the two sides present *different* partial regions, keeping
-            # both keeps the overlap as non-manifold material and the remainder
-            # as an unfilled hole (docs/algorithm.md §7.1). The repair falls back
-            # to the kernel's own general boolean and fuses the two disagreeing
-            # junctions into one solid, then interfaces are resolved again —
-            # the merged piece presents one agreed region, so nothing is
-            # declined there the second time.
-            boundary.pieces, n_fused, invented = fuse_disagreeing_pairs(
-                lp, boundary.pieces, iface.mismatched
-            )
-            n_invented += len(invented)
-            iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
-            if iface.mismatched:
-                raise ProcessingError(
-                    f"{len(iface.mismatched)} cap(s) still disagree after fusing "
-                    f"the junctions on either side; the local repair could not "
-                    f"reconcile them."
-                )
-        # Weldability is settled here, while a rejection still costs only an
-        # extra solid or a local fuse: once a cap face has been given up,
-        # putting it back is an undo, and the caps are given up in
+        # Declining a mismatched cap is not a safe degradation on its own:
+        # where the two sides present *different* partial regions, keeping
+        # both keeps the overlap as non-manifold material and the remainder
+        # as an unfilled hole (docs/algorithm.md §7.1). The repair falls back
+        # to the kernel's own general boolean and fuses the two disagreeing
+        # junctions into one solid, then interfaces are resolved again — the
+        # merged piece presents one agreed region, so nothing is declined
+        # there the second time.
+        #
+        # Weldability is settled in the same loop, while a rejection still
+        # costs only an extra solid or a local fuse: once a cap face has been
+        # given up, putting it back is an undo, and the caps are given up in
         # `finalize_pieces` below.
-        rejected = weld.unweldable(
-            lp, tmesh, interior_set, boundary.pieces, iface.interfaces
-        )
+        #
         # **Declining is not free where the two sides are coincident**, which is
-        # the case this repair exists for. `decline` withdraws both keys and
-        # `finalize_pieces` then keeps *both* sides' cap faces — two sheets at
-        # the same nominal quad. That costs "an extra solid" only when the
+        # the case the second repair exists for. `decline` withdraws both keys
+        # and `finalize_pieces` then keeps *both* sides' cap faces — two sheets
+        # at the same nominal quad. That costs "an extra solid" only when the
         # decline actually separates the bodies; where the two pieces stay
         # connected through their other interfaces the duplicate ends up inside
         # one solid, as material counted twice. Measured on
         # `TD_HX_rehearsal_test` at `cc=5, t=1`: one declined cap, both sides
         # 7.368093e-01 mm² and planar, and the two mesh edges between them are
         # the only defects in that body this generator is responsible for
-        # (tools/prototypes/RESULTS.md G23).
+        # (tools/prototypes/RESULTS.md G23). It gets the same fuse — non-strict,
+        # since unlike a mismatched cap this one has a safe fallback: the
+        # decline that stood before, which is what happens to any group the
+        # fuse cannot merge.
         #
-        # It is the same hazard `fuse_disagreeing_pairs` already exists to avoid
-        # for a mismatched cap, so it gets the same repair — non-strict, since
-        # unlike a mismatched cap this one has a safe fallback: the decline that
-        # stood before, which is what happens to any group the fuse cannot merge.
-        if rejected:
-            boundary.pieces, n_weld_fused, invented = fuse_disagreeing_pairs(
+        # **It is a loop because one repair can expose the next.** A fuse
+        # re-describes the faces of every piece in its group, so a cap that
+        # corresponded edge for edge before can stop doing so after, and a
+        # merged piece can disagree with a neighbour neither operand disagreed
+        # with. Lattice-only parts settle in one pass; with print supports,
+        # whose cross-sections fill cell faces, `TD_HX_rehearsal_test` at
+        # `cc=7, t=1.4` needs three. Groups only ever grow, so it terminates;
+        # the bound is there so a repair that does not converge is reported
+        # rather than waited for.
+        rejected: list = []
+        for attempt in range(INTERFACE_REPAIR_ROUNDS + 1):
+            last = attempt == INTERFACE_REPAIR_ROUNDS
+            if iface.mismatched:
+                if last:
+                    _raise_still_disagreeing(iface, boundary.pieces, interior_set, tmpdir)
+                boundary.pieces, extra, invented = fuse_disagreeing_pairs(
+                    lp, boundary.pieces, iface.mismatched
+                )
+                n_fused += extra
+                n_invented += len(invented)
+                iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
+                continue
+            rejected = weld.unweldable(
+                lp, tmesh, interior_set, boundary.pieces, iface.interfaces
+            )
+            if not rejected or last:
+                break
+            boundary.pieces, extra, invented = fuse_disagreeing_pairs(
                 lp, boundary.pieces, rejected, strict=False
             )
             n_invented += len(invented)
-            if n_weld_fused:
-                iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
-                if iface.mismatched:
-                    boundary.pieces, extra, invented = fuse_disagreeing_pairs(
-                        lp, boundary.pieces, iface.mismatched
-                    )
-                    n_fused += extra
-                    n_invented += len(invented)
-                    iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
-                rejected = weld.unweldable(
-                    lp, tmesh, interior_set, boundary.pieces, iface.interfaces
-                )
+            if not extra:
+                break
+            n_weld_fused += extra
+            iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
         for node, h in rejected:
             iface.decline(node, h)
         finalize_pieces(boundary.pieces, iface.interfaces)
@@ -560,13 +605,26 @@ def _run_with_pool(
         f"{istats['interior_open_edges']} open edges"
     )
 
+    n_split_off = 0
     with Timer(rl, "assemble"):
         rl.substage("assembling shells", 0, None)
         shells = weld.assemble(interior.shells, boundary_faces)
         if args.support:
             from .support.build import fill_voids
 
-            shells, n_voids, void_volume = fill_voids(shells)
+            shells, n_voids, void_volume, split_off = fill_voids(shells)
+            n_split_off = len(split_off)
+            if split_off:
+                rl.always(
+                    f"note: {len(split_off)} fragment(s) of support, "
+                    f"{sum(split_off):.4f} mm^3 in total (largest "
+                    f"{max(split_off):.4f}), are cut off from the rest by the "
+                    f"input body's own wall and are written as separate bodies "
+                    f"(docs/algorithm.md §14.5). They lie against that wall, "
+                    f"which is what specification.md §5 means by a wall-attached "
+                    f"support."
+                )
+            stats["support_fragments"] = len(split_off)
             if n_voids:
                 rl.always(
                     f"note: {n_voids} enclosed void(s) between overlapping "
@@ -579,7 +637,7 @@ def _run_with_pool(
         result_solids, _ = weld.close_shells(shells)
     rl.line(f"assembled {len(result_solids)} watertight solid(s)")
 
-    if len(result_solids) != len(keep_labels):
+    if len(result_solids) != len(keep_labels) + n_split_off:
         raise ProcessingError(
             f"Assembly produced {len(result_solids)} solids where the junction "
             f"graph proves there are {len(keep_labels)} connected components. The "

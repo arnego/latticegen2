@@ -78,6 +78,36 @@ def test_clipping_to_lattice_cells_partitions_the_primitive_exactly(angles):
     assert total == pytest.approx(whole, rel=1e-10)
 
 
+def test_a_piece_presents_no_cross_section_where_its_neighbour_keeps_nothing():
+    """A capital poking a hair through a cell face: the far cell drops its
+    share, so the near cell must not present a cross-section in that plane."""
+    lp = lattice_params(10.0, 1.5)
+    pos = nodes(lp, np.array([[0, 0, 0]]))[0]
+    half, e = lp.a / 2.0, lp.e[0]
+    hx = np.cross(B, e); hx /= np.linalg.norm(hx)
+    frame = (hx, np.cross(B, hx), B)
+    # Apex inside the cell, the top ring's furthest corner 2e-4 mm past the face.
+    tau, height = np.tan(np.radians(60.0)), 1.0
+    prim = ph.capital(pos, height, tau, 0.0, frame, "test")
+    reach = float((prim.verts @ e).max() - pos @ e)
+    prim = ph.capital(pos + (half + 2e-4 - reach) * e, height, tau, 0.0, frame, "test")
+    plain = ph.clip_to_cell(prim.verts, prim.faces, lp, pos, 1e-9)
+    beyond = ph.clip_to_cell(prim.verts, prim.faces, lp, pos + lp.a * e, 1e-9)
+    assert beyond is None                                     # too small to build
+    on_face = np.abs(plain[0] @ e - (pos @ e + half)) <= 1e-9
+    assert on_face.sum() >= 3                                 # yet a real cross-section
+
+    matched = ph.clip_to_cell_matched(prim.verts, prim.faces, lp, pos, 1e-9)
+    assert (matched[0] @ e).max() == pytest.approx(pos @ e + half - ph.RETREAT, abs=1e-12)
+    assert ph.volume(*matched) == pytest.approx(ph.volume(*plain), rel=1e-6)
+
+    # Where the neighbour keeps its share, nothing changes at all.
+    deep = ph.capital(pos + (half - 0.5 * reach) * e, height, tau, 0.0, frame, "test")
+    a = ph.clip_to_cell(deep.verts, deep.faces, lp, pos, 1e-9)
+    b = ph.clip_to_cell_matched(deep.verts, deep.faces, lp, pos, 1e-9)
+    assert np.array_equal(a[0], b[0]) and a[1] == b[1]
+
+
 def test_a_piece_inside_another_is_dropped_and_the_rest_kept():
     tau = np.tan(np.radians(60.0))
     big = ph.capital(np.zeros(3), 10.0, tau, 0.1, FRAME, "node")
@@ -268,6 +298,227 @@ def test_a_hanging_tip_is_an_overhang_vertex():
     tips = got.points[got.kind == overhang.VERTEX]
     assert len(tips) == 1
     assert np.allclose(tips[0], [10.0, 10.0, 6.0], atol=1e-6)
+
+
+def test_a_surface_at_the_limit_is_sampled_but_not_required():
+    """A 120 degree drill point in the lid is tilted exactly 60 degrees.
+
+    It is inside the margin, so supports are placed with it in mind, and it is
+    not over the limit, so nothing has to be proven about it.
+    """
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCone
+    from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+
+    from latticegen2 import occ
+    from latticegen2.support import overhang
+
+    box = BRepPrimAPI_MakeBox(20.0, 20.0, 10.0).Shape()
+    radius = 4.0
+    cone = BRepPrimAPI_MakeCone(
+        gp_Ax2(gp_Pnt(10.0, 10.0, 10.0), gp_Dir(0.0, 0.0, 1.0)),
+        radius, 0.0, radius / np.tan(np.radians(60.0))).Shape()
+    body = occ.solids(BRepAlgoAPI_Fuse(box, cone).Shape())[0]
+    lp = _meshed(body)
+    got = overhang.detect(body, lp.b, 60.0, 0.5)
+    face = got.kind == overhang.FACE
+    on_cone = face & (got.points[:, 2] > 10.0 + 1e-6)
+    on_lid = face & (np.abs(got.points[:, 2] - 10.0) <= 1e-6)
+    assert on_cone.sum() > 20 and on_lid.sum() > 100
+    assert not got.required[on_cone].any()
+    assert got.required[on_lid].all()
+    # One degree stricter and the same cone is over the limit.
+    assert overhang.detect(body, lp.b, 59.0, 0.5).required[on_cone].all()
+
+
+# --- the trim that checks itself ----------------------------------------------
+
+
+def _cube_poly(lo, hi):
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    verts = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                      for z in (lo[2], hi[2])])
+    faces = [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6],
+             [0, 2, 6, 4], [1, 5, 7, 3]]
+    return verts, ph.orient_outward(verts, faces)
+
+
+def test_a_trim_whose_two_answers_add_up_is_consistent():
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+
+    from latticegen2 import occ
+    from latticegen2.support import build
+
+    body = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    for lo, hi, want in (((2, 2, 2), (4, 4, 4), 8.0),          # inside
+                         ((8, 2, 2), (12, 4, 4), 8.0),         # straddling
+                         ((11, 2, 2), (13, 4, 4), 0.0)):       # outside
+        clock = {}
+        solid = build.polyhedron_solid(*_cube_poly(lo, hi))
+        inside, ok = build.checked_trim(solid, body, "test", clock)
+        assert ok
+        assert sum(occ.volume(x) for x in inside) == pytest.approx(want, abs=1e-9)
+        assert clock["trim"] > 0.0
+
+
+def test_an_inconsistent_trim_is_bisected_and_loses_nothing(monkeypatch):
+    """The kernel cannot be made to fail on demand, so the first answer is
+    declared inconsistent and the halves have to reproduce it."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+
+    from latticegen2 import occ
+    from latticegen2.support import build
+
+    body = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    poly = _cube_poly((7, 1, 1), (13, 5, 4))
+    real, calls = build.checked_trim, []
+
+    def lying(shape, body_, where, clock):
+        inside, ok = real(shape, body_, where, clock)
+        calls.append(occ.volume(shape))
+        return ([], False) if len(calls) == 1 else (inside, ok)
+
+    monkeypatch.setattr(build, "checked_trim", lying)
+    # The other route to the same region is taken out of the way here; it has
+    # its own test below.
+    monkeypatch.setattr(build, "trim_by_planes", lambda *a: ([], False))
+    clock = {}
+    got = build.trim_convex(poly, body, "test", clock)
+    assert clock["bisections"] == 1 and len(calls) == 3
+    assert calls[1] + calls[2] == pytest.approx(calls[0], rel=1e-9)
+    assert sum(occ.volume(x) for x in got) == pytest.approx(3.0 * 4.0 * 3.0, rel=1e-9)
+
+    # And a leaf that never agrees stops at the depth bound instead of forever.
+    monkeypatch.setattr(build, "checked_trim", lambda *a: ([], False))
+    clock = {}
+    assert build.trim_convex(poly, body, "test", clock) == []
+    assert clock["bisections"] == 2 ** build.BISECT_DEPTH - 1
+
+
+@pytest.mark.parametrize("up", [(0.0, 0.0, 1.0), (0.0, 0.0, -1.0), (0.3, -0.5, 0.81)])
+def test_a_bisection_plane_is_vertical_whatever_the_shape(up):
+    """An exposed cut has to be self-supporting, so it contains the build direction."""
+    from latticegen2.support import build
+
+    up = np.array(up) / np.linalg.norm(up)
+    for lo, hi in (((0, 0, 0), (1, 1, 9)), ((0, 0, 0), (9, 1, 1)), ((0, 0, 0), (2, 5, 3))):
+        poly = _cube_poly(lo, hi)
+        halves = build._halves(*poly, up=up)
+        assert len(halves) == 2
+        assert sum(ph.volume(*h) for h in halves) == pytest.approx(ph.volume(*poly))
+        normals, offsets = ph.face_planes(*halves[0])
+        old, _ = ph.face_planes(*poly)
+        cut = [n for n in normals if not any(np.allclose(n, m) for m in old)]
+        assert len(cut) == 1 and abs(float(cut[0] @ up)) < 1e-12
+
+
+def test_plane_by_plane_gives_the_same_region_as_the_direct_trim():
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+
+    from latticegen2 import occ
+    from latticegen2.support import build
+
+    body = BRepPrimAPI_MakeCylinder(10.0, 10.0).Shape()
+    # A capital leaning out through the curved wall.
+    prim = ph.capital(np.array([7.0, 0.5, 2.0]), 5.0, np.tan(np.radians(60.0)), 0.1,
+                      FRAME, "test")
+    poly = (prim.verts, prim.faces)
+    direct, ok = build.checked_trim(build.polyhedron_solid(*poly), body, "test", {})
+    assert ok
+    planed, ok = build.trim_by_planes(poly, body, "test", {})
+    assert ok
+    want = sum(occ.volume(x) for x in direct)
+    assert 0.0 < want < ph.volume(*poly)
+    assert sum(occ.volume(x) for x in planed) == pytest.approx(want, rel=1e-6)
+
+
+def test_the_judge_sees_what_the_kernels_own_cross_check_cannot():
+    """An operand returned whole, and one returned empty: both add up."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+
+    from latticegen2.classify import OutsideProbe, tessellate_surface
+    from latticegen2.support import build
+
+    body = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    mesh = tessellate_surface(body, lattice_params(10.0, 1.5))
+    judge = build.Judge(OutsideProbe(mesh, 0.05))
+    poly = _cube_poly((7, 3, 3), (13, 6, 6))                 # half in, half out
+    whole = [build.polyhedron_solid(*poly)]
+    right, ok = build.checked_trim(whole[0], body, "test", {})
+    assert ok
+    assert judge.outside(right) == 0.0 and judge.missing([poly], right) == 0
+    assert not judge.refutes([poly], right)
+    assert judge.outside(whole) == pytest.approx(3.0)        # untrimmed
+    assert judge.missing([poly], []) > 0                     # lost
+    assert judge.refutes([poly], whole) and judge.refutes([poly], [])
+
+    # And trim_convex acts on it: a first answer of "nothing" is not accepted.
+    real, calls = build.checked_trim, []
+
+    def lying(shape, body_, where, clock):
+        calls.append(1)
+        return ([], True) if len(calls) == 1 else real(shape, body_, where, clock)
+
+    import latticegen2.support.build as b
+    saved, b.checked_trim = b.checked_trim, lying
+    try:
+        clock = {}
+        got = build.trim_convex(poly, body, "test", clock, judge=judge)
+    finally:
+        b.checked_trim = saved
+    from latticegen2 import occ
+    assert clock["judge_refusals"] == 1 and clock["by_planes"] == 1
+    assert sum(occ.volume(x) for x in got) == pytest.approx(27.0, rel=1e-9)
+
+
+def test_a_repair_fuse_that_loses_volume_is_folded_instead(monkeypatch):
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Pnt
+
+    from latticegen2 import boundary, occ
+
+    boxes = [BRepPrimAPI_MakeBox(gp_Pnt(float(i), 0.0, 0.0), 1.0, 1.0, 1.0).Shape()
+             for i in range(4)]
+    got = boundary._fuse_solids(boxes, "test")
+    assert len(got) == 1 and occ.volume(got[0]) == pytest.approx(4.0)
+
+    # The one-shot call returns one of its operands; the fold must take over.
+    real, calls = boundary.occ.solids, []
+
+    def lying(shape):
+        calls.append(1)
+        return [boxes[0]] if len(calls) == 1 else real(shape)
+
+    monkeypatch.setattr(boundary.occ, "solids", lying)
+    got = boundary._fuse_solids(boxes, "test")
+    assert len(calls) == 4                                   # one shot + three steps
+    assert len(got) == 1 and occ.volume(got[0]) == pytest.approx(4.0)
+
+
+def test_a_fragment_beside_the_main_body_is_kept_as_its_own_shell():
+    """Two closed surfaces in one component: the junction graph over-connects
+    supported cells, so the second is a body and not a contradiction."""
+    from OCP.BRep import BRep_Builder
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.TopoDS import TopoDS_Shell
+    from OCP.gp import gp_Pnt
+
+    from latticegen2 import occ
+    from latticegen2.support.build import fill_voids
+
+    big = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    crumb = BRepPrimAPI_MakeBox(gp_Pnt(20.0, 0.0, 0.0), 0.5, 0.5, 0.5).Shape()
+    shell = TopoDS_Shell()
+    builder = BRep_Builder()
+    builder.MakeShell(shell)
+    for face in occ.faces(big) + occ.faces(crumb):
+        builder.Add(shell, face)
+    out, n_filled, filled, extra = fill_voids({0: shell, 1: occ.shells(big)[0]})
+    assert n_filled == 0 and filled == 0.0
+    assert extra == [pytest.approx(0.125)]
+    assert sorted(out) == [0, 1, 2]                       # sortable integer keys
+    assert len(occ.faces(out[0])) == 6 and len(occ.faces(out[2])) == 6
+    assert out[1].IsSame(occ.shells(big)[0])              # an ordinary shell is untouched
 
 
 # --- the whole pipeline -------------------------------------------------------

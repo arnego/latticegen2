@@ -58,6 +58,12 @@ and applies every applicable §6.2 check. Scenarios are independent — one fail
 scenario does not prevent the others from running — and the exit code reflects the
 run as a whole. `--only smoke-fast,invalid-input` restricts the set.
 
+`rehearsal-support` is **opt-in**: it is close to an hour, so a plain
+`python tools/e2e.py` leaves it out and it runs only when named with `--only`.
+`--keep <dir>` writes a run's output, log and (on failure) temp folder into a
+folder of your choosing instead of a temporary one, which is what makes a
+failure of a run that long worth having.
+
 Each generated run writes its own `<output-stem>.log` containing the required run
 data (parameters, start time, duration, run characteristics, peak memory). Save
 it for analysis and attach it to the pull request.

@@ -50,10 +50,13 @@ def run_support(args, rl, lp, mesh, body, body_path, mesh_path, tmpdir, pool,
         f"overhangs: {len(samples)} sample(s) at {params.pitch:g} mm pitch over "
         f"{samples.area:.1f} mm^2 of inner surface flatter than "
         f"{params.overhang - overhang.MARGIN_DEG:g} deg from the build direction "
-        f"({kinds['edge']} on edges, {kinds['vertex']} on vertices)"
+        f"({kinds['edge']} on edges, {kinds['vertex']} on vertices); "
+        f"{int(samples.required.sum())} of them exceed the {params.overhang:g} deg "
+        f"limit itself and must be proven covered"
     )
     stats["overhang_area_mm2"] = round(samples.area, 2)
     stats["overhang_samples"] = len(samples)
+    stats["overhang_samples_required"] = int(samples.required.sum())
     if len(samples) == 0:
         # Not a failure: a body with no inner overhang at this orientation
         # needs no support, and saying so is the whole result.

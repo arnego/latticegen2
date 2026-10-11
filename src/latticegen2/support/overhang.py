@@ -46,6 +46,10 @@ from ..cli import OVERHANG_MARGIN as MARGIN_DEG
 
 FACE, EDGE, VERTEX = 0, 1, 2
 
+REQUIRED_SLACK = 1e-6
+"""How far past ``sin(phi)`` a sample's ``n . b`` must be to count as over the
+limit rather than at it."""
+
 PREFILTER_SLACK = 0.25
 """How far below the threshold a mesh node's ``n . b`` may sit while its
 triangle is still refined. The classification mesh allows 0.2 rad of angular
@@ -68,6 +72,25 @@ class OverhangSamples:
     area: float
     """Surface area the face samples stand for, in mm²."""
     pitch: float
+    required: np.ndarray = None  # type: ignore[assignment]
+    """``(N,)`` bool: does this sample exceed the limit itself?
+
+    Everything within the margin of the limit is *sampled*, so that supports are
+    placed to run past the border of an overhang region instead of ending on
+    it. Only what actually exceeds the limit is *required*, and only that is
+    proven covered (docs/algorithm.md §14.6).
+
+    The two were one set until `TD_HX_rehearsal_test` was run turned over. Its
+    drill points are 120° cones, tilted exactly 60° — at the default limit, not
+    over it. A capital under one has faces at 58°, so what the margin asked to
+    be proven there was a film a tenth of a millimetre thick wrapped round the
+    cone, two degrees from tangent: the grazing regime of docs/algorithm.md §7,
+    where the kernel dropped part of it and the run was refused for an overhang
+    that does not exist."""
+
+    def __post_init__(self):
+        if self.required is None:
+            self.required = np.ones(len(self.points), dtype=bool)
 
     def __len__(self) -> int:
         return len(self.points)
@@ -273,7 +296,7 @@ def _edge_samples(body, b: np.ndarray, bar: float, pitch: float) -> list:
             proj /= reach
             if float(np.cross(n1, proj) @ axis) < 0.0 or float(np.cross(proj, n2) @ axis) < 0.0:
                 continue                      # steepest direction is off the arc
-            out.append((p3.X(), p3.Y(), p3.Z()))
+            out.append((p3.X(), p3.Y(), p3.Z(), reach))
     return out
 
 
@@ -329,7 +352,11 @@ def detect(body, b: np.ndarray, overhang_deg: float, pitch: float,
     """
     b = np.asarray(b, dtype=float)
     bar = threshold(overhang_deg, margin_deg)
-    points, inward, kinds = [], [], []
+    # Strictly over the limit, with a hair of slack so that a surface tilted at
+    # exactly the limit -- a 120 degree drill point at 60 -- is not "over" it
+    # by a rounding error.
+    limit = float(np.sin(np.radians(overhang_deg))) + REQUIRED_SLACK
+    points, inward, kinds, required = [], [], [], []
     area = 0.0
     faces = occ.faces(body)
     for fi, face in enumerate(faces):
@@ -342,18 +369,28 @@ def detect(body, b: np.ndarray, overhang_deg: float, pitch: float,
         points.append(p)
         inward.append(-n)
         kinds.append(np.full(len(p), FACE))
+        required.append(n @ b > limit)
         area += a
 
-    for kind, pts in ((EDGE, _edge_samples(body, b, bar, pitch)),
-                      (VERTEX, _vertex_samples(body, b))):
-        if pts:
-            arr = np.array(pts, dtype=float)
-            points.append(arr)
-            inward.append(np.broadcast_to(-b, arr.shape).copy())
-            kinds.append(np.full(len(arr), kind))
+    edges = _edge_samples(body, b, bar, pitch)
+    if edges:
+        arr = np.array(edges, dtype=float)
+        points.append(arr[:, :3])
+        inward.append(np.broadcast_to(-b, (len(arr), 3)).copy())
+        kinds.append(np.full(len(arr), EDGE))
+        required.append(arr[:, 3] > limit)
+    tips = _vertex_samples(body, b)
+    if tips:
+        arr = np.array(tips, dtype=float)
+        points.append(arr)
+        inward.append(np.broadcast_to(-b, arr.shape).copy())
+        kinds.append(np.full(len(arr), VERTEX))
+        # A down-pointing tip has nothing beneath it whatever its faces' tilt.
+        required.append(np.ones(len(arr), dtype=bool))
 
     if not points:
         return OverhangSamples(np.empty((0, 3)), np.empty((0, 3)),
                                np.empty(0, dtype=np.int64), 0.0, pitch)
     return OverhangSamples(np.vstack(points), np.vstack(inward),
-                           np.concatenate(kinds).astype(np.int64), area, pitch)
+                           np.concatenate(kinds).astype(np.int64), area, pitch,
+                           np.concatenate(required).astype(bool))

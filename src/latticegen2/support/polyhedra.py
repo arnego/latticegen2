@@ -223,6 +223,56 @@ def clip_to_cell(verts: np.ndarray, faces: list, lp, node_pos: np.ndarray,
     return verts, faces
 
 
+RETREAT = 1e-3
+"""Millimetres a piece is cut back from a cell face nothing lies beyond."""
+
+ON_PLANE = 1e-9
+"""Millimetres within which a clipped vertex counts as on the cell face."""
+
+
+def clip_to_cell_matched(verts: np.ndarray, faces: list, lp, node_pos: np.ndarray,
+                         min_volume: float):
+    """:func:`clip_to_cell`, with a cross-section only where the neighbour has one.
+
+    Two cells sharing a face clip a primitive against the same plane, so the
+    cross-sections they present there agree to the last bit — **provided both
+    keep their piece**. A primitive that pokes through a cell face by less than
+    ``min_volume`` leaves a real cross-section on the near side and nothing at
+    all on the far side, where the piece is too small to build.
+
+    Measured on `TD_HX_rehearsal_test` at ``cc=7, t=1.4`` with supports, turned
+    over: the cell of node (206, -282, -264) presented 1.960005 mm² in the
+    plane it shares with an interior node's 1.960000 mm² cap — the cap, plus
+    5e-6 mm² of a capital whose far side was under 1e-9 mm³ — and the run was
+    refused for a disagreement no fuse could reconcile, the other side being a
+    template junction.
+
+    So where the neighbour across a face would drop its piece, this one is cut
+    back from that face by :data:`RETREAT`, and presents nothing there either.
+    """
+    piece = clip_to_cell(verts, faces, lp, node_pos, min_volume)
+    if piece is None:
+        return None
+    half = lp.a / 2.0
+    for k in range(3):
+        e = lp.e[k]
+        centre = float(np.dot(e, node_pos))
+        for sign in (1.0, -1.0):
+            offset = sign * centre + half
+            if not (np.abs(piece[0] @ (sign * e) - offset) <= ON_PLANE).any():
+                continue
+            beyond = clip_to_cell(verts, faces, lp, node_pos + sign * lp.a * e, min_volume)
+            if beyond is not None:
+                continue
+            got = clip_halfspace(piece[0], piece[1], sign * e, offset - RETREAT)
+            if got is None or len(got[1]) < 4:
+                return None
+            piece = (got[0], orient_outward(*got))
+    if volume(*piece) <= min_volume:
+        return None
+    return piece
+
+
 def face_planes(verts: np.ndarray, faces: list) -> tuple[np.ndarray, np.ndarray]:
     """``(normals, offsets)`` of an outward-wound convex polyhedron's faces:
     a point ``x`` is inside iff ``normals @ x <= offsets`` for every face."""

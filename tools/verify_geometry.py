@@ -727,6 +727,13 @@ def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
     body = occ.read_step(input_path)
     tessellate_surface(body, lp)
     samples = oh.detect(body, lp.b, overhang, oh.sample_pitch(t, thickness))
+    # Only what exceeds the limit itself has to be backed. The band inside it
+    # is sampled so supports run past a region's border, and there a support
+    # can be a film thinner than any probe (docs/algorithm.md §14.1).
+    keep = samples.required
+    samples = oh.OverhangSamples(
+        samples.points[keep], samples.inward[keep], samples.kind[keep],
+        samples.area, samples.pitch)
     out = occ.read_step(candidate_path)
     v, f, _n, _a = _oriented_mesh(out, SUPPORT_MESH_DEFLECTION)
     v, f = _weld(v, f)

@@ -464,6 +464,7 @@ body loses 2 edges to the file under-declaring what the geometry needs.
 | oriented-lattice | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 | valid STEP through every §6.2 check with the lattice turned to the bed; the orientation recorded in the log and no support stage run. No golden sample. |
 | support-tilted | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 --support | as above, plus the two support checks of §6.2: a curved overhang, tilted. No golden sample. |
 | support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --support | valid STEP, both support checks, the existing lattice golden sample contained in the output, generation < 20 minutes. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-sup60-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+| rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --overhang 60 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, being close to an hour. Print support at production scale, the part turned over: valid STEP through every §6.2 check including both support checks, generation < 3 hours. **Measured: 50 m 16 s, 41 solids, 857 MB, peak memory 8.45 GB; 125,777 overhang samples backed, none uncovered.** **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup60-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 | spiral-stress | -i test/SpiralTest.step -cc 5 -t 1 --cores 6 | valid STEP, no golden sample, generation < 20 minutes. **Measured: 11 m 01 s**, both solids `BRepCheck_Analyzer`-valid with 0 non-manifold edges after a round trip. Containment falls back to point sampling — the dominant body is past `verify_geometry.CUT_MAX_FACES` — and is reported as the weaker check, never as an unmeasured pass. |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
@@ -550,13 +551,15 @@ diagnosis. Remove an item once it's fixed and verified.*
 defect in the output; each is something measured or left undone that a later
 session should know about before touching that stage.
 
-* **Print support has not been run at production scale.** Every figure in
-  docs/algorithm.md §14 is from `test-cylinder.STEP` at `cc=10, t=1.5`
-  (~2 minutes) and the 80 mm ball. `TD_HX_rehearsal_test` at `cc=5, t=1` —
-  91 minutes without supports — has not been run with them. The per-cell fuse
-  is 60 core-seconds for 585 cells on the cylinder; how that, and the rate of
-  interface repairs (3 of 3,680 there), scale is unmeasured. *Verify by:*
-  running the rehearsal's inner loop, `cc=7, t=1.4`, with `--support`.
+* **Print support has been run at production scale on one part and one
+  orientation.** `TD_HX_rehearsal_test` at `cc=7, t=1.4`, `--orient 180 0 0`,
+  is the `rehearsal-support` scenario (§6.1) and is what docs/algorithm.md
+  §14.5's second list was found on. `cc=5, t=1` with supports, and any other
+  orientation of that part, have not been run. The kernel is markedly less
+  reliable there than on the cylinder — 375 of 46,000 interfaces disagree at
+  first, against 3 of 3,680 — and every repair that run needed is checked
+  rather than trusted, but a part of that kind at other parameters should be
+  expected to find something new.
 * **Supported boundary cells are trimmed twice** — once by `boundary`, once by
   `support`, which rebuilds the cell with its support. Estimated at 1–9 % of a
   run depending on how much of the surface is ceiling. The fix is to place

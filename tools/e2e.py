@@ -511,6 +511,46 @@ def scenario_support_cylinder(outdir: str) -> Report:
     return rep
 
 
+REHEARSAL = os.path.join(TESTDIR, "TD_HX_rehearsal_test.step")
+REHEARSAL_SUPPORT_GOLDEN = os.path.join(
+    TESTDIR, "TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup60-golden-sample.step")
+
+
+def scenario_rehearsal_support(outdir: str) -> Report:
+    """Print support at production scale: the rehearsal part, turned over.
+
+    `TD_HX_rehearsal_test.step` at `cc=7, t=1.4` is the cheapest real part
+    docs/testing.md names for anything touching `validate`, and with
+    `--orient 180 0 0` what was its floor becomes its ceiling. This is the only
+    scenario that puts the support stages through a part of that size, with
+    its grazing trims, its tiled boundary sew and its per-half-strut re-trims.
+
+    Much the slowest scenario — tens of minutes for the run and more for the
+    checks — so it is **opt-in** (:data:`OPT_IN`): it runs only when named with
+    `--only`. Pass `--keep <dir>` with it to write into a folder that outlives
+    the harness, since a run this long is not one to repeat for its log.
+
+    **No golden sample exists yet** (docs/testing.md): `golden_check` reports
+    `SKIP` until an inspected output is committed.
+    """
+    rep = Report("rehearsal-support")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "rehearsal-support.step")
+    orient = (180.0, 0.0, 0.0)
+    proc, elapsed = run_generator(
+        ["-i", REHEARSAL, "-cc", "7", "-t", "1.4", "-o", out, "--cores", "6",
+         "--support", "--orient", "180", "0", "0", "--overhang", "60",
+         "--support-thickness", "1"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-600:])
+    rep.check("runtime under 3 hours", elapsed < 10800, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        geometry_checks(rep, out, REHEARSAL, 7.0, 1.4)
+        support_checks(rep, out, REHEARSAL, 7.0, 1.4, orient, 60.0, 1.0)
+        golden_check(rep, out, REHEARSAL_SUPPORT_GOLDEN, 7.0, 1.4)
+    return rep
+
+
 SCENARIOS = {
     "smoke-fast": scenario_smoke_fast,
     "invalid-input": scenario_invalid_input,
@@ -521,19 +561,30 @@ SCENARIOS = {
     "oriented-lattice": scenario_oriented_lattice,
     "support-tilted": scenario_support_tilted,
     "support-cylinder": scenario_support_cylinder,
+    "rehearsal-support": scenario_rehearsal_support,
 }
+
+
+#: Scenarios that run only when asked for by name with `--only`.
+OPT_IN = {"rehearsal-support"}
 
 
 def main(argv: list[str]) -> int:
     only = None
     if "--only" in argv:
         only = set(argv[argv.index("--only") + 1].split(","))
+    keep = argv[argv.index("--keep") + 1] if "--keep" in argv else None
     occ.quiet_kernel()
 
     reports = []
     with tempfile.TemporaryDirectory(prefix="latticegen2-e2e-") as outdir:
+        if keep:
+            os.makedirs(keep, exist_ok=True)
+            outdir = os.path.abspath(keep)
         for name, fn in SCENARIOS.items():
             if only and name not in only:
+                continue
+            if name in OPT_IN and not (only and name in only):
                 continue
             reports.append(fn(outdir))
             print(flush=True)

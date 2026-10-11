@@ -2402,9 +2402,23 @@ Three kinds of sample are produced (`support/overhang.py`):
 * **Vertices** — a vertex lower than everything attached to it with the body
   directly beneath: the tip of a stalactite.
 
-Everything with `n·b ≥ sin(φ − Δ)`, `Δ = 5°`, is reported. The margin is
+Everything with `n·b ≥ sin(φ − Δ)`, `Δ = 5°`, is *sampled*. The margin is
 conservative, and it is what keeps a support face from meeting the wall
 tangentially at the border of an overhang region — §7's grazing-trim regime.
+
+**Sampled is not the same as required.** Each sample also records whether it
+exceeds the limit itself (`OverhangSamples.required`): a face sample with
+`n·b > sin φ`, an edge sample whose arc reaches past `sin φ`, and every vertex
+tip. Placement (§14.4) works from all samples, so capitals run past the border
+of a region; the coverage proof (§14.6) and `tools/verify_geometry.py` ask only
+about the required ones.
+
+The two were one set until `TD_HX_rehearsal_test` was run turned over
+(`--orient 180 0 0`). Its drill points are 120° cones, tilted exactly 60° — at
+the default limit, not over it. A capital under one has faces at 58.0°, so what
+the margin asked to be *proven* there was a film a tenth of a millimetre thick
+wrapped round a cone two degrees from tangent, and where the kernel dropped
+part of that film the run was refused for an overhang that does not exist.
 
 **The configured limit is checked against the lattice's own angles**, as a
 warning. Strut ridge edges recline at `θ` (54.74°) and strut faces at `90° − θ`
@@ -2515,10 +2529,18 @@ every cell a primitive reaches (`support/build.py`):
 
 1. each primitive is clipped to `Q_n` **analytically** — a convex polyhedron
    against six planes, exact to floating point, and pieces lying wholly inside
-   another piece are dropped;
+   another piece are dropped. A piece under 1e-6 mm³ is not built, **and the
+   cell on the other side of the face it pokes through is cut back 1e-3 mm
+   from that face** (`polyhedra.clip_to_cell_matched`), so that it presents no
+   cross-section to nothing. Two cells clip against one plane with one
+   expression, so their cross-sections agree to the last bit only while both
+   keep their piece: on `TD_HX_rehearsal_test` a capital's 3.6e-09 mm³ share
+   of one cell left its neighbour presenting 1.960005 mm² to an interior
+   node's 1.960000;
 2. one local fuse of `J_n` with the clipped pieces, its coplanar faces merged;
 3. one intersection with `Ω`, one object operand at a time (§7), skipped where
-   no part of the surface is near the cell;
+   no part of the surface is near the cell, and **checked against its own
+   complement** (below);
 4. faces in the cube's planes are tagged exactly as a trimmed junction's caps.
 
 The result is an ordinary boundary piece that replaces the cell's lattice-only
@@ -2530,8 +2552,95 @@ does not keeps the piece it had.
 **It is two-pass on purpose.** The boundary trim runs first, untouched;
 placement sees the lattice that survived; only supported cells are rebuilt.
 
-Four things had to change for support cross-sections to pass through the
-existing interface machinery, each measured on `test-cylinder.STEP`:
+**The intersection of step 3 is asked twice, because it can be wrong while
+reporting success** (§7.2), and for a support that is a hole in the coverage
+rather than a strut reaching outside. Measured on `TD_HX_rehearsal_test` at
+`cc=7, t=1.4` turned over, in the cell of node `(227, -273, -298)`: a valid
+65.9 mm³ fused cell intersects the body to **0.021 mm³**, and one 12.18 mm³
+clipped capital to **nothing at all** — with swapped operands, fuzzy values
+from 1e-7 to 1e-3, `CheckInverted` off, a local block of the body and
+`BOPAlgo_CellsBuilder` all returning the same. Point classification puts about
+4.9 mm³ of that capital inside the body.
+
+What exposes it is the complementary question. `Cut` of the same capital
+returns 7.43 mm³, so 4.74 mm³ of a 12.18 mm³ operand is in neither answer.
+`build.checked_trim` therefore runs both and requires
+`|common| + |cut| = |operand|` to 1e-3 relative — sound trims against that
+part's B-spline wall disagree by 1.8e-05 to 2.9e-05, the two booleans each
+fitting their own intersection curve, and the failures above by 0.23 to 0.39,
+so the bar sits well clear of both. (It was 1e-5 for one run, and one cell was
+then halved 124 times chasing noise no halving removes.) Agreement is not proof — §7.2
+records both being wrong the same way, which the coverage proof and the outside
+probe are still for — but a contradiction is conclusive.
+
+**Two answers that add up can still both be wrong**, and on that part they
+are, in two more cells. At node `(240, -277, -280)` a 32.95 mm³ clipped capital
+intersects the body to nothing and cuts against it to all of itself, with 140
+overhang samples inside it. At node `(209, -266, -284)` one 61.9 mm³ capital
+comes back *whole*, reaching 1.46 mm outside the body, and another of 47.1 mm³
+comes back *empty* where point sampling puts 39 mm³ of it inside — and no
+sample lies in either. So two kinds of evidence that need no kernel are asked
+as well:
+
+* **Witnesses.** The cell's own samples, moved a hair inward, are known to be
+  inside the body. One of them inside an operand and outside that operand's
+  trim refutes the trim.
+* **The judge** (`build.Judge`), for what no sample speaks for. It asks the
+  classification mesh — ray parity and a distance, the two halves of §7.2's
+  `OutsideProbe` and for the same reasons — and then, for *outside*, the
+  body's own point classifier: every vertex the mesh puts outside is asked of
+  `BRepClass3d_SolidClassifier` at 2e-3 mm, and none may be OUT. The mesh
+  alone is not enough there: its margin is twice its deviation, 0.68 mm on
+  that part, and a capital in the cell of node `(228, -273, -298)` came back
+  reaching 0.62 mm outside, through the probe and into a written file. For
+  *missing*, of 24 fixed points per operand each one inside the body must be
+  inside the result unless it is within the probe's margin of the surface.
+
+A cell refuted by any of the three — the volumes, a witness, the judge — is
+rebuilt **operand by operand**: the junction on its own (as its six convex
+half-struts if that is refuted too, §7.2's repair), and every clipped primitive
+through `build.trim_convex`, which tries, in order and each judged the same
+way:
+
+1. the direct intersection;
+2. **plane by plane** (`build.trim_by_planes`): a convex polyhedron is the
+   intersection of its face half-spaces, so the same region is an axis-aligned
+   block of the body cut by one plane after another, and the polyhedron itself
+   is never intersected with the body. On the capital of node
+   `(240, -277, -280)`: 10.085 mm³ in 0.17 s against 9.83 by point sampling,
+   covering all 140 samples, where bisection to its depth bound left two
+   uncovered. The block is axis-aligned on purpose — one turned to a frame
+   aligned with nothing intersected the body to nothing at node
+   `(209, -266, -284)`, where axis-aligned boxes of four sizes are correct;
+3. **bisection**: the polyhedron halved by a **vertical** plane across the
+   longer of its two horizontal extents, and each half taken from step 1
+   again, to `BISECT_DEPTH` (6). Vertical because a cut is not always buried:
+   where the kernel returns less of one half than of the other, part of the
+   plane is left as a face of the result, and a vertical face is always
+   self-supporting. Cut across the longest extent whatever its direction, one
+   cell of that part was left with 0.5 mm² of a near-horizontal cut exposed. The first capital above is inconsistent whole,
+   consistent in one half at 1.71 mm³, and adds up three levels down, for
+   4.71 mm³ against a point-sampled 4.87; both operands of node
+   `(209, -266, -284)` are right after one halving.
+
+The trimmed pieces are then fused. For a leaf still refuted at the depth bound
+— a sixty-fourth of an operand — whichever of its two answers stays inside the
+body is kept, and if neither does the leaf is left out, which is §7.2's
+decision for a junction no intersection keeps inside. Whether that left a gap
+is the coverage proof's question.
+
+Measured over all 7,068 cells that part's primitives reach: 16 rebuilt operand
+by operand — 10 for an uncovered sample, 3 on the judge alone — 7 operands
+taken plane by plane, 30 halvings, no leaf left out, and afterwards nothing
+uncovered, nothing outside and nothing missing. The judge is about 8 % of the
+stage's CPU.
+
+Several things had to change for support cross-sections to pass through the
+existing interface machinery. The first, second, fourth and fifth below were
+measured on `test-cylinder.STEP`; the rest only showed at the scale of
+`TD_HX_rehearsal_test` at `cc=7, t=1.4`, turned over, where 375 of 46,000
+interfaces disagree at first and the repair of §7.1 and §8 runs on 197
+clusters rather than on three:
 
 * **The edge-for-edge interface check ignores edges along the cell's own
   border** (`weld._within_cell_face`). A bare cap sits well inside its cell
@@ -2544,6 +2653,47 @@ existing interface machinery, each measured on `test-cylinder.STEP`:
 * **A fused group of supported cells may be several solids**
   (`boundary._fuse_group`): one cell can hold disconnected pieces that all
   present material in one plane.
+* **A repair fuse is checked against its operands' volume**
+  (`boundary._fuse_solids`). The pieces are from different cells, or separate
+  pieces of one, so they meet on faces and the fused volume is the plain sum.
+  On `TD_HX_rehearsal_test` the five pieces around node `(240, -277, -280)` —
+  each valid, 54.9 mm³ together — fuse in one call to a single 0.84 mm³ solid,
+  which is one of the operands. Every pair of them fuses correctly, and so does
+  folding them in one at a time, in each of four orders tried. A result that
+  does not add up is redone as that fold, every step checked the same way.
+* **The repair is a loop** (`pipeline`, `INTERFACE_REPAIR_ROUNDS` = 8). A fuse
+  re-describes every face of its group, so a cap that corresponded edge for
+  edge before can stop doing so after, and a merged piece can disagree with a
+  neighbour neither operand disagreed with. Lattice-only parts settle in one
+  pass; that part needs three. Groups only grow, so it terminates.
+* **Re-tagging a fused piece's faces knows which side the material is on**
+  (`boundary._owning_cap`). The plane between two nodes of a group is a cap
+  plane of both, with one and the same ideal centre, and the first node listed
+  used to win. A cell's cap faces outward along its own half-strut, so the
+  face's outward normal decides.
+* **A face left in a plane both sides of which were in the group is exterior
+  surface, not a cap** — the fuse has merged whatever the two sides share, and
+  what remains is one cross-section reaching past the other (0.016 mm² against
+  0.672). "Both sides in the group" is a statement about cap *keys*: a cell can
+  hold several pieces and only those party to a disagreement are fused, so
+  asking about *nodes* demoted 19 sound caps. The same holds for one piece
+  that has come to hold both sides of a cap over several rounds, which is
+  settled without a fuse.
+* **A merged piece remembers every cell it spans** (`BoundaryPiece.spans`).
+  It can be fused again, and re-tagging then has to consider all of them;
+  read off its one representative node, 17 caps of twice-fused pieces became
+  plain faces and 156 edges were left unclosed at `stitch`.
+* **A fused piece has its pinhole wires removed**, as a trimmed one does in the
+  worker (§7), at a bar of 1e-3 mm: a fuse leaves the same defect and leaves it
+  longer, 3.7e-04 mm on that part, which was the single unaccounted edge of
+  one run.
+* **A fragment of support cut off by the body's own wall is its own body**
+  (`support.build.fill_voids`). The junction graph joins every piece
+  presenting a cap to every piece presenting its partner, which over-connects
+  by design (§8) and is exact only while a cell holds one piece per cap. Two
+  fragments of 0.1455 mm³ on that part share a cap plane with material they do
+  not touch. Each is closed, lies against the wall that cut it, and is written
+  as a separate solid and reported.
 * **Enclosed voids are filled** (`support.build.fill_voids`). Overlapping
   capitals can seal off a pocket; its wall is a second closed surface in the
   same shell, which is not a connected shell, and the pocket could never be
@@ -2562,10 +2712,14 @@ existing interface machinery, each measured on `test-cylinder.STEP`:
 
 ### 14.6 Safeguards
 
-* **Coverage is proven per cell against the real B-rep.** Every sample, moved
-  2e-3 mm into the body, must classify IN or ON the piece the kernel produced.
-  A miss retries the cell with the operands in the other order, then fails the
-  run (exit 4) naming the location.
+* **Coverage is proven per cell against the real B-rep.** Every *required*
+  sample (§14.1), moved 2e-3 mm into the body, must classify IN or ON the piece
+  the kernel produced. A miss retries the cell with every operand trimmed on
+  its own (§14.5), then fails the run (exit 4) naming the location.
+* **Every intersection with the body is checked against its complement, and
+  every cell's result against the classification mesh** (§14.5), so a trim that
+  silently loses a region or returns an operand untrimmed is repaired before
+  the coverage proof is asked.
 * A supported cell reaching outside the body, judged by §7.2's `OutsideProbe`,
   fails the run.
 * A component carrying support is exempt from the floating-body rule
@@ -2586,6 +2740,25 @@ rebuilt, 10,270 mm³ of support on 43,574 mm³ of lattice.
 | `overhang` | 1.4 s | no — seconds beside the booleans |
 | `plan` | 12 s | station clearance checks across the pool (21 → 12 s); selection serial |
 | `support` | 21 s | one job per batch of cells across the pool; 60 core-seconds of it the fuse |
+
+At production scale — `TD_HX_rehearsal_test` at `cc=7, t=1.4`, turned over,
+six cores: **50 m 16 s**, 8.45 GB peak, 41 solids in an 857 MB file. 15,654 mm²
+of overhang, 1,982 primitives, 3,849 cells rebuilt into 4,851 pieces.
+
+| Stage | Time |
+|---|---|
+| `boundary` | 10 m 22 s |
+| `overhang` | 7 s |
+| `plan` | 52 s |
+| `support` | 12 m 21 s — 2,407 core-seconds of it the checked trim, 624 the fuse |
+| `connect` | 3 m 28 s — 174 repair fuses over three rounds |
+| `stitch` | 6 m 36 s |
+| `simplify` | 5 m 20 s |
+| `validate` | 8 m 22 s — 468 s of it the export-truth gate |
+| `export` | 1 m 49 s |
+
+Checking every trim against its complement doubles the booleans of `support`,
+and is what that stage's time now mostly is.
 
 Not yet done, and stated rather than implied: the selection half of `plan` is
 serial, and supported boundary cells are trimmed twice — once by `boundary`,

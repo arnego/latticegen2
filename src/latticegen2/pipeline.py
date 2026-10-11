@@ -362,6 +362,7 @@ def _run_with_pool(
         )
 
     with Timer(rl, "connect"):
+        rl.substage("resolving interfaces", 0, None)
         interior_set = {(int(a), int(b), int(c)) for a, b, c in interior_nodes} \
             if len(interior_nodes) else set()
         iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
@@ -409,6 +410,11 @@ def _run_with_pool(
         rejected: list = []
         for attempt in range(INTERFACE_REPAIR_ROUNDS + 1):
             last = attempt == INTERFACE_REPAIR_ROUNDS
+            if attempt:
+                # No countable total: how many rounds a part needs is what the
+                # loop is finding out. The label says which one it is on, so
+                # three and a half minutes here do not look like a stall.
+                rl.substage(f"repairing interfaces, round {attempt}", 0, None)
             if iface.mismatched:
                 if last:
                     _raise_still_disagreeing(iface, boundary.pieces, interior_set, tmpdir)

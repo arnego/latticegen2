@@ -176,9 +176,16 @@ true surface (docs/algorithm.md §14.1).
 becomes `Stop!`, and two bars appear:
 
 * the **top** bar names the running stage and fills according to a fixed share
-  per stage, taken from the 2026-08-18 controlled pair in
-  docs/profiling-reports.md and declared in
-  [`gui/weights.py`](../src/latticegen2/gui/weights.py);
+  per stage, declared in [`gui/weights.py`](../src/latticegen2/gui/weights.py).
+  **There are two layouts, chosen by whether the run generates supports.** A
+  supported run goes through three more stages — `overhang`, `plan`,
+  `support`, between `boundary` and `connect` — and they are a quarter of it;
+  it also spends several times longer in `connect`, so its layout is measured
+  on its own rather than being the plain one with three bands squeezed in.
+  Both come from the 2026-10-11 controlled pair in docs/profiling-reports.md,
+  one part run with and without `--support`, and both are computed once when
+  the window starts. A run announces its stages when it begins, and that list
+  is what selects the layout;
 * the **second** bar shows work within the stage — `boundary trim: 9,776 /
   19,552` — with the text drawn over it.
 
@@ -547,7 +554,7 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-**Open, all from print support (§4.6, v3.2.0).** None of them is a known
+**Open, all from print support (§4.6, v4.0.0).** None of them is a known
 defect in the output; each is something measured or left undone that a later
 session should know about before touching that stage.
 

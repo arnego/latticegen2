@@ -100,6 +100,46 @@ def test_a_fraction_outside_zero_to_one_cannot_escape_its_band():
         assert weights.overall_permille(stage, 99.0) == band_end
 
 
+def test_the_supported_layout_is_its_own_measurement_not_the_plain_one_squeezed():
+    """Two precomputed layouts, each summing to 1000 over its own stages."""
+    from latticegen2.runlog import SUPPORT_STAGES, stages_for
+
+    held = stages_for(True)
+    assert set(weights.SUPPORT_PERMILLE) == set(held)
+    assert sum(weights.SUPPORT_PERMILLE.values()) == 1000
+    assert all(v >= 1 for v in weights.SUPPORT_PERMILLE.values())
+    assert all(v >= 1 for v in weights.STAGE_PERMILLE.values())
+    # The three support stages are a real part of the bar...
+    own = sum(weights.SUPPORT_PERMILLE[s] for s in SUPPORT_STAGES)
+    assert 150 < own < 400
+    # ...and a supported run spends far more of itself repairing interfaces,
+    # which squeezing three bands into the plain layout could never show.
+    assert weights.SUPPORT_PERMILLE["connect"] > 5 * weights.STAGE_PERMILLE["connect"]
+    # The layout is selected by the announced stages, and by nothing else.
+    assert weights.layout(held) == (weights.SUPPORT_PERMILLE, weights.SUPPORT_BAND_START)
+    assert weights.layout(STAGES) == weights.layout() == (
+        weights.STAGE_PERMILLE, weights.BAND_START)
+    for stage in held:
+        end = weights.SUPPORT_BAND_START[stage] + weights.SUPPORT_PERMILLE[stage]
+        assert weights.overall_permille(stage, None, held) == weights.SUPPORT_BAND_START[stage]
+        assert weights.overall_permille(stage, 1.0, held) == end
+    assert weights.overall_permille("support", 0.0, STAGES) == 0     # not a plain stage
+
+
+def test_shares_are_apportioned_exactly_and_never_to_nothing():
+    stages = ("a", "b", "c", "d")
+    share = weights._permille({"a": 0.0, "b": 1.0, "c": 1.0, "d": 1.0}, stages)
+    assert sum(share.values()) == 1000 and share["a"] == 1
+    assert sorted(share[s] for s in "bcd") == [333, 333, 333]
+    # Nothing measured at all: an even split, still exact.
+    assert sum(weights._permille({}, stages).values()) == 1000
+    # A list this window has never seen still tiles the bar from 0 to 1000.
+    odd = ("template", "something-new", "export")
+    share, start = weights.layout(odd)
+    assert sum(share.values()) == 1000 and share["something-new"] == 1
+    assert start["template"] == 0 and start["export"] + share["export"] == 1000
+
+
 # --- the reduction -----------------------------------------------------------
 
 

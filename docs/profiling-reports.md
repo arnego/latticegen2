@@ -626,3 +626,53 @@ shares from this table's Duration column. The previous shares gave `validate`
 **35** of 1000; it is **385** here, so the bar would otherwise have sat still for
 thirty-five minutes and then jumped. If the rehearsal is re-profiled again, that
 table has to be recomputed with it.
+
+**Superseded as the source of those shares on 2026-10-11** — see the entry
+below. The table above stands as a measurement of `cc=5, t=1`.
+
+---
+
+## 2026-10-11 — print supports, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, controlled pair
+
+Same part, same parameters, same commit, same machine (6 cores), run back to
+back; the only difference is the flag. Both with `--orient 180 0 0`.
+
+```
+plain    : -cc 7 -t 1.4 --cores 6 --orient 180 0 0
+supported: the same, plus --support --overhang 60 --support-thickness 1
+           (tools/e2e.py --only rehearsal-support)
+```
+
+| Stage | Plain | Supported | |
+|---|---|---|---|
+| template | 0.05 s | 0.05 s | |
+| import | 1.0 s | 1.3 s | |
+| tessellate | 2.3 s | 2.3 s | |
+| classify | 14.7 s | 12.9 s | |
+| boundary | 668.2 s | 622.3 s | untouched by the flag; the two agree to 7 % |
+| overhang | — | 7.0 s | |
+| plan | — | 52.1 s | |
+| support | — | 740.7 s | 2,407 core-seconds of it the checked trim |
+| connect | 11.0 s | 208.3 s | 174 repair fuses over three rounds, against none |
+| stitch | 258.7 s | 395.6 s | |
+| instance | 13.1 s | 11.9 s | |
+| assemble | 8.3 s | 25.4 s | |
+| simplify | 234.9 s | 319.7 s | |
+| validate | 434.4 s | 502.0 s | |
+| export | 90.3 s | 108.8 s | |
+| **run** | **29 m 00 s** | **50 m 16 s** | **+73 %** |
+| peak memory | 7.04 GB | 8.45 GB | |
+
+Supports cost 21 minutes on this part: 13.3 in their own three stages and the
+rest in the stages after them, `connect` most of all — nineteen times longer,
+because 375 of 46,000 interfaces disagree at first where a plain run of this
+part has almost none.
+
+`boundary` is the control. Nothing about it depends on the flag, and it
+differs by 46 s between the two runs, so read any difference under about 7 %
+in the other rows as noise.
+
+**Downstream consumer.** `src/latticegen2/gui/weights.py` holds both Duration
+columns as `SECONDS_PLAIN` and `SECONDS_SUPPORT` and derives the progress
+bar's two layouts from them. If either run is re-measured, those two tables
+have to be updated with it.

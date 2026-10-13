@@ -45,6 +45,7 @@ class OrientationView(tk.Canvas):
         self._verts = None
         self._tris = None
         self._normals = None
+        self._extent = 1.0
         self._orient = _orient.IDENTITY
         self._overhang: float | None = None
         self._enabled = True
@@ -65,6 +66,11 @@ class OrientationView(tk.Canvas):
             self._verts = np.asarray(verts, dtype=float)
             self._tris = np.asarray(tris, dtype=np.int64)
             self._normals = view3d.triangle_normals(self._verts, self._tris)
+            # The view is fitted to the part's bounding sphere, not to its
+            # extent as turned: a rotation leaves the sphere alone, so the
+            # part keeps one size on screen however it is turned.
+            centre = (self._verts.min(axis=0) + self._verts.max(axis=0)) / 2.0
+            self._extent = float(np.linalg.norm(self._verts - centre, axis=1).max())
         self.redraw()
 
     def set_state(self, orient, overhang: float | None) -> None:
@@ -115,20 +121,25 @@ class OrientationView(tk.Canvas):
              else _orient.rotation_matrix(self._orient))
         if self._verts is not None:
             verts, _shift = view3d.place_on_bed(self._verts, R)
-            extent = float(np.abs(verts).max())
+            extent = self._extent
         else:
             verts, extent = None, 1.0
-        half = max(extent, 1e-6) * 1.25
+        half = max(extent, 1e-6)
         scale = min(WIDTH, HEIGHT) * 0.5 / (half * 1.45)
-        cx, cy = WIDTH / 2.0, HEIGHT * 0.56
+        corners = np.array([[-half, -half, 0], [half, -half, 0],
+                            [half, half, 0], [-half, half, 0]], dtype=float)
+        # The bed sits low on the canvas: its corner nearest the eye is as far
+        # from the bottom edge as its side corners are from the left and right,
+        # which leaves the room above it for the part standing on it.
+        bed_xy = np.abs(view3d.project(corners)[0]).max(axis=0) * scale
+        cx = WIDTH / 2.0
+        cy = HEIGHT - (cx - bed_xy[0]) - bed_xy[1]
 
         def to_screen(points):
             xy, depth = view3d.project(points)
             return np.column_stack([cx + xy[:, 0] * scale, cy - xy[:, 1] * scale]), depth
 
         # The bed: a square plate with a grid, drawn first — everything stands on it.
-        corners = np.array([[-half, -half, 0], [half, -half, 0],
-                            [half, half, 0], [-half, half, 0]], dtype=float)
         s, _ = to_screen(corners)
         self.create_polygon(*s.ravel(), fill="#e9edf2", outline="#9aa6b2")
         for i in range(1, 6):
@@ -175,5 +186,4 @@ class OrientationView(tk.Canvas):
                              fill=AXIS_COLOURS[k], font=("TkDefaultFont", 8, "bold"))
         self.create_text(6, HEIGHT - 6, anchor="sw", fill="#667",
                          font=("TkDefaultFont", 7),
-                         text="print bed" if verts is not None
-                         else "print bed — choose an input to see it here")
+                         text="print bed")

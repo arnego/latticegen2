@@ -90,6 +90,7 @@ Upon success the script shall produce an end of run summary report in the .log f
  - Date and time of run start
  - Duration from start to completion
  - Run characteristics (node classification counts, boundary pieces, worker count, connected components, face/vertex/edge counts of the assembled shell, etc)
+ - Volume of the end product, split by origin: the lattice's (`lattice_volume_mm3`), what supports add to it with `--support` (`support_volume_mm3`, net of overlap with the lattice), and the total written (`output_volume_mm3`)
  - Maximum memory usage
  - Path to output .step file 
 
@@ -347,11 +348,16 @@ An opt-in stage that creates support structures, as used for
 - **Anchoring.** Supports may attach to the wall of the input geometry or to the
   generated lattice, so the lattice is generated first.
 - **Pipeline position.** Supports are added to the **completed lattice**:
-  after `simplify` and before `validate`, so one validity pass — including the
-  export-truth gate — judges lattice and supports together. The generator
-  receives the lattice solids, the input geometry, `--orient`, `--overhang`,
-  `--support-thickness` and the inner overhangs already detected, and returns
-  every solid to write (docs/algorithm.md §14.2).
+  after `simplify` and before `validate`. The lattice's faces are merged
+  before the support stage; the generator receives the lattice solids, the
+  input geometry, `--orient`, `--overhang`, `--support-thickness` and the
+  inner overhangs already detected, and returns support solids only; when it
+  is finished the support stage merges them with the lattice into the final
+  product and merges that product's faces again. One validity pass — including
+  the export-truth gate — then judges it (docs/algorithm.md §14.2).
+- **No lattice lost.** The merge is checked by volume: the final product holds
+  at least the lattice's volume and at most the lattice's plus the supports',
+  and a run that breaks either bound fails rather than ships.
 - **Algorithm.** [TODO: needs decision] — docs/algorithm.md §14.3. Until it
   exists a run with `--support` detects and logs the overhangs, writes the
   lattice unchanged, and says so in a `WARNING` line on the console and in the
@@ -568,9 +574,11 @@ how to verify the fix) that a later session can act on it without re-deriving th
 diagnosis. Remove an item once it's fixed and verified.*
 
 * **Implement the print support algorithm** (§4.6, docs/algorithm.md §14.3).
-  The stage, its contract and the overhang detection it starts from are in
-  place: `src/latticegen2/support/generate.py` is a stub returning the lattice
-  unchanged, and its docstring lists what an implementation owes `validate`.
+  The stage, its contract, the merge with the lattice and the overhang
+  detection it starts from are in place: `src/latticegen2/support/generate.py`
+  is a stub returning no supports. **Start from docs/algorithm.md §14.4**,
+  which gives the directions step by step: what to read from the contract,
+  what to return, the helpers to reuse, how to parallelise and how to test.
   Done means the stub's `WARNING` is gone and `support-tilted`,
   `support-cylinder` and `rehearsal-support` pass both support checks of §6.2
   rather than skipping them; then re-measure `rehearsal-support` and fill in

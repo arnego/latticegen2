@@ -352,7 +352,7 @@ halving the face count and the file size.
 | Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |
 | Lattice oriented to the print bed | The frame is rotated into the part's coordinates and the body is never transformed, so the output stays where the input is. One code path: the rotation is applied even at `0 0 0`, where it is exactly the identity, and both golden samples still compare at 0 mm³ through it |
 | Candidates bounded by the surface, not its box | The body's own mesh vertices are bounded in lattice index space instead of the corners of its axis-aligned box — 23,064 → 10,608 candidates on the test cylinder, the same interior and boundary nodes |
-| Supports added to the completed lattice | The support stage runs after `simplify` and hands its result to the same validity and export-truth gates as the lattice, so nothing upstream knows supports exist and one validation pass judges both ([docs/algorithm.md](docs/algorithm.md) §14.2) |
+| Supports added to the completed lattice | The support stage runs after `simplify`: the generator sees the unified lattice and returns supports only, which the stage fuses into the lattice they touch, unifies again and checks by volume so no lattice can be lost. One validation pass then judges the product, and nothing upstream knows supports exist ([docs/algorithm.md](docs/algorithm.md) §14.2) |
 
 ### Memory
 

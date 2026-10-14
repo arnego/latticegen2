@@ -1,13 +1,17 @@
 """The support generator (docs/algorithm.md §14.3). **Not yet implemented.**
 
-:func:`generate` receives the completed lattice and the input body
-(:class:`.contract.SupportInput`) and returns every solid to write
-(:class:`.contract.SupportResult`). Until the algorithm exists it returns the
-lattice unchanged with ``generated=False``, and the run warns that its output
-carries no supports.
+Implementing it: follow docs/algorithm.md §14.4, step by step.
 
-What an implementation owes the rest of the pipeline, which runs
-``validate`` -> export-truth -> ``export`` on whatever it returns:
+:func:`generate` receives the completed lattice and the input body
+(:class:`.contract.SupportInput`) and returns the support solids alone
+(:class:`.contract.SupportResult`). Until the
+algorithm exists it returns none, and the run warns that its output carries no
+supports.
+
+What happens to them is not the generator's job: the support stage fuses them
+with the lattice they touch, re-unifies the merged solids and checks that the
+merge lost no lattice (:mod:`.merge`); then ``validate`` -> export-truth ->
+``export`` run on the final product. What an implementation owes that chain:
 
 * **Inside the body.** No material outside the input solid (specification.md
   §1). A boolean against the body can be wrong while reporting success
@@ -22,10 +26,12 @@ What an implementation owes the rest of the pipeline, which runs
 * **Floating bodies.** The lattice's own floating-body rule has already run.
   A support body attached to the wall is exempt from it (specification.md §5);
   any other new body under ``t³`` must not be produced.
-* **Valid, writable solids.** Closed, ``BRepCheck_Analyzer``-valid, and
-  surviving a STEP round trip — ``validate`` refuses the run otherwise.
-* **Unified.** ``simplify`` has already run, so solids this stage changes
-  should be unified again (``pipeline._unify`` takes a list and the pool).
+* **Valid, writable solids.** Closed and ``BRepCheck_Analyzer``-valid, so the
+  merge fuse is well posed, and — once merged — surviving a STEP round trip,
+  which ``validate`` checks.
+* **Supports only.** Never a copy of the lattice: a lattice solid returned as
+  "support" would be fused with itself and counted twice in the volume
+  bounds the merge is checked against.
 """
 
 from __future__ import annotations
@@ -34,5 +40,5 @@ from .contract import SupportInput, SupportResult
 
 
 def generate(inp: SupportInput) -> SupportResult:
-    """Supports for ``inp.samples``, combined with ``inp.lattice``."""
-    return SupportResult(solids=list(inp.lattice), generated=False)
+    """Support solids backing ``inp.samples``, anchored on ``inp.lattice``."""
+    return SupportResult(supports=[])

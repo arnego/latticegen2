@@ -1,7 +1,8 @@
 """Print support (specification.md §4.6, docs/algorithm.md §14).
 
 Three layers, cheapest first: overhang detection against shapes whose answer
-is known in closed form, the support stage's contract checked on its own, and
+is known in closed form, the support stage's contract and its merge checked on
+their own, and
 whole runs on a small box that go through the real kernel and the real
 pipeline -- including one with a stand-in generator, which pins what the
 pipeline hands the generator and that what it returns is what gets validated
@@ -147,31 +148,75 @@ def _box(lo=(0.0, 0.0, 0.0), size=(5.0, 5.0, 5.0)):
     return occ.solids(BRepPrimAPI_MakeBox(gp_Pnt(*lo), *size).Shape())[0]
 
 
-def test_a_result_that_generated_nothing_must_be_the_lattice_unchanged():
-    from latticegen2.errors import ProcessingError
-    from latticegen2.support import SupportResult, check_result
-
-    lattice = [_box(), _box((10.0, 0.0, 0.0))]
-    check_result(SupportResult(solids=list(lattice), generated=False), lattice)
-    check_result(SupportResult(solids=lattice + [_box((20.0, 0, 0))], generated=True),
-                 lattice)
-    with pytest.raises(ProcessingError, match="generated nothing"):
-        check_result(SupportResult(solids=lattice[:1], generated=False), lattice)
-    with pytest.raises(ProcessingError, match="generated nothing"):
-        check_result(SupportResult(solids=[_box(), lattice[1]], generated=False), lattice)
-
-
-def test_a_result_must_be_a_non_empty_list_of_solids():
+def test_a_result_must_be_support_solids_and_never_the_lattice():
     from latticegen2 import occ
     from latticegen2.errors import ProcessingError
     from latticegen2.support import SupportResult, check_result
 
-    lattice = [_box()]
-    with pytest.raises(ProcessingError, match="no solids"):
-        check_result(SupportResult(solids=[], generated=True), lattice)
+    lattice = [_box(), _box((10.0, 0.0, 0.0))]
+    check_result(SupportResult(supports=[]), lattice)
+    check_result(SupportResult(supports=[_box((20.0, 0.0, 0.0))]), lattice)
     with pytest.raises(ProcessingError, match="other than a solid"):
-        check_result(SupportResult(solids=[occ.faces(lattice[0])[0]], generated=True),
-                     lattice)
+        check_result(SupportResult(supports=[occ.faces(lattice[0])[0]]), lattice)
+    with pytest.raises(ProcessingError, match="lattice solid as support"):
+        check_result(SupportResult(supports=[lattice[1]]), lattice)
+
+
+def _no_unify(solids):
+    return list(solids), {"volume_drift": 0.0}
+
+
+def test_supports_are_fused_into_the_lattice_they_touch_and_nothing_else():
+    from latticegen2 import occ
+    from latticegen2.support import merge
+
+    touched, alone = _box(), _box((10.0, 0.0, 0.0))
+    reaching = _box((4.0, 1.0, 1.0), (2.0, 2.0, 2.0))     # 1 mm into `touched`
+    wall_attached = _box((20.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+    got = merge.merge_with_lattice([touched, alone], [reaching, wall_attached],
+                                   unify=_no_unify)
+    assert any(s.IsSame(alone) for s in got.solids)       # untouched: same object
+    assert not any(s.IsSame(touched) for s in got.solids)
+    assert len(got.solids) == 3                            # merged, alone, wall-attached
+    assert got.lattice_volume == pytest.approx(250.0)
+    assert got.support_volume == pytest.approx(9.0)
+    assert got.output_volume == pytest.approx(250.0 + 4.0 + 1.0)
+    assert sorted(round(occ.volume(s), 6) for s in got.solids) == [1.0, 125.0, 129.0]
+
+
+def test_a_merge_with_no_supports_passes_the_lattice_through_unmeasured():
+    from latticegen2.support import merge
+
+    lattice = [_box(), _box((10.0, 0.0, 0.0))]
+    got = merge.merge_with_lattice(lattice, [], unify=_no_unify)
+    assert all(a.IsSame(b) for a, b in zip(got.solids, lattice))
+    assert got.lattice_volume is None and got.output_volume is None
+
+
+def test_a_merge_that_loses_lattice_fails_rather_than_shipping_less(monkeypatch):
+    from latticegen2.errors import ProcessingError
+    from latticegen2.support import merge
+
+    lattice = [_box()]
+    support = _box((4.0, 1.0, 1.0), (2.0, 2.0, 2.0))
+    # A fuse that reports success and returns only the support -- the shape of
+    # the kernel failure docs/algorithm.md §7.2 records.
+    monkeypatch.setattr(merge, "_fuse", lambda members, where: [members[-1]])
+    with pytest.raises(ProcessingError, match="lost lattice"):
+        merge.merge_with_lattice(lattice, [support], unify=_no_unify)
+
+
+def test_volume_bounds_refuse_both_loss_and_invented_material():
+    from latticegen2.errors import ProcessingError
+    from latticegen2.support.merge import check_volumes
+
+    check_volumes(100.0, 10.0, 100.0)
+    check_volumes(100.0, 10.0, 110.0)
+    with pytest.raises(ProcessingError, match="lost lattice"):
+        check_volumes(100.0, 10.0, 99.0)
+    with pytest.raises(ProcessingError, match="gained material"):
+        check_volumes(100.0, 10.0, 111.0)
+
 
 # --- the whole pipeline -------------------------------------------------------
 
@@ -218,6 +263,8 @@ def test_a_supported_box_runs_through_the_stub_and_writes_the_lattice(box_step, 
     assert "stage overhang" not in open(plain[:-5] + ".log", encoding="utf-8").read()
     assert int(log.split("overhang_samples: ")[1].split()[0]) > 1000
     assert NOT_IMPLEMENTED_WARNING in log
+    assert "support_volume_mm3: 0.0" in log
+    assert "lattice_volume_mm3" in log and "output_volume_mm3" in log
 
     lattice = occ.solids(occ.read_step(plain))
     supported = occ.solids(occ.read_step(held))
@@ -230,9 +277,11 @@ def test_the_generator_gets_the_completed_lattice_and_its_result_is_what_ships(
         box_step, tmp_path, monkeypatch):
     """In process, with a stand-in generator: what goes in, and what comes out.
 
-    The stand-in adds one separate solid. That it reaches the written file, and
-    is counted by `validate`, is what proves the generator's result is gated
-    and exported rather than the lattice it was given.
+    The stand-in returns one cube straddling a lattice node. That it reaches
+    the written file merged into the lattice, with the volumes in the summary
+    adding up, is what proves the support stage merges the generator's result
+    and that the product -- not the lattice it was given -- is gated and
+    exported.
     """
     from latticegen2 import occ
     from latticegen2.cli import parse_args
@@ -244,12 +293,18 @@ def test_the_generator_gets_the_completed_lattice_and_its_result_is_what_ships(
     seen = {}
 
     def stand_in(inp):
+        from latticegen2.lattice import nodes
+
         seen["inp"] = inp
         # Asked now: the temp folder is removed once the run succeeds.
         seen["staged"] = os.path.isfile(inp.body_path) and os.path.isfile(inp.mesh_path)
-        extra = _box((5.0, 5.0, 5.0), (2.0, 2.0, 2.0))
-        return SupportResult(solids=list(inp.lattice) + [extra], generated=True,
-                             stats={"support_solids_added": 1},
+        # A 3 mm cube on the kept node nearest the body's middle: partly inside
+        # lattice material and partly in the void around it, so the merge has
+        # something to fuse and something to add.
+        pos = nodes(inp.lp, inp.kept_nodes)
+        centre = pos[np.argmin(np.linalg.norm(pos - [14.3, 12.2, 9.9], axis=1))]
+        return SupportResult(supports=[_box(tuple(centre - 1.5), (3.0, 3.0, 3.0))],
+                             stats={"support_stand_in": 1},
                              notes=["note: stand-in generator ran"])
 
     monkeypatch.setattr(gen, "generate", stand_in)
@@ -280,10 +335,18 @@ def test_the_generator_gets_the_completed_lattice_and_its_result_is_what_ships(
         stats["nodes_interior"] + stats["nodes_boundary"])
     assert seen["staged"]
 
-    assert stats["support_generated"] is True and stats["support_solids_added"] == 1
-    assert stats["solids_written"] == len(inp.lattice) + 1
+    assert stats["support_solids_generated"] == 1 and stats["support_stand_in"] == 1
+    assert stats["support_merge_groups"] == 1
+    # The summary splits what ships by origin, and the parts add up.
+    assert 0.0 < stats["support_volume_mm3"] < 27.0
+    assert stats["lattice_volume_mm3"] + stats["support_volume_mm3"] == pytest.approx(
+        stats["output_volume_mm3"], abs=1e-3)
     written = occ.solids(occ.read_step(out))
-    assert len(written) == len(inp.lattice) + 1
+    assert len(written) == stats["solids_written"]
+    assert sum(occ.volume(w) for w in written) == pytest.approx(
+        stats["output_volume_mm3"], rel=1e-6)
+    # Face and edge counts are retaken on the product, not left at the lattice's.
+    assert stats["output_faces"] == sum(occ.count_subshapes(w)[0] for w in written)
     log = open(args.log_path, encoding="utf-8").read()
     assert "note: stand-in generator ran" in log
     assert "no support algorithm is implemented" not in log

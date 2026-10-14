@@ -3,11 +3,13 @@
 The support generator is handed the **completed lattice** — every solid the
 pipeline has assembled and unified, before ``validate`` — together with the
 input body, the run's parameters and the inner overhangs already detected. It
-returns the complete set of solids to write. Everything after it (``validate``,
-the export-truth gate, ``export``) is unchanged and gates whatever comes back.
+returns the **support material only**. The support stage then merges it with
+the lattice into the final product (:mod:`.merge`), and everything after it
+(``validate``, the export-truth gate, ``export``) gates that product unchanged.
 
 Both types are plain frozen dataclasses so the generator can be exercised in a
-unit test without a pipeline around it.
+unit test without a pipeline around it. docs/algorithm.md §14.4 says how to
+write a generator against them.
 """
 
 from __future__ import annotations
@@ -95,15 +97,14 @@ class SupportInput:
 class SupportResult:
     """What the support generator hands back to the pipeline."""
 
-    solids: list
-    """The **complete** output: every solid to be validated and written,
-    lattice and supports alike. Supports may be fused into lattice solids or
-    added as separate solids; lattice solids the generator does not touch
-    should be passed through as the same objects."""
-
-    generated: bool
-    """Whether any support was produced. False is only legitimate with
-    ``solids`` identical to the input lattice, which the pipeline checks."""
+    supports: list
+    """The support solids, and nothing else: no lattice. Each must be a valid
+    closed solid inside the input body. They may overlap the lattice and each
+    other — the support stage fuses every support with the lattice solids and
+    supports it touches (:func:`.merge.merge_with_lattice`), unifies the
+    result, and checks that no lattice was lost. A support touching nothing
+    stays a body of its own, attached to the wall. Empty means no support was
+    generated."""
 
     stats: dict = field(default_factory=dict)
     """Run characteristics for the end-of-run summary (specification.md §3).

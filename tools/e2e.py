@@ -425,18 +425,26 @@ def support_checks(rep: Report, output: str, input_path: str, cc: float, t: floa
     that the support stages ran where they belong, between `simplify` and
     `validate`. Both checks come back on their own once the warning goes.
     """
-    from latticegen2.support import NOT_IMPLEMENTED_WARNING
+    from latticegen2.support import NO_OVERHANG_NOTE, NOT_IMPLEMENTED_WARNING
 
     log = open(os.path.splitext(output)[0] + ".log", encoding="utf-8").read()
     order = [log.find(f"stage {name}") for name in
              ("simplify", "overhang", "support", "validate")]
     rep.check("the support stages ran between simplify and validate",
               -1 not in order and order == sorted(order))
-    if NOT_IMPLEMENTED_WARNING in log:
+    # Two runs these checks have nothing to say about, each recognised by the
+    # line the run itself prints for it: one with nothing to support at this
+    # orientation, where coverage of no samples can neither pass nor fail, and
+    # one whose generator does not exist yet.
+    why = None
+    if NO_OVERHANG_NOTE in log:
+        why = "no inner overhang at this orientation"
+    elif NOT_IMPLEMENTED_WARNING in log:
+        why = "no support algorithm yet (docs/algorithm.md §14.3)"
+    if why is not None:
         for label in ("every inner overhang is backed by material",
                       "no support surface exceeds the overhang limit"):
-            print(f"  [SKIP] {label} — no support algorithm yet "
-                  f"(docs/algorithm.md §14.3)", flush=True)
+            print(f"  [SKIP] {label} — {why}", flush=True)
         return
     cov = vg.overhang_coverage(output, input_path, cc, t, orient, overhang, thickness)
     rep.check("every inner overhang is backed by material",

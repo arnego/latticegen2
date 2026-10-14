@@ -231,9 +231,9 @@ flowchart TD
     M0 -->|not closed or not orientable| E3
     M0 --> S[Same-domain unification per solid,
     across the shared worker pool]
-    S -->|--support| SU[Detect inner overhangs, hand the completed
-    lattice and the input to the support generator - section 14]
-    SU -->|contract broken| E3
+    S -->|--support| SU[Detect inner overhangs, generate supports on the
+    completed lattice, merge them into it and unify - section 14]
+    SU -->|contract broken or lattice lost| E3
     SU --> M
     S --> M[BRepCheck_Analyzer validity gate,
     on the master, OCCT threads]
@@ -2352,7 +2352,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/gui/`](../src/latticegen2/gui/) | specification.md §3.1 (the window, the subprocess runner and the stage weights) — imports no geometry module and no OCP |
 | [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration), §5.4 (dispatching the classification sweep), §9 (parallel unification, and the master-side validity gate) |
 | [`src/latticegen2/orient.py`](../src/latticegen2/orient.py) | §14.0 (the three angles, the rotation, the build direction) — pure NumPy, shared by the command line, the lattice maths and the window |
-| [`src/latticegen2/support/`](../src/latticegen2/support/) | §14.1–§14.3 (overhang detection, the support stage and its contract, the generator) — imported only under `--support` |
+| [`src/latticegen2/support/`](../src/latticegen2/support/) | §14.1–§14.4 (overhang detection, the support stage and its contract, the merge with the lattice, the generator and how to write it) — imported only under `--support` |
 | [`src/latticegen2/preview.py`](../src/latticegen2/preview.py) | specification.md §3.1 (the coarse mesh of the input the window draws on the print bed) |
 | [`src/latticegen2/__main__.py`](../src/latticegen2/__main__.py) | Entry point, failure reporting, exit codes |
 
@@ -2476,13 +2476,17 @@ Supports are added to the **completed lattice**. Two stages run, under
 | Stage | Does |
 |---|---|
 | `overhang` | §14.1's detection on the input body, at the run's orientation and limit |
-| `support` | hands the lattice, the body and the samples to the generator, and checks what comes back |
+| `support` | hands the lattice, the body and the samples to the generator; merges the supports it returns with the lattice into the final product; unifies what changed; checks the volumes |
 
-So the generator sees exactly the solids a run without `--support` would
-validate and write — assembled, closed, unified, the floating-body rule already
-applied — and `validate` (§9), with its export-truth gate, then judges lattice
-and supports together in one pass. Nothing upstream of `simplify` knows
-supports exist.
+The order is the point. The lattice's faces are merged by `simplify` (§9)
+**before** the generator sees it, so the generator works on exactly the solids
+a run without `--support` would validate and write — assembled, closed,
+unified, the floating-body rule already applied. The supports are merged with
+the lattice **when the generator is finished**, inside the same stage, and the
+solids that merge changes are unified again with the same `pipeline._unify`
+— same guards, same degradation, same worker pool. `validate` (§9), with its
+export-truth gate, then judges the final product in one pass. Nothing upstream
+of `simplify` knows supports exist.
 
 **The contract** is two frozen dataclasses in `support/contract.py`.
 `SupportInput` carries the lattice solids, the input body (still carrying its
@@ -2490,31 +2494,150 @@ classification triangulation) and its staged `.brep`, the classification mesh
 with its measured deviation `d` and its staged `.npz`, `LatticeParams` (frame,
 orientation, build direction `b`), `--overhang`, `--support-thickness`, the
 overhang samples, the index of every kept lattice node, and the run's worker
-pool, worker count, temp folder and progress callback. `SupportResult` returns
-the **complete** output — every solid to write, lattice included — with
-`generated`, summary stats, and lines for the log.
+pool, worker count, temp folder and progress callback. `SupportResult`
+returns **the support solids only** — no lattice — with summary stats and lines
+for the log. `support.check_result` holds the generator to that, as a hard
+failure (exit 4): every entry a solid, none of them a lattice solid.
 
-`support.check_result` holds the generator to what the contract promises, as
-a hard failure (exit 4): a non-empty list of solids, and when `generated` is
-false, exactly the lattice it was given, object for object. Whether the solids
-are sound is `validate`'s question, asked next.
+**The merge** (`support/merge.py`). Solids whose bounding boxes touch are
+grouped by union-find, starting from the supports, so a support joining two
+lattice components joins them into one group. Each group is fused in one
+`BRepAlgoAPI_Fuse` call. A lattice solid no support reaches passes through as
+the same object and is not unified twice; a support touching no lattice stays
+a body of its own, attached to the wall (specification.md §5). Grouping by box
+can only over-group, which costs a larger fuse and never a wrong one: members
+that do not actually touch come back as separate solids.
+
+On a real part this is one fuse against the dominant lattice body, whose box
+spans the part — the boolean on the volume-scaling path that §6 and §12 exist
+to avoid. That is accepted here as the price of a generator that sees the
+finished lattice, and is the first thing to measure once one exists.
+
+**The merge is checked by volume, both ways**, per group and over the whole
+product, as a hard failure:
+
+```
+lattice volume  <=  output volume  <=  lattice volume + support volume
+```
+
+within `MERGE_VOLUME_REL_TOL` (1e-4, the same slack as unification's
+pre-filter, since the merged solids are unified again). A union can neither
+lose material it was given nor gain material nobody gave it. The lower bound is
+the one that matters: a fuse can report success and return less than its
+operands (§7.1's repair measured 0.84 mm³ from 54.9), and without the check
+that would be lattice silently dropped from the output, which specification.md
+§5 forbids.
+
+**What the summary reports.** `lattice_volume_mm3` is the lattice's volume as
+it enters the merge; `support_volume_mm3` is the volume supports **add** to
+the final product, net of where they overlap the lattice — not the volume the
+generator built; `output_volume_mm3` is the product's, measured by `validate`,
+so the first two add up to the third. Without `--support` there is no support
+figure and the other two are equal. `output_faces` and `output_edges` are
+retaken on the product whenever the merge changed it.
 
 A body with no sample at this orientation needs no support; the generator is
-not called and the run says so.
+not called and the run prints `support.NO_OVERHANG_NOTE`.
 
-**The generator is a stub** (`support/generate.py`). It returns the lattice
-unchanged with `generated=False`, and the run prints
-`support.NOT_IMPLEMENTED_WARNING` — to the console and the log regardless of
-`-v` — so a supported run's output is never mistaken for a supported part.
-`tools/e2e.py` reads that line to report the two support checks of
-specification.md §6.2 as `SKIP` rather than failed.
+**The generator is a stub** (`support/generate.py`). It returns no supports,
+and the run prints `support.NOT_IMPLEMENTED_WARNING` — to the console and the
+log regardless of `-v` — so a supported run's output is never mistaken for a
+supported part. `tools/e2e.py` reads either line to report the two support
+checks of specification.md §6.2 as `SKIP` rather than failed.
 
 ### 14.3 The support algorithm
 
 [TODO: needs decision] — to be specified and implemented in
 `support/generate.py`. What it owes the rest of the pipeline is
 specification.md §4.6 and §5, and is listed in that module's docstring:
-material inside the body, full coverage of the required samples,
-self-supporting surfaces, members no thinner than `t_s`, no floating body
-under `t³` other than wall-attached support, solids `validate` and the
-export-truth gate accept, and re-unification of the solids it changes.
+support solids only, each closed and valid; material inside the body; full
+coverage of the required samples; self-supporting surfaces; members no thinner
+than `t_s`; no floating body under `t³` other than wall-attached support.
+Merging with the lattice and re-unification are the stage's job, not the
+generator's (§14.2).
+
+### 14.4 Writing the generator — directions for the next session
+
+Everything around the generator is in place and tested; the work is the body
+of one function. This is the order to go in.
+
+**1. Settle the algorithm in the documents first.** §14.3 and
+specification.md §4.6 carry `[TODO: needs decision]`. Write the algorithm into
+§14.3 — normative, as the rest of this document is — and have the user turn
+the tag into `[TODO: implement]` before writing code (specification.md's own
+rule). specification.md §4.6's requirements (detection, full coverage,
+anchoring, self-supporting, thickness, volume, integral, shape) are the
+acceptance criteria; ask before changing any of them.
+
+**2. Write it in `support/generate.py`, and only there.** Replace the body of
+`generate(inp) -> SupportResult`. New modules go beside it in
+`src/latticegen2/support/` — imported from `generate.py`, never from
+`pipeline.py`, so a run without `--support` still loads none of them
+(`test_support_code_is_not_loaded_without_the_flag` checks this). Do not
+touch the pipeline, the stage list, the CLI or the window: the contract is the
+whole interface.
+
+**3. Read from `SupportInput`** (`support/contract.py`, documented field by
+field):
+
+| You need | Use |
+|---|---|
+| where to support | `inp.samples.points`, `.inward`, `.kind` (`overhang.FACE/EDGE/VERTEX`); `.required` marks what must be proven covered, the rest is the 5° margin to run past |
+| which way is up | `inp.lp.b`, in the part's own coordinates; the body is never rotated (§14.0) |
+| the limits | `inp.overhang_deg` (from `b`), `inp.thickness_mm` |
+| what to anchor on | `inp.lattice` (solids), or analytically `lattice.nodes(inp.lp, inp.kept_nodes)` and the strut directions `inp.lp.e` — cheaper than reading struts back off the B-rep |
+| inside / outside without a boolean | `classify.PointInside(inp.mesh)` for points; `classify.OutsideProbe(inp.mesh, 2 * inp.mesh.deviation).worst_outside(points)` for "does this reach outside the body", the same check §7.2 uses |
+| the body itself | `inp.body` for exact questions (`BRepClass3d_SolidClassifier`, booleans) |
+| B-rep helpers | `occ.polygon_face`, `occ.prism`, `occ.faces_shell`, `occ.make_solid`, `occ.solids`, `occ.volume`, `occ.is_valid`, `occ.bounding_box` |
+
+**4. Return support solids only.** `SupportResult(supports=[...], stats=...,
+notes=..., lines=...)`. Do not fuse them with the lattice and do not unify
+them: the stage does both (§14.2) and checks by volume that no lattice was
+lost. A support that overlaps the lattice is fine and expected — that is how
+it anchors. Stats keys start with `support_`; `notes` print without `-v`, so
+use them for anything a user must see (material left out, a fallback taken).
+
+**5. Trust no boolean against the body on its own word.** A trim of a support
+against `inp.body` can return the wrong answer while reporting success (§7.2).
+Check every result with something that is not the same kernel call —
+`OutsideProbe` for material outside, a volume or witness-point check for
+material lost — before returning it. A generator that cannot place a support
+inside the body fails the run (`errors.ProcessingError`, exit 4) naming the
+location, rather than returning less coverage (§11).
+
+**6. Parallelise where it pays more than 5 %** (specification.md §4.6), through
+`inp.pool` and never a pool of your own: `inp.pool.run(worker_fn, jobs,
+on_result=...)` when `inp.pool.active`, a plain loop otherwise. Under `spawn`,
+`worker_fn` must be a module-level function; ship file paths and plain numbers
+in `jobs` (`inp.body_path`, `inp.mesh_path`, written with
+`parallel.write_brep` / read with `parallel.read_brep` and
+`classify.load_mesh`), never shapes; and end each result tuple with
+`runlog.peak_rss_bytes()`, which `run` folds into the run's peak memory.
+Report progress with `inp.report(label, done, total)` (`total=None` for work
+with no countable fraction).
+
+**7. Test in three layers**, as `test/test_support.py` does today:
+
+* pure functions (placement, geometry) against closed-form answers, no kernel;
+* the generator called directly on a `SupportInput` built from a small box —
+  the stand-in test `test_the_generator_gets_the_completed_lattice_and_its_result_is_what_ships`
+  shows how to get a real one from `run_pipeline` in process with
+  `--cores 1`;
+* whole runs: replace `test_a_supported_box_runs_through_the_stub_and_writes_the_lattice`,
+  which asserts the stub's warning, with one asserting that coverage holds
+  (`tools/verify_geometry.overhang_coverage`) and the limit is kept
+  (`verify_geometry.self_supporting`).
+
+Then the gate: `python -m pytest test -q` and `python tools/e2e.py`. Once
+supports are generated the stub's `WARNING` is gone, so the two support checks
+in `support-tilted` and `support-cylinder` stop reporting `SKIP` and must
+pass, and the cylinder's lattice golden sample must still be contained in the
+output. Finish with `python tools/e2e.py --only rehearsal-support` (tens of
+minutes) for production scale.
+
+**8. Tidy up what the stub leaves behind.** Measure `rehearsal-support` and
+put the `support` stage's seconds into `SECONDS_SUPPORT` in
+`gui/weights.py` (it is worth the floor until then); record the run in
+docs/profiling-reports.md and specification.md §6.1; and remove the
+roadmap item in specification.md §10. `NOT_IMPLEMENTED_WARNING` can stay —
+it still guards a generator that returns nothing while overhangs exist.

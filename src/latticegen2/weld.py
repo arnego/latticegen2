@@ -302,14 +302,14 @@ def _within_cell_face(lp: LatticeParams, ring: Ring, node: NodeKey, h: int) -> R
     """``ring`` without the edges lying along the border of the lattice cell face.
 
     A bare cap sits well inside its cell face (``t < a``), so for a lattice
-    junction this removes nothing. A print support's cross-section can reach
-    the border, and there the comparison this ring is used for stops being a
+    junction this removes nothing. A cross-section filling more of the cell
+    face -- as v4.0.0's first, cell-by-cell print supports produced -- can
+    reach the border, and there the comparison this ring is used for stops being a
     statement about one interface: an edge along the cell's own edge is where
     *two* of a piece's interface faces meet, and after both are given up it is
     either no free edge at all or one whose partner belongs to a third cell.
     Which of those it is differs legitimately between the two sides, so those
-    edges are left to the sew and to the every-edge-twice proof after it
-    (docs/algorithm.md §14.5).
+    edges are left to the sew and to the every-edge-twice proof after it.
     """
     if any(p is None for p in ring.points):
         return ring

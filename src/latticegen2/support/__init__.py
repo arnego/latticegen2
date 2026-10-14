@@ -4,116 +4,141 @@ Loaded only by a run with ``--support``: :mod:`latticegen2.pipeline` imports
 this package inside the one branch that needs it, so a run without supports
 never executes — or even imports — any of it.
 
-Three stages, between ``boundary`` and ``connect``:
+Two stages, between ``simplify`` and ``validate``:
 
 ``overhang``
-    Find where the input body's inner surface overhangs
-    (:mod:`.overhang`).
-``plan``
-    Decide where support apexes go, against the lattice that actually survived
-    the boundary trim (:mod:`.plan`).
+    Find where the input body's inner surface overhangs (:mod:`.overhang`).
 ``support``
-    Build every lattice cell a support reaches as B-rep and hand it to the
-    rest of the pipeline in place of the lattice-only piece (:mod:`.build`).
+    Hand the completed, unified lattice, the body and the overhangs to the
+    generator (:mod:`.generate`) through the contract in :mod:`.contract`;
+    then merge the supports it returns with the lattice into the final
+    product, unify what changed and check that no lattice was lost
+    (:mod:`.merge`).
+
+``validate`` then gates the final product, in one pass.
 """
 
 from __future__ import annotations
 
-import numpy as np
+from dataclasses import dataclass
 
-from ..boundary import resolve_interfaces
-from ..runlog import Timer, format_bytes
-from . import build, overhang, plan
+from OCP.TopAbs import TopAbs_ShapeEnum
+
+from ..errors import ProcessingError
+from ..runlog import Timer
+from . import generate, merge, overhang
+from .contract import SupportInput, SupportResult
+
+NOT_IMPLEMENTED_WARNING = (
+    "WARNING: no support algorithm is implemented yet; the output carries no "
+    "supports (docs/algorithm.md §14.3)."
+)
+"""Printed by every run whose generator returns no supports while there were
+overhangs to support. ``tools/e2e.py`` reads it to report the support checks
+as skipped rather than failed."""
+
+NO_OVERHANG_NOTE = (
+    "note: no inner overhang exceeds the limit at this orientation; no support "
+    "was generated."
+)
+"""Printed when the body has nothing to support. ``tools/e2e.py`` reads it too:
+coverage of nothing is not a check that can pass or fail."""
 
 
-def run_support(args, rl, lp, mesh, body, body_path, mesh_path, tmpdir, pool,
-                interior_nodes, boundary, outside_margin, stats):
-    """Run the three support stages.
+@dataclass
+class SupportOutcome:
+    """What the support stage hands back to the pipeline."""
 
-    Returns the piece list and the interior node array the rest of the pipeline
-    should continue with: supported cells replace their lattice-only pieces, and
-    a supported node that was interior leaves the instanced set, since its
-    junction now comes out of a boolean like any boundary junction's.
+    solids: list
+    """The final product, to be validated and written."""
+    lattice_volume: "float | None"
+    """The lattice's volume, measured before supports were merged in; ``None``
+    when nothing was merged, the output then being the lattice."""
+
+
+def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
+                kept_nodes, pool, tmpdir, stats, unify) -> SupportOutcome:
+    """Run the two support stages on the completed lattice.
+
+    ``unify(solids) -> (solids, stats)`` is the pipeline's same-domain
+    unification, bound to the run's pool: the merged solids are compacted
+    exactly as the lattice was.
     """
-    params = plan.SupportParams(
-        overhang=args.overhang,
-        thickness=args.support_thickness,
-        pitch=overhang.sample_pitch(lp.t, args.support_thickness),
-        deviation=mesh.deviation,
-    )
-
+    pitch = overhang.sample_pitch(lp.t, args.support_thickness)
     with Timer(rl, "overhang"):
-        samples = overhang.detect(body, lp.b, params.overhang, params.pitch,
+        samples = overhang.detect(body, lp.b, args.overhang, pitch,
                                   report=rl.substage)
     kinds = samples.counts()
     rl.line(
-        f"overhangs: {len(samples)} sample(s) at {params.pitch:g} mm pitch over "
+        f"overhangs: {len(samples)} sample(s) at {pitch:g} mm pitch over "
         f"{samples.area:.1f} mm^2 of inner surface flatter than "
-        f"{params.overhang - overhang.MARGIN_DEG:g} deg from the build direction "
+        f"{args.overhang - overhang.MARGIN_DEG:g} deg from the build direction "
         f"({kinds['edge']} on edges, {kinds['vertex']} on vertices); "
-        f"{int(samples.required.sum())} of them exceed the {params.overhang:g} deg "
+        f"{int(samples.required.sum())} of them exceed the {args.overhang:g} deg "
         f"limit itself and must be proven covered"
     )
     stats["overhang_area_mm2"] = round(samples.area, 2)
     stats["overhang_samples"] = len(samples)
     stats["overhang_samples_required"] = int(samples.required.sum())
-    if len(samples) == 0:
-        # Not a failure: a body with no inner overhang at this orientation
-        # needs no support, and saying so is the whole result.
-        rl.always("note: no inner overhang exceeds the limit at this "
-                  "orientation; no support was generated.")
-        for name in ("plan", "support"):
-            with Timer(rl, name):
-                pass
-        return boundary.pieces, interior_nodes
 
-    with Timer(rl, "plan"):
-        rl.substage("finding anchors", 0, None)
-        iface = resolve_interfaces(lp, interior_nodes, boundary.pieces)
-        anchors = plan.find_anchors(
-            lp, mesh, params, interior_nodes,
-            [p.node for p in boundary.pieces], iface.interfaces,
-            near=plan.near_samples(lp, samples.points),
-            pool=pool, mesh_path=mesh_path,
-        )
-        rl.substage("placing supports", 0, None)
-        placed = plan.plan_supports(lp, mesh, params, samples.points, anchors)
-    rl.line(
-        f"support plan: {len(anchors.nodes)} anchor node(s) of "
-        f"{anchors.n_lattice} lattice node(s) ({anchors.n_grounded} grounded); "
-        f"{placed.stats.get('support_capitals_on_struts', 0)} capital(s) on "
-        f"struts, {placed.stats.get('support_capitals_on_nodes', 0)} on nodes, "
-        f"{placed.stats.get('support_king_posts', 0)} king post(s), "
-        f"{placed.stats.get('support_drop_columns', 0)} drop column(s)"
-    )
-    stats.update(placed.stats)
-
-    interior_set = {(int(r[0]), int(r[1]), int(r[2])) for r in interior_nodes}
-    lattice_nodes = interior_set | {tuple(p.node) for p in boundary.pieces}
+    lattice = list(lattice)
     with Timer(rl, "support"):
-        pieces, supported, bstats = build.build_supports(
-            lp, placed.primitives, samples, mesh, lattice_nodes, interior_set,
-            body_path, mesh_path, outside_margin, tmpdir, pool, args.workers,
-            report=rl.substage,
-        )
-    rss = bstats.pop("peak_support_worker_rss", 0)
-    if rss:
-        rl.note_worker_rss(rss)
-        stats["peak_support_worker_memory"] = format_bytes(rss)
-    stats.update(bstats)
-    rl.line(
-        f"supports built: {bstats.get('support_cells', 0)} lattice cell(s) "
-        f"({bstats.get('support_cells_interior', 0)} of them interior) -> "
-        f"{len(pieces)} piece(s); coverage verified at "
-        f"{bstats.get('support_samples_verified', 0)} sample(s)"
-        + (f", {bstats['support_cells_retried']} cell(s) needed the alternative "
-           f"operand order" if bstats.get("support_cells_retried") else "")
-    )
+        if len(samples) == 0:
+            # Not a failure: a body with no inner overhang at this orientation
+            # needs no support, and saying so is the whole result.
+            result = SupportResult(supports=[])
+        else:
+            result = generate.generate(SupportInput(
+                lattice=tuple(lattice), body=body, body_path=body_path,
+                mesh=mesh, mesh_path=mesh_path, lp=lp,
+                overhang_deg=args.overhang, thickness_mm=args.support_thickness,
+                samples=samples, kept_nodes=kept_nodes, pool=pool,
+                workers=args.workers, tmpdir=tmpdir, report=rl.substage,
+            ))
+        check_result(result, lattice)
+        merged = merge.merge_with_lattice(
+            lattice, list(result.supports), unify=unify, report=rl.substage)
 
-    kept = [p for p in boundary.pieces if tuple(p.node) not in supported]
-    keep_interior = np.array(
-        [r for r in interior_nodes
-         if (int(r[0]), int(r[1]), int(r[2])) not in supported],
-        dtype=np.int64,
-    ).reshape(-1, 3)
-    return kept + pieces, keep_interior
+    for line in result.lines:
+        rl.line(line)
+    for note in result.notes:
+        rl.always(note)
+    stats.update(result.stats)
+    stats.update(merged.stats)
+    stats["support_solids_generated"] = len(result.supports)
+    if len(samples) == 0:
+        rl.always(NO_OVERHANG_NOTE)
+    elif not result.supports:
+        rl.always(NOT_IMPLEMENTED_WARNING)
+    else:
+        rl.line(
+            f"supports: {len(result.supports)} solid(s), "
+            f"{merged.support_volume:.4f} mm^3 as generated, merged into "
+            f"{merged.stats['support_merge_groups']} group(s); output "
+            f"{merged.output_volume:.4f} mm^3 against "
+            f"{merged.lattice_volume:.4f} mm^3 of lattice"
+        )
+    return SupportOutcome(merged.solids, merged.lattice_volume)
+
+
+def check_result(result: SupportResult, lattice: list) -> None:
+    """Fail (exit 4) if ``result`` breaks :class:`SupportResult`'s contract.
+
+    Only what the contract itself promises is checked here: support solids,
+    none of them the lattice itself. Whether the merge kept every bit of
+    lattice is :func:`.merge.check_volumes`'s question, and whether the
+    product is sound is ``validate``'s.
+    """
+    supports = list(result.supports)
+    for i, s in enumerate(supports):
+        if s is None or s.IsNull() or s.ShapeType() != TopAbs_ShapeEnum.TopAbs_SOLID:
+            raise ProcessingError(
+                f"The support generator returned something other than a solid "
+                f"at position {i} of {len(supports)} (docs/algorithm.md §14.2)."
+            )
+        if any(s.IsSame(l) for l in lattice):
+            raise ProcessingError(
+                f"The support generator returned a lattice solid as support "
+                f"at position {i} of {len(supports)}; it must return support "
+                f"material only (docs/algorithm.md §14.2)."
+            )

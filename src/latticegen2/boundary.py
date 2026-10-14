@@ -163,12 +163,6 @@ class BoundaryPiece:
     this is a list per key, not a single face. Keyed by node as well as
     half-strut id because a piece :func:`fuse_disagreeing_pairs` has merged can
     hold caps belonging to either of the nodes it spans."""
-    support: bool = False
-    """Whether this piece carries print support (docs/algorithm.md §14.5).
-
-    Such a piece is one lattice cell's junction fused with the support passing
-    through it. It is attached to the wall by design, so the component it
-    belongs to is exempt from the floating-body rule (specification.md §5)."""
     spans: frozenset = frozenset()
     """Every node whose cell this piece holds material of, when that is more
     than ``node`` alone: set by :func:`_fuse_group` on a merged piece.
@@ -880,8 +874,9 @@ def _owning_cap(
             continue
         # The face must lie within this node's own cell face, not merely in its
         # plane. For a bare cap the nearest-centre rule below already implies
-        # it; a support cross-section (docs/algorithm.md §14.5) can sit anywhere
-        # on the cell face, where "nearest cap centre" stops being decisive.
+        # it; a cross-section filling more of the cell face -- as v4.0.0's
+        # first, cell-by-cell print supports produced -- can sit anywhere on
+        # it, where "nearest cap centre" stops being decisive.
         rel = centre - ideal
         if any(abs(float(rel @ lp.e[k])) > lp.a / 2.0 + 1e-6 for k in range(3)):
             continue
@@ -972,13 +967,9 @@ def _fuse_group(
     solids = [_rebuild_solid(p) for p in group]
     involved = [p.node for p in group]
     result_solids = _fuse_solids(solids, involved)
-    supported = any(p.support for p in group)
     # Lattice junctions on either side of one cap fuse into one solid or the
-    # repair has not worked. Supported cells are different: one cell can hold
-    # several disconnected pieces, all presenting material in the same cell
-    # plane, so the group legitimately fuses into more than one solid — each
-    # of which is simply a piece (docs/algorithm.md §14.5).
-    if len(result_solids) != 1 and not (supported and result_solids):
+    # repair has not worked.
+    if len(result_solids) != 1:
         raise ProcessingError(
             f"Fusing the disagreeing boundary pieces at {involved} produced "
             f"{len(result_solids)} solid(s) instead of 1. The two pieces do not "
@@ -1007,7 +998,6 @@ def _fuse_group(
             volume=occ.volume(solid),
             tolerance_ratio=tf.ratio,
             tolerance_evidence=(tf.tolerance, tf.face_area, tf.where),
-            support=supported,
             spans=spanned,
         )
         for face in fused_faces:

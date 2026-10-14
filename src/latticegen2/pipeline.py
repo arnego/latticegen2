@@ -346,21 +346,6 @@ def _run_with_pool(
         rl.line(f"peak worker memory: {format_bytes(boundary.max_worker_rss)}")
         stats["peak_worker_memory"] = format_bytes(boundary.max_worker_rss)
 
-    if args.support:
-        # The one hook print support has in this pipeline, and the only place
-        # its code is imported (specification.md §4.6): a run without
-        # `--support` never loads `latticegen2.support` at all. It runs here
-        # because anchoring is evaluated against the lattice the boundary trim
-        # actually left, and it hands back the same two things this function
-        # already carries forward -- the piece list and the interior nodes --
-        # so everything below is unchanged (docs/algorithm.md §14).
-        from .support import run_support
-
-        boundary.pieces, interior_nodes = run_support(
-            args, rl, lp, mesh, body, body_path, mesh_path, tmpdir, pool,
-            interior_nodes, boundary, 2.0 * mesh_deviation, stats,
-        )
-
     with Timer(rl, "connect"):
         rl.substage("resolving interfaces", 0, None)
         interior_set = {(int(a), int(b), int(c)) for a, b, c in interior_nodes} \
@@ -402,9 +387,10 @@ def _run_with_pool(
         # re-describes the faces of every piece in its group, so a cap that
         # corresponded edge for edge before can stop doing so after, and a
         # merged piece can disagree with a neighbour neither operand disagreed
-        # with. Lattice-only parts settle in one pass; with print supports,
-        # whose cross-sections fill cell faces, `TD_HX_rehearsal_test` at
-        # `cc=7, t=1.4` needs three. Groups only ever grow, so it terminates;
+        # with. Most parts settle in one pass; with the cell-by-cell print
+        # supports of v4.0.0's first algorithm, whose cross-sections filled
+        # cell faces, `TD_HX_rehearsal_test` at `cc=7, t=1.4` needed three.
+        # Groups only ever grow, so it terminates;
         # the bound is there so a repair that does not converge is reported
         # rather than waited for.
         rejected: list = []
@@ -446,17 +432,6 @@ def _run_with_pool(
         )
         threshold = lp.t ** 3
         dropped = comps.dropped(threshold)
-        # A component carrying print support is attached to the wall by design
-        # and is not a floating body (specification.md §5); the rule keeps
-        # applying to lattice-only crumbs.
-        dropped -= {
-            cid for cid in dropped
-            if any(
-                comps.vertices[v].piece_index >= 0
-                and boundary.pieces[comps.vertices[v].piece_index].support
-                for v in comps.members[cid]
-            )
-        }
         keep_labels = set(comps.volumes) - dropped
         _check_component_tolerance(rl, comps, keep_labels, boundary.pieces, stats)
     if n_fused:
@@ -611,39 +586,13 @@ def _run_with_pool(
         f"{istats['interior_open_edges']} open edges"
     )
 
-    n_split_off = 0
     with Timer(rl, "assemble"):
         rl.substage("assembling shells", 0, None)
         shells = weld.assemble(interior.shells, boundary_faces)
-        if args.support:
-            from .support.build import fill_voids
-
-            shells, n_voids, void_volume, split_off = fill_voids(shells)
-            n_split_off = len(split_off)
-            if split_off:
-                rl.always(
-                    f"note: {len(split_off)} fragment(s) of support, "
-                    f"{sum(split_off):.4f} mm^3 in total (largest "
-                    f"{max(split_off):.4f}), are cut off from the rest by the "
-                    f"input body's own wall and are written as separate bodies "
-                    f"(docs/algorithm.md §14.5). They lie against that wall, "
-                    f"which is what specification.md §5 means by a wall-attached "
-                    f"support."
-                )
-            stats["support_fragments"] = len(split_off)
-            if n_voids:
-                rl.always(
-                    f"note: {n_voids} enclosed void(s) between overlapping "
-                    f"supports, {void_volume:.4f} mm^3 in total, were filled "
-                    f"(docs/algorithm.md §14.5). An enclosed pocket cannot be "
-                    f"emptied of powder."
-                )
-            stats["support_voids_filled"] = n_voids
-            stats["support_void_volume_mm3"] = round(void_volume, 4)
         result_solids, _ = weld.close_shells(shells)
     rl.line(f"assembled {len(result_solids)} watertight solid(s)")
 
-    if len(result_solids) != len(keep_labels) + n_split_off:
+    if len(result_solids) != len(keep_labels):
         raise ProcessingError(
             f"Assembly produced {len(result_solids)} solids where the junction "
             f"graph proves there are {len(keep_labels)} connected components. The "
@@ -693,6 +642,20 @@ def _run_with_pool(
     stats["output_edges"] = simplify_stats["output_edges"]
     stats["unmerged_solids"] = simplify_stats["unmerged_solids"]
     stats["invalid_merges"] = simplify_stats["invalid_merges"]
+
+    if args.support:
+        # The one hook print support has in this pipeline, and the only place
+        # its code is imported (specification.md §4.6): a run without
+        # `--support` never loads `latticegen2.support` at all. It runs on the
+        # completed, unified lattice and hands back the solids to validate and
+        # write, so `validate` gates lattice and supports together in one pass
+        # (docs/algorithm.md §14.2).
+        from .support import run_support
+
+        result_solids = run_support(
+            args, rl, lp, body, body_path, mesh, mesh_path, result_solids,
+            _kept_nodes(kept), pool, tmpdir, stats,
+        )
 
     with Timer(rl, "validate"):
         invalid, total_volume = _validate(result_solids, report=rl.substage)
@@ -1175,8 +1138,8 @@ def _shell_is_broken(shape: TopoDS_Shape) -> bool:
     """Whether any real edge of ``shape`` is not shared by exactly two faces.
 
     The topological half of a validity check, and the half a face merge can
-    break: measured on `test-cylinder.STEP` with print supports, where many
-    cells' contact patches lie side by side on one cylindrical wall,
+    break: measured on `test-cylinder.STEP` with v4.0.0's first, cell-by-cell
+    print supports, where many cells' contact patches lie side by side on one cylindrical wall,
     ``ShapeUpgrade_UnifySameDomain`` builds the merged face *and leaves some of
     the originals in the shell beside it* — 7 edges on four faces and 35 on one,
     out of 56,822. Asked here, between the two passes, because it costs a
@@ -1276,8 +1239,7 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool]:
         return solid, False, False
     if _shell_is_broken(merged):
         # The merge across curved faces is what breaks (see `_shell_is_broken`),
-        # and it is also the small part of the job: the lattice and the supports
-        # are planar. So the second rung merges planar faces only, by forbidding
+        # and it is also the small part of the job: the lattice is planar. So the second rung merges planar faces only, by forbidding
         # a merge across any edge of a curved face, and keeps nearly all of the
         # reduction. Only if that fails too is the solid exported as built.
         try:
@@ -1617,6 +1579,22 @@ def _partition_kept(comps, keep_labels: set[int], boundary_pieces) -> _Kept:
         else np.empty((0, 3), dtype=np.int64)
     )
     return _Kept(nodes_arr, interior_groups, keep_pieces, piece_groups)
+
+
+def _kept_nodes(kept: _Kept) -> np.ndarray:
+    """``(N, 3)`` index of every lattice node whose junction is in the output.
+
+    Interior nodes, plus every node a kept boundary piece holds material of --
+    all of them for a piece a local fuse merged (``spans``), not only its
+    representative. Sorted and unique, so it is the same array however the
+    pieces happen to be ordered.
+    """
+    out = {tuple(int(x) for x in row) for row in kept.interior_nodes}
+    for piece in kept.pieces:
+        out.update(tuple(int(x) for x in n) for n in (piece.spans or (piece.node,)))
+    if not out:
+        return np.empty((0, 3), dtype=np.int64)
+    return np.array(sorted(out), dtype=np.int64)
 
 
 def _rings_needed(interior_groups, interfaces) -> dict:

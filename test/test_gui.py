@@ -100,7 +100,7 @@ def test_a_fraction_outside_zero_to_one_cannot_escape_its_band():
         assert weights.overall_permille(stage, 99.0) == band_end
 
 
-def test_the_supported_layout_is_its_own_measurement_not_the_plain_one_squeezed():
+def test_the_supported_layout_has_bands_for_its_own_stages():
     """Two precomputed layouts, each summing to 1000 over its own stages."""
     from latticegen2.runlog import SUPPORT_STAGES, stages_for
 
@@ -109,12 +109,10 @@ def test_the_supported_layout_is_its_own_measurement_not_the_plain_one_squeezed(
     assert sum(weights.SUPPORT_PERMILLE.values()) == 1000
     assert all(v >= 1 for v in weights.SUPPORT_PERMILLE.values())
     assert all(v >= 1 for v in weights.STAGE_PERMILLE.values())
-    # The three support stages are a real part of the bar...
-    own = sum(weights.SUPPORT_PERMILLE[s] for s in SUPPORT_STAGES)
-    assert 150 < own < 400
-    # ...and a supported run spends far more of itself repairing interfaces,
-    # which squeezing three bands into the plain layout could never show.
-    assert weights.SUPPORT_PERMILLE["connect"] > 5 * weights.STAGE_PERMILLE["connect"]
+    # Each support stage has a band to begin and end, measured or not: the
+    # generator has no measurement yet and is worth exactly the floor.
+    assert all(weights.SUPPORT_PERMILLE[s] >= 1 for s in SUPPORT_STAGES)
+    assert weights.SUPPORT_PERMILLE["support"] == 1
     # The layout is selected by the announced stages, and by nothing else.
     assert weights.layout(held) == (weights.SUPPORT_PERMILLE, weights.SUPPORT_BAND_START)
     assert weights.layout(STAGES) == weights.layout() == (
@@ -732,13 +730,13 @@ def test_stderr_and_kernel_chatter_are_shown_whatever_the_box_says(tmp_path, tk_
 
 
 def test_a_supported_run_lays_the_bar_out_over_the_stages_it_announced():
-    """Three more stages than the plain pipeline, and the bar still ends at 1000."""
+    """Two more stages than the plain pipeline, and the bar still ends at 1000."""
     from latticegen2.runlog import stages_for
 
     plain, held = stages_for(False), stages_for(True)
     assert plain == STAGES
-    assert held[held.index("boundary") + 1:held.index("connect")] == (
-        "overhang", "plan", "support")
+    assert held[held.index("simplify") + 1:held.index("validate")] == (
+        "overhang", "support")
     marks = [weights.overall_permille(s, 0.0, held) for s in held]
     assert marks == sorted(marks) and marks[0] == 0
     assert weights.overall_permille(held[-1], 1.0, held) == 1000

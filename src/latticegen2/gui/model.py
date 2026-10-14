@@ -74,7 +74,7 @@ class RunState:
     #: read.
     lines_seen: int = 0
     #: The stages this run announced in its ``hello``. A run with print supports
-    #: goes through three more than the plain pipeline, and both the stage
+    #: goes through two more than the plain pipeline, and both the stage
     #: counter and the bar are laid out over what was announced.
     stages: tuple = STAGES
 

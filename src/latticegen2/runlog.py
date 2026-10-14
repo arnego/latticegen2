@@ -37,18 +37,19 @@ STAGES: tuple[str, ...] = (
     "stitch", "instance", "assemble", "simplify", "validate", "export",
 )
 
-#: The extra stages a run with ``--support`` goes through, between ``boundary``
-#: and ``connect`` (docs/algorithm.md §14). Kept out of :data:`STAGES` so a run
-#: without support announces, logs and weights exactly the stages it always
-#: has.
-SUPPORT_STAGES: tuple[str, ...] = ("overhang", "plan", "support")
+#: The extra stages a run with ``--support`` goes through, between ``simplify``
+#: and ``validate`` (docs/algorithm.md §14.2): the support generator works on
+#: the completed lattice, and ``validate`` gates the two together. Kept out of
+#: :data:`STAGES` so a run without support announces, logs and weights exactly
+#: the stages it always has.
+SUPPORT_STAGES: tuple[str, ...] = ("overhang", "support")
 
 
 def stages_for(support: bool) -> tuple[str, ...]:
     """The stages one run goes through, in order."""
     if not support:
         return STAGES
-    at = STAGES.index("boundary") + 1
+    at = STAGES.index("simplify") + 1
     return STAGES[:at] + SUPPORT_STAGES + STAGES[at:]
 
 

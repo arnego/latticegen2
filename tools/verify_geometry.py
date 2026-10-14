@@ -748,9 +748,10 @@ def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
     # `test-cylinder.STEP`: 9 of 51,156 probes fall out of the bottom of a
     # wedge 0.01-0.06 mm thick, every one of them on a sample the solid touches
     # (distance exactly 0) and contains 2e-3 mm below. The exact classifier is
-    # asked at that depth, the same one the pipeline's own proof uses
-    # (docs/algorithm.md §14.6); it costs tens of milliseconds a point, which
-    # is why it is the second question and not the first.
+    # asked at that depth; it costs tens of milliseconds a point, which is why
+    # it is the second question and not the first. (Measured on v4.0.0's first
+    # support algorithm, since removed; the mechanism is a property of any
+    # support meeting a wall near the limit, not of that algorithm.)
     doubtful = np.nonzero(~covered)[0]
     thin = 0
     if 0 < len(doubtful) <= EXACT_RECHECK_MAX:

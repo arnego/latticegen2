@@ -222,12 +222,13 @@ the output stays in the input's own coordinate system. A rotated run adds
 `-rotx<rx>y<ry>z<rz>` to the default file name.
 
 **Print support.** With `--support`, every part of the input's inner surface
-that acts as a ceiling flatter than `--overhang` is backed by solid, permanent,
-self-supporting supports: flared eight-sided "capitals" rooted in the lattice's
-struts and nodes, on thin posts where the lattice does not reach, and trimmed
-flush against the wall. They are part of the same body as the lattice, no
-support face or edge exceeds the limit, and after generation no inner surface
-does either. A supported run adds `-sup<overhang>` to the default file name:
+that acts as a ceiling flatter than `--overhang` is to be backed by solid,
+permanent, self-supporting supports, added to the completed lattice just before
+it is validated and written ([docs/algorithm.md](docs/algorithm.md) §14).
+**The support algorithm itself is not implemented yet:** a run with
+`--support` detects and logs the inner overhangs, writes the lattice unchanged
+and prints a `WARNING` saying so. A supported run adds `-sup<overhang>` to the
+default file name:
 
 ```bash
 python src/main.py -i part.step -cc 10 -t 1.5 --orient 30 0 0 --support --overhang 60
@@ -351,9 +352,7 @@ halving the face count and the file size.
 | Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |
 | Lattice oriented to the print bed | The frame is rotated into the part's coordinates and the body is never transformed, so the output stays where the input is. One code path: the rotation is applied even at `0 0 0`, where it is exactly the identity, and both golden samples still compare at 0 mm³ through it |
 | Candidates bounded by the surface, not its box | The body's own mesh vertices are bounded in lattice index space instead of the corners of its axis-aligned box — 23,064 → 10,608 candidates on the test cylinder, the same interior and boundary nodes |
-| Supports built one lattice cell at a time | Each node owns the cube whose faces are its cap planes; supports are clipped to it analytically and fused with that one junction, so no boolean ever sees more than a cell ([docs/algorithm.md](docs/algorithm.md) §14.5) |
-| Supports placed by coverage per unit of material | Choosing capitals by how much they cover always picks the deepest and backs the ceiling almost solid; per unit of material it took 837 primitives and 17,060 mm³ down to 406 and 10,270 mm³ on the test cylinder |
-| Coverage proven against the result | Every overhang sample is classified against the piece the kernel actually produced; a miss fails the run by name rather than shipping an unsupported overhang |
+| Supports added to the completed lattice | The support stage runs after `simplify` and hands its result to the same validity and export-truth gates as the lattice, so nothing upstream knows supports exist and one validation pass judges both ([docs/algorithm.md](docs/algorithm.md) §14.2) |
 
 ### Memory
 
@@ -372,12 +371,6 @@ Measured on a 6-core / 32 GB Windows workstation:
 |---|---|---|---|---|
 | 80 mm ball, `cc=20 t=4` | 27 / 176 | 1,338 | 4.7 MB | **6 s** |
 | test cylinder, `cc=10 t=1.5` | 594 / 968 | 15,966 | 52.6 MB | **~40 s** |
-
-With `--support` at the defaults the cylinder takes **~2 min**: 5,718 mm² of
-inner overhang, 406 support primitives, 585 lattice cells rebuilt, and
-10,270 mm³ of support on 43,574 mm³ of lattice (single run, six cores). The
-three support stages are 34 s of that; the rest is the heavier body going
-through stitching, validation and export.
 
 Both match their golden samples with a symmetric-difference volume of 0 mm³, put
 0 mm³ of material outside the input body, and pass `BRepCheck_Analyzer` with zero

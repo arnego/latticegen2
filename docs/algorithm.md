@@ -231,9 +231,9 @@ flowchart TD
     M0 -->|not closed or not orientable| E3
     M0 --> S[Same-domain unification per solid,
     across the shared worker pool]
-    S -->|--support| SU[Detect inner overhangs, generate supports on the
-    completed lattice, merge them into it and unify - section 14]
-    SU -->|contract broken or lattice lost| E3
+    S -->|--support| SU[Detect inner overhangs, generate support bodies
+    against the completed lattice, append them beside it - section 14]
+    SU -->|contract broken or overlap| E3
     SU --> M
     S --> M[BRepCheck_Analyzer validity gate,
     on the master, OCCT threads]
@@ -2352,7 +2352,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/gui/`](../src/latticegen2/gui/) | specification.md §3.1 (the window, the subprocess runner and the stage weights) — imports no geometry module and no OCP |
 | [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration), §5.4 (dispatching the classification sweep), §9 (parallel unification, and the master-side validity gate) |
 | [`src/latticegen2/orient.py`](../src/latticegen2/orient.py) | §14.0 (the three angles, the rotation, the build direction) — pure NumPy, shared by the command line, the lattice maths and the window |
-| [`src/latticegen2/support/`](../src/latticegen2/support/) | §14.1–§14.4 (overhang detection, the support stage and its contract, the merge with the lattice, the generator and how to write it) — imported only under `--support` |
+| [`src/latticegen2/support/`](../src/latticegen2/support/) | §14.1–§14.4 (overhang detection, the support stage and its contract, the support algorithm: regions, rays, cells, solids, pockets) — imported only under `--support` |
 | [`src/latticegen2/preview.py`](../src/latticegen2/preview.py) | specification.md §3.1 (the coarse mesh of the input the window draws on the print bed) |
 | [`src/latticegen2/__main__.py`](../src/latticegen2/__main__.py) | Entry point, failure reporting, exit codes |
 
@@ -2362,14 +2362,18 @@ Alternatives evaluated and rejected:
 
 Two additions that share one input. The **print orientation** turns the lattice
 to the print bed and applies to every run (specification.md §4.5). **Print
-supports** are an opt-in stage that backs every inner overhang of the input
-with permanent, solid, self-supporting material (specification.md §4.6),
-added to the completed lattice; with `--support` absent none of that code is
+supports** are an opt-in stage that backs the inner overhangs of the input with
+solid, self-supporting material for metal powder-bed fusion
+(specification.md §4.6), generated against the completed lattice and shipped as
+**separate bodies** beside it; with `--support` absent none of that code is
 loaded.
 
-Extra symbols: `b` build direction, `φ` maximum overhang angle from `b`,
-`τ = tan φ`, `t_s` minimum support thickness, `Ω` the input body, `n` its
-outward normal, `h_s` the overhang sample pitch.
+Extra symbols: `b` build direction, `θ = arcsin(sqrt(2/3))` the lattice rod
+angle, which is also the steepest a support face may overhang,
+`φ_s = 60°` the angle past which the input's surface is supported
+(`SUPPORT_START_DEG`), `h = 0.5 mm` the support step, `D = 0.5 mm` the
+unsupported reach, `t_s` minimum support thickness (`--support-thickness`,
+default `t`), `Ω` the input body, `n` its outward normal.
 
 ### 14.0 Orientation
 
@@ -2413,231 +2417,288 @@ compare at 0 mm³. (§5.4's figures predate this and count the box.)
 
 ### 14.1 Overhang detection
 
-A point of `∂Ω` is an inner overhang iff
+A point of `∂Ω` needs support iff
 
 ```
-n · b  >  sin φ
+n · b  >  sin φ_s          (φ_s = 60°, SUPPORT_START_DEG)
 ```
 
 — the surface acts as a ceiling of the volume and the shell beyond it overhangs
-the lattice core more flatly than the limit. A flat ceiling (`n = b`) always
-qualifies, a vertical wall never does, and a wall leaning inward by `ω`
-qualifies iff `ω > φ`. The underside of the body is an *outside* overhang and is
-never examined. The lattice is not analysed.
+the lattice core more flatly than 60° from the build direction. A flat ceiling
+(`n = b`) always qualifies, a vertical wall never does. The underside of the
+body is an *outside* overhang and is never examined. The lattice is not
+analysed.
 
-Three kinds of sample are produced (`support/overhang.py`):
+**Why 60° and not the rod angle.** Supports themselves never exceed `θ`
+(54.74°, §14.3 S4), but the input's surface is supported only past 60°, by
+decision: a support ending on a ceiling tilted at exactly `θ` meets it
+tangentially, and a support ending at the 60° isocline meets it at no less than
+`60° − θ = 5.26°`. Surface between 54.74° and 60° is left bare on purpose — a
+planar face in that range entirely, a gently curved one in a band
+`R · 5.26°` wide (3.7 mm on the 80 mm ball). `test/Hole-block-chamfered.STEP`'s
+30° roof facet sits exactly at 60° and, the inequality being strict, gets no
+support.
+
+Three kinds of sample are produced (`support/overhang.py`), all at the one
+support step `h`:
 
 * **Faces** — sampled on the **true surface** with its exact normal, by
-  refining each face's classification triangulation in UV to pitch
-  `h_s = clamp(min(t, t_s)/2, 0.25, 1.0)` mm. Triangle normals are not used:
-  §5.1's 0.2 rad angular deflection would smear a region's border by 11°. Each
-  triangle is sampled along its longest side and across its height separately,
-  because the mesher makes long thin triangles and sampling at the square of the
-  long side put 300 samples on every mm² of `test-cylinder.STEP`.
+  refining each face's classification triangulation in UV to pitch `h`.
+  Triangle normals are not used: §5.1's 0.2 rad angular deflection would smear a
+  region's border by 11°. Each triangle is sampled along its longest side and
+  across its height separately, because the mesher makes long thin triangles.
 * **Edges** — a concave edge of the body is a ridge of shell hanging into the
   volume. The outward normals between its two faces sweep an arc, and it
   overhangs iff that arc contains a direction over the bar while neither face
-  does: the ridge runs flatter than the limit, between two faces that are each
-  steep enough.
+  does.
 * **Vertices** — a vertex lower than everything attached to it with the body
-  directly beneath: the tip of a stalactite.
+  directly beneath: the tip of a stalactite. Always supported.
 
-Everything with `n·b ≥ sin(φ − Δ)`, `Δ = 5°`, is *sampled*. The margin is
-conservative, and it is what keeps a support face from meeting the wall
-tangentially at the border of an overhang region — §7's grazing-trim regime.
-
-**Sampled is not the same as required.** Each sample also records whether it
-exceeds the limit itself (`OverhangSamples.required`): a face sample with
-`n·b > sin φ`, an edge sample whose arc reaches past `sin φ`, and every vertex
-tip. A generator should place supports from all samples, so they run past the
-border of a region; coverage — the generator's own proof, and
-`tools/verify_geometry.overhang_coverage` — is owed only for the required ones.
-
-The two were one set until `TD_HX_rehearsal_test` was run turned over
-(`--orient 180 0 0`). Its drill points are 120° cones, tilted exactly 60° — at
-the default limit, not over it. A support under one with faces at 58.0° makes
-proving the margin mean proving a film a tenth of a millimetre thick wrapped
-round a cone two degrees from tangent, and where the kernel dropped part of
-that film the run was refused for an overhang that does not exist.
-
-**The configured limit is checked against the lattice's own angles**, as a
-warning. Strut ridge edges recline at `θ` (54.74°) and strut faces at `90° − θ`
-(35.26°) from `b`. Below 54.74° the command line and the window warn that the
-lattice's edges exceed the limit, below 35.26° that its faces do too
-(`cli.overhang_warning`); the default of 60° is silent. The run proceeds either
-way.
+There is no margin band and no separate sample pitch: what is detected is what
+is supported, and the 0.5 mm unsupported-reach rule of §14.3 is the only slack.
+(v4.0.0 sampled a 5° band flatter than the limit as a guard against grazing at
+a region's border; ending at the 60° isocline is that guard now.)
 
 ### 14.2 The support stage
 
-Supports are added to the **completed lattice**. Two stages run, under
-`--support` only, between `simplify` and `validate`
+Two stages run, under `--support` only, between `simplify` and `validate`
 (`runlog.SUPPORT_STAGES`):
 
 | Stage | Does |
 |---|---|
-| `overhang` | §14.1's detection on the input body, at the run's orientation and limit |
-| `support` | hands the lattice, the body and the samples to the generator; merges the supports it returns with the lattice into the final product; unifies what changed; checks the volumes |
+| `overhang` | §14.1's detection on the input body, at the run's orientation |
+| `support` | hands the lattice, the body and the samples to the generator (§14.3); checks what it returns; appends it to the output |
 
-The order is the point. The lattice's faces are merged by `simplify` (§9)
-**before** the generator sees it, so the generator works on exactly the solids
-a run without `--support` would validate and write — assembled, closed,
-unified, the floating-body rule already applied. The supports are merged with
-the lattice **when the generator is finished**, inside the same stage, and the
-solids that merge changes are unified again with the same `pipeline._unify`
-— same guards, same degradation, same worker pool. `validate` (§9), with its
-export-truth gate, then judges the final product in one pass. Nothing upstream
-of `simplify` knows supports exist.
+The lattice's faces are merged by `simplify` (§9) **before** the generator sees
+it, so the generator works on exactly the solids a run without `--support`
+would validate and write. Nothing upstream of `simplify` knows supports exist.
 
 **The contract** is two frozen dataclasses in `support/contract.py`.
 `SupportInput` carries the lattice solids, the input body (still carrying its
 classification triangulation) and its staged `.brep`, the classification mesh
 with its measured deviation `d` and its staged `.npz`, `LatticeParams` (frame,
-orientation, build direction `b`), `--overhang`, `--support-thickness`, the
-overhang samples, the index of every kept lattice node, and the run's worker
-pool, worker count, temp folder and progress callback. `SupportResult`
-returns **the support solids only** — no lattice — with summary stats and lines
-for the log. `support.check_result` holds the generator to that, as a hard
-failure (exit 4): every entry a solid, none of them a lattice solid.
+orientation, build direction `b`), `t_s`, the overhang samples, the index of
+every kept lattice node, and the run's worker pool, worker count, temp folder
+and progress callback. `SupportResult` returns **the support solids only** — no
+lattice — with summary stats and lines for the log.
 
-**The merge** (`support/merge.py`). Solids whose bounding boxes touch are
-grouped by union-find, starting from the supports, so a support joining two
-lattice components joins them into one group. Each group is fused in one
-`BRepAlgoAPI_Fuse` call. A lattice solid no support reaches passes through as
-the same object and is not unified twice; a support touching no lattice stays
-a body of its own, attached to the wall (specification.md §5). Grouping by box
-can only over-group, which costs a larger fuse and never a wrong one: members
-that do not actually touch come back as separate solids.
+**Supports are not merged with the lattice.** The output STEP carries the
+lattice solids exactly as `simplify` left them and, beside them, one body per
+support cell (§14.3) and per pocket fill. Support bodies are built to share
+faces with the lattice, the input's walls, floors and roofs, and with each
+other, so that the downstream merge in the enveloping part's CAD tool succeeds;
+they never share volume. `support.check_result` holds the generator to that, as
+a hard failure (exit 4):
 
-On a real part this is one fuse against the dominant lattice body, whose box
-spans the part — the boolean on the volume-scaling path that §6 and §12 exist
-to avoid. That is accepted here as the price of a generator that sees the
-finished lattice, and is the first thing to measure once one exists.
+* every entry is a solid, and none of them is a lattice solid;
+* no support overlaps the lattice: the volume of its intersection with the
+  lattice junctions near it is at most `SUPPORT_OVERLAP_TOL` (1e-6 mm³);
+* no two supports overlap, by the same bar.
 
-**The merge is checked by volume, both ways**, per group and over the whole
-product, as a hard failure:
-
-```
-lattice volume  <=  output volume  <=  lattice volume + support volume
-```
-
-within `MERGE_VOLUME_REL_TOL` (1e-4, the same slack as unification's
-pre-filter, since the merged solids are unified again). A union can neither
-lose material it was given nor gain material nobody gave it. The lower bound is
-the one that matters: a fuse can report success and return less than its
-operands (§7.1's repair measured 0.84 mm³ from 54.9), and without the check
-that would be lattice silently dropped from the output, which specification.md
-§5 forbids.
-
-**What the summary reports.** `lattice_volume_mm3` is the lattice's volume as
-it enters the merge; `support_volume_mm3` is the volume supports **add** to
-the final product, net of where they overlap the lattice — not the volume the
-generator built; `output_volume_mm3` is the product's, measured by `validate`,
-so the first two add up to the third. Without `--support` there is no support
-figure and the other two are equal. `output_faces` and `output_edges` are
-retaken on the product whenever the merge changed it.
+So the volumes are additive by construction: `support_volume_mm3` is the sum of
+the support bodies, `lattice_volume_mm3` the lattice's, and
+`output_volume_mm3` — measured by `validate` — their sum. Without `--support`
+there is no support figure and the other two are equal.
 
 A body with no sample at this orientation needs no support; the generator is
-not called and the run prints `support.NO_OVERHANG_NOTE`.
-
-**The generator is a stub** (`support/generate.py`). It returns no supports,
-and the run prints `support.NOT_IMPLEMENTED_WARNING` — to the console and the
-log regardless of `-v` — so a supported run's output is never mistaken for a
-supported part. `tools/e2e.py` reads either line to report the two support
-checks of specification.md §6.2 as `SKIP` rather than failed.
+not called and the run prints `support.NO_OVERHANG_NOTE`. A generator that
+returns no supports while samples exist prints `support.NOT_IMPLEMENTED_WARNING`
+to the console and the log regardless of `-v`; `tools/e2e.py` reads either line
+to report the two support checks of specification.md §6.2 as `SKIP`.
 
 ### 14.3 The support algorithm
 
-[TODO: needs decision] — to be specified and implemented in
-`support/generate.py`. What it owes the rest of the pipeline is
-specification.md §4.6 and §5, and is listed in that module's docstring:
-support solids only, each closed and valid; material inside the body; full
-coverage of the required samples; self-supporting surfaces; members no thinner
-than `t_s`; no floating body under `t³` other than wall-attached support.
-Merging with the lattice and re-unification are the stage's job, not the
-generator's (§14.2).
+The generator turns every inner overhang into a set of **cells**: patches of
+ceiling, each carried down to the nearest anchor — a wall, floor or other
+surface of the input, or a lattice strut — by a solid whose side faces lean no
+further than `θ` from vertical.
 
-### 14.4 Writing the generator — directions for the next session
+```mermaid
+flowchart TD
+    A[overhang samples, section 14.1] --> B[S1 region mesh: overhang faces refined to edge h on the true surface; 60 deg isocline found exactly]
+    B --> B1{every region boundary a closed loop?}
+    B1 -->|no| F1[exit 4, naming the region]
+    B1 -->|yes| C[S2 one job per region, largest first, on the shared pool]
+    C --> D[S3a first-contact ray per region vertex, exact cone query against body and lattice faces]
+    D --> E[exempt: ray length at most D]
+    E --> G[S3b partition: same anchor and continuous targets; components are cells]
+    G --> H[fold cells under t_s squared into a neighbour; split cells holding another cell]
+    H --> I[S3c parting curves: zero of the depth difference, one shared curve per parting]
+    I --> J[S4 per cell: ruled loft from the perimeter rays, extended into shell and anchor]
+    J --> K[Common with body, Cut with local lattice junctions, keep the piece holding the seed]
+    K --> L{cell gates}
+    L -->|fail| M[deeper overshoot, then split the cell, then exit 4 naming it]
+    M --> J
+    L -->|pass| N[S5 pockets: split the free space in the support envelope]
+    N -->|sealed and new| O[the sealed piece is the fill, shipped as a support body]
+    O --> P
+    N -->|none| P[S6 neighbouring cells checked for overlap; an overlapping pair is fused]
+    P --> Q[SupportResult: one solid per cell and per pocket fill]
+```
 
-Everything around the generator is in place and tested; the work is the body
-of one function. This is the order to go in.
+**S1 — Regions** (`support/regions.py`). The triangles of every face with a
+face sample are refined until every edge is at most `h`, new vertices placed on
+the true surface through the face's own UV evaluator, welded across faces, each
+vertex carrying its exact normal. A vertex is *required* when
+`n·b > sin φ_s + REQUIRED_SLACK`. A region's boundary toward unsupported
+surface is the **exact 60° isocline**, not the mesh staircase: it is
+root-found on every mesh edge that crosses the bar, refined by bisection on the
+true surface to `1e-4` mm, and fitted as one B-spline on the ceiling. Keel and
+tip samples add a band of half-width `max(t_s/2, h)` on their adjacent faces,
+so a line or point feature has a ceiling patch of its own; keels and tips are
+never exempt. An **enclosed overhang area** is a connected component of
+required triangles, and every one of its boundaries must be a closed loop
+(gate G1, exit 4 naming the region otherwise).
 
-**1. Settle the algorithm in the documents first.** §14.3 and
-specification.md §4.6 carry `[TODO: needs decision]`. Write the algorithm into
-§14.3 — normative, as the rest of this document is — and have the user turn
-the tag into `[TODO: implement]` before writing code (specification.md's own
-rule). specification.md §4.6's requirements (detection, full coverage,
-anchoring, self-supporting, thickness, volume, integral, shape) are the
-acceptance criteria; ask before changing any of them.
+**S2 — Jobs.** One job per region, largest area first, dispatched through the
+run's shared `WorkerPool` (§12). Jobs carry file paths and plain arrays only —
+the body `.brep`, the mesh `.npz`, the region arrays, the lattice obstacle
+`.npz` — and end each result with `runlog.peak_rss_bytes()`.
 
-**2. Write it in `support/generate.py`, and only there.** Replace the body of
-`generate(inp) -> SupportResult`. New modules go beside it in
-`src/latticegen2/support/` — imported from `generate.py`, never from
-`pipeline.py`, so a run without `--support` still loads none of them
-(`test_support_code_is_not_loaded_without_the_flag` checks this). Do not
-touch the pipeline, the stage list, the CLI or the window: the contract is the
-whole interface.
+**S3a — First-contact rays** (`support/rays.py`, pure NumPy). For every region
+vertex `x`, the apex `x' = x + 1e-3 mm · (−n)` and the closed cone of half-angle
+**exactly** `θ` about `−b`:
 
-**3. Read from `SupportInput`** (`support/contract.py`, documented field by
-field):
+> the ray's target `y` is the obstacle point inside the cone with the smallest
+> drop `(x' − y) · b` — the first thing the cone touches as it grows downward
+> from its tip. Ties go to the smallest distance `|y − x'|`, then to the point
+> straight below.
 
-| You need | Use |
+Obstacles are the input's faces, tessellated within the job's reach box to a
+deflection of at most `h/10`, and the lattice's faces, which are planar and
+tessellate exactly, tessellated **once on the master** from the lattice solids
+themselves — never rebuilt from the analytic struts, which would include
+material the floating-body rule dropped. The query is exact, not a fan of
+rays: drop is linear, so over (triangle ∩ cone) its minimum lies at a triangle
+vertex inside the cone, at a triangle edge's crossing of the cone surface (a
+quadratic), or at the plane's own first-contact generator — the one whose
+horizontal part runs against the horizontal part of the plane's normal —
+when that falls inside the triangle. Candidates are pruned with
+`classify.SpatialHash` inside a growing drop bound. Each vertex records `y`,
+its drop and length, and its **anchor shape**: the input body, or lattice
+solid `k`.
+
+A vertex is **exempt** — it needs no support — when its ray is at most `D`
+long: the surface it sits on, or another, is reached within the unsupported
+reach (where the ceiling itself runs down inside the cone the ray is of length
+zero). For the 0.5 mm check of specification.md §6.2, a vertex within `D` of
+lattice material counts as supported too; cells are not cut back around strut
+ends, which they meet face to face.
+
+**S3b — Cells** (`support/cells.py`). Over the non-exempt required vertices, a
+mesh edge `(i, j)` joins its two ends iff they have the same anchor shape and
+
+```
+|y_i − y_j|  ≤  κ · |x_i − x_j| + 2h,          κ = 4
+```
+
+The connected components are the cells, and the partings fall where the
+targets jump. A cell smaller than `t_s²` is folded into the neighbour it
+shares the longest border with: its rays are re-cast against that neighbour's
+anchor alone, and the fold is refused if a re-cast ray is obstructed. A cell
+must be simply connected, with one exception — an inner loop bordering the
+body's **exterior** (a tube through the roof), which S4's trim removes. An inner
+loop bordering another cell or an exempt patch splits the cell along a line
+through the hole, which makes a new parting.
+
+**S3c — Parting curves.** A parting is computed, not read off the mesh. Read
+off the mesh it is a staircase at pitch `h`, and each cell smoothing its own
+copy of it in S4 would leave the two copies up to `h/2` apart — slivers of
+overlap in places, hairline cracks in others. Instead, on every mesh edge whose
+two ends lie in different cells `A` and `B`, both cells' anchors are queried
+from both ends, and the parting point is the zero of `drop_A − drop_B`:
+interpolated along the edge, refined on the true surface by bisection to
+`1e-4` mm. Since first contact means "whichever anchor the cone reaches first",
+that zero is the parting by definition. The points chain into curves meeting at
+triple points, and each chain is fitted with **one** B-spline on the ceiling,
+which both cells use as their common boundary — each with its own rays from
+it. Equal drop to different targets means the two rays diverge, so neighbouring
+cells meet in a V opening downward: one shared edge on the ceiling and no
+overlap. Each parting's smallest divergence angle is reported; where it would
+leave a crack narrower than `t_s` within `t_s` of the ceiling, the two cells are
+fused across it.
+
+**S4 — Cell solids** (`support/build.py`).
+
+1. The perimeter is the cell's boundary: the shared S3c curve along a parting,
+   the fitted 60° isocline along the region's edge, the mesh boundary against
+   the body's exterior. Its rays are `(x_i, d_i)`, `d_i = y_i − x_i`.
+2. A periodic degree-3 B-spline top curve `T(s)` is fitted through
+   `x_i − λ·d̂_i` (λ = 0.2 mm, up the ray into the shell), and the ray field
+   `D(s)` is fitted **in the same basis**, each control vector clamped into the
+   closed `θ`-cone and lengthened by the overshoot
+   `δ = max(t_s/2, 2d, 0.2 mm)`. The bottom curve is `T + D`.
+3. The two curves are lofted as a ruled solid. Every ruling `D(s)` is a convex
+   combination of control vectors inside a convex cone, so **every side face is
+   self-supporting by construction** — at `θ` or steeper — and a cell has one
+   or a few side faces however long its perimeter is.
+4. The loft is intersected with the body and cut by the lattice junctions near
+   it (`J` instanced at the kept nodes, §3.2). Faces against walls and roofs
+   therefore lie on the input's own surfaces, and faces against struts on the
+   lattice's own planes: shared faces. The parts of the loft above the roof and
+   below a strut fall outside the body or inside the lattice and are gone; of
+   what remains, the piece holding the cell's seed point is kept and anything
+   else is construction debris.
+5. **Cell gates**, each measured with something other than the boolean that
+   made the cell (§7.2):
+   * closed and `BRepCheck_Analyzer`-valid;
+   * `classify.OutsideProbe` worst at most `2d`;
+   * every face lies on the input's surface, on a lattice strut plane, or is a
+     side face — a leftover cap fails;
+   * side faces within `θ + 0.05°` at exact sampled normals;
+   * every patch vertex, moved a hair into the body, is inside the solid;
+   * no member thinner than `t_s`, sampled along the side faces' normals,
+     except within `t_s` of a ceiling or anchor face, where the wedge is
+     attached rather than free-standing.
+
+   A cell failing a gate is rebuilt with twice the overshoot, up to a cap; then
+   split in two along its principal axis, recursively to a depth limit; and
+   then the run fails (exit 4) naming the cell's position. Coverage is never
+   given up to make a run succeed (§11).
+
+**S5 — Pockets** (`support/voids.py`). Powder must not be trapped. A pocket is a
+region of free space — inside the body, outside the lattice and the supports —
+that the supports have sealed off from the free space it used to belong to.
+Every new pocket is bounded partly by support, so it lies in the **support
+envelope**, the union of a job's cell boxes inflated by `t_s`.
+`BRepAlgoAPI_Splitter` splits `envelope ∩ Ω` by the cells and the local lattice
+junctions. A piece is **free** when a witness point inside it is outside every
+cell and the lattice and inside the body — asked of the tessellations, not of
+the kernel; **sealed** when none of its faces lies on the envelope's own faces;
+and **new** when the same witness, in the split without the cells, lands in a
+piece that does touch the envelope. A pocket the lattice alone had already
+sealed against a wall is not filled. The fill is the sealed piece itself: an
+exact solid each of whose faces already lies on the body, the lattice or a
+support, shipped as a support body of its own; having no free face, it is
+self-supporting. A second split with the fills in place must find no new
+sealed piece (gate G5). A job whose envelope holds too many tools is tiled;
+since a pocket touches a support, a tile boundary need only avoid cutting
+through a cell's envelope.
+
+**S6 — Overlaps.** Cells whose boxes touch are intersected pairwise; a pair
+overlapping by more than `SUPPORT_OVERLAP_TOL` is fused into one body, with the
+fuse checked by volume as §7.1's is, and counted. First-contact rays from
+neighbouring vertices can cross, if rarely.
+
+**What a support owes the rest of the pipeline**, and what
+`tools/verify_geometry.py` asks of the written file (specification.md §6.2):
+
+| Property | Bar |
 |---|---|
-| where to support | `inp.samples.points`, `.inward`, `.kind` (`overhang.FACE/EDGE/VERTEX`); `.required` marks what must be proven covered, the rest is the 5° margin to run past |
-| which way is up | `inp.lp.b`, in the part's own coordinates; the body is never rotated (§14.0) |
-| the limits | `inp.overhang_deg` (from `b`), `inp.thickness_mm` |
-| what to anchor on | `inp.lattice` (solids), or analytically `lattice.nodes(inp.lp, inp.kept_nodes)` and the strut directions `inp.lp.e` — cheaper than reading struts back off the B-rep |
-| inside / outside without a boolean | `classify.PointInside(inp.mesh)` for points; `classify.OutsideProbe(inp.mesh, 2 * inp.mesh.deviation).worst_outside(points)` for "does this reach outside the body", the same check §7.2 uses |
-| the body itself | `inp.body` for exact questions (`BRepClass3d_SolidClassifier`, booleans) |
-| B-rep helpers | `occ.polygon_face`, `occ.prism`, `occ.faces_shell`, `occ.make_solid`, `occ.solids`, `occ.volume`, `occ.is_valid`, `occ.bounding_box` |
+| inside the body | `material_outside` ~ 0 |
+| self-supporting | no support face overhangs more than `θ` (+0.05°) at exact normals |
+| coverage | every point overhanging more than `φ_s` is within `D` of support or lattice, or exempt |
+| disjoint | no support overlaps the lattice or another support |
+| shared faces | a support face on a strut lies on that strut's plane within 1e-6 mm |
+| thickness | no free-standing member thinner than `t_s` |
 
-**4. Return support solids only.** `SupportResult(supports=[...], stats=...,
-notes=..., lines=...)`. Do not fuse them with the lattice and do not unify
-them: the stage does both (§14.2) and checks by volume that no lattice was
-lost. A support that overlaps the lattice is fine and expected — that is how
-it anchors. Stats keys start with `support_`; `notes` print without `-v`, so
-use them for anything a user must see (material left out, a fallback taken).
+### 14.4 Where the implementation stands
 
-**5. Trust no boolean against the body on its own word.** A trim of a support
-against `inp.body` can return the wrong answer while reporting success (§7.2).
-Check every result with something that is not the same kernel call —
-`OutsideProbe` for material outside, a volume or witness-point check for
-material lost — before returning it. A generator that cannot place a support
-inside the body fails the run (`errors.ProcessingError`, exit 4) naming the
-location, rather than returning less coverage (§11).
-
-**6. Parallelise where it pays more than 5 %** (specification.md §4.6), through
-`inp.pool` and never a pool of your own: `inp.pool.run(worker_fn, jobs,
-on_result=...)` when `inp.pool.active`, a plain loop otherwise. Under `spawn`,
-`worker_fn` must be a module-level function; ship file paths and plain numbers
-in `jobs` (`inp.body_path`, `inp.mesh_path`, written with
-`parallel.write_brep` / read with `parallel.read_brep` and
-`classify.load_mesh`), never shapes; and end each result tuple with
-`runlog.peak_rss_bytes()`, which `run` folds into the run's peak memory.
-Report progress with `inp.report(label, done, total)` (`total=None` for work
-with no countable fraction).
-
-**7. Test in three layers**, as `test/test_support.py` does today:
-
-* pure functions (placement, geometry) against closed-form answers, no kernel;
-* the generator called directly on a `SupportInput` built from a small box —
-  the stand-in test `test_the_generator_gets_the_completed_lattice_and_its_result_is_what_ships`
-  shows how to get a real one from `run_pipeline` in process with
-  `--cores 1`;
-* whole runs: replace `test_a_supported_box_runs_through_the_stub_and_writes_the_lattice`,
-  which asserts the stub's warning, with one asserting that coverage holds
-  (`tools/verify_geometry.overhang_coverage`) and the limit is kept
-  (`verify_geometry.self_supporting`).
-
-Then the gate: `python -m pytest test -q` and `python tools/e2e.py`. Once
-supports are generated the stub's `WARNING` is gone, so the two support checks
-in `support-tilted` and `support-cylinder` stop reporting `SKIP` and must
-pass, and the cylinder's lattice golden sample must still be contained in the
-output. Finish with `python tools/e2e.py --only rehearsal-support` (tens of
-minutes) for production scale.
-
-**8. Tidy up what the stub leaves behind.** Measure `rehearsal-support` and
-put the `support` stage's seconds into `SECONDS_SUPPORT` in
-`gui/weights.py` (it is worth the floor until then); record the run in
-docs/profiling-reports.md and specification.md §6.1; and remove the
-roadmap item in specification.md §10. `NOT_IMPLEMENTED_WARNING` can stay —
-it still guards a generator that returns nothing while overhangs exist.
+The algorithm above is implemented in phases, tracked in specification.md §10.
+New modules live beside the stage in `src/latticegen2/support/` and are
+imported from `generate.py`, never from `pipeline.py`, so a run without
+`--support` still loads none of them
+(`test_support_code_is_not_loaded_without_the_flag`). The generator is driven
+without a lattice by `tools/support_dev.py`, a development harness for parts
+whose only anchors are their own surfaces (`test/Hole-block-*.STEP`); the
+product itself always generates the lattice.

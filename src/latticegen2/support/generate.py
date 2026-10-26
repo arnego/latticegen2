@@ -60,7 +60,8 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     The generator proper, shared by :func:`generate` and by
     ``tools/support_dev.py``, which calls it with no lattice.
     """
-    from . import build, cells, obstacles, rays, regions
+    from .. import occ
+    from . import build, cells, obstacles, rays, regions, voids
     from .assemble import _LocalLattice
 
     stats = {}
@@ -76,8 +77,10 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     inside_body = gates.inside_body
     delta = overshoot_for(thickness, mesh.deviation)
     solids = []
+    tags = []
     n_cells = 0
     retried = 0
+    region_lines = []
     for k, reg in enumerate(regs):
         apex = rmesh.verts[reg.verts] - rays.APEX_NUDGE * rmesh.normals[reg.verts]
         got = rays.first_contact(apex, lp.b, obs, report=report)
@@ -117,14 +120,27 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                     f"(docs/algorithm.md §14.3 S4)."
                 )
             solids.append(built.solid)
-        lines.append(f"support region {k}: {reg.area:.1f} mm^2, {len(part.cells)} "
-                     f"cell(s), {part.stats}")
+            tags.append(k)
+        region_lines.append((k, reg.area, len(part.cells), part.stats))
     stats["support_cells"] = n_cells
     stats["support_span_fit_mm"] = round(build.worst_span_fit(reset=True), 4)
     stats["support_cells_retried"] = retried
-    solids, resolved = _resolve_overlaps(solids)
+    # S6 before S5: pockets are found by cutting the cells out of the free
+    # space, which only removes their volume exactly once they are disjoint.
+    solids, tags, resolved = _resolve_overlaps(solids, tags)
     stats["support_overlaps_resolved"] = resolved
-    return solids, stats, lines
+    fills = []
+    for k, area, n, pstats in region_lines:
+        if report is not None:
+            report("looking for sealed pockets", k, len(regs))
+        mine = [s for s, t in zip(solids, tags) if t == k]
+        pockets = voids.find_pockets(body, mesh, mine, local.near, thickness, lp.b)
+        fills += pockets.fills
+        lines.append(f"support region {k}: {area:.1f} mm^2, {n} cell(s), "
+                     f"{len(pockets.fills)} pocket(s) filled, {pstats}")
+    stats["support_pockets"] = len(fills)
+    stats["support_pocket_volume_mm3"] = round(sum(occ.volume(f) for f in fills), 4)
+    return solids + fills, stats, lines
 
 
 OVERLAP_VOLUME_REL_TOL = 1e-5
@@ -132,8 +148,11 @@ OVERLAP_VOLUME_REL_TOL = 1e-5
 overlap measured before it."""
 
 
-def _resolve_overlaps(solids: list):
-    """S6: ``(solids, resolved)``, no two bodies sharing volume.
+def _resolve_overlaps(solids: list, tags: list):
+    """S6: ``(solids, tags, resolved)``, no two bodies sharing volume.
+
+    ``tags`` -- a region per body -- follow the bodies: a piece a cut splits off
+    keeps its body's, a fused pair the first one's.
 
     Neighbouring cells meet on a shared run and diverge below it, so they
     normally share faces only. Two things leave them sharing some volume:
@@ -160,6 +179,7 @@ def _resolve_overlaps(solids: list):
     from .build import _boolean
 
     solids = list(solids)
+    tags = list(tags)
     boxes = _boxes(solids)
     resolved = 0
     i = 0
@@ -186,6 +206,7 @@ def _resolve_overlaps(solids: list):
                 boxes[j] = _boxes([pieces[0]])[0]
                 for extra in pieces[1:]:
                     solids.append(extra)
+                    tags.append(tags[j])
                     boxes.append(_boxes([extra])[0])
                 resolved += 1
                 j += 1
@@ -209,7 +230,8 @@ def _resolve_overlaps(solids: list):
             # The fused body is new: ask every later body about it again.
             j = i + 1
         i += 1
-    return [s for s in solids if s is not None], resolved
+    keep = [k for k, s in enumerate(solids) if s is not None]
+    return [solids[k] for k in keep], [tags[k] for k in keep], resolved
 
 
 def generate(inp: SupportInput) -> SupportResult:

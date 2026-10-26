@@ -2521,7 +2521,7 @@ flowchart TD
     B1 -->|yes| C[S2 one job per region, largest first, on the shared pool]
     C --> D[S3a first-contact ray per region vertex, exact cone query against body and lattice faces]
     D --> E[exempt: ray length at most D]
-    E --> G[S3b partition: same anchor and continuous targets; components are cells]
+    E --> G[S3b partition: same anchor, continuous targets, same fold class; components are cells]
     G --> H[fold cells under t_s squared into a neighbour; split cells holding another cell]
     H --> I[S3c parting curves: zero of the depth difference, one shared curve per parting]
     I --> J[S4 per cell: ruled loft from the perimeter rays, extended into shell and anchor]
@@ -2529,11 +2529,11 @@ flowchart TD
     K --> L{cell gates}
     L -->|fail| M[deeper overshoot, then split the cell, then exit 4 naming it]
     M --> J
-    L -->|pass| N[S5 pockets: split the free space in the support envelope]
-    N -->|sealed and new| O[the sealed piece is the fill, shipped as a support body]
-    O --> P
-    N -->|none| P[S6 neighbouring cells checked for overlap; the later of a pair is cut by the earlier]
-    P --> Q[SupportResult: one solid per cell and per pocket fill]
+    L -->|pass| P[S6 neighbouring cells checked for overlap; the later of a pair is cut by the earlier]
+    P --> N[S5 pockets: cut the cells out of the free space in the support envelope]
+    N -->|cut off| O[the cut-off piece is the fill, shipped as a support body]
+    O --> Q
+    N -->|none| Q[SupportResult: one solid per cell and per pocket fill]
 ```
 
 **S1 — Regions** (`support/regions.py`). The triangles of every face with a
@@ -2592,8 +2592,26 @@ mesh edge `(i, j)` joins its two ends iff they have the same anchor shape and
 |y_i − y_j|  ≤  κ · |x_i − x_j| + 2h,          κ = 4
 ```
 
-The connected components are the cells, and the partings fall where the
-targets jump. A cell smaller than `t_s²` is folded into the neighbour it
+and the same **fold class**. The connected components are the cells, and the
+partings fall where the targets jump.
+
+**The fold class** keeps rays that converge apart from rays that follow their
+sources. A vertex is *converging* when its target lies within `h/2` of a
+convex edge of its anchor — an edge of the input's B-rep sharper than 20°,
+convex seen from outside the body: a ledge's rim. From everywhere above a
+cup's mouth, the nearest point of the ledge round it at the first drop that
+reaches it is the rim, so those rays all land on it. What the support needs
+there is the cone of those rays from the middle of the ceiling down to the
+rim, which no loft from a cell's perimeter is (S4); mixed with the ledge's
+straight-down rays in one cell, the cell's closure crossed the cup at 82°.
+The boundary between the classes is where a target is exactly `h/2` from the
+edge, found by bisection like a parting, on the true surface to `1e-4` mm;
+both cells cast against the same anchor, so it carries one ray. Converging
+cells are not split where a closure beyond their anchor would enter the body
+(below): they close upward. Lattice anchors' edges — a strut's top ridge —
+are not classed yet (Phase 6).
+
+A cell smaller than `t_s²` is folded into the neighbour it
 shares the longest border with: its rays are re-cast against that neighbour's
 anchor alone, and the fold is refused if a re-cast ray is obstructed. A cell
 must be simply connected, with one exception — an inner loop bordering the
@@ -2645,7 +2663,20 @@ fused across it.
    an apex over the ceiling, and below by a fan to the first apex that keeps
    the fan out of the body — the bottom curve's centre moved `δ` along the mean
    ray, the centre itself, the targets' centre moved `δ` along the mean ray,
-   the centre moved `δ` straight down — or, when none does, by a plane.
+   the centre moved `δ` straight down, then points below each bottom pole at
+   `δ`, `2δ` and `4δ`, nearest the centre first — or, when none does, by a
+   plane; or, for a converging cell, by a fan **up** to a point just over the
+   ceiling, which is the cone of its rays, when every ruling of that fan is
+   inside the `θ`-cone.
+
+   How far past its target a ray is carried is a ladder too: along itself,
+   which is what enters a wall met at an angle; along the cell's mean ray;
+   straight down. Along itself is the default unless two neighbouring control
+   rulings meet — rays converging on one target, carried on along themselves,
+   fan out again below it and pinch the band into a bowtie that no boolean
+   trims. Asking instead whether the bottom row merely runs against the top one
+   fired on ordinary curved runs and sent nine of `Hole-block-basic`'s twenty
+   cells down the wrong rung.
 4. The loft is intersected with the body and cut by the lattice junctions near
    it (`J` instanced at the kept nodes, §3.2), with fuzzy values 0, 1e-5,
    1e-4, 1e-3 mm in turn. Faces against walls and roofs therefore lie on the
@@ -2684,22 +2715,44 @@ fused across it.
 
 **S5 — Pockets** (`support/voids.py`). Powder must not be trapped. A pocket is a
 region of free space — inside the body, outside the lattice and the supports —
-that the supports have sealed off from the free space it used to belong to.
-Every new pocket is bounded partly by support, so it lies in the **support
-envelope**, the union of a job's cell boxes inflated by `t_s`.
-`BRepAlgoAPI_Splitter` splits `envelope ∩ Ω` by the cells and the local lattice
-junctions. A piece is **free** when a witness point inside it is outside every
-cell and the lattice and inside the body — asked of the tessellations, not of
-the kernel; **sealed** when none of its faces lies on the envelope's own faces;
-and **new** when the same witness, in the split without the cells, lands in a
-piece that does touch the envelope. A pocket the lattice alone had already
-sealed against a wall is not filled. The fill is the sealed piece itself: an
-exact solid each of whose faces already lies on the body, the lattice or a
-support, shipped as a support body of its own; having no free face, it is
-self-supporting. A second split with the fills in place must find no new
-sealed piece (gate G5). A job whose envelope holds too many tools is tiled;
-since a pocket touches a support, a tile boundary need only avoid cutting
-through a cell's envelope.
+that the supports have cut off from the free space it used to belong to. It is
+bounded partly by support, and lies below the support that seals it, so it
+lies in the **support envelope**: per region, the cells' box inflated by `t_s`
+and swept down along `−b` to the body's lowest point. Inflated alone, the box
+reaches `t_s` below the cells, and a cup 5 mm deep under a lid would touch its
+floor and never read as sealed.
+
+S5 runs **after S6**, on disjoint cells. The free space is found by cutting,
+not splitting: `envelope ∩ Ω` minus the local lattice junctions is the free
+space before the supports, and minus the cells as well the free space after
+them, each a list of solids, each cut checked to remove exactly the volume it
+was given (fuzzy 0 up to 1e-3 mm). A split by the cells, tried first, lost
+volume where neighbouring cells share faces; on the test chamber the cut
+removes 178.67 of the cells' 205.75 mm³ at every fuzzy value to 1e-4 and all
+of it at 1e-3. Every free piece after the supports is given a **witness**, a
+point well inside it by its own tessellation, and is placed by it in the piece
+of free space it came from — asked of tessellations, not of the kernel; a
+witness outside the body, or in no earlier piece, fails the run (exit 4). A
+piece is **cut off**:
+
+* where its earlier piece reaches the envelope's own faces, if it no longer
+  does;
+* where the envelope holds all of its earlier piece — a small body, whose free
+  space the body alone already encloses — if it is not the largest piece.
+
+So a pocket the lattice alone had already sealed against a wall is not filled.
+Pieces under 1e-3 mm³ are boolean specks along shared faces, not pockets. The
+fill is the cut-off piece itself: an exact solid each of whose faces already
+lies on the body, the lattice or a support, shipped as a support body of its
+own; having no free face, it is self-supporting. With the fills in place
+nothing is cut off any more (gate G5).
+
+Besides cups, this fills the thin ring a wall's cells close off in the corner
+between the roof and the wall, inside the exempt band, where the cells along
+that wall meet on cuts rather than V-shaped partings: 3.9 mm³ round the test
+chamber. A job whose envelope holds too many tools is tiled; since a pocket
+touches a support, a tile boundary need only avoid cutting through a cell's
+envelope.
 
 **S6 — Overlaps.** Cells whose boxes touch are intersected pairwise. Of a pair
 sharing more than `SUPPORT_OVERLAP_TOL` (1e-6 mm³), the later is **cut by the
@@ -2740,13 +2793,14 @@ without a lattice by `tools/support_dev.py`, a development harness for parts
 whose only anchors are their own surfaces (`test/Hole-block-*.STEP`); the
 product itself always generates the lattice.
 
-**Built so far (Phases 2–4, no lattice):** S1, S3a–c, S4 and S6. Of S4's
+**Built so far (Phases 2–5, no lattice):** S1, S3a–c, S4, S5 and S6. Of S4's
 gates, validity, `OutsideProbe`, self-support of the free faces and coverage
 run (coverage with 0.25 mm slack for the span fit, `build.COVER_SLACK`); a
 failing cell is rebuilt at twice the overshoot twice, then fails the run.
 **Still to come:** the face-classification and thickness gates and the split
-rung of the ladder (Phase 4 follow-up), S5 pockets (Phase 5), S2's pool
-dispatch (Phase 7), and lattice as an anchor and cutter (Phase 6). Until
+rung of the ladder (Phase 4 follow-up), S2's pool dispatch (Phase 7), and
+lattice as an anchor and cutter, with the fold class on strut ridges
+(Phase 6). Until
 Phase 6, `generate` returns no supports whenever it is given a lattice — which
 the product always does — so a supported run still prints
 `NOT_IMPLEMENTED_WARNING` and e2e still reports the support checks as `SKIP`.

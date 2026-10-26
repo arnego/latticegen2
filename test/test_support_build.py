@@ -43,11 +43,13 @@ def test_a_pillar_in_a_chamber_gets_the_closed_form_crowns():
     k = 2.0 * np.pi / np.sqrt(2.0)
     pillar = k * (R ** 3 / 6 - R * r ** 2 / 2 + r ** 3 / 3)
     wall = k * (W ** 3 / 3 - R * W ** 2 / 2 + R ** 3 / 6)
-    vols = sorted(occ.volume(s) for s in solids)
     # The wall's annulus is split around the pillar's cell, and again wherever
     # a piece's loft would close through the body: the count is not fixed,
-    # the volumes are.
-    assert stats["support_cells"] == len(solids) >= 3
+    # the volumes are. Pocket fills come last; the one here is the ring the
+    # wall cells close off in the roof's corner, inside the exempt band.
+    assert stats["support_cells"] + stats["support_pockets"] == len(solids)
+    assert stats["support_cells"] >= 3
+    solids = solids[:stats["support_cells"]]
     # Measured +5.4 % on the crown and +1.8 % on the wall: the rays land on the
     # obstacle mesh, a polygon inscribed in each cylinder, so they reach a
     # little further than to the true surface, and they are smoothed. Both err

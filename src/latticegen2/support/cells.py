@@ -31,10 +31,22 @@ PARTING_TOL = 1e-4
 SPLIT_ROUNDS_MAX = 16
 """Rounds of splitting cells that enclose another cell before giving up."""
 
+FOLD_EDGE_DEG = 20.0
+"""Degrees. Two anchor facets meeting at a sharper angle than this make a
+feature edge -- a ledge's rim -- that rays can converge on."""
+
+FOLD_TOL = 0.5 * STEP
+"""mm. A ray landing this close to a convex edge of its anchor is a converging
+one; the boundary between converging and following rays is where a target is
+exactly this far from the edge."""
+
+FOLD_SAMPLE = 0.25 * FOLD_TOL
+"""mm. Spacing of the points feature edges are sampled at."""
+
 EXEMPT = -1
 OUTSIDE = -2
 
-VERTEX, PARTING, EXEMPT_EDGE, TRIPLE, CUT, BORDER = 0, 1, 2, 3, 4, 5
+VERTEX, PARTING, EXEMPT_EDGE, TRIPLE, CUT, BORDER, FOLD = 0, 1, 2, 3, 4, 5, 6
 
 
 @dataclass
@@ -195,6 +207,56 @@ def _fan_enters_body(P, T, overshoot, inside_body) -> bool:
     return bool(inside_body(probe).any())
 
 
+class _Features:
+    """Points along the convex edges of the body's anchors, and distance to them.
+
+    Rays converge on such an edge: from everywhere above a cup's mouth, the
+    nearest point of the ledge round it at the first drop that reaches it is the
+    rim. Under the mouth what the support needs is the cone of those rays, which
+    no loft from a cell's perimeter is; so a cell never mixes rays landing on a
+    rim with rays that follow their sources (docs/algorithm.md §14.3 S3b), and
+    the first kind are closed by that cone (§14.3 S4).
+
+    The edges are read off the B-rep (``obstacles.convex_edge_points``), convex
+    seen from outside the body. Lattice anchors are not looked at yet.
+    """
+
+    def __init__(self, points: np.ndarray):
+        pts = np.asarray(points, dtype=float).reshape(-1, 3)
+        self.points = pts
+        self.cell = FOLD_TOL * 2.0
+        self.grid = defaultdict(list)
+        for k, g in enumerate(np.floor(pts / self.cell).astype(np.int64)):
+            self.grid[tuple(g)].append(k)
+
+    def distance(self, X: np.ndarray, cap: float = 4.0 * FOLD_TOL) -> np.ndarray:
+        """Distance from each point to the nearest feature sample, capped."""
+        out = np.full(len(X), cap)
+        if not len(self.points):
+            return out
+        reach = int(np.ceil(cap / self.cell))
+        for i, x in enumerate(np.asarray(X)):
+            if not np.isfinite(x).all():
+                continue
+            g = np.floor(x / self.cell).astype(np.int64)
+            idx = []
+            for dx in range(-reach, reach + 1):
+                for dy in range(-reach, reach + 1):
+                    for dz in range(-reach, reach + 1):
+                        idx += self.grid.get((g[0] + dx, g[1] + dy, g[2] + dz), [])
+            if idx:
+                out[i] = min(cap, float(np.linalg.norm(self.points[idx] - x, axis=1).min()))
+        return out
+
+
+def _features(obstacles):
+    got = getattr(obstacles, "_features", None)
+    if got is None:
+        got = obstacles._features = _Features(getattr(obstacles, "feature_points",
+                                                      np.empty((0, 3))))
+    return got
+
+
 def partition(rmesh, region, rays, obstacles, b, thickness: float,
               step: float = STEP, report=None, inside_body=None,
               overshoot: float = 0.0) -> Partition:
@@ -224,6 +286,14 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
     dx = np.linalg.norm(rmesh.verts[i] - rmesh.verts[j], axis=1)
     dy = np.linalg.norm(tgt[i] - tgt[j], axis=1)
     join = live & (key[i] == key[j]) & (dy <= KAPPA * dx + 2.0 * step)
+    # Rays landing on a convex edge of their anchor and rays following their
+    # sources are never one cell (_Features).
+    conv = np.zeros(V, dtype=bool)
+    feats = None
+    if inside_body is not None:
+        feats = _features(obstacles)
+        conv[rv] = feats.distance(tgt[rv]) < FOLD_TOL
+        join &= conv[i] == conv[j]
 
     labels = np.full(V, OUTSIDE, dtype=np.int64)
     labels[rv] = EXEMPT
@@ -311,6 +381,10 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
             bad = []
             for l in np.unique(labels[labels >= 0]):
                 mine = np.nonzero(labels == l)[0]
+                # Converging cells close upward, by the cone of their rays (§14.3
+                # S4), so a fan beyond their anchor says nothing about them.
+                if conv[mine].mean() > 0.5:
+                    continue
                 if len(mine) >= 8 and _fan_enters_body(
                         rmesh.verts[mine], tgt[mine], overshoot, inside_body):
                     bad.append(int(l))
@@ -322,10 +396,14 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
                 _record_split(split_planes, l, new, plane)
                 splits += 1
 
+    cell_conv = {}
+    for l in np.unique(labels[labels >= 0]):
+        cell_conv[int(l)] = bool(conv[labels == l].mean() > 0.5)
     cells = _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt,
-                        caster, split_planes, b, region.tris)
+                        caster, split_planes, b, region.tris, feats, cell_conv)
     stats = {"cells": len(cells), "cells_folded": folded, "cells_split": splits,
-             "exempt_vertices": int(exempt[rv].sum())}
+             "exempt_vertices": int(exempt[rv].sum()),
+             "converging_cells": int(sum(cell_conv.values()))}
     return Partition(labels, cells, stats)
 
 
@@ -486,19 +564,22 @@ def _nested_cells(rmesh, tris, labels) -> list:
 
 
 def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster,
-                split_planes, b, tri_global):
+                split_planes, b, tri_global, feats=None, cell_conv=None):
     """Exact crossings, triple points and rays; then each cell's loops."""
     etri = _edge_triangles(tris)
     # Crossing edges, grouped by kind.
     xs = {}
-    parting_edges, exempt_edges, cut_edges = [], [], []
+    parting_edges, exempt_edges, cut_edges, fold_edges = [], [], [], []
     for (p, q), (t, kp, kq) in etri.items():
         lp, lq = int(labels[p]), int(labels[q])
         if lp == lq or (lp < 0 and lq < 0):
             continue
         if lp >= 0 and lq >= 0:
             pair = (min(lp, lq), max(lp, lq))
-            if pair in split_planes or cell_key[lp] == cell_key[lq]:
+            if (cell_conv is not None and pair not in split_planes
+                    and cell_key[lp] == cell_key[lq] and cell_conv[lp] != cell_conv[lq]):
+                fold_edges.append((p, q, t, kp, kq))
+            elif pair in split_planes or cell_key[lp] == cell_key[lq]:
                 cut_edges.append((p, q, t, kp, kq))
             else:
                 parting_edges.append((p, q, t, kp, kq))
@@ -594,6 +675,29 @@ def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster
             p, q = x[0], x[1]
             lp, lq = int(labels[p]), int(labels[q])
             xs[(min(p, q), max(p, q))] = (pts[k], nrm[k], {lp: t_[k], lq: t_[k]}, CUT)
+
+    # Folds: where a target is FOLD_TOL from a convex edge, by bisection.
+    if fold_edges:
+        keys = np.array([cell_key[int(labels[x[0]])] for x in fold_edges])
+        conv_p = np.array([cell_conv[int(labels[x[0]])] for x in fold_edges])
+        lo = np.zeros(len(fold_edges))
+        hi = np.ones(len(fold_edges))
+        L = max(float(np.linalg.norm(rmesh.verts[x[0]] - rmesh.verts[x[1]]))
+                for x in fold_edges)
+        for _ in range(int(np.ceil(np.log2(max(L, PARTING_TOL) / PARTING_TOL))) + 1):
+            mid = 0.5 * (lo + hi)
+            pts, nrm = surface(fold_edges, mid)
+            t_, _d, _l = cast_groups(pts, nrm, keys)
+            near = feats.distance(t_) < FOLD_TOL
+            left = near == conv_p
+            lo = np.where(left, mid, lo)
+            hi = np.where(left, hi, mid)
+        pts, nrm = surface(fold_edges, 0.5 * (lo + hi))
+        t_, _d, _l = cast_groups(pts, nrm, keys)
+        for k, x in enumerate(fold_edges):
+            p, q = x[0], x[1]
+            lp, lq = int(labels[p]), int(labels[q])
+            xs[(min(p, q), max(p, q))] = (pts[k], nrm[k], {lp: t_[k], lq: t_[k]}, FOLD)
 
     # Triple points: the mean of the triangle's three crossings, cast per cell.
     centres = {}

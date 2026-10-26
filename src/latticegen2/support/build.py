@@ -415,8 +415,13 @@ def _fit_run(P: np.ndarray, Ds: list, kind: np.ndarray) -> list:
     return [(int(keep[a]), int(keep[b]), fit) for a, b, fit in spans]
 
 
-def _bands(loop, w: np.ndarray, overshoot: float, cache: dict) -> list:
-    """The ruled bands of one loop, one per span, sharing curves through ``cache``."""
+def _bands(loop, w: np.ndarray, overshoot: float, cache: dict, extend=None) -> list:
+    """The ruled bands of one loop, one per span, sharing curves through ``cache``.
+
+    Each control ray is carried ``overshoot`` past its target into the anchor:
+    along itself, or, given ``extend``, along that one direction for the whole
+    loop (see :func:`loft`).
+    """
     out = []
     for idx in _runs(loop):
         P = loop.points[idx]
@@ -438,10 +443,49 @@ def _bands(loop, w: np.ndarray, overshoot: float, cache: dict) -> list:
             ctrl_d = _smooth_in_basis(u, D[sl], fit.knots, fit.degree, len(fit.ctrl),
                                       RAY_FIT_TOL)
             ctrl_d = _clamp_cone(ctrl_d, w)
-            L = np.linalg.norm(ctrl_d, axis=1)
-            e = ctrl_d * (1.0 + overshoot / np.maximum(L, 1e-9))[:, None]
+            if extend is None:
+                L = np.linalg.norm(ctrl_d, axis=1)
+                e = ctrl_d * (1.0 + overshoot / np.maximum(L, 1e-9))[:, None]
+            else:
+                e = ctrl_d + overshoot * extend
             out.append((fit.ctrl, e, fit.degree, fit.knots))
     return out
+
+
+def _mean_direction(loop, w: np.ndarray) -> np.ndarray:
+    """The loop's mean ray direction, inside the rod-angle cone about ``w``."""
+    D = loop.targets - loop.points
+    L = np.linalg.norm(D, axis=1)
+    m = (D[L > 1e-9] / L[L > 1e-9][:, None]).mean(axis=0) if (L > 1e-9).any() else w
+    m = _clamp_cone(m[None], w)[0]
+    n = np.linalg.norm(m)
+    return m / n if n > 1e-9 else w
+
+
+PINCH_TOL = 1e-3
+"""mm. Two neighbouring control rulings closer than this meet."""
+
+
+def _rulings_cross(bands) -> bool:
+    """Do neighbouring control rulings of some band cross below the ceiling?
+
+    Rays converging on one target -- every ray from a radial cut line landing
+    on the same point of a ledge's rim -- carried on along themselves fan out
+    again below it: the band becomes a bowtie pinched at the target, valid
+    as a B-rep and not trimmable. Seen as control rulings: two neighbours meet.
+    Asking only whether the bottom row runs against the top one fires on
+    ordinary curved runs too, and sent nine of Hole-block-basic's twenty cells
+    down the wrong extension.
+    """
+    from ..classify import _segment_segment_dist
+
+    for x, e, _d, _k in bands:
+        b_ = x + e
+        for i in range(len(x) - 1):
+            gap = float(_segment_segment_dist(x[i], b_[i], x[i + 1:i + 2], b_[i + 1:i + 2])[0])
+            if gap < PINCH_TOL:
+                return True
+    return False
 
 
 # --- OCCT faces ------------------------------------------------------------------
@@ -484,6 +528,9 @@ class CellSolid:
     stats: dict = field(default_factory=dict)
     failure: str = ""
 
+
+APEX_SEARCH_POLES = 24
+"""Bottom poles below which a lower fan's apex is also looked for."""
 
 FAN_SAMPLES = (0.25, 0.5, 0.75)
 """Fractions along the loft's extension beyond the anchor asked whether they are
@@ -557,7 +604,8 @@ def _fan_faces(rows: list, bands: list, apex: np.ndarray) -> list:
             for r, (_x, _e, d, k) in zip(rows, bands)]
 
 
-def loft(cell, b: np.ndarray, overshoot: float, cache: dict, inside_body=None):
+def loft(cell, b: np.ndarray, overshoot: float, cache: dict, inside_body=None,
+         extend: str = "auto"):
     """The closed, untrimmed loft of a cell (its outer loop), and how it was closed.
 
     The ruled band runs from just above the ceiling to ``overshoot`` past the
@@ -575,12 +623,27 @@ def loft(cell, b: np.ndarray, overshoot: float, cache: dict, inside_body=None):
 
     Projecting the whole bottom loop along one direction instead was tried and
     folds it: round a tube, where rays converge, and along a curved wall alike.
+
+    How far past the anchor the rays reach is ``extend``: ``"ray"`` carries
+    each control ray on along itself, which is what enters a wall the ray meets
+    at an angle -- the tube crowns need it, since their mean ray is straight
+    down a vertical wall; ``"mean"`` carries all of them along the loop's mean
+    ray, which is what keeps rays converging on one target from crossing there
+    (:func:`_rulings_cross`); ``"auto"`` is the first unless its rulings cross.
+    Both stay self-supporting: a control ray plus a vector inside the cone is
+    inside the cone.
     """
     w = -np.asarray(b, dtype=float)
     w /= np.linalg.norm(w)
     up = -w
     loop = cell.loops[0]
-    bands = _bands(loop, w, overshoot, cache)
+    direction = {"auto": None, "ray": None, "down": w}.get(extend)
+    if extend == "mean":
+        direction = _mean_direction(loop, w)
+    bands = _bands(loop, w, overshoot, cache, direction)
+    if extend == "auto" and _rulings_cross(bands):
+        direction = _mean_direction(loop, w)
+        bands = _bands(loop, w, overshoot, cache, direction)
     longest = max(float(np.linalg.norm(e, axis=1).max()) for _x, e, _d, _k in bands)
     v_top = -LIFT / longest
     tops = [x + v_top * e for x, e, _d, _k in bands]
@@ -602,10 +665,21 @@ def loft(cell, b: np.ndarray, overshoot: float, cache: dict, inside_body=None):
     # the body winning. Along the mean ray is right for a tube under a level
     # roof; under a sloping one the mean ray tilts with it and that apex can
     # leave the tube, where the bottom points' own centre still sits inside.
-    T_ = np.vstack([x + e / (1.0 + overshoot / np.maximum(np.linalg.norm(e, axis=1), 1e-9))[:, None]
-                    for x, e, _d, _k in bands])
+    if direction is None:
+        T_ = np.vstack([x + e / (1.0 + overshoot / np.maximum(np.linalg.norm(e, axis=1), 1e-9))[:, None]
+                        for x, e, _d, _k in bands])
+    else:
+        T_ = np.vstack([x + e - overshoot * direction for x, e, _d, _k in bands])
     candidates = [Bm.mean(axis=0) + overshoot * mean_ray, Bm.mean(axis=0),
                   T_.mean(axis=0) + overshoot * mean_ray, Bm.mean(axis=0) + overshoot * w]
+    # Then below each bottom pole, deeper and deeper, nearest the centre first.
+    # Rays converging on a ledge's rim pull the centre onto the rim itself, and
+    # a fan from there reaches back over the ledge's edge into the body; an apex
+    # further into the ledge sees the whole bottom loop.
+    pick = Bm[np.linspace(0, len(Bm) - 1, min(len(Bm), APEX_SEARCH_POLES)).astype(int)]
+    deeper = np.vstack([pick + k * overshoot * mean_ray for k in (1.0, 2.0, 4.0)])
+    order = np.argsort(np.linalg.norm(deeper - Bm.mean(axis=0), axis=1))
+    candidates += list(deeper[order])
     apex_bot = candidates[0]
     if inside_body is not None:
         for apex_bot in candidates:
@@ -614,12 +688,23 @@ def loft(cell, b: np.ndarray, overshoot: float, cache: dict, inside_body=None):
                 break
         else:
             mode = "plane"
+    if mode == "plane":
+        # Rays converging on a ledge's rim: what lies under the cell's middle is
+        # the cone of rays from its middle down to the rim, which no closure
+        # beyond the anchor can be. A fan from the bottom loop up to a point just
+        # over the ceiling is that cone -- when every ruling of it is inside the
+        # rod-angle cone, so that it can be a support's lower face.
+        apex_up = c + (rise + LIFT / 2.0) * up
+        rul = apex_up - Bm
+        if np.all(rul @ up >= np.cos(np.radians(SUPPORT_OVERHANG_DEG)) * np.linalg.norm(rul, axis=1)):
+            mode = "up"
+            apex_bot = apex_up
     sew = BRepBuilderAPI_Sewing(SEW_TOL)
     for (x, e, deg, knots), t1, b1 in zip(bands, tops, bottoms):
         sew.Add(_face(t1, b1, deg, knots))
     for f in _fan_faces(tops, bands, apex_top):
         sew.Add(f)
-    if mode == "fan":
+    if mode in ("fan", "up"):
         for f in _fan_faces(bottoms, bands, apex_bot):
             sew.Add(f)
     else:
@@ -741,35 +826,50 @@ def _holding(shape, point: np.ndarray):
     return None
 
 
+EXTEND_LADDER = ("auto", "mean", "ray", "down")
+"""How a cell's rays are carried past their anchor (:func:`loft`), tried in turn
+until one trims: ``auto`` first; then each fixed choice."""
+
+
 def build_cell(cell, body, lattice_near: list, b: np.ndarray, overshoot: float,
                cache: dict, inside_body=None) -> CellSolid:
     """One support body: the cell's loft, within the body, outside the lattice."""
-    solid, why, mode = loft(cell, b, overshoot, cache, inside_body)
-    if solid is None:
-        return CellSolid(cell, None, failure=why)
-    why = "no fuzzy value gave a valid piece holding the cell's seed point"
+    whys = []
+    solid = None
+    for extend in EXTEND_LADDER:
+        solid, why, mode = loft(cell, b, overshoot, cache, inside_body, extend)
+        if solid is None:
+            whys.append(f"{extend}: {why}")
+            continue
+        got = _trim(cell, solid, body, lattice_near)
+        if got is not None:
+            piece, stats = got
+            stats.update({"closure": mode, "extend": extend})
+            return CellSolid(cell, piece, solid, stats)
+        whys.append(f"{extend}: no fuzzy value or face-by-face trim gave a valid "
+                    f"piece holding the cell's seed point")
+    return CellSolid(cell, None, solid, failure="; ".join(whys))
+
+
+def _trim(cell, solid, body, lattice_near: list):
+    """``(piece, stats)``: the loft within the body, outside the lattice, or ``None``."""
     for fuzzy in FUZZY_LADDER:
         inside = _boolean(BRepAlgoAPI_Common, solid, [body], fuzzy)
         if inside is None:
-            why = "the intersection with the body failed"
             continue
         if lattice_near:
             inside = _boolean(BRepAlgoAPI_Cut, inside, lattice_near, fuzzy)
             if inside is None:
-                why = "the cut by the lattice failed"
                 continue
         piece = _holding(inside, cell.seed)
         if piece is None or not occ.is_valid(piece, parallel=False):
             continue
-        return CellSolid(cell, piece, solid,
-                         {"pieces": len(occ.solids(inside)), "fuzzy": fuzzy,
-                          "closure": mode, "trim": "solid"})
+        return piece, {"pieces": len(occ.solids(inside)), "fuzzy": fuzzy, "trim": "solid"}
     for tol in FACE_TRIM_SEW_TOLS:
         piece = _face_trim(solid, body, cell.seed, lattice_near, tol)
         if piece is not None and occ.is_valid(piece, parallel=False):
-            return CellSolid(cell, piece, solid, {"closure": mode, "trim": "faces",
-                                                  "sew_tol": tol})
-    return CellSolid(cell, None, solid, failure=why)
+            return piece, {"trim": "faces", "sew_tol": tol}
+    return None
 
 
 # --- gates -------------------------------------------------------------------------

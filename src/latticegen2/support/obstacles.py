@@ -75,30 +75,40 @@ def _face_groups(shape, material_inside: bool) -> np.ndarray:
 
 def _joins(edge, f0, f1, material_inside: bool) -> bool:
     """Smooth, or convex seen from the material, at the edge's midpoint."""
+    got = _edge_shape(edge, f0, f1, material_inside)
+    return got is None or got[0] < SMOOTH_TOL or got[1]
+
+
+def _edge_shape(edge, f0, f1, material_inside: bool):
+    """``(angle, convex)`` at the edge's midpoint: the angle between the two
+    faces' normals, and whether the edge is convex seen from the material;
+    ``None`` for a seam or where the faces cannot be evaluated (then the caller
+    treats it as smooth)."""
     if f0.IsSame(f1):
-        return True                                # a seam
+        return None                                # a seam
     curve = BRepAdaptor_Curve(edge)
     t = 0.5 * (curve.FirstParameter() + curve.LastParameter())
     p, d = gp_Pnt(), gp_Vec()
     curve.D1(t, p, d)
     if d.Magnitude() < 1e-12:
-        return True
+        return None
     normals = []
     for f in (f0, f1):
         c2d = BRep_Tool.CurveOnSurface_s(edge, f, 0.0, 0.0)
         if c2d is None:
-            return False
+            return (np.pi, False)
         uv = c2d.Value(t)
         _p, n = _SurfaceNormals(f).at(uv.X(), uv.Y())
         if n is None:
-            return False
+            return (np.pi, False)
         normals.append(n)
     n0, n1 = normals
-    if np.arccos(np.clip(float(n0 @ n1), -1.0, 1.0)) < SMOOTH_TOL:
-        return True
+    angle = float(np.arccos(np.clip(float(n0 @ n1), -1.0, 1.0)))
+    if angle < SMOOTH_TOL:
+        return (angle, True)
     ori = _edge_orientation_in(f0, edge)
     if ori is None:
-        return False
+        return (angle, False)
     sign = -1.0 if ori == TopAbs_Orientation.TopAbs_REVERSED else 1.0
     tangent = sign * np.array([d.X(), d.Y(), d.Z()]) / d.Magnitude()
     # `into` runs across face 0, away from the edge. The solid is concave along
@@ -109,7 +119,37 @@ def _joins(edge, f0, f1, material_inside: bool) -> bool:
     # Material inside the solid (a lattice strut): join where it is convex
     # inside. Material outside (the input body's surroundings): join where the
     # body is concave inside, which is convex outside.
-    return concave_inside != material_inside
+    return (angle, concave_inside != material_inside)
+
+
+def convex_edge_points(shape, material_inside: bool, min_angle_deg: float,
+                       spacing: float) -> np.ndarray:
+    """Points every ``spacing`` along the edges of ``shape`` that are convex seen
+    from the material and sharper than ``min_angle_deg``: a ledge's rim, which
+    first-contact rays converge on (docs/algorithm.md §14.3 S3b)."""
+    from OCP.GCPnts import GCPnts_AbscissaPoint
+
+    owners = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(shape, TopAbs_ShapeEnum.TopAbs_EDGE,
+                                   TopAbs_ShapeEnum.TopAbs_FACE, owners)
+    out = []
+    for i in range(1, owners.Extent() + 1):
+        edge = TopoDS.Edge_s(owners.FindKey(i))
+        if BRep_Tool.Degenerated_s(edge):
+            continue
+        adj = [TopoDS.Face_s(f) for f in owners.FindFromIndex(i)]
+        if len(adj) != 2:
+            continue
+        got = _edge_shape(edge, adj[0], adj[1], material_inside)
+        if got is None or not got[1] or got[0] < np.radians(min_angle_deg):
+            continue
+        curve = BRepAdaptor_Curve(edge)
+        a, b = curve.FirstParameter(), curve.LastParameter()
+        n = max(2, int(np.ceil(GCPnts_AbscissaPoint.Length_s(curve) / spacing)) + 1)
+        for t in np.linspace(a, b, n):
+            p = curve.Value(float(t))
+            out.append((p.X(), p.Y(), p.Z()))
+    return np.array(out, dtype=float).reshape(-1, 3)
 
 
 def _triangles(shape, deflection: float):
@@ -152,5 +192,9 @@ def from_shapes(body, lattice: list, deflection: float) -> Obstacles:
         key.append(key_base + groups[face])
         offset += len(v)
         key_base += len(groups)
-    return Obstacles(TriMesh(np.vstack(verts), np.vstack(tris)),
-                     np.concatenate(shape_id), np.concatenate(key))
+    obs = Obstacles(TriMesh(np.vstack(verts), np.vstack(tris)),
+                    np.concatenate(shape_id), np.concatenate(key))
+    from .cells import FOLD_EDGE_DEG, FOLD_SAMPLE
+
+    obs.feature_points = convex_edge_points(body, False, FOLD_EDGE_DEG, FOLD_SAMPLE)
+    return obs

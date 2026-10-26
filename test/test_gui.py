@@ -756,13 +756,12 @@ def test_a_supported_run_lays_the_bar_out_over_the_stages_it_announced():
 def test_orientation_and_support_reach_the_child_and_the_parser_accepts_them(tmp_path):
     step = tmp_path / "in.step"
     step.write_text("x")
-    extra = ["--orient", "30", "0", "-45", "--support", "--overhang", "50",
-             "--support-thickness", "1.2"]
+    extra = ["--orient", "30", "0", "-45", "--support", "--support-thickness", "1.2"]
     argv = runner.build_argv(input_path=str(step), output_path=str(tmp_path / "o.step"),
                              cc="10", t="1.5", cores=2, extra=extra)
     args = parse_args(argv[3:])
     assert args.orient == (30.0, 0.0, -45.0)
-    assert args.support and args.overhang == 50.0 and args.support_thickness == 1.2
+    assert args.support and args.support_thickness == 1.2
     assert "-v" not in argv and argv[-1] == "--progress-stream"
 
 
@@ -782,11 +781,16 @@ def test_the_view_rests_the_part_on_the_bed_and_marks_what_overhangs():
 
     normals = np.array([[0, 0, 1], [0, 0, -1], [1, 0, 0]], dtype=float)
     # Upright: the lid is a ceiling of the volume, the floor and a wall are not.
-    assert view3d.overhang_mask(normals, (0, 0, 0), 60.0).tolist() == [True, False, False]
+    assert view3d.overhang_mask(normals, (0, 0, 0)).tolist() == [True, False, False]
     # Turned upside down, the old floor is the ceiling.
-    assert view3d.overhang_mask(normals, (180, 0, 0), 60.0).tolist() == [False, True, False]
+    assert view3d.overhang_mask(normals, (180, 0, 0)).tolist() == [False, True, False]
     # On its side (+X up), the wall is.
-    assert view3d.overhang_mask(normals, (0, -90, 0), 60.0).tolist() == [False, False, True]
+    assert view3d.overhang_mask(normals, (0, -90, 0)).tolist() == [False, False, True]
+    # The bar is strict 60 deg: a ceiling tilted 30 deg from horizontal (exactly
+    # 60 from vertical) is left bare, one tilted 29 deg is supported.
+    tilted = np.array([[0.0, np.sin(np.radians(a)), np.cos(np.radians(a))]
+                       for a in (30.0, 29.0)])
+    assert view3d.overhang_mask(tilted, (0, 0, 0)).tolist() == [False, True]
 
 
 def test_dragging_turns_the_part_and_reports_angles_that_reproduce_it():
@@ -817,11 +821,10 @@ def test_the_orientation_panel_is_always_there_and_support_fields_grey_out(tmp_p
         # Always shown: the orientation boxes and the view are gridded at once.
         assert app.view.winfo_manager() == "grid"
         assert all(s.winfo_manager() == "grid" for s in app.orient_spins)
-        assert app.overhang_spin.winfo_manager() == "grid"
+        assert app.thickness_spin.winfo_manager() == "grid"
+        assert not hasattr(app, "overhang_spin")
         # Greyed out, not hidden, while support is off.
-        assert app.overhang_spin.instate(["disabled"])
         assert app.thickness_spin.instate(["disabled"])
-        assert app.overhang_var.get() == "60"
 
         app.input_var.set(str(step))
         app.cc_var.set("10")
@@ -833,18 +836,23 @@ def test_the_orientation_panel_is_always_there_and_support_fields_grey_out(tmp_p
 
         app.support_var.set(True)
         tk_root.update()
-        assert app.overhang_spin.instate(["!disabled"])
         assert app.thickness_spin.instate(["!disabled"])
-        assert app._pending_argv()[-5:] == ["--support", "--overhang", "60",
-                                            "--support-thickness", "1"]
-        assert app.derived_var.get().endswith("-rotx30y0z0-sup60.step")
-        assert app.warning_var.get() == ""
-
-        # Stricter than the lattice's own edges: a warning, and Start stays live.
-        app.overhang_var.set("45")
+        # The thickness follows t, and is the command line's default, so it is
+        # not passed until edited.
+        assert app.thickness_var.get() == "1.5"
+        app.t_var.set("1.2")
         tk_root.update()
-        assert "strut edges" in app.warning_var.get()
+        assert app.thickness_var.get() == "1.2"
+        assert app._pending_argv()[-1] == "--support"
+        assert app.derived_var.get().endswith("-rotx30y0z0-sup.step")
         assert app.start.instate(["!disabled"])
+
+        # Once edited it stays put, and is passed.
+        app.thickness_var.set("0.8")
+        app.t_var.set("1.5")
+        tk_root.update()
+        assert app.thickness_var.get() == "0.8"
+        assert app._pending_argv()[-3:] == ["--support", "--support-thickness", "0.8"]
 
         # A drag reports angles straight into the three boxes.
         app._dragged((12.5, -3.0, 90.0))

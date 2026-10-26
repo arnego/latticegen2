@@ -47,44 +47,17 @@ CC_RANGE = (0.4, 50.0)
 T_RANGE = (0.4, 20.0)
 CORES_RANGE = (1, 128)
 ORIENT_RANGE = (-360.0, 360.0)
-OVERHANG_RANGE = (15.0, 80.0)
 SUPPORT_THICKNESS_RANGE = (0.2, 20.0)
-OVERHANG_DEFAULT = 60.0
-#: Degrees inside the limit at which a surface is already treated as an
-#: overhang (docs/algorithm.md §14.1). Here rather than with the detection
-#: code, which needs the geometry kernel, because the window tints its preview
-#: with the same bar and must not import one.
-OVERHANG_MARGIN = 5.0
-SUPPORT_THICKNESS_DEFAULT = 1.0
 
-#: The lattice's own two angles from the build direction, in degrees: strut
-#: ridge edges recline at ``THETA`` and strut faces at its complement
-#: (docs/algorithm.md §2.1, §14). Expressions, not literals.
-LATTICE_EDGE_ANGLE = math.degrees(THETA)
-LATTICE_FACE_ANGLE = 90.0 - LATTICE_EDGE_ANGLE
-
-
-def overhang_warning(overhang: float) -> str | None:
-    """A warning when the limit is stricter than the lattice's own geometry.
-
-    One function for the command line and the window, so the two cannot word
-    it — or decide it — differently (specification.md §4.6). It is evaluated
-    from the value the user configured and it is a warning only: the lattice is
-    not analysed for overhang and is generated as specified either way.
-    """
-    if overhang >= LATTICE_EDGE_ANGLE:
-        return None
-    what = (
-        f"strut edges ({LATTICE_EDGE_ANGLE:.2f} deg from vertical) and strut "
-        f"faces ({LATTICE_FACE_ANGLE:.2f} deg)"
-        if overhang < LATTICE_FACE_ANGLE
-        else f"strut edges ({LATTICE_EDGE_ANGLE:.2f} deg from vertical)"
-    )
-    return (
-        f"the maximum overhang angle of {format_param(overhang)} deg is "
-        f"stricter than the lattice itself: its {what} exceed it. Supports are "
-        f"generated for the input geometry only; the lattice is left as it is."
-    )
+#: The steepest a support face may overhang, from vertical, in degrees: the
+#: lattice rod angle ``THETA`` itself (specification.md §4.6), an expression
+#: rather than a literal. Not a parameter.
+SUPPORT_OVERHANG_DEG = math.degrees(THETA)
+#: The input's surface is supported where it overhangs more than this, from
+#: vertical (docs/algorithm.md §14.1). Not a parameter either. Here rather than
+#: with the detection code, which needs the geometry kernel, because the window
+#: tints its preview with the same bar and must not import one.
+SUPPORT_START_DEG = 60.0
 
 
 USAGE = """\
@@ -109,11 +82,11 @@ Optional:
                         print bed, in degrees (-360-360 each, default 0 0 0):
                         rotations about the bed's X, then Y, then Z axis. The
                         lattice is oriented to the bed.
-  --support             Generate print supports for inner overhangs
-  --overhang <deg>      Maximum overhang angle from vertical (15-80,
-                        default 60). Requires --support.
+  --support             Generate print supports for inner overhangs: the
+                        surface overhanging more than 60 deg from vertical,
+                        with supports no steeper than the lattice rod angle
   --support-thickness <mm>
-                        Minimum support thickness (0.2-20, default 1).
+                        Minimum support thickness (0.2-20, default -t).
                         Requires --support.
   -v, --verbose         Verbose console output (a full .log is always written)
   -h, --help            Show this message and exit
@@ -155,13 +128,12 @@ class Args:
     orient: tuple[float, float, float] = _orient.IDENTITY
     """Print orientation ``(rx, ry, rz)`` in degrees (specification.md §4.5)."""
     support: bool = False
-    overhang: float = OVERHANG_DEFAULT
-    support_thickness: float = SUPPORT_THICKNESS_DEFAULT
+    support_thickness: float | None = None
+    """Minimum support thickness in mm; ``None`` means the strut size ``t``."""
 
-    @property
-    def name_overhang(self) -> float | None:
-        """The overhang angle as names carry it: ``None`` unless support is on."""
-        return self.overhang if self.support else None
+    def __post_init__(self):
+        if self.support_thickness is None:
+            object.__setattr__(self, "support_thickness", self.t)
 
     def params_extra(self) -> str:
         """Orientation and support parameters for the STEP header, when in force."""
@@ -170,8 +142,7 @@ class Args:
             out += ("orient=" + " ".join(format_param(a) for a in self.orient)
                     + " deg, ")
         if self.support:
-            out += (f"support overhang={format_param(self.overhang)} deg, "
-                    f"support thickness={format_param(self.support_thickness)} mm, ")
+            out += f"support thickness={format_param(self.support_thickness)} mm, "
         return out
 
     def as_dict(self) -> dict:
@@ -196,7 +167,6 @@ class Args:
             out["orient"] = " ".join(format_param(a) for a in self.orient) + " deg"
         if self.support:
             out["support"] = "enabled"
-            out["overhang"] = f"{format_param(self.overhang)} deg"
             out["support_thickness"] = f"{format_param(self.support_thickness)} mm"
         return out
 
@@ -264,11 +234,11 @@ def default_workers(cores: int | None) -> int:
 
 
 def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: float,
-                         orient=_orient.IDENTITY, overhang: float | None = None):
+                         orient=_orient.IDENTITY, support: bool = False):
     """``(step_path, log_path)`` per specification.md §3.
 
-    ``orient`` and ``overhang`` add ``-rotx<rx>y<ry>z<rz>`` and
-    ``-sup<overhang>`` to the default name, each only when it applies
+    ``orient`` and ``support`` add ``-rotx<rx>y<ry>z<rz>`` and ``-sup`` to the
+    default name, each only when it applies
     (:func:`latticegen2.lattice.variant_suffix`).
 
     Default name is ``<input_stem>-lattice-cc<cc>t<t>.step`` beside the input.
@@ -290,7 +260,7 @@ def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: 
         step_path = os.path.join(
             directory,
             f"{stem}-lattice-cc{format_param(cc)}t{format_param(t)}"
-            f"{variant_suffix(orient, overhang)}.step",
+            f"{variant_suffix(orient, support)}.step",
         )
     else:
         # The validated string is the one used. Trailing space is stripped
@@ -350,7 +320,7 @@ def parse_args(argv: list[str]) -> Args:
     progress_stream = False
     orient = None
     support = False
-    overhang = thickness = None
+    thickness = None
 
     i = 0
     while i < len(argv):
@@ -379,8 +349,14 @@ def parse_args(argv: list[str]) -> Args:
             support = True
             i += 1
         elif a == "--overhang":
-            v, i = _value(argv, i, a)
-            overhang = _as_float(a, v)
+            # Removed with the support algorithm (specification.md §3): named
+            # rather than reported as unknown, so a script written against the
+            # skeleton learns why.
+            raise ParamError(
+                "--overhang has been removed: support faces are held to the "
+                "lattice rod angle and the input is supported past 60 deg from "
+                "vertical; neither is a parameter (specification.md §4.6)."
+            )
         elif a == "--support-thickness":
             v, i = _value(argv, i, a)
             thickness = _as_float(a, v)
@@ -422,27 +398,20 @@ def parse_args(argv: list[str]) -> Args:
         orient = _orient.IDENTITY
     for axis, angle in zip("xyz", orient):
         _in_range(f"--orient r{axis}", angle, *ORIENT_RANGE)
-    if not support:
+    if not support and thickness is not None:
         # Refused rather than ignored: a support parameter that silently does
         # nothing would leave the user believing supports had been generated.
-        for flag, value in (("--overhang", overhang),
-                            ("--support-thickness", thickness)):
-            if value is not None:
-                raise ParamError(f"{flag} requires --support.")
-    if overhang is None:
-        overhang = OVERHANG_DEFAULT
+        raise ParamError("--support-thickness requires --support.")
     if thickness is None:
-        thickness = SUPPORT_THICKNESS_DEFAULT
-    _in_range("--overhang", overhang, *OVERHANG_RANGE)
+        thickness = t
     _in_range("--support-thickness", thickness, *SUPPORT_THICKNESS_RANGE)
 
     step_path, log_path = resolve_output_paths(
-        input_path, output, cc, t, orient, overhang if support else None
+        input_path, output, cc, t, orient, support
     )
     return Args(
         orient=orient,
         support=support,
-        overhang=overhang,
         support_thickness=thickness,
         input=input_path,
         output=step_path,

@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 
 from .. import orient as _orient
-from ..cli import OVERHANG_MARGIN
+from ..cli import SUPPORT_START_DEG
 
 #: Direction from the scene toward the eye: a fixed three-quarter view from
 #: above. Fixed on purpose — the thing being manipulated is the part, and a
@@ -59,18 +59,17 @@ def triangle_normals(verts: np.ndarray, tris: np.ndarray) -> np.ndarray:
     return np.where(mag > 0.0, n / np.where(mag > 0.0, mag, 1.0), 0.0)
 
 
-def overhang_mask(normals_part: np.ndarray, orient, overhang: float) -> np.ndarray:
-    """Which preview triangles are inner overhangs at this orientation.
+def overhang_mask(normals_part: np.ndarray, orient) -> np.ndarray:
+    """Which preview triangles will be supported at this orientation.
 
     The same test a run applies (docs/algorithm.md §14.1): the outward normal
-    leans toward the build direction by more than the limit allows, with the
-    run's own margin. The preview's triangles are coarse, so this is an
-    indication of what will be supported, not the measurement the run makes on
-    the true surface.
+    leans toward the build direction by more than 60 deg from vertical allows.
+    The preview's triangles are coarse, so this is an indication of what will
+    be supported, not the measurement the run makes on the true surface.
     """
     b = _orient.build_direction(orient)
-    bar = float(np.sin(np.radians(overhang - OVERHANG_MARGIN)))
-    return np.asarray(normals_part) @ b >= bar
+    bar = float(np.sin(np.radians(SUPPORT_START_DEG))) + 1e-6
+    return np.asarray(normals_part) @ b > bar
 
 
 def shade(normals_bed: np.ndarray) -> np.ndarray:

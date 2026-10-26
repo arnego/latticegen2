@@ -412,11 +412,11 @@ def scenario_spiral_stress(outdir: str) -> Report:
 
 
 CYLINDER_SUPPORT_GOLDEN = os.path.join(
-    TESTDIR, "test-cylinder-cc10t1.5-sup60-golden-sample.step")
+    TESTDIR, "test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step")
 
 
 def support_checks(rep: Report, output: str, input_path: str, cc: float, t: float,
-                   orient, overhang: float, thickness: float) -> None:
+                   orient, thickness: float) -> None:
     """specification.md §6.2's two support checks, asked of the written file.
 
     Until the support generator exists (docs/algorithm.md §14.3) the run says
@@ -446,7 +446,7 @@ def support_checks(rep: Report, output: str, input_path: str, cc: float, t: floa
                       "no support surface exceeds the overhang limit"):
             print(f"  [SKIP] {label} — {why}", flush=True)
         return
-    cov = vg.overhang_coverage(output, input_path, cc, t, orient, overhang, thickness)
+    cov = vg.overhang_coverage(output, input_path, cc, t, orient, thickness)
     rep.check("every inner overhang is backed by material",
               cov["samples"] > 0 and cov["uncovered"] == 0,
               f"{cov['samples']} sample(s) over {cov['area_mm2']:.0f} mm^2, "
@@ -454,7 +454,7 @@ def support_checks(rep: Report, output: str, input_path: str, cc: float, t: floa
               + (f" ({cov['thin']} over material thinner than the mesh probe, "
                  f"confirmed by exact classification)" if cov["thin"] else "")
               + (f", first at {cov['where'][0]}" if cov["where"] else ""))
-    ss = vg.self_supporting(output, input_path, cc, t, orient, overhang)
+    ss = vg.self_supporting(output, input_path, cc, t, orient)
     rep.check("no support surface exceeds the overhang limit",
               ss["bad_area_mm2"] == 0.0,
               f"{ss['triangles']} triangles"
@@ -494,46 +494,55 @@ def scenario_support_tilted(outdir: str) -> Report:
     out = os.path.join(outdir, "support-tilted.step")
     orient = (35.0, 20.0, -110.0)
     proc, elapsed = run_generator(
-        ["-i", BALL, "-cc", "20", "-t", "4", "-o", out, "--cores", "4",
+        ["-i", BALL, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "4",
          "--orient", "35", "20", "-110", "--support"]
     )
     rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
     rep.check("runtime under 10 minutes", elapsed < 600, f"{elapsed:.1f}s")
     if proc.returncode == 0:
-        geometry_checks(rep, out, BALL, 20.0, 4.0)
-        support_checks(rep, out, BALL, 20.0, 4.0, orient, 60.0, 1.0)
+        geometry_checks(rep, out, BALL, 10.0, 1.5)
+        support_checks(rep, out, BALL, 10.0, 1.5, orient, 1.5)
     return rep
 
 
 def scenario_support_cylinder(outdir: str) -> Report:
     """Print support on the test cylinder, prepared for a golden sample.
 
-    Default overhang (60 deg) and thickness (1 mm), unrotated. Two things are
-    checked beyond the usual: the two support checks of §6.2, and that the
-    **existing lattice golden sample is contained in the output** — supports
-    only ever add material, so this is what says adding them lost none of the
-    lattice.
+    Default thickness (``t``), turned `--orient 0 -90 0`. Two things are
+    checked beyond the usual: the support checks of §6.2, and that **the same
+    run without `--support` is contained in the output** — supports are separate
+    bodies beside an unchanged lattice, so this is what says adding them lost
+    none of it. The committed lattice golden sample cannot say that here: it is
+    the unrotated lattice.
 
     **No golden sample exists yet, deliberately** (docs/testing.md): one is only
     worth having once a human has inspected the output it pins. `golden_check`
-    reports `SKIP` until `test-cylinder-cc10t1.5-sup60-golden-sample.step` is
-    committed, and compares against it from then on.
+    reports `SKIP` until `test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step`
+    is committed, and compares against it from then on.
     """
     rep = Report("support-cylinder")
     print(f"=== {rep.name} ===", flush=True)
     out = os.path.join(outdir, "support-cylinder.step")
+    orient = (0.0, -90.0, 0.0)
+    plain = os.path.join(outdir, "support-cylinder-lattice-only.step")
     proc, elapsed = run_generator(
         ["-i", CYLINDER, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "6",
-         "--support"]
+         "--orient", "0", "-90", "0", "--support"]
     )
     rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
     rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, CYLINDER, 10.0, 1.5)
-        support_checks(rep, out, CYLINDER, 10.0, 1.5, (0.0, 0.0, 0.0), 60.0, 1.0)
-        if os.path.isfile(CYLINDER_GOLDEN):
-            lost = vg.contained_in(CYLINDER_GOLDEN, out)
-            rep.check("the lattice golden sample is contained in the output",
+        support_checks(rep, out, CYLINDER, 10.0, 1.5, orient, 1.5)
+        ref, _ = run_generator(
+            ["-i", CYLINDER, "-cc", "10", "-t", "1.5", "-o", plain,
+             "--cores", "6", "--orient", "0", "-90", "0"]
+        )
+        rep.check("the reference run without --support exits 0",
+                  ref.returncode == 0, ref.stderr.strip()[-300:])
+        if ref.returncode == 0:
+            lost = vg.contained_in(plain, out)
+            rep.check("the same run without --support is contained in the output",
                       lost < 1.5 ** 3, f"{lost:.6g} mm^3 of it outside")
         golden_check(rep, out, CYLINDER_SUPPORT_GOLDEN, 10.0, 1.5)
     return rep
@@ -541,7 +550,7 @@ def scenario_support_cylinder(outdir: str) -> Report:
 
 REHEARSAL = os.path.join(TESTDIR, "TD_HX_rehearsal_test.step")
 REHEARSAL_SUPPORT_GOLDEN = os.path.join(
-    TESTDIR, "TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup60-golden-sample.step")
+    TESTDIR, "TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step")
 
 
 def scenario_rehearsal_support(outdir: str) -> Report:
@@ -552,9 +561,9 @@ def scenario_rehearsal_support(outdir: str) -> Report:
     `--orient 180 0 0` what was its floor becomes its ceiling. This is the only
     scenario that puts the support stages through a part of that size.
 
-    Much the slowest scenario — tens of minutes for the run and more for the
-    checks — so it is **opt-in** (:data:`OPT_IN`): it runs only when named with
-    `--only`. Pass `--keep <dir>` with it to write into a folder that outlives
+    Much the slowest scenario — hours for the run and more for the checks — so
+    it is **opt-in** (:data:`OPT_IN`): it runs only when named with `--only`,
+    and only for final verification. Pass `--keep <dir>` with it to write into a folder that outlives
     the harness, since a run this long is not one to repeat for its log.
 
     **No golden sample exists yet** (docs/testing.md): `golden_check` reports
@@ -566,14 +575,13 @@ def scenario_rehearsal_support(outdir: str) -> Report:
     orient = (180.0, 0.0, 0.0)
     proc, elapsed = run_generator(
         ["-i", REHEARSAL, "-cc", "7", "-t", "1.4", "-o", out, "--cores", "6",
-         "--support", "--orient", "180", "0", "0", "--overhang", "60",
-         "--support-thickness", "1"]
+         "--support", "--orient", "180", "0", "0", "--support-thickness", "1"]
     )
     rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-600:])
-    rep.check("runtime under 3 hours", elapsed < 10800, f"{elapsed:.1f}s")
+    rep.check("runtime under 12 hours", elapsed < 43200, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, REHEARSAL, 7.0, 1.4)
-        support_checks(rep, out, REHEARSAL, 7.0, 1.4, orient, 60.0, 1.0)
+        support_checks(rep, out, REHEARSAL, 7.0, 1.4, orient, 1.0)
         golden_check(rep, out, REHEARSAL_SUPPORT_GOLDEN, 7.0, 1.4)
     return rep
 

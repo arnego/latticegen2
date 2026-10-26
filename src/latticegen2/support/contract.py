@@ -3,13 +3,14 @@
 The support generator is handed the **completed lattice** — every solid the
 pipeline has assembled and unified, before ``validate`` — together with the
 input body, the run's parameters and the inner overhangs already detected. It
-returns the **support material only**. The support stage then merges it with
-the lattice into the final product (:mod:`.merge`), and everything after it
-(``validate``, the export-truth gate, ``export``) gates that product unchanged.
+returns the **support material only**, as separate bodies. The support stage
+checks they overlap nothing and appends them beside the lattice
+(:mod:`.assemble`); everything after it (``validate``, the export-truth gate,
+``export``) gates lattice and supports together.
 
 Both types are plain frozen dataclasses so the generator can be exercised in a
-unit test without a pipeline around it. docs/algorithm.md §14.4 says how to
-write a generator against them.
+unit test without a pipeline around it, or — as ``tools/support_dev.py``
+does — with an empty lattice.
 """
 
 from __future__ import annotations
@@ -59,17 +60,15 @@ class SupportInput:
     ``e``/``u``/``v``, the basis ``B``, the print orientation ``orient`` and the
     build direction ``b`` in part coordinates (docs/algorithm.md §14.0)."""
 
-    overhang_deg: float
-    """``--overhang``: maximum overhang angle from the build direction, degrees."""
-
     thickness_mm: float
-    """``--support-thickness``: minimum thickness of a free-standing member, mm."""
+    """``--support-thickness``: minimum thickness of a free-standing member, mm
+    (default ``t``). The two support angles are not parameters: they are
+    :data:`.params.SUPPORT_OVERHANG_DEG` and :data:`.params.SUPPORT_START_DEG`."""
 
     samples: OverhangSamples
-    """The inner overhangs of ``body`` at this orientation and limit
+    """The inner overhangs of ``body`` at this orientation that need support
     (docs/algorithm.md §14.1). Never empty: a run with nothing to support does
-    not call the generator. ``samples.required`` marks the ones that exceed
-    the limit itself, which are what coverage must be proven for."""
+    not call the generator."""
 
     kept_nodes: np.ndarray
     """``(N, 3)`` int64 lattice indices of every node whose junction is part of
@@ -99,12 +98,10 @@ class SupportResult:
 
     supports: list
     """The support solids, and nothing else: no lattice. Each must be a valid
-    closed solid inside the input body. They may overlap the lattice and each
-    other — the support stage fuses every support with the lattice solids and
-    supports it touches (:func:`.merge.merge_with_lattice`), unifies the
-    result, and checks that no lattice was lost. A support touching nothing
-    stays a body of its own, attached to the wall. Empty means no support was
-    generated."""
+    closed solid inside the input body, sharing faces — never volume — with
+    the lattice, the input's surfaces and the other supports
+    (:func:`.assemble.assemble` checks the volume half). Each ships as a body
+    of its own. Empty means no support was generated."""
 
     stats: dict = field(default_factory=dict)
     """Run characteristics for the end-of-run summary (specification.md §3).

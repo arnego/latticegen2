@@ -27,13 +27,9 @@ from ..cli import (
     CC_RANGE,
     CORES_RANGE,
     ORIENT_RANGE,
-    OVERHANG_DEFAULT,
-    OVERHANG_RANGE,
-    SUPPORT_THICKNESS_DEFAULT,
     SUPPORT_THICKNESS_RANGE,
     T_RANGE,
     USAGE,
-    overhang_warning,
     parse_args,
     resolve_output_paths,
 )
@@ -61,9 +57,10 @@ node, reclined about 55° from vertical.
 "Vertical" is the print bed's normal: the three orientation angles turn the \
 part on the bed, about the bed's X, then Y, then Z axis, and the lattice is \
 oriented to the bed. With Generate support ticked, every part of the inner \
-surface that overhangs more flatly than the maximum overhang angle (measured \
-from vertical) is backed by permanent, solid, self-supporting supports rooted \
-in the lattice and the wall; those surfaces are tinted in the preview.
+surface that overhangs more than 60° from vertical is carried down to the \
+nearest strut or wall by solid supports no steeper than the lattice's own rods; \
+those surfaces are tinted in the preview. Supports are written as separate \
+bodies that share faces with the lattice and the walls, ready to be merged.
 
 The output sits beside a .log recording the parameters, the per-stage timings, \
 the run's characteristics and its peak memory — written every run, whether or \
@@ -178,11 +175,13 @@ class App:
         self.ry_var = tk.StringVar(value="0")
         self.rz_var = tk.StringVar(value="0")
         self.support_var = tk.BooleanVar(value=False)
-        self.overhang_var = tk.StringVar(value=f"{OVERHANG_DEFAULT:g}")
-        self.thickness_var = tk.StringVar(value=f"{SUPPORT_THICKNESS_DEFAULT:g}")
+        #: Follows ``t`` until the user edits it -- the command line's default,
+        #: made visible. `_thickness_edited` records that it no longer does.
+        self.thickness_var = tk.StringVar(value=self.t_var.get())
+        self._thickness_edited = False
+        self._following_t = False
         self.derived_var = tk.StringVar(value="—")
         self.message_var = tk.StringVar(value="")
-        self.warning_var = tk.StringVar(value="")
         #: The helper tessellating the current input for the orientation view,
         #: the input it is for, and where its files go.
         self._preview: Preview | None = None
@@ -196,8 +195,10 @@ class App:
         self._build(root)
         for var in (self.input_var, self.cc_var, self.t_var, self.cores_var,
                     self.outdir_var, self.rx_var, self.ry_var, self.rz_var,
-                    self.support_var, self.overhang_var, self.thickness_var):
+                    self.support_var, self.thickness_var):
             var.trace_add("write", lambda *_a: self._revalidate())
+        self.t_var.trace_add("write", lambda *_a: self._follow_t())
+        self.thickness_var.trace_add("write", lambda *_a: self._thickness_written())
         self.input_var.trace_add("write", lambda *_a: self._request_preview())
         self.support_var.trace_add("write", lambda *_a: self._sync_support_fields())
         self._sync_support_fields()
@@ -283,29 +284,20 @@ class App:
                                              variable=self.support_var)
         self.support_check.grid(row=4, column=0, columnspan=2, sticky="w",
                                 pady=(8, 1))
-        ttk.Label(side, text="Max overhang (°)").grid(row=5, column=0, sticky="w")
-        self.overhang_spin = ttk.Spinbox(
-            side, textvariable=self.overhang_var, width=8, increment=1,
-            from_=OVERHANG_RANGE[0], to=OVERHANG_RANGE[1])
-        self.overhang_spin.grid(row=5, column=1, sticky="w", padx=(6, 0), pady=1)
-        ttk.Label(side, text="Min thickness (mm)").grid(row=6, column=0, sticky="w")
+        ttk.Label(side, text="Min thickness (mm)").grid(row=5, column=0, sticky="w")
         self.thickness_spin = ttk.Spinbox(
             side, textvariable=self.thickness_var, width=8, increment=0.1,
             from_=SUPPORT_THICKNESS_RANGE[0], to=SUPPORT_THICKNESS_RANGE[1])
-        self.thickness_spin.grid(row=6, column=1, sticky="w", padx=(6, 0), pady=1)
-        #: Frozen with every other parameter while a run is in flight. The two
-        #: support spins are in here too, and `_sync_support_fields` then
-        #: decides between them and the tick box once the run is over.
+        self.thickness_spin.grid(row=5, column=1, sticky="w", padx=(6, 0), pady=1)
+        #: Frozen with every other parameter while a run is in flight. The
+        #: support spin is in here too, and `_sync_support_fields` then decides
+        #: between it and the tick box once the run is over.
         self.fields += [*self.orient_spins, self.support_check,
-                        self.overhang_spin, self.thickness_spin]
+                        self.thickness_spin]
 
         self.message = ttk.Label(outer, textvariable=self.message_var,
                                  foreground="#a11", wraplength=WIDTH - 24)
-        self.message.grid(row=6, column=0, columnspan=3, sticky="w", pady=(2, 0))
-        # A warning is not an error: amber, and `Start!` stays enabled.
-        self.warning = ttk.Label(outer, textvariable=self.warning_var,
-                                 foreground="#a60", wraplength=WIDTH - 24)
-        self.warning.grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        self.message.grid(row=6, column=0, columnspan=3, sticky="w", pady=(2, 4))
 
         buttons = ttk.Frame(outer)
         buttons.grid(row=8, column=0, columnspan=3, sticky="ew")
@@ -387,14 +379,31 @@ class App:
 
         The support arguments are passed only when the box is ticked, so an
         unticked run is a run without `--support` and loads none of that code.
+        The thickness is passed only once edited: until then it is the command
+        line's own default, ``t``, and saying so twice could only disagree.
         """
         extra = ["--orient", self.rx_var.get().strip(), self.ry_var.get().strip(),
                  self.rz_var.get().strip()]
         if self.support_var.get():
-            extra += ["--support",
-                      "--overhang", self.overhang_var.get().strip(),
-                      "--support-thickness", self.thickness_var.get().strip()]
+            extra.append("--support")
+            if self._thickness_edited:
+                extra += ["--support-thickness", self.thickness_var.get().strip()]
         return extra
+
+    def _follow_t(self) -> None:
+        """Copy ``t`` into the thickness field while the user has not edited it."""
+        if self._thickness_edited:
+            return
+        self._following_t = True
+        try:
+            self.thickness_var.set(self.t_var.get())
+        finally:
+            self._following_t = False
+
+    def _thickness_written(self) -> None:
+        """A write that did not come from `_follow_t` is the user's edit."""
+        if not self._following_t:
+            self._thickness_edited = True
 
     def _pending_argv(self) -> list[str]:
         """The command line the current field values describe."""
@@ -407,11 +416,10 @@ class App:
         ]
 
     def _sync_support_fields(self) -> None:
-        """Grey the two support fields out while the box is unticked."""
+        """Grey the support field out while the box is unticked."""
         if self.run is not None:
             return
         state = ["!disabled"] if self.support_var.get() else ["disabled"]
-        self.overhang_spin.state(state)
         self.thickness_spin.state(state)
 
     def _dragged(self, angles) -> None:
@@ -422,7 +430,7 @@ class App:
                 var.set(text)
 
     def _update_view(self) -> None:
-        """Push the orientation and the overhang limit into the view.
+        """Push the orientation, and whether to tint what will be supported.
 
         Read straight from the boxes rather than from a parsed command line, so
         the view follows while another field is still invalid.
@@ -432,13 +440,7 @@ class App:
                            (self.rx_var, self.ry_var, self.rz_var))
         except ValueError:
             return
-        overhang = None
-        if self.support_var.get():
-            try:
-                overhang = float(self.overhang_var.get())
-            except ValueError:
-                overhang = None
-        self.view.set_state(orient, overhang)
+        self.view.set_state(orient, bool(self.support_var.get()))
 
     def _request_preview(self) -> None:
         """Start tessellating the chosen input for the orientation view."""
@@ -499,7 +501,6 @@ class App:
         if self.run is not None:
             return
         self.message_var.set("")
-        self.warning_var.set("")
         try:
             args = parse_args(self._pending_argv())
         except LatticeGenError as exc:
@@ -508,12 +509,6 @@ class App:
             self.message_var.set(first if self.input_var.get().strip() else "")
             self.start.state(["disabled"])
             return
-
-        if args.support:
-            # The same sentence the command line prints, from the same
-            # function. A warning: the run is allowed to proceed.
-            warning = overhang_warning(args.overhang)
-            self.warning_var.set(f"Warning: {warning}" if warning else "")
 
         name = os.path.basename(args.output)
         self.derived_var.set(f"→ {name}")
@@ -529,7 +524,7 @@ class App:
         """
         args = parse_args(self._pending_argv())
         default_step, _log = resolve_output_paths(
-            args.input, None, args.cc, args.t, args.orient, args.name_overhang)
+            args.input, None, args.cc, args.t, args.orient, args.support)
         folder = self.outdir_var.get().strip() or os.path.dirname(args.input)
         return os.path.join(os.path.abspath(folder), os.path.basename(default_step))
 

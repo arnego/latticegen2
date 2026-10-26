@@ -149,14 +149,12 @@ axes and the input geometry standing on it. Drag the view to turn the part and
 the boxes follow; edit the boxes and the part turns. The lattice is oriented to
 the bed, with or without support.
 
-Tick **Generate support** to back every inner overhang with permanent supports.
-**Max overhang** (1° steps, default 60°, measured from vertical) and **Min
-thickness** (0.1 mm steps, default 1 mm) are greyed out until it is ticked. With
-it ticked, the parts of the surface that overhang at the current orientation and
-limit are tinted in the view, and the tint follows every change — so the
-orientation can be checked before a long run is started. If the limit is
-stricter than the lattice's own strut angles the window says so in amber and
-still lets the run start.
+Tick **Generate support** to carry every inner overhang down to the nearest
+strut or wall. **Min thickness** (0.1 mm steps) follows `t` until you edit it,
+and is greyed out until the box is ticked. With it ticked, the parts of the
+surface that overhang more than 60° from vertical at the current orientation —
+what will be supported — are tinted in the view, and the tint follows every
+change, so the orientation can be checked before a long run is started.
 
 The window is deliberately small and plain, so it can sit in a corner of the
 screen for the hour a large part takes. It adds nothing the command line cannot
@@ -207,8 +205,7 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `--cores` | int | no | count | 1 – 128 | logical cores on the machine | Maximum cores this run may use — one worker process per core, honoured exactly, in the shared pool used across every process-parallel stage (classification, boundary trim, boundary sew, same-domain unification). It also caps OCCT's *own* native thread pool, which the validity check uses instead of the process pool, so the total stays within the budget either way |
 | `--orient` | 3 × float | no | degrees | −360 – 360 each | `0 0 0` | Print orientation `<rx> <ry> <rz>` of the input relative to the print bed: rotations about the bed's X, then Y, then Z axis. The lattice is oriented to the bed. Works with or without `--support` |
 | `--support` | flag | no | — | — | off | Generate print supports for inner overhangs |
-| `--overhang` | float | no | degrees | 15 – 80 | 60 | Maximum overhang angle, measured from vertical (the bed's normal). Requires `--support` |
-| `--support-thickness` | float | no | mm | 0.2 – 20 | 1 | Minimum support thickness. Requires `--support` |
+| `--support-thickness` | float | no | mm | 0.2 – 20 | `t` | Minimum support thickness. Requires `--support` |
 | `-v`, `--verbose` | flag | no | — | — | off | Verbose console output (a full `.log` is always written) |
 | `-h`, `--help` | flag | no | — | — | — | Usage |
 
@@ -221,23 +218,23 @@ tips the part 30° about the bed's X axis; the lattice turns with the bed and
 the output stays in the input's own coordinate system. A rotated run adds
 `-rotx<rx>y<ry>z<rz>` to the default file name.
 
-**Print support.** With `--support`, every part of the input's inner surface
-that acts as a ceiling flatter than `--overhang` is to be backed by solid,
-permanent, self-supporting supports, added to the completed lattice just before
-it is validated and written ([docs/algorithm.md](docs/algorithm.md) §14).
-**The support algorithm itself is not implemented yet:** a run with
-`--support` detects and logs the inner overhangs, writes the lattice unchanged
-and prints a `WARNING` saying so. A supported run adds `-sup<overhang>` to the
-default file name:
+**Print support** (metal powder-bed fusion). With `--support`, every part of
+the input's inner surface that acts as a ceiling more than 60° from vertical is
+carried down to the first strut, wall or floor a downward cone of the lattice
+rod angle (54.74°) reaches, by solid supports whose own faces are no steeper
+than that angle ([docs/algorithm.md](docs/algorithm.md) §14). Neither angle is a
+parameter. Supports are written as **separate bodies** beside the unchanged
+lattice, sharing faces with the lattice and the walls so that they merge into
+the enveloping part in your CAD tool; pockets of powder they would trap are
+filled. **The support algorithm is being implemented in phases:** until it
+lands, a run with `--support` detects and logs the inner overhangs, writes the
+lattice unchanged and prints a `WARNING` saying so. A supported run adds `-sup`
+to the default file name:
 
 ```bash
-python src/main.py -i part.step -cc 10 -t 1.5 --orient 30 0 0 --support --overhang 60
-# -> part-lattice-cc10t1.5-rotx30y0z0-sup60.step
+python src/main.py -i part.step -cc 10 -t 1.5 --orient 30 0 0 --support
+# -> part-lattice-cc10t1.5-rotx30y0z0-sup.step
 ```
-
-The lattice itself is left as it is. Its strut edges recline 54.74° and its
-strut faces 35.26° from vertical, so an `--overhang` below those is stricter
-than the lattice; the run then prints a warning and carries on.
 
 `--cores` is an optional budget; it resolves to a concrete figure from the
 machine when omitted. There used to be a second budget, `--ram`, but it was

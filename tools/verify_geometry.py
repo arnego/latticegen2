@@ -712,7 +712,7 @@ def _oriented_mesh(shape, deflection: float):
 
 
 def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
-                      orient, overhang: float, thickness: float) -> dict:
+                      orient, thickness: float) -> dict:
     """Is every inner overhang of the input backed by material in the output?
 
     Asked of the **written file**, and independently of how the supports were
@@ -726,14 +726,7 @@ def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
     lp = lattice_params(cc, t, orient)
     body = occ.read_step(input_path)
     tessellate_surface(body, lp)
-    samples = oh.detect(body, lp.b, overhang, oh.sample_pitch(t, thickness))
-    # Only what exceeds the limit itself has to be backed. The band inside it
-    # is sampled so supports run past a region's border, and there a support
-    # can be a film thinner than any probe (docs/algorithm.md §14.1).
-    keep = samples.required
-    samples = oh.OverhangSamples(
-        samples.points[keep], samples.inward[keep], samples.kind[keep],
-        samples.area, samples.pitch)
+    samples = oh.detect(body, lp.b)
     out = occ.read_step(candidate_path)
     v, f, _n, _a = _oriented_mesh(out, SUPPORT_MESH_DEFLECTION)
     v, f = _weld(v, f)
@@ -779,7 +772,7 @@ def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
 
 
 def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
-                    orient, overhang: float, tol_deg: float = 0.05) -> dict:
+                    orient, tol_deg: float = 0.05) -> dict:
     """Does any free surface of the output face down more flatly than the limit?
 
     A facet is exempt only for one of two reasons, both geometric: it lies on
@@ -795,7 +788,9 @@ def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
     b = lp.b
     out = occ.read_step(candidate_path)
     v, f, n, area = _oriented_mesh(out, SUPPORT_MESH_DEFLECTION)
-    bar = float(np.sin(np.radians(overhang + tol_deg)))
+    from latticegen2.cli import SUPPORT_OVERHANG_DEG
+
+    bar = float(np.sin(np.radians(SUPPORT_OVERHANG_DEG + tol_deg)))
     down = -(n @ b)
     suspect = np.nonzero(down > bar)[0]
 

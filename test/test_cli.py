@@ -280,20 +280,20 @@ def test_orientation_is_accepted_without_support_and_named():
 
 def test_support_defaults_and_names():
     args = _args("--support")
-    assert args.support and args.overhang == 60.0 and args.support_thickness == 1.0
-    assert os.path.basename(args.output) == "part-lattice-cc10t1.5-sup60.step"
-    both = _args("--orient", "30", "0", "0", "--support", "--overhang", "45")
-    assert os.path.basename(both.output) == "part-lattice-cc10t1.5-rotx30y0z0-sup45.step"
-    assert os.path.basename(both.log_path) == "part-lattice-cc10t1.5-rotx30y0z0-sup45.log"
+    # The thickness follows the strut size unless set.
+    assert args.support and args.support_thickness == 1.5
+    assert os.path.basename(args.output) == "part-lattice-cc10t1.5-sup.step"
+    assert args.as_dict()["support_thickness"] == "1.5 mm"
+    both = _args("--orient", "30", "0", "0", "--support", "--support-thickness", "2")
+    assert both.support_thickness == 2.0
+    assert os.path.basename(both.output) == "part-lattice-cc10t1.5-rotx30y0z0-sup.step"
+    assert os.path.basename(both.log_path) == "part-lattice-cc10t1.5-rotx30y0z0-sup.log"
 
 
 @pytest.mark.parametrize("extra", [
-    ("--overhang", "45"),
     ("--support-thickness", "2"),
     ("--orient", "10", "20"),
     ("--orient", "400", "0", "0"),
-    ("--support", "--overhang", "10"),
-    ("--support", "--overhang", "85"),
     ("--support", "--support-thickness", "0.1"),
 ])
 def test_bad_orientation_and_support_arguments_are_rejected(extra):
@@ -301,19 +301,21 @@ def test_bad_orientation_and_support_arguments_are_rejected(extra):
         _args(*extra)
 
 
-def test_overhang_warning_follows_the_configured_value():
-    """Evaluated from the input, against the lattice's own two angles."""
-    from latticegen2.cli import (
-        LATTICE_EDGE_ANGLE,
-        LATTICE_FACE_ANGLE,
-        overhang_warning,
-    )
+@pytest.mark.parametrize("extra", [("--overhang", "60"),
+                                   ("--support", "--overhang", "45")])
+def test_the_removed_overhang_flag_is_refused_by_name(extra):
+    """Not "unknown argument": a script written against the skeleton is told why."""
+    with pytest.raises(ParamError, match="--overhang has been removed"):
+        _args(*extra)
 
-    assert LATTICE_EDGE_ANGLE == pytest.approx(54.7356, abs=1e-4)
-    assert LATTICE_FACE_ANGLE == pytest.approx(35.2644, abs=1e-4)
-    assert overhang_warning(60.0) is None                 # the default is silent
-    assert overhang_warning(LATTICE_EDGE_ANGLE) is None
-    edges = overhang_warning(45.0)
-    assert "strut edges" in edges and "strut faces" not in edges
-    both = overhang_warning(30.0)
-    assert "strut edges" in both and "strut faces" in both
+
+def test_the_support_angles_are_the_rod_angle_and_sixty_degrees():
+    """Fixed, not parameters (specification.md §4.6); the rod angle is the
+    expression, not a typed decimal."""
+    import math
+
+    from latticegen2.cli import SUPPORT_OVERHANG_DEG, SUPPORT_START_DEG
+
+    assert SUPPORT_OVERHANG_DEG == math.degrees(math.asin(math.sqrt(2.0 / 3.0)))
+    assert SUPPORT_OVERHANG_DEG == pytest.approx(54.7356, abs=1e-4)
+    assert SUPPORT_START_DEG == 60.0

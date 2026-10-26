@@ -7,39 +7,38 @@ never executes — or even imports — any of it.
 Two stages, between ``simplify`` and ``validate``:
 
 ``overhang``
-    Find where the input body's inner surface overhangs (:mod:`.overhang`).
+    Find where the input body's inner surface needs support (:mod:`.overhang`).
 ``support``
     Hand the completed, unified lattice, the body and the overhangs to the
     generator (:mod:`.generate`) through the contract in :mod:`.contract`;
-    then merge the supports it returns with the lattice into the final
-    product, unify what changed and check that no lattice was lost
-    (:mod:`.merge`).
+    check that what comes back is support material that overlaps nothing, and
+    append it to the output beside the lattice (:mod:`.assemble`).
 
-``validate`` then gates the final product, in one pass.
+Supports are **not** merged with the lattice: they ship as separate bodies that
+share faces with it. ``validate`` then gates lattice and supports together.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from OCP.TopAbs import TopAbs_ShapeEnum
-
-from ..errors import ProcessingError
 from ..runlog import Timer
-from . import generate, merge, overhang
+from . import assemble, generate, overhang
 from .contract import SupportInput, SupportResult
+from .params import STEP, SUPPORT_START_DEG
 
 NOT_IMPLEMENTED_WARNING = (
-    "WARNING: no support algorithm is implemented yet; the output carries no "
-    "supports (docs/algorithm.md §14.3)."
+    "WARNING: the support generator returned no supports although the input "
+    "has inner overhangs; the output carries no supports (docs/algorithm.md "
+    "§14.3)."
 )
 """Printed by every run whose generator returns no supports while there were
 overhangs to support. ``tools/e2e.py`` reads it to report the support checks
 as skipped rather than failed."""
 
 NO_OVERHANG_NOTE = (
-    "note: no inner overhang exceeds the limit at this orientation; no support "
-    "was generated."
+    "note: no inner overhang exceeds 60 deg from vertical at this orientation; "
+    "no support was generated."
 )
 """Printed when the body has nothing to support. ``tools/e2e.py`` reads it too:
 coverage of nothing is not a check that can pass or fail."""
@@ -50,36 +49,27 @@ class SupportOutcome:
     """What the support stage hands back to the pipeline."""
 
     solids: list
-    """The final product, to be validated and written."""
+    """The final product, to be validated and written: the lattice solids as
+    they came in, followed by the support bodies."""
     lattice_volume: "float | None"
-    """The lattice's volume, measured before supports were merged in; ``None``
-    when nothing was merged, the output then being the lattice."""
+    """The lattice's volume; ``None`` when no support was generated, the output
+    then being the lattice."""
 
 
 def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
-                kept_nodes, pool, tmpdir, stats, unify) -> SupportOutcome:
-    """Run the two support stages on the completed lattice.
-
-    ``unify(solids) -> (solids, stats)`` is the pipeline's same-domain
-    unification, bound to the run's pool: the merged solids are compacted
-    exactly as the lattice was.
-    """
-    pitch = overhang.sample_pitch(lp.t, args.support_thickness)
+                kept_nodes, pool, tmpdir, stats) -> SupportOutcome:
+    """Run the two support stages on the completed lattice."""
     with Timer(rl, "overhang"):
-        samples = overhang.detect(body, lp.b, args.overhang, pitch,
-                                  report=rl.substage)
+        samples = overhang.detect(body, lp.b, STEP, report=rl.substage)
     kinds = samples.counts()
     rl.line(
-        f"overhangs: {len(samples)} sample(s) at {pitch:g} mm pitch over "
-        f"{samples.area:.1f} mm^2 of inner surface flatter than "
-        f"{args.overhang - overhang.MARGIN_DEG:g} deg from the build direction "
-        f"({kinds['edge']} on edges, {kinds['vertex']} on vertices); "
-        f"{int(samples.required.sum())} of them exceed the {args.overhang:g} deg "
-        f"limit itself and must be proven covered"
+        f"overhangs: {len(samples)} sample(s) at {STEP:g} mm over "
+        f"{samples.area:.1f} mm^2 of inner surface overhanging more than "
+        f"{SUPPORT_START_DEG:g} deg from vertical "
+        f"({kinds['edge']} on edges, {kinds['vertex']} on vertices)"
     )
     stats["overhang_area_mm2"] = round(samples.area, 2)
     stats["overhang_samples"] = len(samples)
-    stats["overhang_samples_required"] = int(samples.required.sum())
 
     lattice = list(lattice)
     with Timer(rl, "support"):
@@ -91,20 +81,19 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
             result = generate.generate(SupportInput(
                 lattice=tuple(lattice), body=body, body_path=body_path,
                 mesh=mesh, mesh_path=mesh_path, lp=lp,
-                overhang_deg=args.overhang, thickness_mm=args.support_thickness,
+                thickness_mm=args.support_thickness,
                 samples=samples, kept_nodes=kept_nodes, pool=pool,
                 workers=args.workers, tmpdir=tmpdir, report=rl.substage,
             ))
-        check_result(result, lattice)
-        merged = merge.merge_with_lattice(
-            lattice, list(result.supports), unify=unify, report=rl.substage)
+        assembled = assemble.assemble(lattice, list(result.supports), lp,
+                                      kept_nodes, report=rl.substage)
 
     for line in result.lines:
         rl.line(line)
     for note in result.notes:
         rl.always(note)
     stats.update(result.stats)
-    stats.update(merged.stats)
+    stats.update(assembled.stats)
     stats["support_solids_generated"] = len(result.supports)
     if len(samples) == 0:
         rl.always(NO_OVERHANG_NOTE)
@@ -112,33 +101,13 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
         rl.always(NOT_IMPLEMENTED_WARNING)
     else:
         rl.line(
-            f"supports: {len(result.supports)} solid(s), "
-            f"{merged.support_volume:.4f} mm^3 as generated, merged into "
-            f"{merged.stats['support_merge_groups']} group(s); output "
-            f"{merged.output_volume:.4f} mm^3 against "
-            f"{merged.lattice_volume:.4f} mm^3 of lattice"
+            f"supports: {len(result.supports)} separate bod(y/ies), "
+            f"{assembled.support_volume:.4f} mm^3, beside "
+            f"{assembled.lattice_volume:.4f} mm^3 of lattice"
         )
-    return SupportOutcome(merged.solids, merged.lattice_volume)
+    return SupportOutcome(assembled.solids, assembled.lattice_volume)
 
 
-def check_result(result: SupportResult, lattice: list) -> None:
-    """Fail (exit 4) if ``result`` breaks :class:`SupportResult`'s contract.
-
-    Only what the contract itself promises is checked here: support solids,
-    none of them the lattice itself. Whether the merge kept every bit of
-    lattice is :func:`.merge.check_volumes`'s question, and whether the
-    product is sound is ``validate``'s.
-    """
-    supports = list(result.supports)
-    for i, s in enumerate(supports):
-        if s is None or s.IsNull() or s.ShapeType() != TopAbs_ShapeEnum.TopAbs_SOLID:
-            raise ProcessingError(
-                f"The support generator returned something other than a solid "
-                f"at position {i} of {len(supports)} (docs/algorithm.md §14.2)."
-            )
-        if any(s.IsSame(l) for l in lattice):
-            raise ProcessingError(
-                f"The support generator returned a lattice solid as support "
-                f"at position {i} of {len(supports)}; it must return support "
-                f"material only (docs/algorithm.md §14.2)."
-            )
+# Kept importable from the package, where the stage's tests and the generator's
+# own checks look for it.
+check_result = assemble.check_result

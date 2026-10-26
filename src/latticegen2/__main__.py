@@ -166,12 +166,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             _watch_for_cancel(args.log_path)
         rl.header(args.as_dict())
-        if args.support:
-            from .cli import overhang_warning
-
-            warning = overhang_warning(args.overhang)
-            if warning:
-                rl.always(f"WARNING: {warning}")
         stats = run_pipeline(args, rl)
         rl.summary(args.as_dict(), stats)
         return finish(progress.OK, 0, None)

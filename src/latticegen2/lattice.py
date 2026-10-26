@@ -263,25 +263,26 @@ def format_param(x: float) -> str:
     return repr(float(x)).rstrip("0").rstrip(".")
 
 
-def variant_suffix(orient=_orient.IDENTITY, overhang: float | None = None,
+def variant_suffix(orient=_orient.IDENTITY, support: bool = False,
                    sep: str = "-") -> str:
     """The rotation and support tags a name carries, each only when it applies.
 
-    ``-rotx<rx>y<ry>z<rz>`` when any angle is non-zero, then ``-sup<overhang>``
-    when support is enabled (specification.md §4.5, §4.6). An unrotated,
-    unsupported run therefore keeps exactly the name it always had.
+    ``-rotx<rx>y<ry>z<rz>`` when any angle is non-zero, then ``-sup`` when
+    support is enabled (specification.md §4.5, §4.6). An unrotated, unsupported
+    run therefore keeps exactly the name it always had. The support tag carries
+    no angle: neither of the support angles is a parameter.
     """
     out = ""
     if _orient.is_rotated(orient):
         out += (f"{sep}rotx{format_param(orient[0])}y{format_param(orient[1])}"
                 f"z{format_param(orient[2])}")
-    if overhang is not None:
-        out += f"{sep}sup{format_param(overhang)}"
+    if support:
+        out += f"{sep}sup"
     return out
 
 
 def part_name(input_path: str, cc: float, t: float, orient=_orient.IDENTITY,
-              overhang: float | None = None) -> str:
+              support: bool = False) -> str:
     """STEP part name ``<input_stem>+lattice+cc<cc>+t<t>`` (specification.md §5).
 
     It carries the same four components as the default output file name, in the
@@ -295,4 +296,4 @@ def part_name(input_path: str, cc: float, t: float, orient=_orient.IDENTITY,
 
     stem = os.path.splitext(os.path.basename(input_path))[0]
     return (f"{stem}+lattice+cc{format_param(cc)}+t{format_param(t)}"
-            + variant_suffix(orient, overhang, "+"))
+            + variant_suffix(orient, support, "+"))

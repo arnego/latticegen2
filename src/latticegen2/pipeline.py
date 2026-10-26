@@ -649,21 +649,19 @@ def _run_with_pool(
         # its code is imported (specification.md §4.6): a run without
         # `--support` never loads `latticegen2.support` at all. It runs on the
         # completed lattice, unified just above, and hands back the final
-        # product -- supports merged into the lattice and unified again -- so
-        # `validate` gates the two together in one pass (docs/algorithm.md
-        # §14.2).
+        # product -- the lattice unchanged, and the supports beside it as
+        # separate bodies -- so `validate` gates the two together in one pass
+        # (docs/algorithm.md §14.2).
         from .support import run_support
 
         outcome = run_support(
             args, rl, lp, body, body_path, mesh, mesh_path, result_solids,
             _kept_nodes(kept), pool, tmpdir, stats,
-            unify=lambda solids: _unify(
-                solids, pool=pool, tmpdir=tmpdir, report=rl.substage),
         )
         result_solids, lattice_volume = outcome.solids, outcome.lattice_volume
         if lattice_volume is not None:
-            # The merge changed the product, so the counts `simplify` recorded
-            # describe the lattice alone and are retaken on what ships.
+            # Supports were added, so the counts `simplify` recorded describe
+            # the lattice alone and are retaken on what ships.
             counts = [occ.count_subshapes(s) for s in result_solids]
             stats["output_faces"] = sum(f for f, _ in counts)
             stats["output_edges"] = sum(e for _, e in counts)
@@ -688,9 +686,8 @@ def _run_with_pool(
         _check_export_truth(rl, result_solids, tmpdir, stats, seam_gap, args.t)
     rl.line(f"validity: all {len(result_solids)} solid(s) pass BRepCheck_Analyzer")
     stats["solids_written"] = len(result_solids)
-    # What reaches the end product, split by origin. The support figure is the
-    # volume supports *add*, net of where they overlap the lattice they were
-    # merged into -- not the volume the generator built.
+    # What reaches the end product, split by origin. Supports never overlap
+    # the lattice, so the support figure is the support bodies' own volume.
     if lattice_volume is None:
         lattice_volume = total_volume
     stats["lattice_volume_mm3"] = round(lattice_volume, 4)
@@ -698,7 +695,7 @@ def _run_with_pool(
         stats["support_volume_mm3"] = round(total_volume - lattice_volume, 4)
     stats["output_volume_mm3"] = round(total_volume, 4)
 
-    name = part_name(args.input, args.cc, args.t, args.orient, args.name_overhang)
+    name = part_name(args.input, args.cc, args.t, args.orient, args.support)
     with Timer(rl, "export"):
         # One opaque `STEPControl_Writer` call over the whole result, so there is
         # nothing to count — 10.7 % of the rehearsal's clock with no fraction to

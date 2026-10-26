@@ -423,6 +423,7 @@ def build(body, b: np.ndarray, step: float = STEP, report=None) -> RegionMesh:
     b = np.asarray(b, dtype=float)
     bar = SIN_START + REQUIRED_SLACK
     all_p, all_n, all_tris, all_face, all_corner_f, all_uv = [], [], [], [], [], []
+    all_point_face = []
     iso_p, iso_e = [], []
     offset = 0
     faces = occ.faces(body)
@@ -474,6 +475,7 @@ def build(body, b: np.ndarray, step: float = STEP, report=None) -> RegionMesh:
         all_face.append(np.full(len(tris), fi, dtype=np.int64))
         all_corner_f.append(f[tris])
         all_uv.append(uvs[tris])
+        all_point_face.append(np.full(len(pts), fi, dtype=np.int64))
         offset += len(pts)
     if report is not None:
         report("refining overhang faces", len(faces), len(faces))
@@ -488,13 +490,26 @@ def build(body, b: np.ndarray, step: float = STEP, report=None) -> RegionMesh:
     tri_face = np.concatenate(all_face)
     corner_f = np.vstack(all_corner_f)
     tri_uv = np.vstack(all_uv)
-    keys = np.round(P, WELD_DECIMALS)
+    # Welded within a smooth face group only. Across a crease -- the edge
+    # between Hole-block-chamfered's flat and 15 deg roof facets -- the mesh
+    # stays split, so a region and every cell of it lie on one smooth surface:
+    # a cell's ceiling curve is fitted by one cubic, and across a crease that is
+    # a chord dipping into the body under the bent roof. Copies of a crease
+    # point share one averaged normal, so the cells either side cast the same
+    # ray from it and meet face to face.
+    group = _smooth_groups(body)
+    point_face = np.concatenate(all_point_face)
+    pos = np.round(P, WELD_DECIMALS)
+    _up, pos_inv = np.unique(pos, axis=0, return_inverse=True)
+    pos_inv = pos_inv.reshape(-1)
+    pos_normal = np.zeros((pos_inv.max() + 1, 3))
+    np.add.at(pos_normal, pos_inv, N)
+    pos_normal /= np.linalg.norm(pos_normal, axis=1, keepdims=True)
+    keys = np.column_stack([pos, group[point_face].astype(float)])
     _u, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
     inverse = inverse.reshape(-1)
     verts = P[first]
-    normals = np.zeros_like(verts)
-    np.add.at(normals, inverse, N)
-    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+    normals = pos_normal[pos_inv[first]]
     tris = inverse[tris]
     keep = (tris[:, 0] != tris[:, 1]) & (tris[:, 1] != tris[:, 2]) & (tris[:, 2] != tris[:, 0])
     tris, tri_face, corner_f, tri_uv = tris[keep], tri_face[keep], corner_f[keep], tri_uv[keep]
@@ -506,6 +521,60 @@ def build(body, b: np.ndarray, step: float = STEP, report=None) -> RegionMesh:
     return RegionMesh(verts, normals, tris, tri_face, required, vert_required,
                       np.asarray(iso_p) if iso_p else np.empty((0, 3)),
                       iso_edges, step, tri_uv, faces)
+
+
+SMOOTH_DEG = 1.0
+"""Degrees. Faces meeting at less than this are one smooth surface to a region."""
+
+
+def _smooth_groups(body) -> np.ndarray:
+    """Group per face of ``body``: faces joined across edges where they meet smoothly."""
+    from OCP.TopExp import TopExp
+    from OCP.TopTools import (TopTools_IndexedDataMapOfShapeListOfShape,
+                              TopTools_IndexedMapOfShape)
+    from OCP.gp import gp_Vec
+
+    faces = occ.faces(body)
+    fmap = TopTools_IndexedMapOfShape()
+    for f in faces:
+        fmap.Add(f)
+    parent = list(range(len(faces)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owners = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(body, TopAbs_ShapeEnum.TopAbs_EDGE,
+                                   TopAbs_ShapeEnum.TopAbs_FACE, owners)
+    for i in range(1, owners.Extent() + 1):
+        edge = TopoDS.Edge_s(owners.FindKey(i))
+        if BRep_Tool.Degenerated_s(edge):
+            continue
+        adj = [TopoDS.Face_s(f) for f in owners.FindFromIndex(i)]
+        if len(adj) != 2:
+            continue
+        ia, ib = fmap.FindIndex(adj[0]) - 1, fmap.FindIndex(adj[1]) - 1
+        if ia < 0 or ib < 0 or find(ia) == find(ib):
+            continue
+        curve = BRepAdaptor_Curve(edge)
+        t = 0.5 * (curve.FirstParameter() + curve.LastParameter())
+        normals = []
+        for f in adj:
+            c2d = BRep_Tool.CurveOnSurface_s(edge, f, 0.0, 0.0)
+            if c2d is None:
+                break
+            uv = c2d.Value(t)
+            _p, n = _SurfaceNormals(f).at(uv.X(), uv.Y())
+            if n is None:
+                break
+            normals.append(n)
+        if len(normals) == 2 and np.degrees(np.arccos(
+                np.clip(float(normals[0] @ normals[1]), -1.0, 1.0))) < SMOOTH_DEG:
+            parent[max(find(ia), find(ib))] = min(find(ia), find(ib))
+    return np.array([find(i) for i in range(len(faces))], dtype=np.int64)
 
 
 def _edge_table(tris: np.ndarray):

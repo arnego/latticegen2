@@ -2532,7 +2532,7 @@ flowchart TD
     L -->|pass| N[S5 pockets: split the free space in the support envelope]
     N -->|sealed and new| O[the sealed piece is the fill, shipped as a support body]
     O --> P
-    N -->|none| P[S6 neighbouring cells checked for overlap; an overlapping pair is fused]
+    N -->|none| P[S6 neighbouring cells checked for overlap; the later of a pair is cut by the earlier]
     P --> Q[SupportResult: one solid per cell and per pocket fill]
 ```
 
@@ -2623,22 +2623,48 @@ fused across it.
 1. The perimeter is the cell's boundary: the shared S3c curve along a parting,
    the fitted 60° isocline along the region's edge, the mesh boundary against
    the body's exterior. Its rays are `(x_i, d_i)`, `d_i = y_i − x_i`.
-2. A periodic degree-3 B-spline top curve `T(s)` is fitted through
-   `x_i − λ·d̂_i` (λ = 0.2 mm, up the ray into the shell), and the ray field
-   `D(s)` is fitted **in the same basis**, each control vector clamped into the
-   closed `θ`-cone and lengthened by the overshoot
-   `δ = max(t_s/2, 2d, 0.2 mm)`. The bottom curve is `T + D`.
-3. The two curves are lofted as a ruled solid. Every ruling `D(s)` is a convex
-   combination of control vectors inside a convex cone, so **every side face is
-   self-supporting by construction** — at `θ` or steeper — and a cell has one
-   or a few side faces however long its perimeter is.
+2. The perimeter is cut into **runs** at triple points and wherever its kind
+   changes. Each run's ceiling curve is fitted **once**, with every ray field
+   along it in view, so the two cells sharing a parting or a cut build on the
+   same curve object. A run is fitted in **spans of one cubic each** (four
+   poles, ends interpolated), halved until the span is within
+   `SPAN_FIT_TOL` (0.2 mm; 0.05 mm along an exempt edge) of its points; the
+   worst fit is reported. The span's ray field is smoothed **in the same
+   basis** to within 0.3 mm, each control vector clamped into the closed
+   `θ`-cone and lengthened by the overshoot `δ = max(t_s/2, 2d, 0.2 mm)`.
+
+   One cubic per span is a measurement, not a preference: on
+   `Hole-block-basic`, bands of one B-spline per run (13 to 28 poles) left 16
+   of 20 cells' trims empty or invalid, splitting runs to 0.01 mm (302 spans)
+   left 13, and six-pole spans failed as often. The intersection with the body
+   is reliable on simple bands and on nothing else measured.
+3. Each span becomes a ruled band `X(s) + v·E(s)`, top row lifted `λ` = 0.2 mm
+   up its rays into the shell. Every ruling is a convex combination of control
+   vectors inside a convex cone, so **every side face is self-supporting by
+   construction** — at `θ` or steeper. The bands are closed above by a fan to
+   an apex over the ceiling, and below by a fan to the first apex that keeps
+   the fan out of the body — the bottom curve's centre moved `δ` along the mean
+   ray, the centre itself, the targets' centre moved `δ` along the mean ray,
+   the centre moved `δ` straight down — or, when none does, by a plane.
 4. The loft is intersected with the body and cut by the lattice junctions near
-   it (`J` instanced at the kept nodes, §3.2). Faces against walls and roofs
-   therefore lie on the input's own surfaces, and faces against struts on the
-   lattice's own planes: shared faces. The parts of the loft above the roof and
-   below a strut fall outside the body or inside the lattice and are gone; of
-   what remains, the piece holding the cell's seed point is kept and anything
-   else is construction debris.
+   it (`J` instanced at the kept nodes, §3.2), with fuzzy values 0, 1e-5,
+   1e-4, 1e-3 mm in turn. Faces against walls and roofs therefore lie on the
+   input's own surfaces, and faces against struts on the lattice's own planes:
+   shared faces. The parts of the loft above the roof and below a strut fall
+   outside the body or inside the lattice and are gone; of what remains, the
+   piece holding the cell's seed point is kept and anything else is
+   construction debris.
+
+   **Where every fuzzy value fails, the trim is done face by face.** Each loft
+   face is intersected with the body and cut by the lattice, each body and
+   lattice face within the loft's box is intersected with the loft, and the
+   pieces are sewn at 1e-5 up to 1e-2 mm; the shell holding the seed is the
+   support. Measured on `Hole-block-chamfered`: a crown around a tube whose
+   solid intersection came back empty at every fuzzy value, while each face
+   intersected correctly on its own; the two separate face booleans placed the
+   band-to-tube curve up to ~0.01 mm apart, a 0.09 mm lens that sewing at
+   1e-2 mm closes into a valid 119.5 mm³ body — the volume the fuzzy boolean
+   reports too.
 5. **Cell gates**, each measured with something other than the boolean that
    made the cell (§7.2):
    * closed and `BRepCheck_Analyzer`-valid;
@@ -2675,10 +2701,21 @@ sealed piece (gate G5). A job whose envelope holds too many tools is tiled;
 since a pocket touches a support, a tile boundary need only avoid cutting
 through a cell's envelope.
 
-**S6 — Overlaps.** Cells whose boxes touch are intersected pairwise; a pair
-overlapping by more than `SUPPORT_OVERLAP_TOL` is fused into one body, with the
-fuse checked by volume as §7.1's is, and counted. First-contact rays from
-neighbouring vertices can cross, if rarely.
+**S6 — Overlaps.** Cells whose boxes touch are intersected pairwise. Of a pair
+sharing more than `SUPPORT_OVERLAP_TOL` (1e-6 mm³), the later is **cut by the
+earlier**, so the shared volume stays in exactly one body: their union — and
+so the coverage — is unchanged, and the new face lies on the other body's side
+face, which is self-supporting. The cut must remove the measured overlap to
+within 1e-5 of the cut body's volume and leave valid solids; a pair it fails on
+is fused instead, and a pair neither resolves fails the run (exit 4).
+
+Two things leave neighbours sharing volume. First-contact rays can cross —
+0.11 mm³ twice on `Hole-block-chamfered`. And a cell's edge along the exempt
+band, fitted through the mesh's staircase, can swing across the shared run
+near the triple point where both end: slivers of 1e-5 to 3e-4 mm³, one to
+seven microns thick, on every wall cell of the test chamber. Fusing was tried
+first and is the wrong tool for the second: the slivers chain the cells
+together, and chains of 8 and 16 cells fused into nothing valid.
 
 **What a support owes the rest of the pipeline**, and what
 `tools/verify_geometry.py` asks of the written file (specification.md §6.2):
@@ -2702,3 +2739,14 @@ imported from `generate.py`, never from `pipeline.py`, so a run without
 without a lattice by `tools/support_dev.py`, a development harness for parts
 whose only anchors are their own surfaces (`test/Hole-block-*.STEP`); the
 product itself always generates the lattice.
+
+**Built so far (Phases 2–4, no lattice):** S1, S3a–c, S4 and S6. Of S4's
+gates, validity, `OutsideProbe`, self-support of the free faces and coverage
+run (coverage with 0.25 mm slack for the span fit, `build.COVER_SLACK`); a
+failing cell is rebuilt at twice the overshoot twice, then fails the run.
+**Still to come:** the face-classification and thickness gates and the split
+rung of the ladder (Phase 4 follow-up), S5 pockets (Phase 5), S2's pool
+dispatch (Phase 7), and lattice as an anchor and cutter (Phase 6). Until
+Phase 6, `generate` returns no supports whenever it is given a lattice — which
+the product always does — so a supported run still prints
+`NOT_IMPLEMENTED_WARNING` and e2e still reports the support checks as `SKIP`.

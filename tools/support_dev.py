@@ -9,6 +9,8 @@ anchors are their own surfaces -- `test/Hole-block-*.STEP` at `--orient 90 0 0`
                          the region boundary loops as polylines
 * ``<out>-cells.step``   one body per cell: its perimeter loops as polylines and
                          the cell's own rays from them
+* ``<out>-supports.step`` the support bodies, one per cell
+* ``<out>-input.step``   the input body, for context beside them
 * ``<out>-summary.log``  counts, areas, ray drops and lengths
 
 Usage::
@@ -143,6 +145,22 @@ def main(argv=None) -> int:
     occ.write_step(occ.compound(cell_shapes), args.output + "-cells.step",
                    "support-dev-cells")
     say(f"wrote {args.output}-rays.step and -cells.step ({time.time() - t0:.1f} s total)")
+
+    t5 = time.time()
+    from latticegen2.support.generate import supports_for
+
+    solids, gstats, glines = supports_for(body, mesh, [], np.empty((0, 3), dtype=np.int64),
+                                          lp, thickness)
+    for line in glines:
+        say(line)
+    vols = [occ.volume(s) for s in solids]
+    say(f"supports: {len(solids)} bodies, {sum(vols):.2f} mm^3 "
+        f"(min {min(vols):.2f}, max {max(vols):.2f}), faces per body "
+        f"max {max(len(occ.faces(s)) for s in solids)}, {gstats} "
+        f"({time.time() - t5:.1f} s)")
+    occ.write_step(occ.compound(solids), args.output + "-supports.step", "supports")
+    occ.write_step(body, args.output + "-input.step", "input")
+    say(f"wrote {args.output}-supports.step and -input.step")
     with open(args.output + "-summary.log", "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     return 0

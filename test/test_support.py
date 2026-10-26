@@ -237,7 +237,10 @@ def box_step(tmp_path_factory):
 def _run(args):
     main = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "src", "main.py")
-    return subprocess.run([sys.executable, main, *args], capture_output=True, text=True)
+    # The run writes UTF-8 whatever the console's code page; decode it as such,
+    # or the warning's section sign arrives as two characters.
+    return subprocess.run([sys.executable, main, *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
 
 
 def test_a_supported_box_runs_through_the_stub_and_writes_the_lattice(box_step, tmp_path):

@@ -242,7 +242,7 @@ PAIRS_MAX = 400_000
 
 
 def first_contact(apex: np.ndarray, b: np.ndarray, obstacles: Obstacles,
-                  start: float = 0.5, report=None) -> Rays:
+                  start: float = 0.5, report=None, allow_miss: bool = False) -> Rays:
     """The first-contact ray from every row of ``apex`` (docs/algorithm.md §14.3 S3a).
 
     Apexes are bucketed in cubes of :data:`BUCKET`; a bucket shares one index
@@ -314,6 +314,13 @@ def first_contact(apex: np.ndarray, b: np.ndarray, obstacles: Obstacles,
                 key_[a_] = obstacles.key[it[win]]
         settled = np.isfinite(drop[pending])
         rest = pending[~settled]
+        if allow_miss and len(rest):
+            # A cast restricted to one anchor may legitimately find nothing:
+            # from beyond a parting, the other cell's anchor need not be in the
+            # cone at all. Those apexes keep an infinite drop and no target.
+            gone = rest[bound[rest] > limit]
+            target[gone] = np.nan
+            rest = rest[bound[rest] <= limit]
         if len(rest) and (bound[rest] > limit).any():
             x = apex[rest[np.argmax(bound[rest])]]
             raise ProcessingError(

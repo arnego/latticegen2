@@ -116,7 +116,7 @@ class _Caster:
         if not len(points):
             return np.empty((0, 3)), np.empty(0), np.empty(0)
         got = first_contact(np.asarray(points) - APEX_NUDGE * np.asarray(normals),
-                            self.b, sub)
+                            self.b, sub, allow_miss=True)
         return got.target, got.drop, got.length
 
     def full(self, points, normals):
@@ -146,9 +146,64 @@ def _bary(k_i: int, k_j: int, s: np.ndarray) -> np.ndarray:
 # --- the partition ------------------------------------------------------------
 
 
+def _split(rmesh, labels, l, b):
+    """Cut cell ``l`` in two by a vertical plane across its long axis."""
+    mine = np.nonzero(labels == l)[0]
+    P = rmesh.verts[mine]
+    c = P.mean(axis=0)
+    Q = P - c
+    Q -= np.outer(Q @ b, b)
+    _s, _v, vt = np.linalg.svd(Q, full_matrices=False)
+    m = vt[0] - (vt[0] @ b) * b
+    m /= np.linalg.norm(m)
+    side = (P - c) @ m < 0.0
+    new = int(labels.max()) + 1
+    labels[mine[side]] = new
+    return new, (c, m)
+
+
+def _record_split(split_planes: dict, l: int, new: int, plane) -> None:
+    """Note that cell ``new`` was cut from ``l`` along ``plane``.
+
+    A cut cell's earlier cuts stay where they were, so each of ``l``'s existing
+    planes now also bounds ``new``: without that, a boundary between two pieces
+    of a twice-split cell found no plane, fell back to the edge midpoints and
+    zig-zagged by 0.4 mm on the chamber fixture.
+    """
+    for (a, c), pl in list(split_planes.items()):
+        if a == l or c == l:
+            other = c if a == l else a
+            split_planes[(min(other, new), max(other, new))] = pl
+    split_planes[(min(l, new), max(l, new))] = plane
+
+
+def _fan_enters_body(P, T, overshoot, inside_body) -> bool:
+    """Would a cell landing on targets ``T`` from ``P`` close its loft through the body?
+
+    The prediction of :func:`.build.loft`'s own check, from the cell's vertex
+    rays rather than its perimeter: bottom points ``overshoot`` past the
+    targets, an apex past their mean, and a few points along each segment.
+    """
+    D = T - P
+    u = D / np.maximum(np.linalg.norm(D, axis=1, keepdims=True), 1e-12)
+    B = T + overshoot * u
+    if len(B) > 400:
+        B = B[np.linspace(0, len(B) - 1, 400).astype(int)]
+    mean = u.mean(axis=0)
+    apex = B.mean(axis=0) + overshoot * mean / max(np.linalg.norm(mean), 1e-12)
+    probe = np.vstack([B + f * (apex - B) for f in (0.25, 0.5, 0.75)])
+    return bool(inside_body(probe).any())
+
+
 def partition(rmesh, region, rays, obstacles, b, thickness: float,
-              step: float = STEP, report=None) -> Partition:
-    """Cells of one overhang ``region``, from ``rays`` cast at ``region.verts``."""
+              step: float = STEP, report=None, inside_body=None,
+              overshoot: float = 0.0) -> Partition:
+    """Cells of one overhang ``region``, from ``rays`` cast at ``region.verts``.
+
+    With ``inside_body`` given, a cell whose loft would close through the body
+    -- one landing on a wall curving away from it, like a round chamber's wall
+    seen from inside -- is split across its long axis until it would not.
+    """
     V = len(rmesh.verts)
     b = np.asarray(b, dtype=float)
     caster = _Caster(obstacles, b)
@@ -215,6 +270,8 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
             continue
         other = max(nb, key=nb.get)
         t2, d2, l2 = caster(rmesh.verts[mine], rmesh.normals[mine], cell_key[other])
+        if not np.isfinite(d2).all():
+            continue                       # the neighbour's anchor is out of reach
         # Refused where the re-cast ray runs through something before its
         # target: then the neighbour's anchor is not what that ray reaches.
         tf, df, lf = caster.full(rmesh.verts[mine], rmesh.normals[mine])
@@ -233,20 +290,9 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
         if not nested:
             break
         for l in nested:
-            mine = np.nonzero(labels == l)[0]
-            P = rmesh.verts[mine]
-            c = P.mean(axis=0)
-            Q = P - c
-            Q -= np.outer(Q @ b, b)
-            _s, _v, vt = np.linalg.svd(Q, full_matrices=False)
-            axis = vt[0]
-            m = np.cross(b, axis)
-            m /= np.linalg.norm(m)
-            side = (P - c) @ m < 0.0
-            new = int(labels.max()) + 1
-            labels[mine[side]] = new
+            new, plane = _split(rmesh, labels, l, b)
             cell_key[new] = cell_key[l]
-            split_planes[(min(l, new), max(l, new))] = (c, m)
+            _record_split(split_planes, l, new, plane)
             splits += 1
     else:
         nested = _nested_cells(rmesh, tris, labels)
@@ -260,8 +306,24 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
                 f"(docs/algorithm.md §14.3 S3b)."
             )
 
+    if inside_body is not None:
+        for _round in range(SPLIT_ROUNDS_MAX):
+            bad = []
+            for l in np.unique(labels[labels >= 0]):
+                mine = np.nonzero(labels == l)[0]
+                if len(mine) >= 8 and _fan_enters_body(
+                        rmesh.verts[mine], tgt[mine], overshoot, inside_body):
+                    bad.append(int(l))
+            if not bad:
+                break
+            for l in bad:
+                new, plane = _split(rmesh, labels, l, b)
+                cell_key[new] = cell_key[l]
+                _record_split(split_planes, l, new, plane)
+                splits += 1
+
     cells = _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt,
-                        caster, split_planes, b)
+                        caster, split_planes, b, region.tris)
     stats = {"cells": len(cells), "cells_folded": folded, "cells_split": splits,
              "exempt_vertices": int(exempt[rv].sum())}
     return Partition(labels, cells, stats)
@@ -424,7 +486,7 @@ def _nested_cells(rmesh, tris, labels) -> list:
 
 
 def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster,
-                split_planes, b):
+                split_planes, b, tri_global):
     """Exact crossings, triple points and rays; then each cell's loops."""
     etri = _edge_triangles(tris)
     # Crossing edges, grouped by kind.
@@ -444,7 +506,11 @@ def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster
             exempt_edges.append((p, q, t, kp, kq))
 
     def surface(edges, s):
-        tt = np.array([x[2] for x in edges], dtype=np.int64)
+        # Triangle indices here are the region's own; the mesh is the whole
+        # body's. They agreed while a part had one region, and stopped agreeing
+        # on Hole-block-chamfered, whose crease splits it in two: parting points
+        # were evaluated on the wrong facet, 40 mm away.
+        tt = tri_global[np.array([x[2] for x in edges], dtype=np.int64)]
         bary = np.stack([_bary(x[3], x[4], np.array([si]))[0] for x, si in zip(edges, s)])
         return rmesh.surface_points(tt, bary)
 
@@ -474,7 +540,9 @@ def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster
             _ta, da, _la = cast_groups(pts, nrm, kA)
             _tb, db, _lb = cast_groups(pts, nrm, kB)
             # At p (A's own vertex) A is reached first: f = dA - dB <= 0 there.
-            left = (da - db) <= 0.0
+            # Where neither anchor is in reach both drops are infinite; that is
+            # A's side, as at p itself, rather than a NaN steering the search.
+            left = ~(da > db)
             lo = np.where(left, mid, lo)
             hi = np.where(left, hi, mid)
         s = 0.5 * (lo + hi)
@@ -536,13 +604,20 @@ def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster
         ps = [xs[(min(p, q), max(p, q))] for p, q in ((a, b_), (b_, c), (c, a))]
         P = np.mean([x[0] for x in ps], axis=0)
         bary_guess = np.full((1, 3), 1.0 / 3.0)
-        _pp, nn = rmesh.surface_points(np.array([t]), bary_guess)
+        _pp, nn = rmesh.surface_points(np.array([tri_global[t]]), bary_guess)
         targets = {}
         for l in lab:
             if l >= 0:
                 tt, _d, _l = caster(P[None], nn, cell_key[l])
                 targets[l] = tt[0]
         centres[t] = (P, nn[0], targets)
+
+    def own_ray(l, P):
+        """The ray of cell ``l``'s vertex nearest ``P``: for a perimeter point
+        from which a cast restricted to the cell's anchor found nothing."""
+        mine = np.nonzero(labels == l)[0]
+        k = mine[np.argmin(np.linalg.norm(rmesh.verts[mine] - P, axis=1))]
+        return P + (tgt[k] - rmesh.verts[k])
 
     segs = _segments(tris, labels, None, None)
     cells = []
@@ -566,9 +641,9 @@ def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster
                     P, N, tmap, kd = xs[(pid[1], pid[2])]
                     pts.append(P)
                     nrm.append(N)
-                    tg.append(tmap[l])
+                    tg.append(tmap[l] if np.isfinite(tmap[l]).all() else own_ray(l, P))
                     kind.append(kd)
-                    if kd == PARTING:
+                    if kd == PARTING and all(np.isfinite(v_).all() for v_ in tmap.values()):
                         other = [v_ for k_, v_ in tmap.items() if k_ != l][0]
                         u1, u2 = tmap[l] - P, other - P
                         ang = np.degrees(np.arccos(np.clip(
@@ -579,7 +654,7 @@ def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster
                     P, N, tmap = centres[pid[1]]
                     pts.append(P)
                     nrm.append(N)
-                    tg.append(tmap[l])
+                    tg.append(tmap[l] if np.isfinite(tmap[l]).all() else own_ray(l, P))
                     kind.append(TRIPLE)
                 keys.append(pid)
             loops.append(Loop(np.array(pts), np.array(nrm), np.array(tg),

@@ -89,7 +89,13 @@ def test_a_witness_the_cut_disagrees_with_fails_loudly(cup, monkeypatch):
 def test_the_generator_seals_the_cup_and_fills_it(cup):
     """Rays from above the cup's mouth converge on its rim, so that patch is a
     converging cell of its own, closed by the cone of its rays (§14.3 S3b, S4);
-    it seals the cup, which S5 fills."""
+    it seals the cup, which S5 fills. The fill shares its top with the lid and
+    is one body with it, the lid with the ledge's cells it borders by folds,
+    and those with each other along their cuts (§14.3 S6)."""
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.TopAbs import TopAbs_State
+    from OCP.gp import gp_Pnt
+
     from latticegen2 import occ
     from latticegen2.support import assemble
     from latticegen2.support.generate import supports_for
@@ -97,18 +103,20 @@ def test_the_generator_seals_the_cup_and_fills_it(cup):
     body, mesh, lp = cup
     solids, stats, lines = supports_for(body, mesh, [], NO_NODES, lp, 1.5)
     assert "'converging_cells': 1" in lines[0]
-    assert stats["support_pockets"] >= 1
-    assert len(solids) == stats["support_cells"] + stats["support_pockets"]
-    fills = solids[stats["support_cells"]:]
-    cup_fill = [f for f in fills if np.hypot(*occ.centroid(f)[:2]) < 0.1
-                and occ.centroid(f)[2] < TOP]
-    assert len(cup_fill) == 1
-    # The cup, up to the lid's cone, which meets the ring a little below its top.
-    v = occ.volume(cup_fill[0])
-    assert np.pi * R1 ** 2 * (TOP - 1.0) <= v <= np.pi * R1 ** 2 * H
     # Nothing else is sealed: the wall cells reach the roof's crease, so no
     # ring is left there for S5 to fill (§14.3 S3d).
     assert stats["support_pockets"] == 1
+    # The cup, up to the lid's cone, which meets the ring a little below its top.
+    v = stats["support_pocket_volume_mm3"]
+    assert np.pi * R1 ** 2 * (TOP - 1.0) <= v <= np.pi * R1 ** 2 * H
+    # Two bodies: the wall's ring of cells, and the ledge, lid and fill.
+    assert len(solids) == stats["support_bodies"] == 2
+    held = []
+    for s in solids:
+        c = BRepClass3d_SolidClassifier(s)
+        c.Perform(gp_Pnt(0.0, 0.0, TOP / 2.0), 1e-7)
+        held.append(c.State() == TopAbs_State.TopAbs_IN)
+    assert sum(held) == 1
     assert all(occ.is_valid(s) for s in solids)
     assemble.assemble([], solids, lp, NO_NODES)
 
@@ -130,8 +138,7 @@ def test_supports_on_the_ledge_lean_in_and_keep_a_footing(cup):
     region = lines[0]
     lean = float(region.split("'lean_max_deg': ")[1].split("}")[0].split(",")[0])
     assert 30.0 < lean <= SUPPORT_OVERHANG_DEG + 1e-6
-    cells = solids[:stats["support_cells"]]
-    tests = [BRepClass3d_SolidClassifier(s) for s in cells]
+    tests = [BRepClass3d_SolidClassifier(s) for s in solids]
 
     def held(p):
         for t in tests:

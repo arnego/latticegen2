@@ -24,8 +24,9 @@ owes that chain:
   angle :data:`.params.SUPPORT_OVERHANG_DEG` from ``inp.lp.b`` —
   ``verify_geometry.self_supporting``.
 * **Thickness.** No free-standing member thinner than ``inp.thickness_mm``.
-* **Separate bodies.** One body per cell, sharing faces with the lattice and
-  the input's surfaces and overlapping nothing. Support bodies are exempt from
+* **Separate bodies.** Separate from the lattice, sharing faces with it and
+  with the input's surfaces and overlapping nothing; supports sharing a face
+  or volume with each other are one body (:mod:`.join`). Support bodies are exempt from
   the floating-body rule (specification.md §5).
 * **Valid, writable solids.** Closed and ``BRepCheck_Analyzer``-valid, and
   surviving a STEP round trip, which ``validate`` checks.
@@ -61,7 +62,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     ``tools/support_dev.py``, which calls it with no lattice.
     """
     from .. import occ
-    from . import build, cells, lean, obstacles, rays, regions, voids
+    from . import build, cells, join, lean, obstacles, rays, regions, voids
     from .assemble import _LocalLattice
 
     stats = {}
@@ -77,10 +78,8 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     inside_body = gates.inside_body
     delta = overshoot_for(thickness, mesh.deviation)
     solids = []
-    tags = []
     n_cells = 0
     retried = 0
-    region_lines = []
     for k, reg in enumerate(regs):
         apex = rmesh.verts[reg.verts] - rays.APEX_NUDGE * rmesh.normals[reg.verts]
         got = rays.first_contact(apex, lp.b, obs, report=report)
@@ -119,118 +118,37 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                     f"(docs/algorithm.md §14.3 S4)."
                 )
             solids.append(built.solid)
-            tags.append(k)
-        region_lines.append((k, reg.area, len(part.cells), part.stats))
+        lines.append(f"support region {k}: {reg.area:.1f} mm^2, {len(part.cells)} "
+                     f"cell(s), {part.stats}")
     stats["support_cells"] = n_cells
     stats["support_span_fit_mm"] = round(build.worst_span_fit(reset=True), 4)
     stats["support_cells_retried"] = retried
-    # S6 before S5: pockets are found by cutting the cells out of the free
+    # S6 before S5: pockets are found by cutting the supports out of the free
     # space, which only removes their volume exactly once they are disjoint.
-    solids, tags, resolved = _resolve_overlaps(solids, tags)
-    stats["support_overlaps_resolved"] = resolved
+    if report is not None:
+        report("joining supports", 0, None)
+    bodies, jstats = join.join(solids)
+    stats.update(jstats)
+    # S5 per group of touching bodies: a region's cells always touch, and a
+    # body joined across two regions takes both into one envelope.
+    out = []
     fills = []
-    for k, area, n, pstats in region_lines:
+    gs = join.groups(bodies)
+    for k, g in enumerate(gs):
         if report is not None:
-            report("looking for sealed pockets", k, len(regs))
-        mine = [s for s, t in zip(solids, tags) if t == k]
+            report("looking for sealed pockets", k, len(gs))
+        mine = [bodies[i] for i in g]
         pockets = voids.find_pockets(body, mesh, mine, local.near, thickness, lp.b)
         fills += pockets.fills
-        lines.append(f"support region {k}: {area:.1f} mm^2, {n} cell(s), "
-                     f"{len(pockets.fills)} pocket(s) filled, {pstats}")
+        if pockets.fills:
+            # A fill's faces lie on the supports that seal it: one body with them.
+            mine, fstats = join.join(mine + pockets.fills, overlaps=False)
+            stats["support_joins_declined"] += fstats["support_joins_declined"]
+        out += mine
     stats["support_pockets"] = len(fills)
     stats["support_pocket_volume_mm3"] = round(sum(occ.volume(f) for f in fills), 4)
-    return solids + fills, stats, lines
-
-
-OVERLAP_VOLUME_REL_TOL = 1e-5
-"""Relative slack, on the body cut, between the volume a cut removes and the
-overlap measured before it."""
-
-
-def _resolve_overlaps(solids: list, tags: list):
-    """S6: ``(solids, tags, resolved)``, no two bodies sharing volume.
-
-    ``tags`` -- a region per body -- follow the bodies: a piece a cut splits off
-    keeps its body's, a fused pair the first one's.
-
-    Neighbouring cells meet on a shared run and diverge below it, so they
-    normally share faces only. Two things leave them sharing some volume:
-    first-contact rays that cross, and a cell's own edge -- along the exempt
-    band, fitted through the mesh's staircase -- swinging across the shared
-    run near the triple point where both end. Measured: slivers of 1e-5 to
-    3e-4 mm^3, one to seven microns thick, on every wall cell of the test
-    chamber and on most cells of Hole-block-chamfered, and 0.11 mm^3 twice
-    there where rays cross.
-
-    The later body of each pair is cut by the earlier, so the shared volume
-    stays in exactly one of them: their union, and so the coverage, is
-    unchanged, and the new face lies on the other body's side face, which is
-    self-supporting. Fusing the two instead was tried first and fails on this
-    input -- chains of 8 and 16 cells that each overlap the next fused into
-    nothing valid. The cut is checked by volume and validity; a pair it fails
-    on is fused, and a pair neither resolves fails the run
-    (docs/algorithm.md §14.3 S6).
-    """
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
-
-    from .. import occ
-    from .assemble import SUPPORT_OVERLAP_TOL, _boxes, _common_volume, _touch, _where
-    from .build import _boolean
-
-    solids = list(solids)
-    tags = list(tags)
-    boxes = _boxes(solids)
-    resolved = 0
-    i = 0
-    while i < len(solids):
-        j = i + 1
-        while j < len(solids):
-            if solids[i] is None or solids[j] is None or not _touch(boxes[i], boxes[j]):
-                j += 1
-                continue
-            overlap = _common_volume(solids[i], [solids[j]])
-            if overlap <= SUPPORT_OVERLAP_TOL:
-                j += 1
-                continue
-            vj = occ.volume(solids[j])
-            slack = max(OVERLAP_VOLUME_REL_TOL * vj, SUPPORT_OVERLAP_TOL)
-            got = _boolean(BRepAlgoAPI_Cut, solids[j], [solids[i]])
-            pieces = sorted((s for s in (occ.solids(got) if got is not None else [])
-                             if occ.volume(s) > SUPPORT_OVERLAP_TOL),
-                            key=occ.volume, reverse=True)
-            kept = sum(occ.volume(s) for s in pieces)
-            if (pieces and all(occ.is_valid(s, parallel=False) for s in pieces)
-                    and abs((vj - kept) - overlap) <= slack):
-                solids[j] = pieces[0]
-                boxes[j] = _boxes([pieces[0]])[0]
-                for extra in pieces[1:]:
-                    solids.append(extra)
-                    tags.append(tags[j])
-                    boxes.append(_boxes([extra])[0])
-                resolved += 1
-                j += 1
-                continue
-            vi = occ.volume(solids[i])
-            got = _boolean(BRepAlgoAPI_Fuse, solids[i], [solids[j]])
-            fused = occ.solids(got) if got is not None else []
-            total = vi + vj
-            if (len(fused) != 1 or not occ.is_valid(fused[0], parallel=False)
-                    or abs(occ.volume(fused[0]) - (total - overlap))
-                    > max(OVERLAP_VOLUME_REL_TOL * total, SUPPORT_OVERLAP_TOL)):
-                raise ProcessingError(
-                    f"Two support bodies near {_where(boxes[i])} share {overlap:.3e} "
-                    f"mm^3, and neither cutting one by the other nor fusing them "
-                    f"gave valid bodies (docs/algorithm.md §14.3 S6)."
-                )
-            solids[i] = fused[0]
-            boxes[i] = _boxes([fused[0]])[0]
-            solids[j] = None
-            resolved += 1
-            # The fused body is new: ask every later body about it again.
-            j = i + 1
-        i += 1
-    keep = [k for k, s in enumerate(solids) if s is not None]
-    return [solids[k] for k in keep], [tags[k] for k in keep], resolved
+    stats["support_bodies"] = len(out)
+    return out, stats, lines
 
 
 def generate(inp: SupportInput) -> SupportResult:

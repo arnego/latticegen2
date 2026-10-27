@@ -225,8 +225,9 @@ rod angle (54.74°) reaches, by solid supports whose own faces are no steeper
 than that angle ([docs/algorithm.md](docs/algorithm.md) §14). Neither angle is a
 parameter. Supports are written as **separate bodies** beside the unchanged
 lattice, sharing faces with the lattice and the walls so that they merge into
-the enveloping part in your CAD tool; pockets of powder they would trap are
-filled. **The support algorithm is being implemented in phases:** until it
+the enveloping part in your CAD tool; supports touching each other on a face
+are one body, and pockets of powder they would trap are filled and joined to
+them. **The support algorithm is being implemented in phases:** until it
 lands, a run with `--support` detects and logs the inner overhangs, writes the
 lattice unchanged and prints a `WARNING` saying so. A supported run adds `-sup`
 to the default file name:

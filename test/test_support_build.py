@@ -44,18 +44,20 @@ def test_a_pillar_in_a_chamber_gets_the_closed_form_crowns():
     pillar = k * (R ** 3 / 6 - R * r ** 2 / 2 + r ** 3 / 3)
     wall = k * (W ** 3 / 3 - R * W ** 2 / 2 + R ** 3 / 6)
     # The wall's annulus is split around the pillar's cell, and again wherever
-    # a piece's loft would close through the body: the count is not fixed,
-    # the volumes are. Pocket fills, if any, come last.
-    assert stats["support_cells"] + stats["support_pockets"] == len(solids)
+    # a piece's loft would close through the body, but its pieces share the
+    # faces along their cuts and are one body again (§14.3 S6). The crown meets
+    # it only along the parting circle, and stays apart.
     assert stats["support_cells"] >= 3
-    solids = solids[:stats["support_cells"]]
+    assert stats["support_pockets"] == 0
+    assert len(solids) == stats["support_bodies"] == 2
     # Measured +5.4 % on the crown and +1.8 % on the wall: the rays land on the
     # obstacle mesh, a polygon inscribed in each cylinder, so they reach a
     # little further than to the true surface, and they are smoothed. Both err
     # toward more support, never less.
-    centres = [np.hypot(*occ.centroid(s)[:2]) for s in solids]
-    crown = sum(v for v, c in zip([occ.volume(s) for s in solids], centres) if c < 4.0)
-    walls = sum(v for v, c in zip([occ.volume(s) for s in solids], centres) if c >= 4.0)
+    # The wall's ring is centred on the axis like the crown: tell them by reach.
+    reach = [float(np.abs(np.vstack(occ.bounding_box(s))[:, :2]).max()) for s in solids]
+    crown = sum(occ.volume(s) for s, r_ in zip(solids, reach) if r_ < 6.0)
+    walls = sum(occ.volume(s) for s, r_ in zip(solids, reach) if r_ >= 6.0)
     assert pillar <= crown <= 1.06 * pillar
     assert wall <= walls <= 1.06 * wall
 
@@ -67,9 +69,14 @@ def test_hole_block_supports_pass_their_gates_and_overlap_nothing(name):
 
     body = occ.read_step(os.path.join(TESTDIR, f"{name}.STEP"))
     lp, solids, stats = _supports(body, (90.0, 0.0, 0.0))
-    assert len(solids) == stats["support_cells"] >= 15
+    assert len(solids) == stats["support_bodies"]
     assert all(occ.is_valid(s) for s in solids)
-    # Separate bodies, sharing faces, never volume.
+    # Cells meet across partings along an edge, and stay separate bodies; on
+    # the chamfered block cells of the two regions either side of the bare
+    # facet overlap where their rays cross, and are fused (§14.3 S6).
+    want = {"Hole-block-basic": (20, 0), "Hole-block-chamfered": (13, 6)}[name]
+    assert (len(solids), stats["support_overlapping_pairs"]) == want
+    # Never sharing volume.
     assemble.assemble([], solids, lp, NO_NODES)
     # Bounded faces: a handful per cell, never a mesh.
     assert max(len(occ.faces(s)) for s in solids) < 60

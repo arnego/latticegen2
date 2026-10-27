@@ -2483,11 +2483,12 @@ and progress callback. `SupportResult` returns **the support solids only** — n
 lattice — with summary stats and lines for the log.
 
 **Supports are not merged with the lattice.** The output STEP carries the
-lattice solids exactly as `simplify` left them and, beside them, one body per
-support cell (§14.3) and per pocket fill. Support bodies are built to share
-faces with the lattice, the input's walls, floors and roofs, and with each
-other, so that the downstream merge in the enveloping part's CAD tool succeeds;
-they never share volume. `support.check_result` holds the generator to that, as
+lattice solids exactly as `simplify` left them and, beside them, the support
+bodies: one per group of cells and pocket fills joined by shared faces or
+volume (§14.3 S6). Support bodies are built to share faces with the lattice and
+the input's walls, floors and roofs, so that the downstream merge in the
+enveloping part's CAD tool succeeds, and meet each other only along edges; they
+never share volume. `support.check_result` holds the generator to that, as
 a hard failure (exit 4):
 
 * every entry is a solid, and none of them is a lattice solid;
@@ -2529,11 +2530,11 @@ flowchart TD
     K --> L{cell gates}
     L -->|fail| M[deeper overshoot, then split the cell, then exit 4 naming it]
     M --> J
-    L -->|pass| P[S6 neighbouring cells checked for overlap; the later of a pair is cut by the earlier]
-    P --> N[S5 pockets: cut the cells out of the free space in the support envelope]
-    N -->|cut off| O[the cut-off piece is the fill, shipped as a support body]
+    L -->|pass| P[S6 cells sharing a face or volume fused into one body, per group of touching boxes]
+    P --> N[S5 pockets, per group: cut the bodies out of the free space in the support envelope]
+    N -->|cut off| O[the cut-off piece is the fill, fused with the bodies it shares faces with]
     O --> Q
-    N -->|none| Q[SupportResult: one solid per cell and per pocket fill]
+    N -->|none| Q[SupportResult: one solid per joined body]
 ```
 
 **S1 — Regions** (`support/regions.py`). The triangles of every face with a
@@ -2827,12 +2828,14 @@ body, and with them counted the cup's wall annulus was split into 165 cells.
 region of free space — inside the body, outside the lattice and the supports —
 that the supports have cut off from the free space it used to belong to. It is
 bounded partly by support, and lies below the support that seals it, so it
-lies in the **support envelope**: per region, the cells' box inflated by `t_s`
+lies in the **support envelope**: per group of bodies whose boxes touch — a
+region's cells always do, and a body S6 joined across two regions takes both
+into one group — their box inflated by `t_s`
 and swept down along `−b` to the body's lowest point. Inflated alone, the box
 reaches `t_s` below the cells, and a cup 5 mm deep under a lid would touch its
 floor and never read as sealed.
 
-S5 runs **after S6**, on disjoint cells. The free space is found by cutting,
+S5 runs **after S6**, on disjoint bodies. The free space is found by cutting,
 not splitting: `envelope ∩ Ω` minus the local lattice junctions is the free
 space before the supports, and minus the cells as well the free space after
 them, each a list of solids, each cut checked to remove exactly the volume it
@@ -2862,9 +2865,15 @@ piece is **cut off**:
 So a pocket the lattice alone had already sealed against a wall is not filled.
 Pieces under 1e-3 mm³ are boolean specks along shared faces, not pockets. The
 fill is the cut-off piece itself: an exact solid each of whose faces already
-lies on the body, the lattice or a support, shipped as a support body of its
-own; having no free face, it is self-supporting. With the fills in place
-nothing is cut off any more (gate G5).
+lies on the body, the lattice or a support; having no free face, it is
+self-supporting. With the fills in place nothing is cut off any more (gate
+G5), and the fills are then fused with the bodies of their group, as S6 fuses
+the cells — known disjoint, so with no overlap to measure.
+
+Grouping by touching boxes rather than by region finds pockets one region's
+cells alone do not seal: on `Hole-block-chamfered` two slivers, 0.0068 mm³
+together, under the bare 60° facet between its two regions, closed off by
+supports of both.
 
 A ring along the roof's crease used to be sealed and filled here — 3.9 mm³ round
 the cup fixture — while the band within 0.5 mm reach of the wall was left out
@@ -2873,21 +2882,49 @@ whose envelope holds too many tools is tiled; since a pocket
 touches a support, a tile boundary need only avoid cutting through a cell's
 envelope.
 
-**S6 — Overlaps.** Cells whose boxes touch are intersected pairwise. Of a pair
-sharing more than `SUPPORT_OVERLAP_TOL` (1e-6 mm³), the later is **cut by the
-earlier**, so the shared volume stays in exactly one body: their union — and
-so the coverage — is unchanged, and the new face lies on the other body's side
-face, which is self-supporting. The cut must remove the measured overlap to
-within 1e-5 of the cut body's volume and leave valid solids; a pair it fails on
-is fused instead, and a pair neither resolves fails the run (exit 4).
+**S6 — Joining** (`support/join.py`). Supports that share a face or volume
+become one body. Three kinds do:
 
-First-contact rays can cross, which leaves neighbours sharing volume —
-0.11 mm³ twice on `Hole-block-chamfered`. Slivers of 1e-5 to 3e-4 mm³ along
-every wall cell of the test chamber used to be the other source, and fusing
-was tried on them first and is the wrong tool: they chain the cells together,
-and chains of 8 and 16 cells fused into nothing valid. They came from two cells
-fitting a shared run as two curves (S4, step 2), and with that fixed the cup
-fixture resolves none and `Hole-block-chamfered` 6, where it resolved 17.
+* cells sharing rays along a cut or a fold share the face those rays span — on
+  the cup fixture the two sides of every one coincide to 1e-15 mm;
+* cells of different regions overlap where their rays cross under the bare
+  band between them — 2.8e-4 to 0.155 mm³, six pairs, on `Hole-block-chamfered`;
+  within a region nothing overlaps any more;
+* a pocket fill shares faces with the supports that seal it (S5).
+
+Cells across a parting meet in a V from one edge on the ceiling and stay
+separate: one body joined along an edge would not be a manifold solid.
+
+The supports are grouped by touching bounding boxes and each group is fused in
+one `BRepAlgoAPI_Fuse` call, which makes exactly that partition — solids
+sharing a face or volume come back as one, solids meeting along an edge stay
+apart — and is then unified (§9). The fuse is checked: every result valid, and
+its volume the members' sum less the overlaps measured pairwise, within
+`JOIN_VOLUME_REL_TOL` (1e-4 relative, against the 1.5e-5 the members' own
+curved faces carry in quadrature noise). A result that does not add up is
+redone one member at a time, each step checked the same way. A group whose
+members overlap and still cannot be fused fails the run (exit 4); one that only
+shares faces is left as it was, which is sound, and counted
+(`support_joins_declined`).
+
+**Stitching without a boolean was measured first and is not the mechanism.**
+Dropping the coincident faces of a group and sewing the rest holds only where
+the two sides' shared faces correspond one for one: on the cup's ring of eight
+cut cells it is valid and matches the fuse's volume to 1.4e-6, 0.63 s against
+1.00 s. On the ledge and the lid it borders by folds, whose shared faces the
+two cells subdivide differently, the sewn shell is invalid and 0.85 mm³ short;
+likewise with the pocket fill, and on every overlapping pair. A path that needs
+the fuse behind it everywhere else saves less than it costs.
+
+Joined, the cup fixture's 13 cells and its fill are **2 bodies** — the wall's
+ring (14 faces) and the ledge, lid and fill (16) — `Hole-block-chamfered`'s 21
+cells are 13, and `Hole-block-basic`'s 20 stay 20, every contact there a
+parting.
+
+Cutting the later of an overlapping pair by the earlier, which this replaced,
+was chosen when slivers along every wall cell chained cells together and
+chains of 8 and 16 fused into nothing valid; those slivers came from two cells
+fitting one shared run as two curves (S4, step 2) and are gone.
 
 **What a support owes the rest of the pipeline**, and what
 `tools/verify_geometry.py` asks of the written file (specification.md §6.2):
@@ -2912,7 +2949,7 @@ without a lattice by `tools/support_dev.py`, a development harness for parts
 whose only anchors are their own surfaces (`test/Hole-block-*.STEP`); the
 product itself always generates the lattice.
 
-**Built so far (Phases 2–5, no lattice):** S1, S3a–d, S4, S5 and S6. Of S4's
+**Built so far (Phases 2–5, no lattice):** S1, S3a–d, S4, S5 and S6's joining. Of S4's
 gates, validity, `OutsideProbe`, self-support of the free faces and coverage
 run (coverage with 0.25 mm slack for the span fit, `build.COVER_SLACK`); a
 failing cell is rebuilt at twice the overshoot twice, then fails the run.

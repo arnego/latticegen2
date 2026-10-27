@@ -368,12 +368,16 @@ An opt-in stage that creates support structures, as used for
   inner overhangs already detected, and returns support solids only. One
   validity pass — including the export-truth gate — then judges the lattice and
   the supports together (docs/algorithm.md §14.2).
-- **Separate bodies.** Supports are **not** merged with the lattice or with
-  each other. Each support cell is its own body in the output, sharing faces
-  with the lattice, the input's walls, floors and roofs, and neighbouring
-  cells, so that the merge into the enveloping part in the downstream CAD tool
-  succeeds. Support bodies never overlap the lattice or each other, and a run in
-  which one would fails rather than ships.
+- **Separate from the lattice, joined with each other.** Supports are **not**
+  merged with the lattice. They share faces with the lattice and with the
+  input's walls, floors and roofs, so that the merge into the enveloping part
+  in the downstream CAD tool succeeds. Supports that share a face or volume
+  with each other — neighbouring cells along a cut, a pocket fill and the
+  supports that seal it, cells whose rays cross — are fused into **one body**.
+  Supports meeting only along an edge, as neighbouring cells across a parting
+  do, stay separate bodies, since one body joined along an edge would not be a
+  manifold solid. Support bodies never overlap the lattice or each other, and a
+  run in which one would fails rather than ships.
 - **Enclosed voids are filled.** Powder must not be trapped: a pocket of free
   space that supports seal off is filled with support material.
 - **Self-supporting.** No support surface or edge exceeds the rod angle.

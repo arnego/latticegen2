@@ -100,15 +100,33 @@ class _Inside:
             m = _solid_mesh(s)
             if m is not None:
                 lo, hi = m.bounds()
-                self.tests.append((lo, hi, PointInside(m)))
+                self.tests.append((lo, hi, PointInside(m), m))
 
     def which(self, p: np.ndarray) -> list:
-        """Indices of the solids holding ``p``."""
+        """Indices of the solids holding ``p``.
+
+        Failing that, the one whose mesh is nearest, within the mesh's own
+        deflection: a sliver's deepest point can lie microns inside a curved
+        wall the mesh's chords cut inside of -- on the cup fixture, 4 microns
+        from a wall meshed to 0.01 mm.
+        """
+        from ..classify import _point_triangle_dist
+
         out = []
-        for k, (lo, hi, test) in enumerate(self.tests):
+        for k, (lo, hi, test, _m) in enumerate(self.tests):
             if np.all(p >= lo) and np.all(p <= hi) and bool(test(p[None])[0]):
                 out.append(k)
-        return out
+        if out:
+            return out
+        best, where = WITNESS_DEFLECTION, None
+        for k, (lo, hi, _t, m) in enumerate(self.tests):
+            if np.any(p < lo - best) or np.any(p > hi + best):
+                continue
+            a, b, c = m.triangle_points
+            d = float(_point_triangle_dist(p, a, b, c).min())
+            if d <= best:
+                best, where = d, k
+        return [] if where is None else [where]
 
 
 def witness(piece) -> np.ndarray | None:
@@ -167,11 +185,65 @@ def _free(region: list, tools: list, removes: float, what: str) -> list:
             left = sum(occ.volume(p) for p in pieces)
             if abs((total - left) - removes) <= CUT_VOLUME_REL_TOL * total:
                 return pieces
+    got = _free_one_by_one(region, tools, total)
+    if got is not None and abs((total - sum(occ.volume(p) for p in got)) - removes) \
+            <= CUT_VOLUME_REL_TOL * total:
+        return got
     raise ProcessingError(
         f"Cutting {what} out of the support envelope did not remove their volume "
         f"({removes:.4f} mm^3 of {total:.4f}) at any fuzzy value "
         f"(docs/algorithm.md §14.3 S5)."
     )
+
+
+ONE_BY_ONE_PASSES = 3
+"""Orders :func:`_free_one_by_one` tries before giving up."""
+
+
+def _free_one_by_one(region: list, tools: list, total: float):
+    """``region`` minus ``tools``, one tool at a time, or ``None``.
+
+    The kernel can take one of two face-sharing neighbours for the inside of
+    the other. Measured on the cup fixture once its wall cells reached the
+    crease: one cut by all 13 cells, each of which cuts exactly on its own,
+    removed 536.05 of 581.50 mm^3 -- short by exactly one cell's 45.44 --
+    at every fuzzy value; fusing that cell with its neighbour returned the
+    neighbour alone; and cutting the pair one at a time worked in one order
+    and not the other.
+
+    So each step is checked against what that tool alone takes out of the
+    region, and a tool whose step falls short is moved to the front of the
+    order for the next pass.
+    """
+    from .build import _boolean
+
+    alone = []
+    for t in tools:
+        got = [_boolean(BRepAlgoAPI_Common, t, [s]) for s in region]
+        if any(g is None for g in got):
+            return None
+        alone.append(sum(occ.volume(x) for g in got for x in occ.solids(g)))
+    order = list(range(len(tools)))
+    for _pass in range(ONE_BY_ONE_PASSES):
+        pieces = list(region)
+        short = []
+        for k in order:
+            before = sum(occ.volume(p) for p in pieces)
+            nxt = []
+            for s in pieces:
+                got = _boolean(BRepAlgoAPI_Cut, s, [tools[k]])
+                if got is None:
+                    return None
+                nxt += occ.solids(got)
+            if abs((before - sum(occ.volume(p) for p in nxt)) - alone[k]) \
+                    > CUT_VOLUME_REL_TOL * total:
+                short.append(k)
+                continue
+            pieces = nxt
+        if not short:
+            return pieces
+        order = short + [k for k in order if k not in short]
+    return None
 
 
 def _on_envelope(piece, lo: np.ndarray, hi: np.ndarray) -> bool:
@@ -246,9 +318,10 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
             home = homes.which(w)
             if not home:
                 raise ProcessingError(
-                    f"A piece of free space near {np.round(w, 3).tolist()} lies in no "
-                    f"piece of the free space before the supports: the cuts and the "
-                    f"witness disagree (docs/algorithm.md §14.3 S5)."
+                    f"A {occ.volume(p):.4g} mm^3 piece of free space near "
+                    f"{np.round(w, 3).tolist()} lies in no piece of the free space "
+                    f"before the supports: the cuts and the witness disagree "
+                    f"(docs/algorithm.md §14.3 S5)."
                 )
             groups[home[0]].append((p, w, _on_envelope(p, lo, hi)))
         out = []

@@ -106,5 +106,97 @@ def test_the_generator_seals_the_cup_and_fills_it(cup):
     # The cup, up to the lid's cone, which meets the ring a little below its top.
     v = occ.volume(cup_fill[0])
     assert np.pi * R1 ** 2 * (TOP - 1.0) <= v <= np.pi * R1 ** 2 * H
+    # Nothing else is sealed: the wall cells reach the roof's crease, so no
+    # ring is left there for S5 to fill (§14.3 S3d).
+    assert stats["support_pockets"] == 1
     assert all(occ.is_valid(s) for s in solids)
     assemble.assemble([], solids, lp, NO_NODES)
+
+
+def test_supports_on_the_ledge_lean_in_and_keep_a_footing(cup):
+    """The ledge's cells stand on a level face: their outer sides lean in from
+    the parting toward the cup, and stop where the footing on the ledge would
+    narrow below t_s (§14.3 S3d)."""
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.TopAbs import TopAbs_State
+    from OCP.gp import gp_Pnt
+
+    from latticegen2 import occ
+    from latticegen2.support.generate import supports_for
+    from latticegen2.support.params import SUPPORT_OVERHANG_DEG
+
+    body, mesh, lp = cup
+    solids, stats, lines = supports_for(body, mesh, [], NO_NODES, lp, 1.5)
+    region = lines[0]
+    lean = float(region.split("'lean_max_deg': ")[1].split("}")[0].split(",")[0])
+    assert 30.0 < lean <= SUPPORT_OVERHANG_DEG + 1e-6
+    cells = solids[:stats["support_cells"]]
+    tests = [BRepClass3d_SolidClassifier(s) for s in cells]
+
+    def held(p):
+        for t in tests:
+            t.Perform(gp_Pnt(*map(float, p)), 1e-7)
+            if t.State() == TopAbs_State.TopAbs_IN:
+                return True
+        return False
+
+    z = TOP + 0.02
+    rs = np.arange(R1 + 0.01, R2, 0.02)
+    outer = []
+    for a in np.radians(np.arange(0.0, 360.0, 15.0)):
+        on = [r for r in rs if held((r * np.cos(a), r * np.sin(a), z))]
+        assert on, f"nothing stands on the ledge at {np.degrees(a):.0f} deg"
+        # The footing: the material on the ledge, from the cup's rim outward.
+        assert on[-1] - on[0] >= 1.5 - 0.05
+        outer.append(on[-1])
+    # Leaning in: the footing ends well inside the parting at r = 5.76, where
+    # it stood before -- at the cuts between the ledge's cells too, which lean
+    # once for both cells (§14.3 S3d). They stood vertical, and the footing
+    # reached out to the parting in four lobes.
+    assert max(outer) < 4.5
+
+
+def test_cuts_lean_once_for_both_cells(cup):
+    """A cut is an inner face of one support split in two: both cells carry the
+    same ray at every point of it, and its ends lean as far as the parting they
+    end on (§14.3 S3d). They kept a vertical ray, the lean beside them tapered
+    up from it, and the footing reached the parting in four lobes."""
+    from latticegen2.support import build, cells, generate, lean, obstacles, rays, regions
+
+    body, mesh, lp = cup
+    rm = regions.build(body, lp.b)
+    reg = regions.regions(rm)[0]
+    ob = obstacles.from_shapes(body, [], deflection=generate.OBSTACLE_DEFLECTION)
+    delta = generate.overshoot_for(1.5, mesh.deviation)
+    got = rays.first_contact(rm.verts[reg.verts] - rays.APEX_NUDGE * rm.normals[reg.verts],
+                             lp.b, ob)
+    part = cells.partition(rm, reg, got, ob, lp.b, 1.5,
+                           inside_body=build.Gates(mesh, lp.b).inside_body, overshoot=delta)
+    before = {c.id: c.loops[0].targets.copy() for c in part.cells}
+    lean.lean_cells(part.cells, ob, lp.b, 1.5, delta)
+    shared = {}
+    for c in part.cells:
+        L = c.loops[0]
+        for k, (pid, kd) in enumerate(zip(L.keys, L.kind)):
+            if kd in (cells.CUT, cells.TRIPLE):
+                shared.setdefault((pid, c.key), []).append(L.targets[k])
+    cut_pairs = [v for (pid, _key), v in shared.items() if len(v) == 2]
+    assert len(cut_pairs) > 20
+    for a, b_ in cut_pairs:
+        assert np.array_equal(a, b_)
+    # Where a cut meets the ledge's parting, its end leans with the parting.
+    n_ends = 0
+    for c in part.cells:
+        L = c.loops[0]
+        n = len(L.kind)
+        s = np.linalg.norm(L.targets - before[c.id], axis=1)
+        if s.max() < 1.0:
+            continue                       # the wall annulus stands on walls
+        for k in np.nonzero(L.kind == cells.TRIPLE)[0]:
+            prev, nxt = L.kind[(k - 1) % n], L.kind[(k + 1) % n]
+            if {int(prev), int(nxt)} == {cells.CUT, cells.PARTING}:
+                beside = (k - 1) % n if prev == cells.PARTING else (k + 1) % n
+                assert s[beside] > 1.0
+                assert s[k] == pytest.approx(s[beside], rel=0.1)
+                n_ends += 1
+    assert n_ends == 8

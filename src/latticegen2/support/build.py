@@ -64,12 +64,6 @@ snap from facet to facet: round a 2 mm pillar meshed at 0.05 mm they jump in
 cap over itself. Smoothing them costs nothing the overshoot does not absorb, and
 smooth bands are what the intersection with the body handles reliably."""
 
-FIT_TOL_EXEMPT = 0.05
-"""mm. The same for a run along an exempt border. Its points are where the ray
-length crosses the reach, interpolated along mesh edges, so they zig-zag by a
-few hundredths; following them at :data:`FIT_TOL` took a wall cell's run to
-376 control points and its intersection with the body to 19 s."""
-
 SEW_TOL = 1e-6
 MAX_DEGREE = 3
 COS_T = float(np.cos(np.radians(SUPPORT_OVERHANG_DEG)))
@@ -230,6 +224,10 @@ def _smooth_in_basis(u: np.ndarray, data: np.ndarray, knots: np.ndarray, degree:
 # --- runs ------------------------------------------------------------------------
 
 
+_OWN = (cells_.VERTEX, cells_.CREASE)
+"""Point kinds on the region's own border: one cell's, never shared."""
+
+
 def _runs(loop) -> list:
     """Split a closed loop into runs: index lists, each sharing its ends."""
     n = len(loop.points)
@@ -239,10 +237,18 @@ def _runs(loop) -> list:
     cut |= kind == cells_.TRIPLE
     for k in range(n):
         # A change of kind starts a run -- except right after a triple point,
-        # which already ended the last one.
+        # which already ended the last one. Between a crossing, shared with the
+        # neighbouring cell, and a border vertex, this cell's own, the run
+        # breaks at the crossing whichever way the loop runs: so both cells end
+        # their shared run on the same point and fit it as one curve. Breaking
+        # at the change itself ended it on the vertex in one cell and on the
+        # crossing in the other, and the two fits left slivers between them.
         if kind[k] != kind[k - 1] and kind[k - 1] != cells_.TRIPLE \
                 and kind[k] != cells_.TRIPLE:
-            cut[k] = True
+            if kind[k] in _OWN and kind[k - 1] not in _OWN:
+                cut[k - 1] = True
+            else:
+                cut[k] = True
     starts = np.nonzero(cut)[0]
     if len(starts) == 0:
         starts = np.array([0, n // 2]) if n >= 4 else np.array([0])
@@ -410,8 +416,7 @@ def prepare_fits(cells: list, cache: dict) -> None:
 def _fit_run(P: np.ndarray, Ds: list, kind: np.ndarray) -> list:
     """Spans of one run in canonical order, indices into its unthinned points."""
     keep = _thin(P)
-    tol = (FIT_TOL_EXEMPT if (kind == cells_.EXEMPT_EDGE).mean() > 0.5 else SPAN_FIT_TOL)
-    spans = _split_spans(P[keep], [D[keep] for D in Ds], tol)
+    spans = _split_spans(P[keep], [D[keep] for D in Ds], SPAN_FIT_TOL)
     return [(int(keep[a]), int(keep[b]), fit) for a, b, fit in spans]
 
 
@@ -769,7 +774,7 @@ FACE_TRIM_SEW_TOLS = (1e-5, 1e-4, 1e-3, 1e-2)
 The loosest is what Hole-block-chamfered needs: a band meeting a tube wall where
 the two separate face booleans place the intersection curve up to ~0.01 mm
 apart, a 0.09 mm lens. It is a hundredth of the thinnest member this run can
-ask for and far below the 0.5 mm unsupported reach, and the result still has to
+ask for and far below the 0.5 mm support step, and the result still has to
 pass every gate."""
 
 
@@ -886,9 +891,10 @@ SELF_SUPPORT_TOL_DEG = 0.05
 COVER_SLACK = 0.25
 """mm. A ceiling point the cell's solid does not contain may still lie this close
 to it. The solid's border is the fitted span, which follows the parting to
-:data:`SPAN_FIT_TOL`, so the points along a parting fall either side of it; the
-0.5 mm unsupported reach (specification.md §4.6) is the requirement, and the
-verifier asks that of the written file."""
+:data:`SPAN_FIT_TOL`, so the points along a parting fall either side of it,
+and the neighbour across the parting holds those that fall outside. Whether
+every overhang point is backed by material is asked of the written file, by
+the verifier (specification.md §6.2)."""
 
 
 def _mesh_of(shape, deflection: float):

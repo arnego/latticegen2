@@ -353,10 +353,11 @@ An opt-in stage that creates support structures, as used for
   planar face tilted 55–60° is left unsupported entirely, and a curved one
   keeps a bare band (3.7 mm wide on the 80 mm ball). Neither angle is a
   parameter.
-- **Unsupported reach.** Every point overhanging more than 60° lies within
-  **0.5 mm** of support or of lattice material, or reaches surface below it
-  within 0.5 mm inside the rod-angle cone. This is a fixed constant, not a
-  parameter.
+- **Full coverage.** Every point overhanging more than 60° is backed by support
+  or lattice material. Supports run all the way to the edge of each overhang:
+  to its 60° isocline, to the partings with their neighbours, and into the
+  crease where a ceiling meets a wall, ending on the wall's own face. No band
+  along a wall or an isocline is left bare because something below is near.
 - **Anchoring and design depth.** A support runs from the ceiling down to the
   first strut, wall or floor that a downward cone of the rod angle reaches —
   the nearest anchor by drop, not by distance — so the lattice is generated
@@ -379,7 +380,9 @@ An opt-in stage that creates support structures, as used for
 - **Thickness.** No free-standing support member is thinner than the minimum
   support thickness, which defaults to the strut size `t`.
 - **Volume.** Supports take as little volume as possible: each reaches only as
-  far as its nearest anchor.
+  far as its nearest anchor, and where it stands on a level face its sides lean
+  in toward its middle — at most the rod angle, and never so far that its
+  footing on the anchor is narrower than the minimum support thickness.
 - **Integral.** Once merged downstream, supports are a permanent part of the
   produced body, with solid interfaces and no feature designed to ease removal.
 - **Shape.** Support faces may be curved — ruled, cylindrical, toroidal,
@@ -530,12 +533,11 @@ For every scenario the harness must verify, without human intervention:
   distance between the two representations against the area of the face carrying
   it. This is asked of the *artefact* rather than of the process that wrote it,
   which is the only version the downstream tools see.
-- **With `--support`: every inner overhang of the input is within reach of
+- **With `--support`: every inner overhang of the input is backed by
   material in the output.** The input's surface overhanging more than 60° is
-  sampled afresh at 0.5 mm, and every sample must lie within 0.5 mm of the
-  *written file's* support or lattice material, or reach surface below it
-  within 0.5 mm inside the rod-angle cone — independently of how the supports
-  were placed or built.
+  sampled afresh at 0.5 mm, and every sample, moved a hair into the body, must
+  lie inside the *written file's* support or lattice material — independently
+  of how the supports were placed or built.
 - **With `--support`: supports overlap neither the lattice nor each other,**
   and a support face resting on a strut lies on that strut's plane, so the
   downstream merge finds shared faces.

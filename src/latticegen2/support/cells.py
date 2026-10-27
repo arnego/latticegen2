@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .params import REACH, STEP
-from .rays import APEX_NUDGE, first_contact
+from .params import STEP
+from .rays import APEX_NUDGE, COS_T, SIN_T, first_contact
 
 KAPPA = 4.0
 """Continuity: neighbours stay in one cell while their targets are no further
@@ -43,10 +43,40 @@ exactly this far from the edge."""
 FOLD_SAMPLE = 0.25 * FOLD_TOL
 """mm. Spacing of the points feature edges are sampled at."""
 
-EXEMPT = -1
+CREASE_LEN = 0.1
+"""mm. A border point whose ray is shorter than this sits in a crease: the
+ceiling meets a wall the cone reaches at once (§14.3 S3d). Not zero, nor near
+it: the rays land on the obstacle mesh, whose facets cut inside a curved wall
+by up to its deflection, and on the cup's round chamber the crease points'
+rays measured 0.011 to 0.03 mm. At 0.01 mm a third of them stayed behind, and
+the cell's edge zig-zagging between moved and unmoved points notched 44
+pockets into the wall cells. A vertex off the border is a step ``h`` from it,
+with a ray of ``h / sin(theta)``, so nothing else falls under this."""
+
+CREASE_PUSH = 0.2
+"""mm, ``lambda``: how far a crease point is moved across the crease into the
+wall's material, and how long its ray there is. The same as the lift of a band
+above the ceiling (:data:`.build.LIFT`), for the same reason: far enough for
+the trim with the body to cut the band cleanly, never grazing."""
+
+JUNCTION_LEN = STEP
+"""mm. Triple points joined by a parting shorter than this are one junction
+(§14.3 S3c). Where four cells meet at a point -- the middle of a square of four
+holes -- the mesh cannot put them there: each triangle holds at most three, so
+the point comes out as two triple points with a sliver of parting between them,
+0.232 mm on `Hole-block-basic`, always along the roof triangulation's own
+diagonal. Each of the two cells sharing that sliver then had two corners there
+and two rulings down to its anchor. Shorter than a mesh step, a parting is the
+mesh's, not the geometry's."""
+
+CORNER_PARALLEL_DEG = 10.0
+"""Degrees. Two walls meeting at a border junction whose outward directions are
+closer than this are one straight wall: the junction is pushed off its own
+point. Further apart, it is pushed off the corner where the two walls meet."""
+
 OUTSIDE = -2
 
-VERTEX, PARTING, EXEMPT_EDGE, TRIPLE, CUT, BORDER, FOLD = 0, 1, 2, 3, 4, 5, 6
+VERTEX, PARTING, CREASE, TRIPLE, CUT, FOLD = 0, 1, 2, 3, 4, 5
 
 
 @dataclass
@@ -60,11 +90,18 @@ class Loop:
     targets: np.ndarray
     """``(n, 3)`` where this cell's ray from each point lands."""
     kind: np.ndarray
-    """``(n,)`` :data:`VERTEX`, :data:`PARTING`, :data:`EXEMPT_EDGE`,
-    :data:`TRIPLE` or :data:`CUT`."""
+    """``(n,)`` :data:`VERTEX`, :data:`PARTING`, :data:`CREASE`,
+    :data:`TRIPLE`, :data:`CUT` or :data:`FOLD`."""
     keys: list = field(default_factory=list)
     """Point identity per entry, shared with the neighbouring cell's loop at a
     parting, so the two bodies can be checked to share their boundary."""
+    pushed: np.ndarray = None  # type: ignore[assignment]
+    """``(n,)`` bool: moved across a crease into the wall (§14.3 S3d). A
+    crossing on a crease keeps its own kind and is flagged here alone."""
+
+    def __post_init__(self):
+        if self.pushed is None:
+            self.pushed = np.zeros(len(self.points), dtype=bool)
 
 
 @dataclass
@@ -87,7 +124,7 @@ class Cell:
 @dataclass
 class Partition:
     labels: np.ndarray
-    """``(V,)`` cell id per region-mesh vertex, :data:`EXEMPT` or :data:`OUTSIDE`."""
+    """``(V,)`` cell id per region-mesh vertex, or :data:`OUTSIDE`."""
     cells: list
     stats: dict = field(default_factory=dict)
 
@@ -275,17 +312,14 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
     key = np.full(V, -1, dtype=np.int64)
     rv = region.verts
     tgt[rv], drop[rv], length[rv], key[rv] = rays.target, rays.drop, rays.length, rays.key
-    exempt = np.zeros(V, dtype=bool)
-    exempt[rv] = rays.length <= REACH
 
     tris = rmesh.tris[region.tris]
     e = np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
     e = np.unique(np.sort(e, axis=1), axis=0)
     i, j = e[:, 0], e[:, 1]
-    live = ~exempt[i] & ~exempt[j]
     dx = np.linalg.norm(rmesh.verts[i] - rmesh.verts[j], axis=1)
     dy = np.linalg.norm(tgt[i] - tgt[j], axis=1)
-    join = live & (key[i] == key[j]) & (dy <= KAPPA * dx + 2.0 * step)
+    join = (key[i] == key[j]) & (dy <= KAPPA * dx + 2.0 * step)
     # Rays landing on a convex edge of their anchor and rays following their
     # sources are never one cell (_Features).
     conv = np.zeros(V, dtype=bool)
@@ -296,8 +330,7 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
         join &= conv[i] == conv[j]
 
     labels = np.full(V, OUTSIDE, dtype=np.int64)
-    labels[rv] = EXEMPT
-    cell_v = rv[~exempt[rv]]
+    cell_v = np.asarray(rv)
     if len(cell_v) == 0:
         return Partition(labels, [], {"cells": 0})
     local = {int(v): k for k, v in enumerate(cell_v)}
@@ -385,6 +418,10 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
                 # S4), so a fan beyond their anchor says nothing about them.
                 if conv[mine].mean() > 0.5:
                     continue
+                # A crease vertex's ray has no length: carried on, it runs down
+                # the wall's own face, which reads as inside the body. S3d moves
+                # those points into the wall instead, so they are not asked.
+                mine = mine[length[mine] >= max(CREASE_LEN, overshoot)]
                 if len(mine) >= 8 and _fan_enters_body(
                         rmesh.verts[mine], tgt[mine], overshoot, inside_body):
                     bad.append(int(l))
@@ -399,11 +436,11 @@ def partition(rmesh, region, rays, obstacles, b, thickness: float,
     cell_conv = {}
     for l in np.unique(labels[labels >= 0]):
         cell_conv[int(l)] = bool(conv[labels == l].mean() > 0.5)
-    cells = _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt,
-                        caster, split_planes, b, region.tris, feats, cell_conv)
+    cells, jstats = _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length,
+                                caster, split_planes, b, region.tris, feats, cell_conv)
     stats = {"cells": len(cells), "cells_folded": folded, "cells_split": splits,
-             "exempt_vertices": int(exempt[rv].sum()),
-             "converging_cells": int(sum(cell_conv.values()))}
+             "converging_cells": int(sum(cell_conv.values())),
+             "crease_points": int(sum(c.loops[0].pushed.sum() for c in cells)), **jstats}
     return Partition(labels, cells, stats)
 
 
@@ -563,28 +600,255 @@ def _nested_cells(rmesh, tris, labels) -> list:
     return out
 
 
-def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster,
+def _crease_directions(rmesh, tris, b):
+    """Outward directions of the region's own border, horizontal (§14.3 S3d).
+
+    ``(per_edge, per_vertex)``: for each border edge (sorted ids), the unit
+    horizontal direction away from the triangle owning it; for each border
+    vertex, the mean of its two edges'. Read off the region rather than off a
+    cell, so two cells meeting at a crossing on the border agree on it.
+    """
+    from collections import Counter
+
+    use = Counter()
+    third = {}
+    for a, b_, c in tris:
+        for p, q, r in ((a, b_, c), (b_, c, a), (c, a, b_)):
+            k = (min(p, q), max(p, q))
+            use[k] += 1
+            third[k] = r
+    V = rmesh.verts
+    per_edge = {}
+    acc = defaultdict(list)
+    for k, n in use.items():
+        if n != 1:
+            continue
+        p, q = k
+        o = np.cross(V[q] - V[p], b)
+        o -= (o @ b) * b
+        L = np.linalg.norm(o)
+        if L < 1e-12:
+            continue
+        o /= L
+        if (V[third[k]] - V[p]) @ o > 0.0:
+            o = -o
+        per_edge[k] = o
+        acc[p].append(o)
+        acc[q].append(o)
+    per_vertex = {}
+    for v, os_ in acc.items():
+        m = np.mean(os_, axis=0)
+        m -= (m @ b) * b
+        L = np.linalg.norm(m)
+        if L > 1e-12:
+            per_vertex[v] = m / L
+    return per_edge, per_vertex
+
+
+def _push(P, o, b):
+    """A crease point moved into the wall, and its ray there."""
+    P2 = P + CREASE_PUSH * o
+    return P2, P2 + CREASE_PUSH * (COS_T * (-b) + SIN_T * o)
+
+
+def _corner_push(base, oA, oB, b):
+    """A border junction moved :data:`CREASE_PUSH` inside both walls, and its ray.
+
+    ``base + lambda (oA + oB) / (1 + oA . oB)`` is ``lambda`` from both walls'
+    lines: at a square corner ``(lambda, lambda)``, on a straight wall
+    ``lambda oA``. The ray runs on along the cone's surface between the two.
+    """
+    s = oA + oB
+    P2 = base + CREASE_PUSH * s / (1.0 + float(oA @ oB))
+    o = s / np.linalg.norm(s)
+    return P2, P2 + CREASE_PUSH * (COS_T * (-b) + SIN_T * o)
+
+
+def _junctions(loops_ids, pos, normal, short, crease_edge, short_vertex, b, cast):
+    """Points where three or more things meet, computed once (§14.3 S3c, S3d).
+
+    The mesh fixes where partings, cuts and the region's border cross, and so
+    where they meet; two kinds of meeting are rebuilt here instead:
+
+    * **4-way points.** Triple points joined by a parting shorter than
+      :data:`JUNCTION_LEN` are one point, the mean of theirs, with the sliver
+      between them dropped.
+    * **Border junctions.** Where a parting, cut or fold ends in a crease, the
+      crossing on the border, every crossing inward of it whose rays are
+      crease-short, and a corner vertex beside it are one point, pushed
+      :data:`CREASE_PUSH` inside both walls meeting there (:func:`_corner_push`).
+      Before, only a crossing on a border *edge* was pushed, and only along that
+      edge's own wall: at the hole-block's corners the crossing at the corner
+      itself sat on an interior edge and kept a 0.001 mm vertical ray, the
+      corner vertex went 0.14 mm into each wall, and the two wall cells ended
+      on different points.
+
+    ``loops_ids`` maps a cell to its loops of point ids; ``pos``/``normal`` give
+    an id's position and normal before any push; ``short(pid)`` is whether a
+    crossing's rays are crease-short; ``short_vertex(v)`` the same for a border
+    vertex; ``cast(l, P, N)`` cell ``l``'s ray target from ``P``.
+
+    Returns ``(jmap, jinfo, stats)``: ``jmap`` maps member ids to ``("j", n)``,
+    ``jinfo[("j", n)] = (P, N, targets per cell, seed, pushed)``, ``seed``
+    being the border crossing a border junction grew from (whose kind it keeps)
+    and ``None`` for a 4-way point, which is a triple point.
+    """
+    nbr = defaultdict(set)
+    cells_of = defaultdict(set)
+    for l, loops in loops_ids.items():
+        for ids in loops:
+            for a, c in zip(ids, ids[1:] + ids[:1]):
+                nbr[a].add(c)
+                nbr[c].add(a)
+            for pid in ids:
+                cells_of[pid].add(l)
+
+    def on_border(pid):
+        return pid[0] == "x" and (pid[1], pid[2]) in crease_edge
+
+    def chain_next(prev, cur):
+        nxt = [n for n in nbr[cur] if n != prev and n[0] != "v"]
+        return nxt[0] if len(nxt) == 1 else None
+
+    jmap, jinfo = {}, {}
+    n_border = n_four = 0
+    cos_par = np.cos(np.radians(CORNER_PARALLEL_DEG))
+
+    # Border junctions.
+    for seed in [p for p in nbr if on_border(p) and short(p)]:
+        if seed in jmap:
+            continue
+        members = [seed]
+        inward = [n for n in nbr[seed] if n[0] == "x" and not on_border(n)]
+        if len(inward) == 1:
+            prev, cur, run = seed, inward[0], 0.0
+            while cur is not None and cur[0] == "x" and not on_border(cur) \
+                    and cur not in jmap and short(cur):
+                run += float(np.linalg.norm(pos(cur) - pos(prev)))
+                if run >= JUNCTION_LEN:
+                    break
+                members.append(cur)
+                prev, cur = cur, chain_next(prev, cur)
+        o_seed = crease_edge[(seed[1], seed[2])]
+        sides = []
+        for v1 in [n for n in nbr[seed] if n[0] == "v"]:
+            o = o_seed
+            beyond = [n for n in nbr[v1] if n != seed and n[0] == "v"]
+            if short_vertex(v1[1]) and beyond and short_vertex(beyond[0][1]):
+                o = crease_edge.get((min(v1[1], beyond[0][1]), max(v1[1], beyond[0][1])), o)
+            sides.append((v1, o))
+        while len(sides) < 2:
+            sides.append((None, o_seed))
+        (vA, oA), (vB, oB) = sides[0], sides[-1]
+        P = pos(seed)
+        base = P
+        if float(oA @ oB) < cos_par and vA is not None and vB is not None:
+            # The corner where the two walls' lines meet, at P's height.
+            e1 = np.cross(b, oA)
+            e1 /= np.linalg.norm(e1)
+            e2 = np.cross(b, e1)
+            M = np.array([[e1 @ oA, e2 @ oA], [e1 @ oB, e2 @ oB]])
+            r = np.array([(pos(vA) - P) @ oA, (pos(vB) - P) @ oB])
+            if abs(np.linalg.det(M)) > 1e-9:
+                al, be = np.linalg.solve(M, r)
+                if np.hypot(al, be) < JUNCTION_LEN:
+                    base = P + al * e1 + be * e2
+        for v1, _o in sides:
+            if v1 is not None and v1 not in jmap and short_vertex(v1[1]) and \
+                    np.linalg.norm(_horizontal(pos(v1) - base, b)) < 0.5 * JUNCTION_LEN:
+                members.append(v1)
+        J, T = _corner_push(base, oA, oB, b)
+        jid = ("j", len(jinfo))
+        cells = set()
+        for m in members:
+            jmap[m] = jid
+            cells |= cells_of[m]
+        jinfo[jid] = (J, normal(seed), {l: T for l in cells}, seed, True)
+        n_border += 1
+
+    # 4-way points: triple points joined by a short chain of crossings.
+    parent = {}
+
+    def find(p):
+        while parent.get(p, p) != p:
+            p = parent[p]
+        return p
+
+    for c in [p for p in nbr if p[0] == "c" and p not in jmap]:
+        for first in [n for n in nbr[c] if n[0] == "x" and not on_border(n) and n not in jmap]:
+            path, prev, cur = [], c, first
+            run = float(np.linalg.norm(pos(first) - pos(c)))
+            while cur is not None and run < JUNCTION_LEN:
+                if cur[0] == "c":
+                    if cur not in jmap:
+                        for p in path + [cur]:
+                            parent[find(p)] = find(c)
+                    break
+                if cur[0] != "x" or on_border(cur) or cur in jmap:
+                    break
+                path.append(cur)
+                nxt = chain_next(prev, cur)
+                if nxt is None:
+                    break
+                run += float(np.linalg.norm(pos(nxt) - pos(cur)))
+                prev, cur = cur, nxt
+    groups = defaultdict(list)
+    for p in parent:
+        groups[find(p)].append(p)
+    for root, mem in groups.items():
+        mem = sorted(set(mem) | {root})
+        tri = [p for p in mem if p[0] == "c"]
+        if len(tri) < 2:
+            continue
+        P = np.mean([pos(p) for p in tri], axis=0)
+        N = np.sum([normal(p) for p in tri], axis=0)
+        N /= np.linalg.norm(N)
+        jid = ("j", len(jinfo))
+        cells = set()
+        for m in mem:
+            jmap[m] = jid
+            cells |= cells_of[m]
+        jinfo[jid] = (P, N, {l: cast(l, P, N) for l in cells}, None, False)
+        n_four += 1
+    return jmap, jinfo, {"border_junctions": n_border, "four_way_junctions": n_four}
+
+
+def _horizontal(v, b):
+    return v - (v @ b) * b
+
+
+def _collapse(ids, jmap):
+    """A loop of point ids with junction members replaced, repeats dropped."""
+    out = []
+    for pid in ids:
+        q = jmap.get(pid, pid)
+        if not out or out[-1] != q:
+            out.append(q)
+    while len(out) > 1 and out[0] == out[-1]:
+        out.pop()
+    return out
+
+
+def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, caster,
                 split_planes, b, tri_global, feats=None, cell_conv=None):
     """Exact crossings, triple points and rays; then each cell's loops."""
     etri = _edge_triangles(tris)
     # Crossing edges, grouped by kind.
     xs = {}
-    parting_edges, exempt_edges, cut_edges, fold_edges = [], [], [], []
+    parting_edges, cut_edges, fold_edges = [], [], []
     for (p, q), (t, kp, kq) in etri.items():
         lp, lq = int(labels[p]), int(labels[q])
-        if lp == lq or (lp < 0 and lq < 0):
+        if lp == lq or lp < 0 or lq < 0:
             continue
-        if lp >= 0 and lq >= 0:
-            pair = (min(lp, lq), max(lp, lq))
-            if (cell_conv is not None and pair not in split_planes
-                    and cell_key[lp] == cell_key[lq] and cell_conv[lp] != cell_conv[lq]):
-                fold_edges.append((p, q, t, kp, kq))
-            elif pair in split_planes or cell_key[lp] == cell_key[lq]:
-                cut_edges.append((p, q, t, kp, kq))
-            else:
-                parting_edges.append((p, q, t, kp, kq))
+        pair = (min(lp, lq), max(lp, lq))
+        if (cell_conv is not None and pair not in split_planes
+                and cell_key[lp] == cell_key[lq] and cell_conv[lp] != cell_conv[lq]):
+            fold_edges.append((p, q, t, kp, kq))
+        elif pair in split_planes or cell_key[lp] == cell_key[lq]:
+            cut_edges.append((p, q, t, kp, kq))
         else:
-            exempt_edges.append((p, q, t, kp, kq))
+            parting_edges.append((p, q, t, kp, kq))
+    crease_edge, crease_vertex = _crease_directions(rmesh, tris, b)
 
     def surface(edges, s):
         # Triangle indices here are the region's own; the mesh is the whole
@@ -634,25 +898,6 @@ def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster
             p, q = x[0], x[1]
             lp, lq = int(labels[p]), int(labels[q])
             xs[(min(p, q), max(p, q))] = (pts[k], nrm[k], {lp: ta[k], lq: tb[k]}, PARTING)
-
-    # Exempt borders: where the unrestricted ray length crosses the reach.
-    if exempt_edges:
-        s = []
-        keys = []
-        for p, q, *_r in exempt_edges:
-            lp = length[p] if labels[p] >= 0 else length[p]
-            Lp, Lq = length[p], length[q]
-            # Measured from p: p in a cell (long), q exempt (short), or reverse.
-            frac = (Lp - REACH) / (Lp - Lq) if abs(Lp - Lq) > 1e-12 else 0.5
-            s.append(float(np.clip(frac, 0.0, 1.0)))
-            cl = int(labels[p]) if labels[p] >= 0 else int(labels[q])
-            keys.append(cell_key[cl])
-        pts, nrm = surface(exempt_edges, np.array(s))
-        t_, _d, _l = cast_groups(pts, nrm, np.array(keys))
-        for k, x in enumerate(exempt_edges):
-            p, q = x[0], x[1]
-            cl = int(labels[p]) if labels[p] >= 0 else int(labels[q])
-            xs[(min(p, q), max(p, q))] = (pts[k], nrm[k], {cl: t_[k]}, EXEMPT_EDGE)
 
     # Cuts inside one anchor group: where a split plane crosses, or midway.
     if cut_edges:
@@ -724,45 +969,109 @@ def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster
         return P + (tgt[k] - rmesh.verts[k])
 
     segs = _segments(tris, labels, None, None)
-    cells = []
+    all_ids = {}
     for l in sorted(segs):
         loops_ids = _chain(segs[l])
+        if loops_ids is not None and np.any(labels == l):
+            all_ids[l] = loops_ids
+
+    def pos(pid):
+        if pid[0] == "v":
+            return rmesh.verts[pid[1]]
+        if pid[0] == "x":
+            return xs[(pid[1], pid[2])][0]
+        return centres[pid[1]][0]
+
+    def normal(pid):
+        if pid[0] == "v":
+            return rmesh.normals[pid[1]]
+        if pid[0] == "x":
+            return xs[(pid[1], pid[2])][1]
+        return centres[pid[1]][1]
+
+    def short(pid):
+        if pid[0] != "x":
+            return False
+        P, _N, tmap, _k = xs[(pid[1], pid[2])]
+        L = [float(np.linalg.norm(t_ - P)) for t_ in tmap.values() if np.isfinite(t_).all()]
+        return bool(L) and min(L) < CREASE_LEN
+
+    def cast(l, P, N):
+        tt, _d, _l = caster(P[None], N[None], cell_key[l])
+        return tt[0] if np.isfinite(tt[0]).all() else own_ray(l, P)
+
+    jmap, jinfo, jstats = _junctions(
+        all_ids, pos, normal, short, crease_edge,
+        lambda v: v in crease_vertex and float(length[v]) < CREASE_LEN, b, cast)
+
+    cells = []
+    for l, loops_ids in all_ids.items():
         mine = np.nonzero(labels == l)[0]
-        if loops_ids is None or not len(mine):
-            continue
         loops = []
         divergence = 180.0
         for ids in loops_ids:
-            pts, nrm, tg, kind, keys = [], [], [], [], []
+            ids = _collapse(ids, jmap)
+            pts, nrm, tg, kind, keys, pushed = [], [], [], [], [], []
             for pid in ids:
-                if pid[0] == "v":
-                    v = pid[1]
-                    pts.append(rmesh.verts[v])
-                    nrm.append(rmesh.normals[v])
-                    tg.append(tgt[v])
-                    kind.append(VERTEX)
-                elif pid[0] == "x":
-                    P, N, tmap, kd = xs[(pid[1], pid[2])]
+                if pid[0] == "j":
+                    P, N, tmap, seed, pu = jinfo[pid]
                     pts.append(P)
                     nrm.append(N)
-                    tg.append(tmap[l] if np.isfinite(tmap[l]).all() else own_ray(l, P))
+                    tg.append(tmap[l])
+                    kind.append(TRIPLE if seed is None else xs[(seed[1], seed[2])][3])
+                    pushed.append(pu)
+                elif pid[0] == "v":
+                    v = pid[1]
+                    P, T = rmesh.verts[v], tgt[v]
+                    crease = v in crease_vertex and float(length[v]) < CREASE_LEN
+                    if crease:
+                        P, T = _push(P, crease_vertex[v], b)
+                    pts.append(P)
+                    nrm.append(rmesh.normals[v])
+                    tg.append(T)
+                    kind.append(CREASE if crease else VERTEX)
+                    pushed.append(crease)
+                elif pid[0] == "x":
+                    P, N, tmap, kd = xs[(pid[1], pid[2])]
+                    T = tmap[l] if np.isfinite(tmap[l]).all() else own_ray(l, P)
+                    # A crossing on the border is shared by two cells: whether
+                    # it sits in a crease is read off both cells' rays, and its
+                    # direction off the border edge, so both move it alike.
+                    o = crease_edge.get((pid[1], pid[2]))
+                    crease = o is not None and min(
+                        float(np.linalg.norm(t_ - P)) for t_ in tmap.values()
+                        if np.isfinite(t_).all()) < CREASE_LEN
+                    if crease:
+                        P, T = _push(P, o, b)
+                    pts.append(P)
+                    nrm.append(N)
+                    tg.append(T)
                     kind.append(kd)
-                    if kd == PARTING and all(np.isfinite(v_).all() for v_ in tmap.values()):
+                    pushed.append(crease)
+                    # A crease crossing carries one shared ray into the wall by
+                    # construction, and says nothing about how the cells part.
+                    if kd == PARTING and not crease and all(
+                            np.isfinite(v_).all() for v_ in tmap.values()):
                         other = [v_ for k_, v_ in tmap.items() if k_ != l][0]
                         u1, u2 = tmap[l] - P, other - P
-                        ang = np.degrees(np.arccos(np.clip(
-                            u1 @ u2 / max(np.linalg.norm(u1) * np.linalg.norm(u2), 1e-300),
-                            -1.0, 1.0)))
-                        divergence = min(divergence, float(ang))
+                        # Rays shorter than a step land a few facets from their
+                        # source near a crease, and their angle is the facets'.
+                        if min(np.linalg.norm(u1), np.linalg.norm(u2)) >= STEP:
+                            ang = np.degrees(np.arccos(np.clip(
+                                u1 @ u2 / (np.linalg.norm(u1) * np.linalg.norm(u2)),
+                                -1.0, 1.0)))
+                            divergence = min(divergence, float(ang))
                 else:
                     P, N, tmap = centres[pid[1]]
                     pts.append(P)
                     nrm.append(N)
                     tg.append(tmap[l] if np.isfinite(tmap[l]).all() else own_ray(l, P))
                     kind.append(TRIPLE)
+                    pushed.append(False)
                 keys.append(pid)
             loops.append(Loop(np.array(pts), np.array(nrm), np.array(tg),
-                              np.array(kind, dtype=np.int64), keys))
+                              np.array(kind, dtype=np.int64), keys,
+                              np.array(pushed, dtype=bool)))
         n_avg = rmesh.normals[mine].mean(axis=0)
         n_avg /= np.linalg.norm(n_avg)
         signed = [0.5 * float(np.cross(lp_.points, np.roll(lp_.points, -1, axis=0)).sum(axis=0)
@@ -777,4 +1086,4 @@ def _perimeters(rmesh, tris, labels, cell_key, tgt, drop, length, exempt, caster
         seed = rmesh.verts[far] - 2.0 * APEX_NUDGE * rmesh.normals[far]
         area = float(abs(signed[order[0]]) - sum(abs(signed[k]) for k in order[1:]))
         cells.append(Cell(int(l), int(cell_key[l]), mine, area, loops, seed, divergence))
-    return cells
+    return cells, jstats

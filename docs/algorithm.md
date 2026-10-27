@@ -2371,8 +2371,8 @@ loaded.
 Extra symbols: `b` build direction, `θ = arcsin(sqrt(2/3))` the lattice rod
 angle, which is also the steepest a support face may overhang,
 `φ_s = 60°` the angle past which the input's surface is supported
-(`SUPPORT_START_DEG`), `h = 0.5 mm` the support step, `D = 0.5 mm` the
-unsupported reach, `t_s` minimum support thickness (`--support-thickness`,
+(`SUPPORT_START_DEG`), `h = 0.5 mm` the support step, `t_s` minimum support
+thickness (`--support-thickness`,
 default `t`), `Ω` the input body, `n` its outward normal.
 
 ### 14.0 Orientation
@@ -2520,11 +2520,11 @@ flowchart TD
     B1 -->|no| F1[exit 4, naming the region]
     B1 -->|yes| C[S2 one job per region, largest first, on the shared pool]
     C --> D[S3a first-contact ray per region vertex, exact cone query against body and lattice faces]
-    D --> E[exempt: ray length at most D]
-    E --> G[S3b partition: same anchor, continuous targets, same fold class; components are cells]
+    D --> G[S3b partition: same anchor, continuous targets, same fold class; components are cells]
     G --> H[fold cells under t_s squared into a neighbour; split cells holding another cell]
     H --> I[S3c parting curves: zero of the depth difference, one shared curve per parting]
-    I --> J[S4 per cell: ruled loft from the perimeter rays, extended into shell and anchor]
+    I --> I2[S3d perimeter rays: crease runs pushed into the wall; rays on level anchors lean inward, keeping a t_s footing]
+    I2 --> J[S4 per cell: ruled loft from the perimeter rays, extended into shell and anchor]
     J --> K[Common with body, Cut with local lattice junctions, keep the piece holding the seed]
     K --> L{cell gates}
     L -->|fail| M[deeper overshoot, then split the cell, then exit 4 naming it]
@@ -2545,8 +2545,8 @@ surface is the **exact 60° isocline**, not the mesh staircase: it is
 root-found on every mesh edge that crosses the bar, refined by bisection on the
 true surface to `1e-4` mm, and fitted as one B-spline on the ceiling. Keel and
 tip samples add a band of half-width `max(t_s/2, h)` on their adjacent faces,
-so a line or point feature has a ceiling patch of its own; keels and tips are
-never exempt. An **enclosed overhang area** is a connected component of
+so a line or point feature has a ceiling patch of its own. An **enclosed
+overhang area** is a connected component of
 required triangles, and every one of its boundaries must be a closed loop
 (gate G1, exit 4 naming the region otherwise).
 
@@ -2578,14 +2578,15 @@ when that falls inside the triangle. Candidates are pruned with
 its drop and length, and its **anchor shape**: the input body, or lattice
 solid `k`.
 
-A vertex is **exempt** — it needs no support — when its ray is at most `D`
-long: the surface it sits on, or another, is reached within the unsupported
-reach (where the ceiling itself runs down inside the cone the ray is of length
-zero). For the 0.5 mm check of specification.md §6.2, a vertex within `D` of
-lattice material counts as supported too; cells are not cut back around strut
-ends, which they meet face to face.
+Every required vertex is supported, however short its ray. Where a wall
+below is reached at once — in the crease where the ceiling meets it — the ray
+has no length at all, and S3d turns that into the cell's edge running into the
+wall. (An earlier revision called a vertex whose ray was at most 0.5 mm *exempt* and left it
+out of every cell; that left a 0.408 mm bevel of bare ceiling along every
+wall, 0.236 mm deep at the crease, and sealed a powder ring there that S5 then
+had to fill.)
 
-**S3b — Cells** (`support/cells.py`). Over the non-exempt required vertices, a
+**S3b — Cells** (`support/cells.py`). Over the required vertices, a
 mesh edge `(i, j)` joins its two ends iff they have the same anchor shape and
 
 ```
@@ -2616,8 +2617,8 @@ shares the longest border with: its rays are re-cast against that neighbour's
 anchor alone, and the fold is refused if a re-cast ray is obstructed. A cell
 must be simply connected, with one exception — an inner loop bordering the
 body's **exterior** (a tube through the roof), which S4's trim removes. An inner
-loop bordering another cell or an exempt patch splits the cell along a line
-through the hole, which makes a new parting.
+loop bordering another cell splits the cell along a line through the hole,
+which makes a new parting.
 
 **S3c — Parting curves.** A parting is computed, not read off the mesh. Read
 off the mesh it is a staircase at pitch `h`, and each cell smoothing its own
@@ -2636,6 +2637,110 @@ overlap. Each parting's smallest divergence angle is reported; where it would
 leave a crack narrower than `t_s` within `t_s` of the ceiling, the two cells are
 fused across it.
 
+**Junctions are computed, not read off the mesh either.** A triple point is the
+mean of one triangle's three crossings, and a triangle holds at most three
+cells, so where four cells meet at one point — the middle of every square of
+four holes on `Hole-block-basic` — the mesh makes two triple points with a
+sliver of parting between them: 0.232 mm, at all nine, always along the roof
+triangulation's own diagonal. The two cells sharing the sliver each had two
+corners there and two rulings down to their anchors, a double line from hole
+to hole. Triple points joined by a parting shorter than `JUNCTION_LEN` (`h`)
+are therefore one junction, at the mean of theirs, every cell meeting there
+casting its own ray from it, and the sliver is dropped.
+
+**S3d — Perimeter rays** (`support/cells.py`, `support/lean.py`). Only the rays
+on a cell's perimeter shape its solid, and two kinds are adjusted before S4.
+
+*Creases.* A perimeter point on the region's own border whose ray is shorter
+than `CREASE_LEN` (0.1 mm) sits in the crease where the ceiling meets a wall
+the cone reaches at once. Not zero: rays land on the obstacle mesh, whose
+facets cut inside a curved wall, and on the cup fixture's round chamber the
+crease points' rays measure 0.011 to 0.03 mm; at 0.01 mm a third of them were
+missed and the edge zig-zagging between moved and unmoved points notched 44
+pockets into the wall cells. A vertex off the border is a step away, with a
+ray of at least `h / sin θ`. It is moved `λ` (0.2 mm) horizontally away from the
+region, across the crease into the wall's material, and its ray points further
+into that material along the cone's surface, `cos θ·(−b) + sin θ·o` for the
+outward direction `o`, `λ` long. The outward direction is the region border's,
+read off the border edge and the triangle owning it, never the cell's, so the
+two cells meeting at a crossing on the crease move it identically. The band
+along that run then lies wholly outside the body, and the trim with the body
+leaves the wall's own face as the support's face: the support reaches the
+crease. A tube through the roof gets the same end by another route, its crease
+being an inner loop the loft covers.
+
+*Border junctions.* Where a parting, cut or fold ends in a crease, the end is
+one point too. The crossing on the border edge, every crossing inward of it
+along the shared boundary whose rays are crease-short (within `h`), and a
+border vertex beside it within `h/2` of the corner become one junction, which
+both cells use and which carries one ray. It is moved to
+
+    base + λ·(o₁ + o₂) / (1 + o₁·o₂)
+
+— `λ` inside both walls meeting there, `o₁` and `o₂` read off each side's first
+border edge away from the junction, `base` the point where the two walls' lines
+meet (the junction's own point when they are within 10° of parallel, which
+reduces to the crease push above) — and its ray runs on along the cone's
+surface between the two. At the hole-block's corners the crossing at the
+corner itself had sat on an interior mesh edge, so it was never pushed and kept
+a 0.001 mm vertical ray; the crossing beside it went 0.2 mm into one wall only
+and the corner vertex 0.14 mm into each, so the two wall cells ended on
+different points and one met the other in a vertical step.
+
+*Lean.* A ray landing on a level face of its anchor is one of a whole disc of
+targets at the same drop, and S3a's tie-break picks the one straight below:
+on a parting or along the region's edge that makes the side face vertical —
+on the cup fixture, a cylinder from the ceiling to the ledge. There the ray
+leans into its own cell instead: its target moves along the perimeter's
+horizontal inward normal `m`, `y = y₀ + s·m`, as far as all of these allow:
+
+* the cone: `|horizontal(y − x')| ≤ drop·tan θ`;
+* the face: `y₀ + [0, s]·m` stays on level faces of the same anchor at the
+  same height, ending at least `δ` inside them, so the overshoot enters the
+  anchor rather than running off its edge;
+* the ray `x' → y` meets no obstacle before `y`;
+* the **footing**: along `m`, the cell's footprint — the polygon of its
+  perimeter targets before leaning — must keep at least `t_s` between `y` and
+  its far side; half the excess each when the far side leans too.
+
+`m` is taken across 1 mm of perimeter either side, and the lean may change by
+at most 1 mm per mm along it (`TAPER`): a parting's points zig-zag by tens of
+microns, and with a neighbour-to-neighbour tangent a 2 mm lean swapped
+neighbours and folded the footprint. Fold lines keep the one ray their two
+cells share, and crease points are not leaned.
+
+**Cuts lean once, for both cells.** A cut (S3b) is an inner face of one support
+split in two, so it is no perimeter and the cells on either side of it must
+carry the same rays along it. The cells split from one support — a *family*,
+joined by the cut and triple points they share — are leaned together:
+
+* `m` is taken off the family's own outline, the cells' loops less their cuts
+  and less every edge two of them run in opposite directions, so a cut's end
+  and the parting point beside it see one smooth curve. Taken per cell, the end
+  got the mean of two one-sided tangents and its neighbour one of them, 5°
+  apart on the cup, and a 2 mm lean put them in each other's place;
+* a cut's end leans with the parting it ends on, and the far side of the
+  footing is sought across the whole family and past its cuts: at a cut's end
+  `m` runs along the cut, and the far side lies in the other cell;
+* the rays along the cut are its two ends' leans interpolated by arc length,
+  held to the cone and the level face;
+* every lean shared by two cells is the smaller of the two, after the taper and
+  after the clear-line check, until nothing changes; a footprint that folds
+  halves the lean of its whole family.
+
+They had kept a vertical ray, with the lean beside them tapering up from it at
+1 mm per mm: four lobes of footing reaching out to the parting on the cup,
+seen in section as a four-pointed star.
+
+On the cup fixture the ledge's four cells now lean 2 mm, up to 34.8°, all the
+way round, cuts included, where they stood 3.5 mm wide, vertical, before; the
+four come to 170.1 mm³ where they were 189.5 mm³ with vertical cut ends.
+
+The cheap prediction S3b makes of whether a cell's lower fan would enter the
+body leaves out vertices whose ray is shorter than the overshoot: carried on,
+a crease vertex's ray runs down the wall's own face, which reads as inside the
+body, and with them counted the cup's wall annulus was split into 165 cells.
+
 **S4 — Cell solids** (`support/build.py`).
 
 1. The perimeter is the cell's boundary: the shared S3c curve along a parting,
@@ -2644,9 +2749,14 @@ fused across it.
 2. The perimeter is cut into **runs** at triple points and wherever its kind
    changes. Each run's ceiling curve is fitted **once**, with every ray field
    along it in view, so the two cells sharing a parting or a cut build on the
-   same curve object. A run is fitted in **spans of one cubic each** (four
+   same curve object. Where a shared run meets the region's border the run
+   breaks at the crossing, whichever way the loop runs; breaking at the change
+   of kind itself ended the run on the border vertex in one cell and on the
+   crossing in the other, the two cells fitted two curves, and slivers were
+   left between them — 13 sealed ones on the cup fixture, and the overlaps S6
+   used to trim. A run is fitted in **spans of one cubic each** (four
    poles, ends interpolated), halved until the span is within
-   `SPAN_FIT_TOL` (0.2 mm; 0.05 mm along an exempt edge) of its points; the
+   `SPAN_FIT_TOL` (0.2 mm) of its points; the
    worst fit is reported. The span's ray field is smoothed **in the same
    basis** to within 0.3 mm, each control vector clamped into the closed
    `θ`-cone and lengthened by the overshoot `δ = max(t_s/2, 2d, 0.2 mm)`.
@@ -2729,10 +2839,19 @@ them, each a list of solids, each cut checked to remove exactly the volume it
 was given (fuzzy 0 up to 1e-3 mm). A split by the cells, tried first, lost
 volume where neighbouring cells share faces; on the test chamber the cut
 removes 178.67 of the cells' 205.75 mm³ at every fuzzy value to 1e-4 and all
-of it at 1e-3. Every free piece after the supports is given a **witness**, a
+of it at 1e-3. Where every fuzzy value falls short, the tools are cut one at a
+time, each step checked against what that tool alone takes from the region,
+and a tool whose step falls short goes first on the next pass: on the cup
+fixture one cut by 13 cells missed exactly one cell's 45.44 mm³ — the kernel
+took it for the inside of its neighbour, fusing the pair returned the
+neighbour alone — and one at a time it cuts in one order and not the other.
+Every free piece after the supports is given a **witness**, a
 point well inside it by its own tessellation, and is placed by it in the piece
-of free space it came from — asked of tessellations, not of the kernel; a
-witness outside the body, or in no earlier piece, fails the run (exit 4). A
+of free space it came from — asked of tessellations, not of the kernel, and
+failing that the nearest piece within the mesh's own deflection, since a
+sliver's deepest point can lie microns inside a curved wall the chords cut
+inside of; a witness outside the body, or in no earlier piece, fails the run
+(exit 4). A
 piece is **cut off**:
 
 * where its earlier piece reaches the envelope's own faces, if it no longer
@@ -2747,10 +2866,10 @@ lies on the body, the lattice or a support, shipped as a support body of its
 own; having no free face, it is self-supporting. With the fills in place
 nothing is cut off any more (gate G5).
 
-Besides cups, this fills the thin ring a wall's cells close off in the corner
-between the roof and the wall, inside the exempt band, where the cells along
-that wall meet on cuts rather than V-shaped partings: 3.9 mm³ round the test
-chamber. A job whose envelope holds too many tools is tiled; since a pocket
+A ring along the roof's crease used to be sealed and filled here — 3.9 mm³ round
+the cup fixture — while the band within 0.5 mm reach of the wall was left out
+of the cells; with the cells reaching the crease (S3d) there is none. A job
+whose envelope holds too many tools is tiled; since a pocket
 touches a support, a tile boundary need only avoid cutting through a cell's
 envelope.
 
@@ -2762,13 +2881,13 @@ face, which is self-supporting. The cut must remove the measured overlap to
 within 1e-5 of the cut body's volume and leave valid solids; a pair it fails on
 is fused instead, and a pair neither resolves fails the run (exit 4).
 
-Two things leave neighbours sharing volume. First-contact rays can cross —
-0.11 mm³ twice on `Hole-block-chamfered`. And a cell's edge along the exempt
-band, fitted through the mesh's staircase, can swing across the shared run
-near the triple point where both end: slivers of 1e-5 to 3e-4 mm³, one to
-seven microns thick, on every wall cell of the test chamber. Fusing was tried
-first and is the wrong tool for the second: the slivers chain the cells
-together, and chains of 8 and 16 cells fused into nothing valid.
+First-contact rays can cross, which leaves neighbours sharing volume —
+0.11 mm³ twice on `Hole-block-chamfered`. Slivers of 1e-5 to 3e-4 mm³ along
+every wall cell of the test chamber used to be the other source, and fusing
+was tried on them first and is the wrong tool: they chain the cells together,
+and chains of 8 and 16 cells fused into nothing valid. They came from two cells
+fitting a shared run as two curves (S4, step 2), and with that fixed the cup
+fixture resolves none and `Hole-block-chamfered` 6, where it resolved 17.
 
 **What a support owes the rest of the pipeline**, and what
 `tools/verify_geometry.py` asks of the written file (specification.md §6.2):
@@ -2777,7 +2896,7 @@ together, and chains of 8 and 16 cells fused into nothing valid.
 |---|---|
 | inside the body | `material_outside` ~ 0 |
 | self-supporting | no support face overhangs more than `θ` (+0.05°) at exact normals |
-| coverage | every point overhanging more than `φ_s` is within `D` of support or lattice, or exempt |
+| coverage | every point overhanging more than `φ_s` is inside support or lattice material |
 | disjoint | no support overlaps the lattice or another support |
 | shared faces | a support face on a strut lies on that strut's plane within 1e-6 mm |
 | thickness | no free-standing member thinner than `t_s` |
@@ -2793,14 +2912,16 @@ without a lattice by `tools/support_dev.py`, a development harness for parts
 whose only anchors are their own surfaces (`test/Hole-block-*.STEP`); the
 product itself always generates the lattice.
 
-**Built so far (Phases 2–5, no lattice):** S1, S3a–c, S4, S5 and S6. Of S4's
+**Built so far (Phases 2–5, no lattice):** S1, S3a–d, S4, S5 and S6. Of S4's
 gates, validity, `OutsideProbe`, self-support of the free faces and coverage
 run (coverage with 0.25 mm slack for the span fit, `build.COVER_SLACK`); a
 failing cell is rebuilt at twice the overshoot twice, then fails the run.
 **Still to come:** the face-classification and thickness gates and the split
 rung of the ladder (Phase 4 follow-up), S2's pool dispatch (Phase 7), and
 lattice as an anchor and cutter, with the fold class on strut ridges
-(Phase 6). Until
+(Phase 6). With nothing exempt any more, ceiling right beside a strut end gets
+rays of almost no length onto the strut, which Phase 6 has to handle the way
+S3d handles a wall's crease. Until
 Phase 6, `generate` returns no supports whenever it is given a lattice — which
 the product always does — so a supported run still prints
 `NOT_IMPLEMENTED_WARNING` and e2e still reports the support checks as `SKIP`.

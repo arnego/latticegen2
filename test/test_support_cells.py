@@ -97,6 +97,21 @@ def test_neighbouring_cells_share_one_parting_curve_and_part_in_a_v(chamber):
         assert c.min_divergence_deg > 30.0
 
 
+def test_a_crease_point_is_moved_into_the_wall_along_the_cone():
+    """S3d: across the crease by lambda, its ray on the cone's surface."""
+    from latticegen2.support import cells
+    from latticegen2.support.rays import SUPPORT_OVERHANG_DEG
+
+    b = np.array([0.0, 0.0, 1.0])
+    o = np.array([1.0, 0.0, 0.0])
+    P, T = cells._push(np.zeros(3), o, b)
+    assert np.allclose(P, cells.CREASE_PUSH * o)
+    d = T - P
+    assert np.linalg.norm(d) == pytest.approx(cells.CREASE_PUSH)
+    assert np.degrees(np.arccos(-d @ b / np.linalg.norm(d))) == pytest.approx(SUPPORT_OVERHANG_DEG)
+    assert d @ o > 0.0
+
+
 def test_hole_block_cells_are_a_crown_per_tube_and_one_per_wall():
     from latticegen2 import occ
     from latticegen2.support import cells
@@ -108,12 +123,19 @@ def test_hole_block_cells_are_a_crown_per_tube_and_one_per_wall():
     crowns = [c for c in part.cells if len(c.loops) == 2]
     walls = [c for c in part.cells if len(c.loops) == 1]
     assert len(crowns) == 16 and len(walls) == 4
-    # A crown's inner loop is the exempt ring round its tube: no partings.
+    # A crown's inner loop is its tube's crease, every point of it moved into
+    # the tube; a wall cell's outer loop runs along the wall's crease the same
+    # way (§14.3 S3d). Nothing is left out as exempt.
     for c in crowns:
-        assert (c.loops[1].kind == cells.EXEMPT_EDGE).all()
+        assert c.loops[1].pushed.all()
+        assert not (c.loops[1].kind == cells.PARTING).any()
+    for c in walls:
+        assert (c.loops[0].kind == cells.CREASE).sum() > 20
+    assert sum(len(c.verts) for c in part.cells) == len(regs[0].verts)
     # Symmetry: the four walls alike, and the crowns in three classes.
     assert np.ptp([c.area for c in walls]) < 0.05
-    assert len({round(c.area, 1) for c in crowns}) == 3
+    areas = np.sort([c.area for c in crowns])
+    assert (np.diff(areas) > 1.0).sum() + 1 == 3
     # Where two walls' cells part, their rays meet at arccos(1/3).
     assert min(c.min_divergence_deg for c in walls) == pytest.approx(
         np.degrees(np.arccos(1.0 / 3.0)), abs=0.1)
@@ -125,3 +147,37 @@ def test_hole_block_cells_are_a_crown_per_tube_and_one_per_wall():
                 if k == cells.TRIPLE:
                     triples.setdefault(pid, set()).add(c.id)
     assert triples and all(len(v) >= 2 for v in triples.values())
+
+
+def test_hole_block_junctions_are_one_point_each():
+    """Where four crowns meet, and where two walls meet, every cell ends on the
+    same one point (§14.3 S3c, S3d). The mesh put a 0.232 mm sliver of parting
+    in the middle of every square of holes, and left the corners' parting
+    crossing at the corner with a vertical ray while one wall's cell ended
+    0.2 mm into the other wall."""
+    from latticegen2 import occ
+    from latticegen2.support import cells
+
+    body = occ.read_step(os.path.join(TESTDIR, "Hole-block-basic.STEP"))
+    lp, rm, regs, ob, rays = _setup(body, (90.0, 0.0, 0.0))
+    part = _partition(lp, rm, regs[0], ob, rays)
+    assert part.stats["four_way_junctions"] == 9
+    assert part.stats["border_junctions"] == 4
+    uses = {}
+    for c in part.cells:
+        for lp_ in c.loops:
+            for pid, p, k, pu in zip(lp_.keys, lp_.points, lp_.kind, lp_.pushed):
+                uses.setdefault(pid, []).append((c.id, p, k, pu))
+    tri = {pid: u for pid, u in uses.items() if u[0][2] == cells.TRIPLE}
+    P = np.array([u[0][1] for u in tri.values()])
+    d = np.linalg.norm(P[:, None] - P[None], axis=2) + np.eye(len(P)) * 1e9
+    assert d.min() >= cells.JUNCTION_LEN
+    four = [u for pid, u in tri.items() if pid[0] == "j"]
+    assert len(four) == 9 and all(len({c for c, *_ in u}) == 4 for u in four)
+    # The roof spans x, z in [-25, 25]; a corner's junction is lambda inside
+    # both walls, shared by the two wall cells, with one ray.
+    corners = [u for pid, u in uses.items() if pid[0] == "j" and u[0][3]]
+    assert len(corners) == 4
+    for u in corners:
+        assert len(u) == 2 and u[0][0] != u[1][0]
+        assert np.allclose(np.abs(u[0][1][[0, 2]]), 25.0 + cells.CREASE_PUSH, atol=1e-6)

@@ -43,7 +43,7 @@ from latticegen2.lattice import lattice_params  # noqa: E402
 from latticegen2.support import cells as cells_  # noqa: E402
 from latticegen2.support import obstacles as obst  # noqa: E402
 from latticegen2.support import overhang, rays, regions  # noqa: E402
-from latticegen2.support.params import REACH, STEP  # noqa: E402
+from latticegen2.support.params import STEP  # noqa: E402
 
 
 def _pnt(p):
@@ -118,13 +118,11 @@ def main(argv=None) -> int:
         idx = r.verts
         apex = rmesh.verts[idx] - rays.APEX_NUDGE * rmesh.normals[idx]
         got = rays.first_contact(apex, lp.b, obstacles)
-        exempt = got.length <= REACH
-        say(f"  region {k}: {len(got)} rays in {time.time() - t3:.1f} s; "
-            f"{int(exempt.sum())} exempt (<= {REACH} mm); drop "
+        say(f"  region {k}: {len(got)} rays in {time.time() - t3:.1f} s; drop "
             f"min {got.drop.min():.3f} median {np.median(got.drop):.3f} "
             f"max {got.drop.max():.3f} mm; length max {got.length.max():.3f} mm; "
             f"anchors {sorted(set(got.anchor.tolist()))}")
-        keep = np.nonzero(~exempt)[0][::max(1, args.every)]
+        keep = np.arange(len(got))[::max(1, args.every)]
         ray_edges.append(_segments(got.apex[keep], got.target[keep]))
         for loop in r.loops:
             loop_wires.append(_polyline(rmesh.verts[loop]))

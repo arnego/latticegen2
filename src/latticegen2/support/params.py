@@ -16,10 +16,6 @@ STEP = 0.5
 """``h``, mm: the support step. Spacing of overhang samples and of ray sources,
 and the edge length the region mesh is refined to (§14.3 S1)."""
 
-REACH = 0.5
-"""``D``, mm: the unsupported reach. A point within this of support or lattice,
-or whose first-contact ray is no longer than this, needs no support."""
-
 REQUIRED_SLACK = 1e-6
 """How far past ``sin(SUPPORT_START_DEG)`` a sample's ``n . b`` must be to count
 as over the bar rather than at it — so a surface tilted at exactly 60 deg, like
@@ -32,5 +28,5 @@ TAN_CONE = math.tan(math.radians(SUPPORT_OVERHANG_DEG))
 """Tangent of the support cone's half-angle, the lattice rod angle: exactly
 ``sqrt(2)``, computed from the expression rather than typed."""
 
-__all__ = ["STEP", "REACH", "REQUIRED_SLACK", "SIN_START", "TAN_CONE",
+__all__ = ["STEP", "REQUIRED_SLACK", "SIN_START", "TAN_CONE",
            "SUPPORT_OVERHANG_DEG", "SUPPORT_START_DEG"]

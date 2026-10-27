@@ -17,9 +17,9 @@ owes that chain:
   §1). A boolean against the body can be wrong while reporting success
   (docs/algorithm.md §7.2): check a trim with something that is not the same
   kernel call, such as ``classify.OutsideProbe`` over ``inp.mesh``.
-* **Coverage.** Every overhang sample within 0.5 mm of support or lattice
-  (:data:`.params.REACH`) — ``tools/verify_geometry.overhang_coverage`` asks
-  this of the written file in e2e.
+* **Coverage.** Every overhang sample inside support or lattice material,
+  up to the overhang's own edge — ``tools/verify_geometry.overhang_coverage``
+  asks this of the written file in e2e.
 * **Self-supporting.** No support surface or edge overhangs more than the rod
   angle :data:`.params.SUPPORT_OVERHANG_DEG` from ``inp.lp.b`` —
   ``verify_geometry.self_supporting``.
@@ -38,7 +38,7 @@ import numpy as np
 
 from ..errors import ProcessingError
 from .contract import SupportInput, SupportResult
-from .params import REACH, STEP
+from .params import STEP
 
 OBSTACLE_DEFLECTION = 0.02
 """mm. Tessellation the rays land on. First contacts snap to its facets, so it
@@ -61,7 +61,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     ``tools/support_dev.py``, which calls it with no lattice.
     """
     from .. import occ
-    from . import build, cells, obstacles, rays, regions, voids
+    from . import build, cells, lean, obstacles, rays, regions, voids
     from .assemble import _LocalLattice
 
     stats = {}
@@ -86,16 +86,15 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
         got = rays.first_contact(apex, lp.b, obs, report=report)
         part = cells.partition(rmesh, reg, got, obs, lp.b, thickness, report=report,
                                inside_body=gates.inside_body, overshoot=delta)
-        exempt = np.zeros(len(rmesh.verts), dtype=bool)
-        exempt[reg.verts] = got.length <= REACH
+        leaned = lean.lean_cells(part.cells, obs, lp.b, thickness, delta)
+        part.stats.update(leaned)
         cache = {}
         build.prepare_fits(part.cells, cache)
         for c in part.cells:
             n_cells += 1
             if report is not None:
                 report("building support cells", n_cells, None)
-            live = c.verts[~exempt[c.verts]]
-            inside = rmesh.verts[live] - 2.0 * rays.APEX_NUDGE * rmesh.normals[live]
+            inside = rmesh.verts[c.verts] - 2.0 * rays.APEX_NUDGE * rmesh.normals[c.verts]
             d = delta
             whys = []
             for attempt in range(OVERSHOOT_RETRIES + 1):

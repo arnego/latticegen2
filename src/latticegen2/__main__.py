@@ -81,7 +81,23 @@ def _display_available() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
+def _utf8_streams() -> None:
+    """Write stdout and stderr as UTF-8 whatever the locale's code page.
+
+    The `.log` is UTF-8 already, and the console text has to be the same
+    bytes. A Windows console is written through its wide-character API and is
+    unaffected; a pipe or a file otherwise takes the ANSI code page, where the
+    section sign in the support warning arrives as one cp1252 byte that a UTF-8
+    reader -- the front-end, `tools/e2e.py`, the tests -- cannot decode. Under
+    `pythonw.exe` there are no streams to reconfigure.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
 
     # The graphical front-end, dispatched before `parse_args` (which requires

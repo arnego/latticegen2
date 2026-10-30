@@ -243,11 +243,12 @@ def _run(args):
                           encoding="utf-8", errors="replace")
 
 
-def test_a_supported_box_runs_through_the_stub_and_writes_the_lattice(box_step, tmp_path):
-    """Until the generator exists: overhangs found, a warning, the lattice unchanged."""
+def test_a_supported_box_ships_supports_beside_the_unchanged_lattice(box_step, tmp_path):
+    """The real generator, end to end: overhangs found, support bodies written
+    after the lattice, which is the same as a run without supports."""
     from latticegen2 import occ
     from latticegen2.runlog import stages_for
-    from latticegen2.support import NOT_IMPLEMENTED_WARNING
+    from latticegen2.support import LATTICE_BACKS_ALL_NOTE
 
     plain = str(tmp_path / "plain.step")
     held = str(tmp_path / "held.step")
@@ -256,7 +257,7 @@ def test_a_supported_box_runs_through_the_stub_and_writes_the_lattice(box_step, 
               "--support"])
     assert a.returncode == 0, a.stderr
     assert b.returncode == 0, b.stderr
-    assert NOT_IMPLEMENTED_WARNING in b.stdout
+    assert LATTICE_BACKS_ALL_NOTE not in b.stdout
 
     log = open(held[:-5] + ".log", encoding="utf-8").read()
     order = [log.index(f"stage {name}") for name in
@@ -265,14 +266,18 @@ def test_a_supported_box_runs_through_the_stub_and_writes_the_lattice(box_step, 
     assert stages_for(True).index("overhang") == stages_for(True).index("simplify") + 1
     assert "stage overhang" not in open(plain[:-5] + ".log", encoding="utf-8").read()
     assert int(log.split("overhang_samples: ")[1].split()[0]) > 1000
-    assert NOT_IMPLEMENTED_WARNING in log
-    assert "support_volume_mm3: 0.0" in log
-    assert "lattice_volume_mm3" in log and "output_volume_mm3" in log
+    n = int(log.split("supports: ")[1].split()[0])
+    assert n >= 1
+    support = float(log.split("support_volume_mm3: ")[1].split()[0])
+    lattice_v = float(log.split("lattice_volume_mm3: ")[1].split()[0])
+    output_v = float(log.split("output_volume_mm3: ")[1].split()[0])
+    assert support > 0.0
+    assert output_v == pytest.approx(lattice_v + support, rel=1e-6)
 
     lattice = occ.solids(occ.read_step(plain))
     supported = occ.solids(occ.read_step(held))
-    assert len(supported) == len(lattice)
-    assert sum(occ.volume(s) for s in supported) == pytest.approx(
+    assert len(supported) == len(lattice) + n
+    assert sum(occ.volume(s) for s in supported[:len(lattice)]) == pytest.approx(
         sum(occ.volume(s) for s in lattice), rel=1e-9)
 
 

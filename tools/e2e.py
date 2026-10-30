@@ -417,34 +417,27 @@ CYLINDER_SUPPORT_GOLDEN = os.path.join(
 
 def support_checks(rep: Report, output: str, input_path: str, cc: float, t: float,
                    orient, thickness: float) -> None:
-    """specification.md §6.2's two support checks, asked of the written file.
+    """specification.md §6.2's support checks, asked of the written file.
 
-    Until the support generator exists (docs/algorithm.md §14.3) the run says
-    so in its log, and both checks are reported as `SKIP` rather than failed:
-    they measure an algorithm that is not there yet. What is checked instead is
-    that the support stages ran where they belong, between `simplify` and
-    `validate`. Both checks come back on their own once the warning goes.
+    A run with nothing to support at its orientation says so in its log, and
+    the checks are reported as `SKIP` rather than failed: coverage of no samples
+    can neither pass nor fail. A run whose lattice backs every overhang already
+    says that too; coverage is checked, and the checks of the support bodies
+    have no body to ask.
     """
-    from latticegen2.support import NO_OVERHANG_NOTE, NOT_IMPLEMENTED_WARNING
+    from latticegen2.support import LATTICE_BACKS_ALL_NOTE, NO_OVERHANG_NOTE
 
     log = open(os.path.splitext(output)[0] + ".log", encoding="utf-8").read()
     order = [log.find(f"stage {name}") for name in
              ("simplify", "overhang", "support", "validate")]
     rep.check("the support stages ran between simplify and validate",
               -1 not in order and order == sorted(order))
-    # Two runs these checks have nothing to say about, each recognised by the
-    # line the run itself prints for it: one with nothing to support at this
-    # orientation, where coverage of no samples can neither pass nor fail, and
-    # one whose generator does not exist yet.
-    why = None
+    # A run these checks have nothing to say about, recognised by the line the
+    # run itself prints for it: nothing to support at this orientation.
     if NO_OVERHANG_NOTE in log:
-        why = "no inner overhang at this orientation"
-    elif NOT_IMPLEMENTED_WARNING in log:
-        why = "no support algorithm yet (docs/algorithm.md §14.3)"
-    if why is not None:
         for label in ("every inner overhang is backed by material",
                       "no support surface exceeds the overhang limit"):
-            print(f"  [SKIP] {label} — {why}", flush=True)
+            print(f"  [SKIP] {label} — no inner overhang at this orientation", flush=True)
         return
     cov = vg.overhang_coverage(output, input_path, cc, t, orient, thickness)
     rep.check("every inner overhang is backed by material",
@@ -461,6 +454,30 @@ def support_checks(rep: Report, output: str, input_path: str, cc: float, t: floa
               + (f", {ss['bad_area_mm2']:.3f} mm^2 over the limit, worst "
                  f"{ss['worst_deg']:.2f} deg at {ss['where'][0]}"
                  if ss["bad_area_mm2"] else ""))
+    # Which bodies are support is what the run says it wrote; whether they
+    # overlap anything is asked of the file alone.
+    if LATTICE_BACKS_ALL_NOTE in log:
+        print("  [SKIP] support bodies — the lattice backs every overhang", flush=True)
+        return
+    found = re.search(r"^\[[0-9:]+\] supports: (\d+) separate", log, re.MULTILINE)
+    rep.check("the run reports its support bodies", found is not None)
+    if found is None:
+        return
+    n = int(found.group(1))
+    dis = vg.supports_disjoint(output, n)
+    rep.check("supports overlap neither the lattice nor each other",
+              dis["worst_mm3"] <= vg.SUPPORT_OVERLAP_TOL,
+              f"{n} support bod(y/ies), {dis['pairs']} pair(s) intersected, worst "
+              f"{dis['worst_mm3']:.3e} mm^3"
+              + (f" near {dis['where']}" if dis["worst_mm3"] > vg.SUPPORT_OVERLAP_TOL
+                 else ""))
+    sp = vg.supports_on_strut_planes(output, n)
+    rep.check("support faces resting on a strut lie on its plane",
+              sp["worst_mm"] <= vg.CONTACT_PLANE_TOL,
+              f"{sp['resting']} face(s) resting on a strut, worst "
+              f"{sp['worst_mm']:.3e} mm off its plane"
+              + (f" near {sp['where']}" if sp["worst_mm"] > vg.CONTACT_PLANE_TOL
+                 else ""))
 
 
 def scenario_oriented_lattice(outdir: str) -> Report:

@@ -220,17 +220,17 @@ the output stays in the input's own coordinate system. A rotated run adds
 
 **Print support** (metal powder-bed fusion). With `--support`, every part of
 the input's inner surface that acts as a ceiling more than 60° from vertical is
-carried down to the first strut, wall or floor a downward cone of the lattice
-rod angle (54.74°) reaches, by solid supports whose own faces are no steeper
-than that angle ([docs/algorithm.md](docs/algorithm.md) §14). Neither angle is a
-parameter. Supports are written as **separate bodies** beside the unchanged
-lattice, sharing faces with the lattice and the walls so that they merge into
-the enveloping part in your CAD tool; supports touching each other on a face
-are one body, and pockets of powder they would trap are filled and joined to
-them. **The support algorithm is being implemented in phases:** until it
-lands, a run with `--support` detects and logs the inner overhangs, writes the
-lattice unchanged and prints a `WARNING` saying so. A supported run adds `-sup`
-to the default file name:
+carried down to the nearest lattice rod below it — or, where no rod is
+reached, to the enveloping wall — by solid supports built from support nodes of
+a grid in the lattice's own frame ([docs/algorithm.md](docs/algorithm.md) §14). Every
+support face lies on a plane of that frame or on the input's own surface, so no
+face overhangs more than the rod angle (54.74°). Neither angle is a parameter;
+`--support-thickness` sets how finely the grid divides the lattice cube.
+Supports are written as **separate bodies** beside the unchanged lattice,
+sharing faces with the struts and the walls so that they merge into the
+enveloping part in your CAD tool; every support body is a manifold solid, and
+pockets of powder they would trap are filled and joined to them. A supported
+run adds `-sup` to the default file name:
 
 ```bash
 python src/main.py -i part.step -cc 10 -t 1.5 --orient 30 0 0 --support
@@ -350,7 +350,8 @@ halving the face count and the file size.
 | Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |
 | Lattice oriented to the print bed | The frame is rotated into the part's coordinates and the body is never transformed, so the output stays where the input is. One code path: the rotation is applied even at `0 0 0`, where it is exactly the identity, and both golden samples still compare at 0 mm³ through it |
 | Candidates bounded by the surface, not its box | The body's own mesh vertices are bounded in lattice index space instead of the corners of its axis-aligned box — 23,064 → 10,608 candidates on the test cylinder, the same interior and boundary nodes |
-| Supports added to the completed lattice | The support stage runs after `simplify`: the generator sees the unified lattice and returns supports only, which the stage fuses into the lattice they touch, unifies again and checks by volume so no lattice can be lost. One validation pass then judges the product, and nothing upstream knows supports exist ([docs/algorithm.md](docs/algorithm.md) §14.2) |
+| Supports added to the completed lattice | The support stage runs after `simplify`: the generator sees the unified lattice and returns supports only, which the stage checks overlap nothing and appends beside the lattice as separate bodies. One validation pass then judges the product, and nothing upstream knows supports exist ([docs/algorithm.md](docs/algorithm.md) §14.2) |
+| Supports on the lattice grid | Each support is a box of support nodes from its anchor to the ceiling it backs, the grid being the lattice's own frame divided to rod resolution, so self-support and shared strut faces hold by construction and the only booleans are one trim per support body against the input, each checked by a sampled estimate ([docs/algorithm.md](docs/algorithm.md) §14.3) |
 
 ### Memory
 

@@ -28,6 +28,12 @@ SUPPORT_OVERLAP_TOL = 1e-6
 """mm³. The most volume a support may share with the lattice or with another
 support. Faces may coincide; volume may not."""
 
+KEY_OFFSET = 1 << 20
+KEY_SPAN = 1 << 21
+"""Packing of a node index triple into one integer: each index shifted by
+:data:`KEY_OFFSET` into ``[0, KEY_SPAN)``, a million cells either way of the
+origin -- 0.4 mm cells reach 400 m."""
+
 CONTACT_GAP = 1e-3
 """mm. Bounding boxes closer than this are treated as touching when choosing
 which pairs to intersect. Over-selecting costs a boolean, never a wrong answer."""
@@ -114,9 +120,11 @@ class _LocalLattice:
 
     def __init__(self, lp, kept_nodes: np.ndarray):
         self.lp = lp
+        self._nodes = np.asarray(kept_nodes, dtype=np.int64).reshape(-1, 3)
         self.positions = (_lattice.nodes(lp, kept_nodes) if len(kept_nodes)
                           else np.empty((0, 3)))
         self._template = None
+        self._keys = None
         # A junction reaches a/2 along a strut, plus the profile's circumradius.
         self.reach = lp.a / 2.0 + lp.r
 
@@ -134,6 +142,45 @@ class _LocalLattice:
             self._template = build_template(self.lp).solid
         return [self._template.Moved(occ.translation(p))
                 for p in self.positions[hit]]
+
+    def contains(self, points) -> np.ndarray:
+        """Which ``points`` lie in the junction instances' material, exactly.
+
+        ``J`` is the union of six half-strut prisms (docs/algorithm.md §3.2), so
+        a point is inside it iff, for some strut family ``k``, it lies within
+        ``a/2`` of the node along ``e_k`` and inside the diamond profile across
+        it: ``|x·u_k| + |x·v_k| <= r``. A point within a junction is less than
+        one cell from its node in every index coordinate, so the nodes to ask
+        are the corners of the index cell holding it.
+        """
+        P = np.asarray(points, dtype=float).reshape(-1, 3)
+        out = np.zeros(len(P), dtype=bool)
+        if not len(self.positions) or not len(P):
+            return out
+        if self._keys is None:
+            self._keys = np.sort(self._key(self._nodes))
+        lp = self.lp
+        q = np.linalg.solve(lp.B, P.T).T
+        base = np.floor(q).astype(np.int64)
+        for corner in np.array(np.meshgrid([0, 1], [0, 1], [0, 1])).T.reshape(-1, 3):
+            n = base + corner
+            key = self._key(n)
+            at = np.searchsorted(self._keys, key)
+            kept = (at < len(self._keys)) & (self._keys[np.minimum(at, len(self._keys) - 1)] == key)
+            if not kept.any():
+                continue
+            d = P[kept] - (lp.B @ n[kept].T).T
+            hit = np.zeros(len(d), dtype=bool)
+            for k in range(3):
+                hit |= ((np.abs(d @ lp.e[k]) <= lp.a / 2.0)
+                        & (np.abs(d @ lp.u[k]) + np.abs(d @ lp.v[k]) <= lp.r))
+            out[np.nonzero(kept)[0][hit]] = True
+        return out
+
+    @staticmethod
+    def _key(n: np.ndarray) -> np.ndarray:
+        n = np.asarray(n, dtype=np.int64) + KEY_OFFSET
+        return (n[:, 0] * KEY_SPAN + n[:, 1]) * KEY_SPAN + n[:, 2]
 
 
 def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,

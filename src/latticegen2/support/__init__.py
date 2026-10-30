@@ -27,14 +27,14 @@ from . import assemble, generate, overhang
 from .contract import SupportInput, SupportResult
 from .params import STEP, SUPPORT_START_DEG
 
-NOT_IMPLEMENTED_WARNING = (
-    "WARNING: the support generator returned no supports although the input "
-    "has inner overhangs; the output carries no supports (docs/algorithm.md "
-    "§14.3)."
+LATTICE_BACKS_ALL_NOTE = (
+    "note: the lattice backs every inner overhang at this orientation; no "
+    "support was generated."
 )
-"""Printed by every run whose generator returns no supports while there were
-overhangs to support. ``tools/e2e.py`` reads it to report the support checks
-as skipped rather than failed."""
+"""Printed when there were overhangs and the generator returned no supports:
+every ceiling point lies in a strut already (docs/algorithm.md §14.3).
+``tools/e2e.py`` reads it: coverage is still checked, the body checks have no
+body to ask."""
 
 NO_OVERHANG_NOTE = (
     "note: no inner overhang exceeds 60 deg from vertical at this orientation; "
@@ -98,7 +98,7 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
     if len(samples) == 0:
         rl.always(NO_OVERHANG_NOTE)
     elif not result.supports:
-        rl.always(NOT_IMPLEMENTED_WARNING)
+        rl.always(LATTICE_BACKS_ALL_NOTE)
     else:
         rl.line(
             f"supports: {len(result.supports)} separate bod(y/ies), "

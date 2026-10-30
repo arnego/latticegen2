@@ -37,23 +37,39 @@ def mesh_of(path: str, cc: float, t: float, refine: float = 1.0) -> TriMesh:
     ``refine`` divides the chordal deflection. It exists for one caller: a
     crossing found at the default deflection is re-asked at a finer one before
     it is believed (:func:`tools.e2e.geometry_checks`).
+
+    **Each solid is welded on its own.** Support bodies share faces with the
+    lattice and with each other (specification.md §4.6), and welded together
+    the edges of a shared face would be used four times — two closed bodies
+    read as one non-manifold one. Kept apart, every body has to close by
+    itself, which is the property the manifold check asks for.
     """
     shape = occ.read_step(path)
     lp = lattice_params(cc, t)
     occ.mesh_shape(shape, chordal_target(lp) / refine)
-    verts, tris, offset = [], [], 0
-    for face in occ.faces(shape):
-        got = occ.face_triangulation(face)
-        if got is None:
+    verts, tris, owner, offset = [], [], [], 0
+    for solid in occ.solids(shape):
+        sv, sf, soff = [], [], 0
+        for face in occ.faces(solid):
+            got = occ.face_triangulation(face)
+            if got is None:
+                continue
+            v, f = got
+            sv.append(v)
+            sf.append(f + soff)
+            soff += len(v)
+        if not sf:
             continue
-        v, f = got
+        v, f = _weld(np.vstack(sv), np.vstack(sf))
         verts.append(v)
         tris.append(f + offset)
+        owner.append(np.full(len(f), len(owner), dtype=np.int64))
         offset += len(v)
     if not tris:
         raise RuntimeError(f"No triangles produced for {path}")
-    v, f = _weld(np.vstack(verts), np.vstack(tris))
-    return TriMesh(verts=v, tris=f)
+    mesh = TriMesh(verts=np.vstack(verts), tris=np.vstack(tris))
+    mesh.solid_of = np.concatenate(owner)
+    return mesh
 
 
 def manifold_check(mesh: TriMesh):
@@ -102,7 +118,16 @@ def self_intersection_check(mesh: TriMesh, limit: int = 50):
     same pairs while touching each cell's contents once. Adjacent triangles are
     *expected* to touch along shared edges, so pairs sharing any vertex are
     skipped.
+
+    **Within one solid only, where the mesh says which solid a triangle is of**
+    (``mesh.solid_of``, :func:`mesh_of`). A self-intersection is a property of a
+    solid. Support bodies share faces with the lattice by design, and where the
+    two meet on a curved ceiling their independent tessellations cross --
+    measured on the supported ball: 316 pairs, every one between the lattice
+    and the support, none within either. Whether two bodies overlap is asked
+    exactly, of the B-rep, by :func:`supports_disjoint`.
     """
+    solid_of = getattr(mesh, "solid_of", None)
     sh = SpatialHash(mesh)
     A, B, C = mesh.triangle_points
     bad: list[tuple[int, int]] = []
@@ -116,6 +141,8 @@ def self_intersection_check(mesh: TriMesh, limit: int = 50):
                 if pair in seen:
                     continue
                 seen.add(pair)
+                if solid_of is not None and solid_of[pair[0]] != solid_of[pair[1]]:
+                    continue
                 if set(mesh.tris[pair[0]]) & set(mesh.tris[pair[1]]):
                     continue
                 t1 = np.array([A[pair[0]], B[pair[0]], C[pair[0]]])
@@ -711,6 +738,54 @@ def _oriented_mesh(shape, deflection: float):
     return v, f[keep], n[keep] / (2.0 * area[keep])[:, None], area[keep]
 
 
+EXACT_NORMAL_PREFILTER_DEG = 5.0
+"""Degrees. How much flatter than the limit a facet may read and still be
+re-read at the exact normal: far more than a chord at
+:data:`SUPPORT_MESH_DEFLECTION` tilts on any face a support carries."""
+
+
+def _oriented_mesh_exact(shape, deflection: float):
+    """:func:`_oriented_mesh` plus ``exact(i)``: the true outward normal of
+    triangle ``i``'s face at the triangle's centroid in the face's parameters,
+    ``None`` at a pole or where the face has no parameters."""
+    from OCP.TopAbs import TopAbs_Orientation
+
+    from latticegen2.support.overhang import _SurfaceNormals
+
+    occ.mesh_shape(shape, deflection)
+    verts, tris, owner, uvc, faces, offset = [], [], [], [], [], 0
+    for face in occ.faces(shape):
+        got = occ.face_uv_triangulation(face)
+        if got is None:
+            continue
+        p, uv, f, _evaluate = got
+        if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+            f = f[:, ::-1]
+        verts.append(p)
+        tris.append(f + offset)
+        uvc.append(uv[f].mean(axis=1))
+        owner.append(np.full(len(f), len(faces), dtype=np.int64))
+        faces.append(face)
+        offset += len(p)
+    v = np.vstack(verts)
+    f = np.vstack(tris)
+    owner = np.concatenate(owner)
+    uvc = np.vstack(uvc)
+    nrm = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
+    area = 0.5 * np.linalg.norm(nrm, axis=1)
+    keep = area > 0.0
+    f, owner, uvc = f[keep], owner[keep], uvc[keep]
+    normals = {}
+
+    def exact(i: int):
+        k = int(owner[i])
+        if k not in normals:
+            normals[k] = _SurfaceNormals(faces[k])
+        return normals[k].at(*uvc[i])[1]
+
+    return v, f, nrm[keep] / (2.0 * area[keep])[:, None], area[keep], exact
+
+
 def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
                       orient, thickness: float) -> dict:
     """Is every inner overhang of the input backed by material in the output?
@@ -782,17 +857,28 @@ def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
     lattice is not analysed). Everything else is support, and a single such
     facet over the limit is a failure.
     """
-    from latticegen2.classify import PointInside  # noqa: F401  (same import cost)
+    from latticegen2.cli import SUPPORT_OVERHANG_DEG
 
     lp = lattice_params(cc, t, orient)
     b = lp.b
     out = occ.read_step(candidate_path)
-    v, f, n, area = _oriented_mesh(out, SUPPORT_MESH_DEFLECTION)
-    from latticegen2.cli import SUPPORT_OVERHANG_DEG
+    v, f, n, area, exact = _oriented_mesh_exact(out, SUPPORT_MESH_DEFLECTION)
 
+    # **Read at exact normals** (specification.md §6.2). A support face built at
+    # the limit is curved, and its chords tilt either side of the true surface,
+    # so a facet can read a hair past the bar where the face is not. The facet
+    # normals only pick candidates, against a bar loose enough to hold every
+    # chord the mesh can make; each candidate is then read on the face itself.
     bar = float(np.sin(np.radians(SUPPORT_OVERHANG_DEG + tol_deg)))
+    loose = float(np.sin(np.radians(SUPPORT_OVERHANG_DEG - EXACT_NORMAL_PREFILTER_DEG)))
+    suspect = np.nonzero(-(n @ b) > loose)[0]
+    n = n.copy()
+    for i in suspect:
+        got = exact(int(i))
+        if got is not None:
+            n[i] = got
     down = -(n @ b)
-    suspect = np.nonzero(down > bar)[0]
+    suspect = suspect[down[suspect] > bar]
 
     strut = np.array([s * (su * lp.u[k] + sv * lp.v[k]) / np.sqrt(2.0)
                       for k in range(3) for su in (1, -1) for sv in (1, -1)
@@ -831,6 +917,124 @@ def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
         "worst_deg": worst,
         "where": where,
     }
+
+
+SUPPORT_OVERLAP_TOL = 1e-6
+"""mm³. Volume a support may share with the lattice or another support: the
+stage's own bar (docs/algorithm.md §14.2)."""
+
+CONTACT_PLANE_GAP = 1e-2
+"""mm. A planar support face parallel to a strut face and nearer to its plane
+than this is taken to rest on it, and must then lie on it."""
+
+CONTACT_PLANE_TOL = 1e-6
+"""mm. How far off a strut's plane a support face resting on it may lie."""
+
+
+def _split_supports(candidate_path: str, n_supports: int):
+    """``(lattice, supports)`` solids of a written file: the generator writes the
+    lattice first and the supports after it (docs/algorithm.md §14.2)."""
+    solids = occ.solids(occ.read_step(candidate_path))
+    if not 0 < n_supports <= len(solids):
+        raise RuntimeError(f"{candidate_path} holds {len(solids)} solid(s), "
+                           f"not the {n_supports} support(s) its log reports")
+    return solids[:-n_supports], solids[-n_supports:]
+
+
+def _common(a, b) -> float:
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+
+    alg = BRepAlgoAPI_Common(a, b)
+    if not alg.IsDone():
+        return float("nan")
+    return occ.volume(alg.Shape())
+
+
+def supports_disjoint(candidate_path: str, n_supports: int) -> dict:
+    """Do the supports overlap the lattice or each other? Exact, one boolean
+    per pair whose boxes touch."""
+    lattice, supports = _split_supports(candidate_path, n_supports)
+    gap = 1e-3
+
+    def box(s):
+        lo, hi = occ.bounding_box(s)
+        return np.asarray(lo) - gap, np.asarray(hi) + gap
+
+    def touch(p, q):
+        return bool(np.all(p[0] <= q[1]) and np.all(q[0] <= p[1]))
+
+    lb = [box(s) for s in lattice]
+    sb = [box(s) for s in supports]
+    worst, pairs, where = 0.0, 0, None
+    for i, s in enumerate(supports):
+        others = [(lattice[j], lb[j]) for j in range(len(lattice))]
+        others += [(supports[j], sb[j]) for j in range(i + 1, len(supports))]
+        for o, ob in others:
+            if not touch(sb[i], ob):
+                continue
+            pairs += 1
+            v = _common(s, o)
+            if not v <= worst:                     # NaN counts as the worst
+                worst = v
+                where = np.round((sb[i][0] + sb[i][1]) / 2.0, 3).tolist()
+    return {"pairs": pairs, "worst_mm3": worst, "where": where}
+
+
+def supports_on_strut_planes(candidate_path: str, n_supports: int) -> dict:
+    """Does every support face resting on a strut lie on that strut's plane?
+
+    Planar faces only, since a strut face is planar: a support face parallel to
+    a lattice face, overlapping it and nearer than :data:`CONTACT_PLANE_GAP`,
+    rests on it, and must lie within :data:`CONTACT_PLANE_TOL` of its plane, so
+    the downstream merge finds one shared face rather than a sliver.
+    """
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_SurfaceType
+    from OCP.TopAbs import TopAbs_Orientation
+
+    def planes(solids):
+        out = []
+        for s in solids:
+            for face in occ.faces(s):
+                surf = BRepAdaptor_Surface(face)
+                if surf.GetType() != GeomAbs_SurfaceType.GeomAbs_Plane:
+                    continue
+                pl = surf.Plane()
+                d, o = pl.Axis().Direction(), pl.Location()
+                n = np.array([d.X(), d.Y(), d.Z()])
+                if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+                    n = -n
+                lo, hi = occ.bounding_box(face)
+                out.append((n, float(n @ np.array([o.X(), o.Y(), o.Z()])),
+                            np.asarray(lo), np.asarray(hi)))
+        return out
+
+    lattice, supports = _split_supports(candidate_path, n_supports)
+    lat = planes(lattice)
+    if not lat:
+        return {"resting": 0, "worst_mm": 0.0, "where": None}
+    ln = np.array([p[0] for p in lat])
+    lo_ = np.array([p[1] for p in lat])
+    llo = np.array([p[2] for p in lat])
+    lhi = np.array([p[3] for p in lat])
+    resting, worst, where = 0, 0.0, None
+    for n, off, lo, hi in planes(supports):
+        # Resting means facing the strut: outward normals opposite.
+        near = ((ln @ n) < -1.0 + 1e-9) \
+            & np.all(llo <= hi + CONTACT_PLANE_GAP, axis=1) \
+            & np.all(lo <= lhi + CONTACT_PLANE_GAP, axis=1)
+        if not near.any():
+            continue
+        gaps = np.abs(off + lo_[near])             # opposite normals: offsets cancel
+        hit = gaps < CONTACT_PLANE_GAP
+        if not hit.any():
+            continue
+        resting += 1
+        g = float(gaps[hit].max())
+        if g > worst:
+            worst = g
+            where = np.round((lo + hi) / 2.0, 3).tolist()
+    return {"resting": resting, "worst_mm": worst, "where": where}
 
 
 def contained_in(inner_path: str, outer_path: str) -> float:

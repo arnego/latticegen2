@@ -354,44 +354,42 @@ An opt-in stage that creates support structures, as used for
   keeps a bare band (3.7 mm wide on the 80 mm ball). Neither angle is a
   parameter.
 - **Full coverage.** Every point overhanging more than 60° is backed by support
-  or lattice material. Supports run all the way to the edge of each overhang:
-  to its 60° isocline, to the partings with their neighbours, and into the
-  crease where a ceiling meets a wall, ending on the wall's own face. No band
-  along a wall or an isocline is left bare because something below is near.
+  or lattice material, all the way to the edge of each overhang: every ceiling
+  point lies in a support or a strut.
 - **Anchoring and design depth.** A support runs from the ceiling down to the
-  first strut, wall or floor that a downward cone of the rod angle reaches —
-  the nearest anchor by drop, not by distance — so the lattice is generated
-  first.
+  nearest lattice rod below it, or, where no rod is reached, to the enveloping
+  wall — the nearest anchor by drop, searched down the three rod directions —
+  so the lattice is generated first.
 - **Pipeline position.** Supports are generated against the **completed
   lattice**: after `simplify` and before `validate`. The generator receives the
   lattice solids, the input geometry, `--orient`, `--support-thickness` and the
   inner overhangs already detected, and returns support solids only. One
   validity pass — including the export-truth gate — then judges the lattice and
   the supports together (docs/algorithm.md §14.2).
-- **Separate from the lattice, joined with each other.** Supports are **not**
-  merged with the lattice. They share faces with the lattice and with the
-  input's walls, floors and roofs, so that the merge into the enveloping part
-  in the downstream CAD tool succeeds. Supports that share a face or volume
-  with each other — neighbouring cells along a cut, a pocket fill and the
-  supports that seal it, cells whose rays cross — are fused into **one body**.
-  Supports meeting only along an edge, as neighbouring cells across a parting
-  do, stay separate bodies, since one body joined along an edge would not be a
-  manifold solid. Support bodies never overlap the lattice or each other, and a
-  run in which one would fails rather than ships.
+- **Separate from the lattice, manifold bodies.** Supports are **not** merged
+  with the lattice. They share faces with the lattice and with the input's
+  walls, floors and roofs, so that the merge into the enveloping part in the
+  downstream CAD tool succeeds. Supports that would touch are **one body**, and
+  a pocket fill is one body with the supports that seal it. Every support body
+  is a manifold solid: no edge is shared by more than two of its faces, beside
+  a strut as anywhere else, since a CAD kernel reads such a body as no solid.
+  Support bodies never overlap the lattice or each other, and a run in which
+  one would, or in which a body is not manifold, fails rather than ships.
 - **Enclosed voids are filled.** Powder must not be trapped: a pocket of free
   space that supports seal off is filled with support material.
 - **Self-supporting.** No support surface or edge exceeds the rod angle.
 - **Thickness.** No free-standing support member is thinner than the minimum
-  support thickness, which defaults to the strut size `t`.
-- **Volume.** Supports take as little volume as possible: each reaches only as
-  far as its nearest anchor, and where it stands on a level face its sides lean
-  in toward its middle — at most the rod angle, and never so far that its
-  footing on the anchor is narrower than the minimum support thickness.
+  support thickness, which defaults to the strut size `t`. The support grid divides the lattice cube as finely as still leaves at least that thickness
+  between parallel rod faces.
+- **Volume.** Each support is the box of support nodes between its anchor and
+  the ceiling point it backs: it reaches only as far as its nearest anchor, and no
+  higher than the ceiling it serves.
 - **Integral.** Once merged downstream, supports are a permanent part of the
   produced body, with solid interfaces and no feature designed to ease removal.
-- **Shape.** Support faces may be curved — ruled, cylindrical, toroidal,
-  B-spline — so their face count stays bounded; they are never fine meshes of
-  planar triangles. The all-planar rule is the lattice's, not the supports'.
+- **Shape.** Supports are staircases of support nodes on a grid of the lattice's
+  own frame: every face lies on a plane of that frame — every downward face on a
+  rod face's plane — except where it lies on the input's own surface, and
+  coplanar faces are merged.
 - **File and part name:** `-sup` (part name `+sup`) is added last when support
   is enabled.
 - **Parallelisation** is used wherever a run-time reduction above 5 % is likely.
@@ -504,17 +502,19 @@ body loses 2 edges to the file under-declaring what the geometry needs.
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
 | dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | oriented-lattice | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 | valid STEP through every §6.2 check with the lattice turned to the bed; the orientation recorded in the log and no support stage run. No golden sample. |
-| support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. |
-| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+| support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 262 s**, one support body, 12,524 of 12,524 overhang samples backed. |
+| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 506 s**, three support bodies, 33,065 of 33,065 overhang samples backed, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 | rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+
+| spiral-stress | -i test/SpiralTest.step -cc 5 -t 1 --cores 6 | valid STEP, no golden sample, generation < 20 minutes. **Measured: 11 m 01 s**, both solids `BRepCheck_Analyzer`-valid with 0 non-manifold edges after a round trip. Containment falls back to point sampling — the dominant body is past `verify_geometry.CUT_MAX_FACES` — and is reported as the weaker check, never as an unmeasured pass. |
+| invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
 **The hole-block parts are not e2e scenarios.** `test/Hole-block-basic.STEP` and
 `test/Hole-block-chamfered.STEP`, at `--orient 90 0 0`, are the support
 generator's first test parts, run **without a lattice** — their only anchors are
-their own walls — through `tools/support_dev.py` and the `pytest` suite. The
-product cannot run them that way, since it always generates the lattice.
-| spiral-stress | -i test/SpiralTest.step -cc 5 -t 1 --cores 6 | valid STEP, no golden sample, generation < 20 minutes. **Measured: 11 m 01 s**, both solids `BRepCheck_Analyzer`-valid with 0 non-manifold edges after a round trip. Containment falls back to point sampling — the dominant body is past `verify_geometry.CUT_MAX_FACES` — and is reported as the weaker check, never as an unmeasured pass. |
-| invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
+their own walls — through `tools/support_dev.py`; the `pytest` suite uses them
+for ceiling-point detection. The product cannot run them that way, since it
+always generates the lattice.
 
 ### 6.2 Automated pass/fail checks
 For every scenario the harness must verify, without human intervention:
@@ -545,9 +545,6 @@ For every scenario the harness must verify, without human intervention:
 - **With `--support`: supports overlap neither the lattice nor each other,**
   and a support face resting on a strut lies on that strut's plane, so the
   downstream merge finds shared faces.
-- **With `--support`, while no support algorithm exists** (§4.6): the two
-  checks below report `SKIP`, recognised by the run's own `WARNING` line, and
-  come back on their own once it is gone.
 - **With `--support`: no support surface faces down more flatly than the rod
   angle.** Every face of the written file that is neither on the input's own
   surface nor a lattice strut face must be inside 54.74°, read at exact surface
@@ -603,15 +600,16 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-* **Implement the print support algorithm** (§4.6, docs/algorithm.md §14.3),
-  in phases on branch `custom-designed-support-feature`: (1) parameter and
-  output changes; (2) regions and first-contact rays; (3) cells and parting
-  curves; (4) cell solids, inspected on the hole-blocks without a lattice;
-  (5) pockets; (6) with the lattice, `support-tilted` and `support-cylinder`
-  passing every support check of §6.2; (7) measurement, then
-  `rehearsal-support` within 12 h on 6 cores, `SECONDS_SUPPORT["support"]` in
-  `gui/weights.py`, and docs/profiling-reports.md. Done means the stub's
-  `WARNING` is gone and all three support scenarios pass.
+* **Finish the print support generator** (§4.6, docs/algorithm.md §14.3–§14.4).
+  The frustum algorithm is implemented on branch
+  `custom-designed-support-feature`, and `support-tilted` and
+  `support-cylinder` pass every support check of §6.2. What remains is
+  measurement and the production scale: `rehearsal-support` within 12 h on 6
+  cores (final verification only); `SECONDS_SUPPORT["support"]` in
+  `gui/weights.py` from that measurement; docs/profiling-reports.md; the trims
+  and pocket searches dispatched across the worker pool if the measurement
+  shows more than 5 %; and the free-standing thickness gate. Golden samples for
+  the two support scenarios wait for an inspected output.
 * **The window has not been looked at on a screen in this session.** Its widget
   states and the orientation view's drawing were checked programmatically (the
   canvas was rasterised to an image), not by eye in a running window.

@@ -1,9 +1,9 @@
-"""Overhang regions: the surface the support generator works on (docs/algorithm.md §14.3 S1).
+"""Ceiling points: the surface the support generator works on (docs/algorithm.md §14.3).
 
 The detector (:mod:`.overhang`) says *where* the body needs support, as points.
-The generator needs more: a mesh of that surface fine enough to send a ray from
-every ``h`` of it, with neighbours known, so that cells and the partings between
-them can be read off it. This module builds that mesh.
+The generator needs them denser and on a mesh: a ceiling point every ``h`` of
+that surface, each with its exact normal, so that a support backs all of it.
+This module builds that mesh.
 
 Every face that could reach the 60 deg bar is taken from the body's
 classification triangulation and refined until no edge is longer than ``h``:
@@ -34,16 +34,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from OCP.BRep import BRep_Tool
-from OCP.BRepAdaptor import BRepAdaptor_Curve
+from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCP.GeomAbs import GeomAbs_SurfaceType
 from OCP.ShapeAnalysis import ShapeAnalysis_Surface
-from OCP.gp import gp_Pnt
+from OCP.gp import gp_Pnt, gp_Vec
 from OCP.TopAbs import TopAbs_ShapeEnum
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS
 
 from .. import occ
-from ..errors import ProcessingError
 from .overhang import PREFILTER_SLACK, _SurfaceNormals
 from .params import REQUIRED_SLACK, SIN_START, STEP
 
@@ -54,6 +53,12 @@ to the last bits; this only has to absorb that."""
 
 ISOCLINE_TOL = 1e-4
 """mm. How exactly the 60 deg isocline is located on the true surface."""
+
+
+COVER_STEP = STEP / 4.0
+"""mm. Edge length the region mesh is refined to across the outline of a strut
+end meeting the ceiling: within the crease push of 0.2 mm, so a border vertex
+pushed into the strut lands in it."""
 
 
 @dataclass
@@ -110,20 +115,6 @@ class RegionMesh:
             pts[k] = p
             nrm[k] = n if n is not None else self.normals[self.tris[t]].mean(axis=0)
         return pts, nrm
-
-
-@dataclass
-class Region:
-    """One enclosed overhang area: a connected set of required triangles."""
-
-    tris: np.ndarray
-    """Indices into :attr:`RegionMesh.tris`."""
-    verts: np.ndarray
-    """Indices into :attr:`RegionMesh.verts` of the triangles' corners."""
-    area: float
-    loops: list
-    """Boundary loops, each an ``(n,)`` array of vertex indices, closed (the
-    first vertex is not repeated)."""
 
 
 # --- per face ----------------------------------------------------------------
@@ -196,7 +187,31 @@ def _min_angle(A, B, C):
     return np.minimum(np.minimum(angle(A, B, C), angle(B, C, A)), angle(C, A, B))
 
 
-def _flip_to_delaunay(P: np.ndarray, tris: np.ndarray) -> np.ndarray:
+def _uv_turn(uv: np.ndarray, a, b, c) -> np.ndarray:
+    """Signed doubled area of UV triangles ``(a, b, c)``."""
+    return ((uv[b, 0] - uv[a, 0]) * (uv[c, 1] - uv[a, 1])
+            - (uv[b, 1] - uv[a, 1]) * (uv[c, 0] - uv[a, 0]))
+
+
+FLIP_FIDELITY = 1.5
+"""Most a flipped triangle's area may exceed the area of surface it stands for
+(its parameter triangle times the surface's area scale there). A faithful
+triangle on a curved face is close to 1; a chord bridging a boundary curve that
+is straight in the parameters stands for almost nothing."""
+
+
+def _area_scale(surf, uv: np.ndarray) -> np.ndarray:
+    """``|S_u x S_v|`` of ``surf`` at each parameter pair: surface area per unit
+    parameter area."""
+    p, du, dv = gp_Pnt(), gp_Vec(), gp_Vec()
+    out = np.empty(len(uv))
+    for k, (u, v) in enumerate(uv):
+        surf.D1(float(u), float(v), p, du, dv)
+        out[k] = du.Crossed(dv).Magnitude()
+    return out
+
+
+def _flip_to_delaunay(P: np.ndarray, tris: np.ndarray, uv=None, scale=None) -> np.ndarray:
     """Flip interior edges while a flip raises the pair's smallest angle.
 
     An edge ``(a, b)`` between triangles ``(a, b, c)`` and ``(b, a, d)`` is
@@ -213,8 +228,29 @@ def _flip_to_delaunay(P: np.ndarray, tris: np.ndarray) -> np.ndarray:
     edges there back and forth against the bisection for as long as it ran. A
     degenerate triangle's smallest angle is zero, and a flip that cannot better
     zero is not made.
+
+    **With ``uv``, a flip must also keep both new triangles wound as the old
+    pair in the face's parameters**, which is the test that cannot be fooled:
+    the parameter plane is flat. The 3D test compares against the sum of the
+    pair's normals, and on long thin triangles each spanning a wide arc of a
+    curved face that sum points nowhere useful. Measured on a half-cylinder of
+    radius 7.5 mm and 79 mm length (test-cylinder.STEP's hole): the first round
+    of flips folded 32 of the classification mesh's 96 triangles, and
+    refinement never ended -- 680,000 triangles on 1,850 mm^2, and growing.
+
+    **With ``scale`` too, a flip must keep each new triangle faithful to the
+    surface** (:data:`FLIP_FIDELITY`). Measured on the same face: its end
+    curves are arcs in 3D and almost straight in the parameters, and the 3D
+    criterion flipped 80 of 96 triangles into fans along them -- well shaped in
+    3D, slivers in the parameters, standing for no surface. Splitting such a
+    triangle's chord at its parameter midpoint lands on the boundary point
+    already there, and the duplicate breeds flat triangles that never refine
+    away: 135,000 triangles, half of them flat. On a plane the two areas are
+    equal and the test never refuses; at a pole it can only refuse a flip.
     """
     tris = tris.copy()
+    if uv is not None:
+        uv = np.asarray(uv, dtype=float)
     for _ in range(FLIP_PASSES_MAX):
         m = len(tris)
         a = np.concatenate([tris[:, 0], tris[:, 1], tris[:, 2]])
@@ -239,6 +275,16 @@ def _flip_to_delaunay(P: np.ndarray, tris: np.ndarray) -> np.ndarray:
         ok = ((excess > 1e-9)
               & (np.einsum("ij,ij->i", new1, nrm) > 0.0)
               & (np.einsum("ij,ij->i", new2, nrm) > 0.0))
+        if uv is not None:
+            side = np.sign(_uv_turn(uv, a[i1], b[i1], c[i1]))
+            turn1 = _uv_turn(uv, c[i1], a[i1], c[i2])
+            turn2 = _uv_turn(uv, c[i1], c[i2], b[i1])
+            ok &= (np.sign(turn1) == side) & (np.sign(turn2) == side) & (side != 0)
+            if scale is not None:
+                s1 = np.abs(turn1) * (scale[c[i1]] + scale[a[i1]] + scale[c[i2]]) / 3.0
+                s2 = np.abs(turn2) * (scale[c[i1]] + scale[c[i2]] + scale[b[i1]]) / 3.0
+                ok &= ((np.linalg.norm(new1, axis=1) <= FLIP_FIDELITY * s1)
+                       & (np.linalg.norm(new2, axis=1) <= FLIP_FIDELITY * s2))
         cand = np.nonzero(ok)[0]
         if len(cand) == 0:
             return tris
@@ -306,13 +352,17 @@ def _split_patterns(tris: np.ndarray, mid: np.ndarray, longest: np.ndarray) -> n
     return np.vstack(out)
 
 
-def _refine_face(face, step: float, active=None):
+def _refine_face(face, step: float, active=None, covered=None, fine_step=None):
     """``(points, uvs, tris)`` of ``face``'s triangulation, refined to ``step``.
 
     ``active(uv)`` -- ``(n, 2) -> (n,) bool`` -- says which nodes could be over
     the bar; only triangles with an active corner are refined (their neighbours
     only as far as conformity needs), so a large face with a small overhang is
     not refined all over. ``None`` refines everything.
+
+    ``covered(points)`` -- ``(n, 3) -> (n,) bool`` -- says which nodes lie under
+    lattice material; a triangle whose corners disagree straddles the outline
+    of a strut end and is refined further, to ``fine_step``.
     """
     loc = TopLoc_Location()
     tri = BRep_Tool.Triangulation_s(face, loc)
@@ -320,13 +370,17 @@ def _refine_face(face, step: float, active=None):
     if tri is None or got is None:
         return None
     pts, uvs, tris, evaluate = got
-    tris = _flip_to_delaunay(pts, tris)
+    surf = BRepAdaptor_Surface(face, False)
+    scale = list(_area_scale(surf, uvs))
+    tris = _flip_to_delaunay(pts, tris, uvs, np.asarray(scale))
     pts, uvs = list(pts), list(uvs)
     bmap = _boundary_polygons(face, tri, loc)
     trsf = loc.Transformation()
     projector = None
     node_active = (np.ones(len(pts), dtype=bool) if active is None
                    else np.asarray(active(np.asarray(uvs)), dtype=bool))
+    node_covered = (None if covered is None
+                    else np.asarray(covered(np.asarray(pts)), dtype=bool))
     for _pass in range(REFINE_PASSES_MAX):
         P = np.asarray(pts)
         m = len(tris)
@@ -337,7 +391,11 @@ def _refine_face(face, step: float, active=None):
         length = np.linalg.norm(P[uniq[:, 0]] - P[uniq[:, 1]], axis=1)
         longest = np.argmax(length[edge_of], axis=1)
         split = np.zeros(len(uniq), dtype=bool)
-        too_long = (length[edge_of[np.arange(m), longest]] > step) & node_active[tris].any(axis=1)
+        worst = length[edge_of[np.arange(m), longest]]
+        too_long = (worst > step) & node_active[tris].any(axis=1)
+        if node_covered is not None:
+            straddle = node_covered[tris].any(axis=1) & ~node_covered[tris].all(axis=1)
+            too_long |= (worst > fine_step) & straddle & node_active[tris].any(axis=1)
         if not too_long.any():
             break
         split[edge_of[np.nonzero(too_long)[0], longest[too_long]]] = True
@@ -389,8 +447,12 @@ def _refine_face(face, step: float, active=None):
             fresh = (np.ones(added, dtype=bool) if active is None
                      else np.asarray(active(np.asarray(uvs[-added:])), dtype=bool))
             node_active = np.concatenate([node_active, fresh])
+            if node_covered is not None:
+                node_covered = np.concatenate([node_covered, np.asarray(
+                    covered(np.asarray(pts[-added:])), dtype=bool)])
         tris = _split_patterns(tris, mid_of[edge_of], longest)
-        tris = _flip_to_delaunay(np.asarray(pts), tris)
+        scale += list(_area_scale(surf, np.asarray(uvs[len(scale):])))
+        tris = _flip_to_delaunay(np.asarray(pts), tris, np.asarray(uvs), np.asarray(scale))
     return np.asarray(pts), np.asarray(uvs), tris
 
 
@@ -414,11 +476,21 @@ def _bisect_isocline(normals: _SurfaceNormals, b, uv_a, uv_b, f_a, bar, length):
 # --- the whole body ------------------------------------------------------------
 
 
-def build(body, b: np.ndarray, step: float = STEP, report=None) -> RegionMesh:
+def build(body, b: np.ndarray, step: float = STEP, report=None,
+          covered=None) -> RegionMesh:
     """The refined, welded mesh of every face of ``body`` that may need support.
 
     ``body`` must carry the classification triangulation
     (:func:`latticegen2.classify.tessellate_surface`).
+
+    ``covered(points)`` says which surface points lie under lattice material:
+    where a strut meets the ceiling, the lattice backs it already
+    (specification.md §4.6), so those points are not required and the strut's
+    end is a hole in its region. Its outline is not an edge of the body, which
+    is how a wall's crease is found exactly, so it is found by refining: the
+    triangles straddling it go down to :data:`COVER_STEP`, putting the hole's
+    border within that of the outline, where the crease push (§14.3 S3d) carries
+    the support's edge on into the strut.
     """
     b = np.asarray(b, dtype=float)
     bar = SIN_START + REQUIRED_SLACK
@@ -445,7 +517,7 @@ def build(body, b: np.ndarray, step: float = STEP, report=None) -> RegionMesh:
                     _p, n = normals.at(u, v)
                     out[k] = n is None or float(n @ b) >= bar - PREFILTER_SLACK
                 return out
-        refined = _refine_face(face, step, active)
+        refined = _refine_face(face, step, active, covered, COVER_STEP)
         if refined is None:
             continue
         pts, uvs, tris = refined
@@ -461,6 +533,9 @@ def build(body, b: np.ndarray, step: float = STEP, report=None) -> RegionMesh:
                 _p, n = normals.at(cu, cv)
             nrm[k] = n
             f[k] = float(n @ b) - bar
+        if covered is not None:
+            # Under a strut end: not required, whatever its slope.
+            f = np.where(np.asarray(covered(pts), dtype=bool), -1.0, f)
         # Isocline points on edges whose ends straddle the bar.
         e = np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
         e = np.unique(np.sort(e, axis=1), axis=0)
@@ -492,11 +567,8 @@ def build(body, b: np.ndarray, step: float = STEP, report=None) -> RegionMesh:
     tri_uv = np.vstack(all_uv)
     # Welded within a smooth face group only. Across a crease -- the edge
     # between Hole-block-chamfered's flat and 15 deg roof facets -- the mesh
-    # stays split, so a region and every cell of it lie on one smooth surface:
-    # a cell's ceiling curve is fitted by one cubic, and across a crease that is
-    # a chord dipping into the body under the bent roof. Copies of a crease
-    # point share one averaged normal, so the cells either side cast the same
-    # ray from it and meet face to face.
+    # stays split, and the copies of a crease point share one averaged normal,
+    # so the point probed into the body from it lies between the two faces.
     group = _smooth_groups(body)
     point_face = np.concatenate(all_point_face)
     pos = np.round(P, WELD_DECIMALS)
@@ -532,7 +604,6 @@ def _smooth_groups(body) -> np.ndarray:
     from OCP.TopExp import TopExp
     from OCP.TopTools import (TopTools_IndexedDataMapOfShapeListOfShape,
                               TopTools_IndexedMapOfShape)
-    from OCP.gp import gp_Vec
 
     faces = occ.faces(body)
     fmap = TopTools_IndexedMapOfShape()
@@ -575,114 +646,3 @@ def _smooth_groups(body) -> np.ndarray:
                 np.clip(float(normals[0] @ normals[1]), -1.0, 1.0))) < SMOOTH_DEG:
             parent[max(find(ia), find(ib))] = min(find(ia), find(ib))
     return np.array([find(i) for i in range(len(faces))], dtype=np.int64)
-
-
-def _edge_table(tris: np.ndarray):
-    """``(edges, owner_tris)``: each triangle edge, sorted, with its triangle."""
-    e = np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
-    owner = np.tile(np.arange(len(tris)), 3)
-    return np.sort(e, axis=1), owner
-
-
-def _components(n: int, pairs: np.ndarray) -> np.ndarray:
-    """Union-find labels for ``n`` items joined by ``pairs``."""
-    parent = np.arange(n)
-
-    def find(i):
-        root = i
-        while parent[root] != root:
-            root = parent[root]
-        while parent[i] != root:
-            parent[i], i = root, parent[i]
-        return root
-
-    for a, c in pairs:
-        ra, rc = find(int(a)), find(int(c))
-        if ra != rc:
-            parent[max(ra, rc)] = min(ra, rc)
-    return np.array([find(i) for i in range(n)])
-
-
-def _loops(boundary: np.ndarray) -> list:
-    """Chain boundary edges into closed loops, or ``None`` if one does not close.
-
-    A vertex where the boundary pinches (degree 4) is left by the edge that turns
-    least, which is enough to keep loops apart for the closed-loop check; an odd
-    degree anywhere means an open boundary.
-    """
-    from collections import defaultdict
-
-    adj = defaultdict(list)
-    for a, c in boundary:
-        adj[int(a)].append(int(c))
-        adj[int(c)].append(int(a))
-    if any(len(v) % 2 for v in adj.values()):
-        return None
-    unused = {(min(a, c), max(a, c)): 0 for a, c in boundary}
-    for a, c in boundary:
-        unused[(min(a, c), max(a, c))] += 1
-    loops = []
-    for start in list(adj):
-        while any(unused[(min(start, o), max(start, o))] for o in adj[start]):
-            loop = [start]
-            prev, cur = None, start
-            while True:
-                nxt = None
-                for o in adj[cur]:
-                    key = (min(cur, o), max(cur, o))
-                    if unused[key] and o != prev:
-                        nxt = o
-                        break
-                if nxt is None:
-                    for o in adj[cur]:
-                        key = (min(cur, o), max(cur, o))
-                        if unused[key]:
-                            nxt = o
-                            break
-                if nxt is None:
-                    return None
-                unused[(min(cur, nxt), max(cur, nxt))] -= 1
-                if nxt == start:
-                    break
-                loop.append(nxt)
-                prev, cur = cur, nxt
-            loops.append(np.asarray(loop, dtype=np.int64))
-    return loops
-
-
-def regions(mesh: RegionMesh) -> list[Region]:
-    """The enclosed overhang areas of ``mesh``, largest first (gate G1 inside).
-
-    Fails (exit 4) naming the region if a boundary does not close into loops.
-    """
-    req = np.nonzero(mesh.required)[0]
-    if len(req) == 0:
-        return []
-    sub = mesh.tris[req]
-    edges, owner = _edge_table(sub)
-    order = np.lexsort((edges[:, 1], edges[:, 0]))
-    edges, owner = edges[order], owner[order]
-    same = np.all(edges[1:] == edges[:-1], axis=1)
-    pairs = np.column_stack([owner[:-1][same], owner[1:][same]])
-    labels = _components(len(sub), pairs)
-
-    a, c, d = (mesh.verts[sub[:, k]] for k in range(3))
-    tri_area = 0.5 * np.linalg.norm(np.cross(c - a, d - a), axis=1)
-    out = []
-    for lab in np.unique(labels):
-        local = np.nonzero(labels == lab)[0]
-        e, _o = _edge_table(sub[local])
-        uniq, counts = np.unique(e, axis=0, return_counts=True)
-        boundary = uniq[counts == 1]
-        loops = _loops(boundary)
-        if loops is None:
-            centre = mesh.verts[np.unique(sub[local])].mean(axis=0)
-            raise ProcessingError(
-                f"An overhang region near {np.round(centre, 3).tolist()} has a "
-                f"boundary that does not close into loops; it cannot be divided "
-                f"into support cells (docs/algorithm.md §14.3 S1)."
-            )
-        out.append(Region(tris=req[local], verts=np.unique(sub[local]),
-                          area=float(tri_area[local].sum()), loops=loops))
-    out.sort(key=lambda r: -r.area)
-    return out

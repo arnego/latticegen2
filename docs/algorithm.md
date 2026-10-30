@@ -2526,7 +2526,7 @@ flowchart TD
     D --> E[S5 staircase solid per connected body, faces merged]
     E --> G[S6 intersect each with the body: sampled estimate, probe gate, STEP round-trip retry]
     G -->|no rung passes| SP[split in two on a support grid plane, each half trimmed, halves joined]
-    SP -->|four levels down, still refused| F2[exit 4, naming the body]
+    SP -->|four levels down, or one support node, still refused| F2[piece dropped and reported: name, position, volume, ceiling points left unbacked]
     SP --> H
     G --> H[debris backing no ceiling point discarded]
     H --> P[S7 pockets per group of touching bodies, filled and joined]
@@ -2645,11 +2645,16 @@ two** on a support grid plane near its middle, across its longest extent in the
 lattice frame, read off its vertices — a planar staircase cut on one of its own
 planes, the halves checked to add up — each half is trimmed the same way, and
 the trimmed halves are joined back into one body (`support/join.py`). After
-four levels of splitting, or where no grid plane crosses a piece, a body still
-refused fails the run (exit 4) naming it.
+four levels of splitting, or where no grid plane crosses a piece, a piece still
+refused is **dropped and reported** — as §7.2 drops a lattice junction no trim
+produces — by name and position, with the support volume lost inside the body
+and the ceiling points it leaves unbacked, printed regardless of `-v`
+(`frustum.DROPPED_WARNING`). The alternative, failing the run, was weighed and
+declined: it would refuse the whole part over a few support nodes the kernel
+cannot cut, where the report says exactly what is missing and where.
 
-**`SpiralTest.step` at `cc = 5, t = 1`, `--orient -90 45 0` fails there, and
-the failure is the kernel's.** One support body's intersection returned 0.1 mm³
+**`SpiralTest.step` at `cc = 5, t = 1`, `--orient -90 45 0` drops pieces
+there, and the failure is the kernel's.** One support body's intersection returned 0.1 mm³
 where sampling found 1,627.5 mm³, at every rung; the exact classifier puts 224
 of 400 points of one of its pieces inside the input, yet `Cut` returns that
 piece whole, `BRepAlgoAPI_Splitter` does not split it, a local block (§7.2)
@@ -2679,6 +2684,27 @@ the body, the lattice or a support; with the fills in place nothing is cut off
 (gate G5), and the fills are fused with the bodies of their group
 (`support/join.py`). Pieces under 1e-3 mm³ are boolean specks along shared
 faces, not pockets.
+
+**The search runs in slabs across the worker pool.** The envelope reaches down
+to the body's lowest point, so it holds most of the lattice: on the ball, three
+cuts by all 777 junctions in it were 132 s of the search's 157 s. The envelope
+is cut across its longest extent into one slab per worker, as long as each
+still holds `SLAB_MIN_JUNCTIONS` (60) junctions, the interior planes moved
+0.0137 mm off the even division so that none lies on a face of the input. Each
+slab's region is cut by the junctions near it, then — the lattice already
+gone — by the supports alone, each cut checked to remove what it should (the
+supports' volume measured inside the slab one support per call) to
+`CUT_VOLUME_REL_TOL` of the region or `CUT_PER_TOOL_TOL` (0.05 mm³) per tool,
+whichever is larger: neighbouring junctions touch on their caps, and a cut by
+hundreds of them and their intersection differ by slivers there — 2.7 mm³ over
+263 junctions on the ball's middle slab, where the fraction alone allowed 0.43
+and a dropped tool, what the check is for, is a whole junction or support node;
+each piece after is placed in the piece before it by its witness. Pieces of
+neighbouring slabs whose faces on the plane between them overlap are one piece
+of free space, so pockets are judged on the whole envelope exactly as with one
+slab, and a pocket a plane crosses is filled in pieces that the join fuses. A
+worker reads the staged body and mesh and rebuilds the lattice from its kept
+nodes; with no pool the same slabs run in this process.
 
 **Every body is then asked once more for edges used by more than two of its
 faces**, and one that has any fails the run (exit 4): STEP carries such a body,
@@ -2729,11 +2755,12 @@ line (6 cores):
 | ball | 219 s | 16.0 s | 1.6 s | 1.3 s | 11.9 s | 23.1 s | 152.7 s |
 | cylinder | 441 s | 38.1 s | 19.9 s | 4.2 s | 51.6 s | 108.1 s | 194.1 s |
 
-The pocket search is the largest share on both, and on the cylinder the
-backing check — the exact classifier, point by point — the second. Neither
-runs across the worker pool yet.
+The pocket search was the largest share on both, and now runs in slabs across
+the worker pool (S7): the supported ball's whole run fell from 262 s to 142 s,
+the cylinder's from 506 s to 353 s. The backing check — the exact classifier,
+point by point — is the cylinder's next largest and still runs in this
+process.
 
-**Still to come:** the free-standing thickness gate; S6, S7 and the backing
-check dispatched across the worker pool (specification.md §4.6's
-parallelisation: the table above makes more than 5 % likely); `rehearsal-support` at production scale and the support stage's
+**Still to come:** the free-standing thickness gate; S6 and the backing check
+dispatched across the worker pool (specification.md §4.6's parallelisation); `rehearsal-support` at production scale and the support stage's
 weight in `gui/weights.py` (specification.md §10).

@@ -33,7 +33,7 @@ header rewrite.
 | `test_cli.py` | Flags, ranges, the `t < a` cross-constraint, path resolution, preflight checks. Also print orientation and support: that `--orient` stands on its own, that `--support-thickness` is refused without `--support` and defaults to `t`, that the removed `--overhang` is refused by name, the two fixed support angles, and the `-rotx…y…z…` and `-sup` name tags | no |
 | `test_orient.py` | Print orientation (docs/algorithm.md §14.0). First **the property the missing bypass rests on**: zero angles give *exactly* the identity, and the unrotated lattice frame equals the canonical expressions element for element — there is no identity special case in the pipeline, so this and the golden samples are what guarantee the unrotated lattice. Then the convention (extrinsic X, Y, Z about the bed), the Euler round trip the window's drag depends on including both gimbal poles, §2.3's identities re-asserted about the build direction, and that bounding candidates by surface points drops only nodes that cannot reach the body and keeps the rest in order | no |
 | `test_support.py` | Print supports (docs/algorithm.md §14), in three layers. *Detection, against closed forms*: a box's lid and nothing else, a sphere's cap area to 3 %, a keel edge whose two faces are each steep enough, the tip of a hanging cone, and a surface at exactly 60° left out by the strict bar. *The stage's contract and assembly*: a result must be support solids and never a lattice solid; supports ship beside the lattice as separate bodies, the lattice passing through as the same objects, with additive volumes; a support overlapping another support, or the lattice, fails rather than ships. *Whole runs on a small box*: through the real generator, the stages land between `simplify` and `validate`, support bodies are written after a lattice identical to the run without supports, and the summary's lattice and support volumes add up to the output's; with a stand-in generator run in process, it receives the unified lattice, the samples, the orientation and parameters, its slab ships as a body of its own, and the summary's lattice and support volumes add up to the written file's, with face counts retaken on the product. And a run without `--support` never imports the package | yes |
-| `test_support_frustum.py` | The support algorithm (docs/algorithm.md §14.3). *The grid*: the division rule against its definition. *Both manifold repairs*, against a brute-force search of every 2×2 and 2×2×2 window: a diagonal pair, the rod-corner pattern that broke the cylinder's top support, a corner contact round a rod, and random support nodes with random rods — nothing a fill could resolve is left, and no rod's node is ever filled. *The fine grid*: every fine support node's corners agree with its centre about the lattice, so rods are whole nodes; a staircase's faces all lie on lattice planes and its volume is its nodes'. *Whole supports* in a box chamber with its lattice: valid, manifold, no overlap with any junction, every face on the body or a lattice plane, the gates passed, every ceiling point backed, assembled beside the lattice | yes |
+| `test_support_frustum.py` | The support algorithm (docs/algorithm.md §14.3). *The grid*: the division rule against its definition. *Both manifold repairs*, against a brute-force search of every 2×2 and 2×2×2 window: a diagonal pair, the rod-corner pattern that broke the cylinder's top support, a corner contact round a rod, and random support nodes with random rods — nothing a fill could resolve is left, and no rod's node is ever filled. *The fine grid*: every fine support node's corners agree with its centre about the lattice, so rods are whole nodes; a staircase's faces all lie on lattice planes and its volume is its nodes'. *Whole supports* in a box chamber with its lattice: valid, manifold, no overlap with any junction, every face on the body or a lattice plane, the gates passed, every ceiling point backed, assembled beside the lattice. *Trims the kernel refuses*: a body whose whole trim is refused is trimmed in halves and joined again, to the same volume, and a piece refused at every size is dropped, named, and its unbacked ceiling points counted | yes |
 | `test_support_regions.py` | Ceiling points against closed forms: a box lid refined to the step, well-shaped refinement on the hole-block roof, a sphere cap ending on the exact 60° isocline, a tube's underside within 30° of its bottom, and the chamfered hole-block's 30° facet left out by the strict bar | yes |
 | `test_support_voids.py` | Pockets (docs/algorithm.md §14.3 S7) on a cup under a lid: the fill is exactly the cup, a pocket the lattice sealed is left alone, a support sealing nothing fills nothing, a witness the cut disagrees with fails loudly, and the generator's own supports on the cup leave nothing sealed | yes |
 | `test_support_join.py` | Joining support bodies: face-sharing supports become one body with merged faces, overlapping ones their union, edge-only contacts stay apart, and a fuse that loses volume is redone one at a time or, where it cannot be, kept as it was or fails | yes |
@@ -41,7 +41,7 @@ header rewrite.
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
 | `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §11) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell, and `SpiralTest`'s own fat-tolerance face, where a *fixed* absolute cap disabled rung 2 outright. Also that a boundary layer still short of its expected free edges after the unsplit sew fails in `stitch` rather than in `assemble`, and the two properties the round-2 check rests on: that the batch validity scan behind the repair returns exactly what the per-face predicate does, and that `free_edges` does not count a degenerate edge as a hole | yes |
-| `test_boundary.py` | The per-half-strut re-trim behind docs/algorithm.md §7.2, against the four real `SpiralTest.step` junctions whose intersection returns them untrimmed — including that a correctly trimmed junction is left bit-for-bit alone and that a junction wholly inside is checked and kept. Also the symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7) and the two guards on it, tested against the **real** failing junctions in `TD_HX_rehearsal_test.step` rather than synthetic stand-ins — both the `cc=5, t=1` junction the repair was built for and the `cc=12, t=2.5` one whose repair a relative-volume bar wrongly refused (G19) — see the note below | yes |
+| `test_boundary.py` | That a junction wholly inside the body is checked by docs/algorithm.md §7.2's detector and kept (its real-junction tests went with `SpiralTest.step`). Also the symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7) and the two guards on it, tested against the **real** failing junctions in `TD_HX_rehearsal_test.step` rather than synthetic stand-ins — both the `cc=5, t=1` junction the repair was built for and the `cc=12, t=2.5` one whose repair a relative-volume bar wrongly refused (G19) — see the note below | yes |
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6. Also that the strided parallel sweep (docs/algorithm.md §5.4) returns *identical* classes to the serial one, across a real process boundary — identical rather than equivalent, because stride arithmetic invites off-by-ones that a tolerance would hide | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
 | `test_pipeline.py` | Same-domain unification's fallback ladder — a kernel that refuses to merge must yield a larger file, never a failed run | yes |
@@ -141,26 +141,18 @@ and, on the ninth, 1 of 55,513 surface points outside at 1e-06 mm and none at
 1e-05 mm — so nothing was actually wrong with the geometry; the check simply
 could not say so.
 
-**`SpiralTest.step` is both a unit-test fixture and the `spiral-stress` e2e
-scenario.** It is the only committed part whose dominant component tiles, and
-the only *scenario* exercising docs/algorithm.md §7.2 — 8 junctions whose
-intersection returns its own operand, 10 re-trimmed against a local block, 1
-dropped for containment. §7.2 is not peculiar to it:
-`TD_HX_rehearsal_test.step` at `cc=5, t=1` re-trims **35** junctions per
-half-strut, and that part is far too slow to be a scenario, so the automated
-coverage §7.2 has is this one part's. It is much the slowest scenario, and
-most of that is the §6.2 checks rather than the 11-minute run: its dominant body
-is past `verify_geometry.CUT_MAX_FACES`, so containment falls back to point
-sampling over 45,801 faces. Use `--only` while iterating.
-
-It was a fixture alone while §9's export-truth gate refused its output, and
-correctly. Two changes closed that, and both are worth knowing before touching
-either: the part was re-modelled (worst input seam gap 4.24e-02 → 6.86e-03 mm,
-which took its island from 11 non-manifold edges to 0), and the writer now
-declares the greatest tolerance a shape carries rather than the average (which
-took the dominant body from 2 to 0). `test/spiral-island-unwritable.brep`, cut
-from the *old* file, is still refused and still committed — it is the case
-neither change reaches.
+**`SpiralTest.step` was removed on 2026-10-30, with its `spiral-stress`
+scenario and the unit tests that read it.** It was the only committed part whose
+dominant component tiled and the only scenario exercising §7.2 — the
+intersection that returns its own operand, the local-block re-trim, and a
+junction dropped for containment — so **§7.2 now has no automated coverage**
+beyond the box-only unit test that a junction wholly inside is checked and kept.
+`TD_HX_rehearsal_test.step` at `cc=5, t=1` re-trims 35 junctions per
+half-strut, but it is far too slow to be a scenario. The measurements made on
+`SpiralTest` stay in docs/algorithm.md as the record they are.
+`test/spiral-island-unwritable.brep`, cut from an older version of that part,
+stays: it is the export-truth gate's one body that cannot be written, and reads
+no `SpiralTest.step`.
 
 Two things follow for anyone extending this file. A boolean-based check needs a
 scale at which it is known to work, and `dense-lattice`'s 15,966 faces is not
@@ -272,12 +264,11 @@ summary including peak memory. To iterate:
    that stage.
 4. Re-run and compare the same stage.
 
-For reference, the two committed scenarios on a 6-core / 32 GB workstation:
+For reference, the committed parts on a 6-core / 32 GB workstation:
 
 | Scenario | Total | Dominant stages |
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
-| `SpiralTest`, `cc=5 t=1` | 11 min | boundary trim (6 min), validate (1 m 53 s, mostly export truth) |
 | test cylinder, `cc=10 t=1.5` | ~40 s | simplify, boundary trim, stitch |
 | `TD_HX_rehearsal_test`, `cc=5 t=1` | **91 min, 18.65 GB peak, 2.15 GB written** — 14 solids, 584,114 faces (specification.md §11) | validate (35 m 05 s, 95 % of it export truth), boundary trim, simplify, stitch |
 | `TD_HX_rehearsal_test`, `cc=7 t=1.4` | **~20 min, 8.76 GB peak, 990 MB written** — 33 solids, 280,612 faces. The cheapest real part for anything touching `validate` | validate (11 m 24 s), boundary trim, simplify |

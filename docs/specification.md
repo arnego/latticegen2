@@ -355,7 +355,13 @@ An opt-in stage that creates support structures, as used for
   parameter.
 - **Full coverage.** Every point overhanging more than 60° is backed by support
   or lattice material, all the way to the edge of each overhang: every ceiling
-  point lies in a support or a strut.
+  point lies in a support or a strut. **The one exception is a support piece
+  the geometry kernel cannot trim to the input** at any fuzzy value, after a
+  STEP round trip, or in halves down to a single support node: it is dropped,
+  as a lattice junction no trim produces is (docs/algorithm.md §7.2), and the
+  run reports it regardless of `-v` — by name and position, the support
+  volume lost, and the ceiling points it leaves unbacked
+  (docs/algorithm.md §14.3).
 - **Anchoring and design depth.** A support runs from the ceiling down to the
   nearest lattice rod below it, or, where no rod is reached, to the enveloping
   wall — the nearest anchor by drop, searched down the three rod directions —
@@ -472,29 +478,18 @@ case for invalid input).
 
 All are implemented in [`tools/e2e.py`](../tools/e2e.py).
 
-**`SpiralTest.step` is the hardest committed part.** At 2,073 boundary
-junctions it is a fraction of `dense-lattice`, but its swept B-spline surface
-makes the boolean fit trim curves carrying recorded tolerances an order above
-anything the other committed parts produce, and it is the only committed part
-whose dominant component tiles. It is also the only *scenario* that exercises
-§7.2 — the intersection that returns its own operand (8 junctions), the
-local-block re-trim (10), and a junction dropped for containment (1) — which is
-why the unit suite uses it heavily (`test_boundary.py`, `test_export_truth.py`)
-as well.
-
-**§7.2 is not peculiar to it, though, and reading it that way understates
-where that repair matters.** `TD_HX_rehearsal_test.step` at `cc=5, t=1` returns
-**35** junctions untrimmed and re-trims every one of them per half-strut. That
-part is not an e2e scenario — it is far too slow — so the committed scenarios
-are the only automated coverage §7.2 has, and they carry one part's worth of it.
-
-Two properties of the toolchain are what let this part complete, and both are
-load-bearing rather than incidental to it. Its worst **input seam gap** — the
-distance between the two faces meeting at one of its own edges — is
-6.8602e-03 mm, low enough that trimming does not cut the region into features
-smaller than the gap. And the STEP writer declares the *greatest* tolerance a
-shape carries rather than the average of them (§11), without which its dominant
-body loses 2 edges to the file under-declaring what the geometry needs.
+**`SpiralTest.step` was removed on 2026-10-30, with its `spiral-stress`
+scenario and the unit tests that read it.** It was the only committed part whose
+dominant component tiled and the only scenario exercising §7.2 — the
+intersection that returns its own operand, the local-block re-trim, and a
+junction dropped for containment — so **§7.2 now has no automated coverage**
+beyond the box-only unit test that a junction wholly inside is checked and kept.
+`TD_HX_rehearsal_test.step` at `cc=5, t=1` re-trims 35 junctions per
+half-strut, but it is far too slow to be a scenario. The measurements made on
+`SpiralTest` stay in docs/algorithm.md as the record they are.
+`test/spiral-island-unwritable.brep`, cut from an older version of that part,
+stays: it is the export-truth gate's one body that cannot be written, and reads
+no `SpiralTest.step`.
 
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
@@ -502,11 +497,10 @@ body loses 2 edges to the file under-declaring what the geometry needs.
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
 | dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | oriented-lattice | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 | valid STEP through every §6.2 check with the lattice turned to the bed; the orientation recorded in the log and no support stage run. No golden sample. |
-| support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 262 s**, one support body, 12,524 of 12,524 overhang samples backed. |
-| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 506 s**, three support bodies, 33,065 of 33,065 overhang samples backed, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+| support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 142 s**, one support body, 12,524 of 12,524 overhang samples backed. |
+| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 353 s**, three support bodies, 33,065 of 33,065 overhang samples backed, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 | rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 
-| spiral-stress | -i test/SpiralTest.step -cc 5 -t 1 --cores 6 | valid STEP, no golden sample, generation < 20 minutes. **Measured: 11 m 01 s**, both solids `BRepCheck_Analyzer`-valid with 0 non-manifold edges after a round trip. Containment falls back to point sampling — the dominant body is past `verify_geometry.CUT_MAX_FACES` — and is reported as the weaker check, never as an unmeasured pass. |
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
 **The hole-block parts are not e2e scenarios.** `test/Hole-block-basic.STEP` and
@@ -610,13 +604,6 @@ diagnosis. Remove an item once it's fixed and verified.*
   and pocket searches dispatched across the worker pool if the measurement
   shows more than 5 %; and the free-standing thickness gate. Golden samples for
   the two support scenarios wait for an inspected output.
-* **Supports cannot be trimmed on one region of `SpiralTest.step`**
-  (`-cc 5 -t 1 --orient -90 45 0 --support`, exit 4). OCCT does not intersect
-  three node-sized support pieces with the part's swept surface at any size,
-  fuzzy value or offset (docs/algorithm.md §14.3 S6); it is the region where
-  §7.2 drops one lattice junction of this part. Needs a decision: the run
-  fails, as now, or the pieces are dropped by name as §7.2 drops a junction,
-  which would give up coverage there and change §4.6's full-coverage rule.
 * **The window has not been looked at on a screen in this session.** Its widget
   states and the orientation view's drawing were checked programmatically (the
   canvas was rasterised to an image), not by eye in a running window.

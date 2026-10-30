@@ -45,12 +45,14 @@ from .contract import SupportInput, SupportResult
 
 
 def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
-                 report=None, tmpdir: str | None = None):
+                 report=None, tmpdir: str | None = None, pool=None, staged=None):
     """``(solids, stats, lines)``: every support body for ``body``.
 
     The generator proper, shared by :func:`generate` and by
     ``tools/support_dev.py``, which calls it with no lattice: every anchor is
-    then on a wall.
+    then on a wall. ``pool`` and ``staged`` -- the body's ``.brep`` and the
+    mesh's ``.npz`` -- let the pocket search run across the run's workers;
+    without them it runs in this process.
     """
     from .. import occ
     from . import build, frustum, join, regions, voids
@@ -69,7 +71,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                         report=report)
     stats = dict(got.stats)
     stats["support_ceiling_s"] = round(ceiling_s, 2)
-    lines = list(got.lines)
+    lines = list(got.lines) + list(got.notes)
     if not got.solids:
         stats["support_bodies"] = 0
         return [], stats, lines
@@ -83,7 +85,8 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
         if report is not None:
             report("looking for sealed pockets", k, len(gs))
         mine = [got.solids[i] for i in g]
-        pockets = voids.find_pockets(body, mesh, mine, local.near, thickness, lp.b)
+        pockets = voids.find_pockets(body, mesh, mine, local.near, thickness, lp.b,
+                                     pool=pool, staged=staged)
         fills += pockets.fills
         if pockets.fills:
             mine, _js = join.join(mine + pockets.fills, overlaps=False)
@@ -118,7 +121,19 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
 
 def generate(inp: SupportInput) -> SupportResult:
     """Support solids backing the ceiling of ``inp.body``, anchored on ``inp.lattice``."""
+    from .frustum import DROPPED_WARNING
+
+    staged = {"body_path": inp.body_path, "mesh_path": inp.mesh_path,
+              "lp_args": (inp.lp.cc, inp.lp.t, tuple(inp.lp.orient)),
+              "kept_nodes": np.asarray(inp.kept_nodes), "tmpdir": inp.tmpdir}
     solids, stats, lines = supports_for(inp.body, inp.mesh, list(inp.lattice),
                                         inp.kept_nodes, inp.lp, inp.thickness_mm,
-                                        report=inp.report, tmpdir=inp.tmpdir)
-    return SupportResult(supports=solids, stats=stats, lines=lines)
+                                        report=inp.report, tmpdir=inp.tmpdir,
+                                        pool=inp.pool, staged=staged)
+    # The dropped pieces' report goes to the console whatever -v says.
+    k = next((i for i, line in enumerate(lines) if line.startswith(DROPPED_WARNING)), None)
+    notes = []
+    if k is not None:
+        notes = lines[k:k + 1 + stats["support_pieces_dropped"]]
+        lines = lines[:k] + lines[k + len(notes):]
+    return SupportResult(supports=solids, stats=stats, lines=lines, notes=notes)

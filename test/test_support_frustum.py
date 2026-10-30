@@ -222,11 +222,11 @@ def test_a_body_no_trim_passes_is_trimmed_in_halves_and_joined_again(
     real = frustum._trim
     refused = []
 
-    def first_refused(piece, *args):
+    def first_refused(piece, *args, **kw):
         if not refused:
             refused.append(args[-1])
-            return None, ["refused"]
-        return real(piece, *args)
+            return None, ["refused"], 0.0
+        return real(piece, *args, **kw)
 
     monkeypatch.setattr(frustum, "_trim", first_refused)
     solids, stats, lines = supports_for(body, mesh, [], kept, lp, 1.5, tmpdir=str(tmp_path))
@@ -322,6 +322,31 @@ def test_chamber_supports_pass_their_gates_with_every_face_on_a_lattice_plane(
                           for wn, w in walls)
             assert on_body or np.isclose(np.abs(E @ n).max(), 1.0, atol=1e-9)
 
+
+def test_a_piece_no_trim_produces_is_dropped_and_reported(chamber, monkeypatch, tmp_path):
+    """Where the kernel trims a piece at no rung and no size -- three pieces of
+    SpiralTest at -90 45 0 -- the piece is dropped, named, and the ceiling
+    points it held are counted as left unbacked; the run goes on (§14.3 S6)."""
+    from latticegen2.support import frustum
+    from latticegen2.support.generate import supports_for
+
+    body, mesh, lp, kept, occ = chamber
+    real = frustum._trim
+
+    def refuse_first_body(piece, *args, **kw):
+        if args[-1].startswith("body-0"):
+            return None, ["refused"], 123.0
+        return real(piece, *args, **kw)
+
+    monkeypatch.setattr(frustum, "_trim", refuse_first_body)
+    monkeypatch.setattr(frustum, "SPLIT_DEPTH", 0)
+    solids, stats, lines = supports_for(body, mesh, [], kept, lp, 1.5, tmpdir=str(tmp_path))
+    assert stats["support_pieces_dropped"] == 1
+    assert stats["support_dropped_volume_mm3"] == pytest.approx(123.0)
+    warning = [line for line in lines if line.startswith(frustum.DROPPED_WARNING)]
+    assert len(warning) == 1 and "123.0 mm^3" in warning[0]
+    assert any(line.startswith("  body-0 near [") for line in lines)
+    assert stats["support_ceiling_points_uncovered"] > 0
 
 def test_supports_are_assembled_beside_the_lattice(chamber, chamber_supports):
     from latticegen2.support import assemble

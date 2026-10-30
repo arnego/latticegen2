@@ -66,7 +66,11 @@ body, which every trim is held to."""
 
 SPLIT_DEPTH = 4
 """How many times a support body no trim passes is split in two along a grid
-plane, each half trimmed on its own, before the run fails."""
+plane, each half trimmed on its own, before the piece is dropped."""
+
+DROPPED_WARNING = "WARNING: support piece(s) the geometry kernel could not trim were dropped"
+"""Opens the note a run prints when it drops support pieces (docs/algorithm.md
+§14.3 S6), regardless of ``-v``."""
 
 ESTIMATE_REL_TOL = 0.03
 """A trim's volume must agree with the sampled estimate to this fraction (or
@@ -91,6 +95,8 @@ class Frustums:
     """Per ceiling point: backed by one of :attr:`solids`."""
     stats: dict = field(default_factory=dict)
     lines: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
+    """Lines for the console regardless of ``-v``: the pieces dropped."""
 
 
 class _Grid:
@@ -357,27 +363,37 @@ def _unified(s, gates):
     return u if gates.probe.worst_outside(pts) == 0.0 else s
 
 
-def _trim(piece, body, gates, tmpdir: str, tag: str):
-    """``(solids, lines)``: ``piece`` intersected with the body, checked;
-    ``solids`` is ``None`` when no rung passed.
+def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True):
+    """``(solids, lines, estimate)``: ``piece`` intersected with the body,
+    checked; ``solids`` is ``None`` when no rung passed. ``estimate`` is the
+    sampled volume of ``piece`` inside the body, mm^3.
 
-    The ladder runs the fuzzy values on the piece as built, then again on the
-    piece as a STEP round trip gives it back: measured on the cylinder at m=1,
-    the in-memory piece trims to material 2.25 mm outside the body at every
-    fuzzy value and the round-tripped one trims cleanly at fuzzy 0. Every rung
-    is held to the sampled estimate and to the gates.
+    The full ladder runs the fuzzy values on the piece as built, then again on
+    the piece as a STEP round trip gives it back: measured on the cylinder at
+    m=1, the in-memory piece trims to material 2.25 mm outside the body at
+    every fuzzy value and the round-tripped one trims cleanly at fuzzy 0. Every
+    rung is held to the sampled estimate and to the gates.
+
+    ``full=False`` tries fuzzy 0 alone, for a piece that can still be split:
+    a refused rung on a large piece costs as much as the trim itself, and
+    eight of them before every split ran a SpiralTest support stage past five
+    hours, where its halves cost a fraction of that.
     """
     from .build import FUZZY_LADDER, _boolean
 
     lines = []
     est, sig = _estimate(piece, gates.inside_body)
     if est < 3.0 * sig:
-        return [], [f"  {tag}: no material inside the body by sampling; dropped"]
-    path = os.path.join(tmpdir, f"support-{tag}.step")
-    occ.write_step(piece, path, "support-piece")
-    piece_rt = occ.solids(occ.read_step(path))[0]
-    for operand, fuzzy in ([(piece, f) for f in FUZZY_LADDER]
-                           + [(piece_rt, f) for f in FUZZY_LADDER]):
+        return [], [f"  {tag}: no material inside the body by sampling; dropped"], est
+    rungs = [(piece, f) for f in (FUZZY_LADDER if full else FUZZY_LADDER[:1])]
+    if full:
+        path = os.path.join(tmpdir, f"support-{tag}.step")
+        occ.write_step(piece, path, "support-piece")
+        piece_rt = occ.solids(occ.read_step(path))[0]
+        rungs += [(piece_rt, f) for f in FUZZY_LADDER]
+    else:
+        piece_rt = None
+    for operand, fuzzy in rungs:
         got = _boolean(BRepAlgoAPI_Common, operand, [body], fuzzy)
         vin = 0.0 if got is None else sum(occ.volume(x) for x in occ.solids(got))
         rung = f"fuzzy {fuzzy:g}{' after a STEP round trip' if operand is piece_rt else ''}"
@@ -396,8 +412,8 @@ def _trim(piece, body, gates, tmpdir: str, tag: str):
         if why:
             lines.append(f"  {tag}, {rung}: rejected, {' | '.join(why)}")
             continue
-        return sol, lines
-    return None, lines
+        return sol, lines, est
+    return None, lines, est
 
 
 def _split(piece, g: _Grid):
@@ -522,18 +538,34 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     solids, debris = [], []
     covered = np.zeros(len(need), dtype=bool)
     probes = need - PROBE_DEPTH * need_n
+    dropped = []      # (tag, centroid, mm^3 inside the body, ceiling points it held)
+
     def trim_or_split(piece, tag: str, depth: int = 0):
-        got, trim_lines = _trim(piece, body, gates, tmpdir, tag)
-        if got is not None:
-            return got, trim_lines
-        halves = _split(piece, g) if depth < SPLIT_DEPTH else None
+        # One rung while the piece can still be split; the full ladder on a
+        # piece that cannot.
+        halves = None
+        if depth < SPLIT_DEPTH:
+            got, trim_lines, est = _trim(piece, body, gates, tmpdir, tag, full=False)
+            if got is not None:
+                return got, trim_lines
+            halves = _split(piece, g)
+            if halves is None:
+                got, more, est = _trim(piece, body, gates, tmpdir, tag)
+                trim_lines += more
+                if got is not None:
+                    return got, trim_lines
+        else:
+            got, trim_lines, est = _trim(piece, body, gates, tmpdir, tag)
+            if got is not None:
+                return got, trim_lines
         if halves is None:
+            # The kernel cannot trim it at any rung or size: dropped and
+            # reported, as a junction no trim produces is (§7.2).
             where = np.round(np.asarray(occ.centroid(piece), dtype=float), 3).tolist()
-            raise ProcessingError(
-                f"The support body near {where} could not be trimmed to the input body at "
-                f"any fuzzy value, nor in halves "
-                f"({' '.join(x.strip() for x in trim_lines)}) (docs/algorithm.md §14.3)."
-            )
+            held = exact_inside(piece, probes) & gates.inside_body(probes)
+            dropped.append((tag, where, est, held))
+            trim_lines.append(f"  {tag}: no trim passed and no split is left; dropped")
+            return [], trim_lines
         from .join import join
 
         trim_lines.append(f"  {tag}: no trim passed; split in {len(halves)} along a grid plane")
@@ -569,8 +601,23 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     # A probe outside the body is a ceiling point on the ceiling's own rim,
     # where a wall continues it: nothing below it can back it, and the wall does.
     covered |= ~gates.inside_body(probes)
+    notes = []
+    if dropped:
+        lost = np.zeros(len(need), dtype=bool)
+        for _tag, _where, _est, held in dropped:
+            lost |= held
+        lost &= ~covered
+        notes.append(
+            f"{DROPPED_WARNING} (docs/algorithm.md §14.3 S6): {len(dropped)} piece(s), "
+            f"{sum(d[2] for d in dropped):.1f} mm^3 of support inside the body; "
+            f"{int(lost.sum())} ceiling point(s) left unbacked by them")
+        for tag, where, est, held in dropped:
+            notes.append(f"  {tag} near {where}: {est:.1f} mm^3, "
+                         f"{int((held & ~covered).sum())} ceiling point(s)")
     stats.update({"support_debris_solids": len(debris),
+                  "support_pieces_dropped": len(dropped),
+                  "support_dropped_volume_mm3": round(sum(d[2] for d in dropped), 3),
                   "support_ceiling_points_uncovered": int((~covered).sum()),
                   "support_grid_s": round(t1 - t0, 2), "support_staircase_s": round(t2 - t1, 2),
                   "support_trim_s": round(trim_s, 2), "support_backed_s": round(backed_s, 2)})
-    return Frustums(solids, covered, stats, lines)
+    return Frustums(solids, covered, stats, lines, notes)

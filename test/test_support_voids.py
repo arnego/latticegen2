@@ -56,6 +56,45 @@ def test_a_lid_on_the_cup_fills_exactly_the_cup(cup):
         assert on_ring or np.all(np.abs(pts[:, 2]) < 1e-6) or np.all(np.abs(pts[:, 2] - TOP) < 1e-6)
 
 
+
+def test_the_cup_found_in_slabs_is_the_cup(cup, monkeypatch):
+    """Four slabs put a plane through the middle of the cup: the pieces either
+    side of it are joined by their faces on it, so the pocket is found whole
+    and filled exactly, in two pieces that add up to it."""
+    from latticegen2 import occ
+    from latticegen2.support import voids
+
+    body, mesh, lp = cup
+    monkeypatch.setattr(voids, "_slab_count", lambda workers, junctions: 4)
+    lid = _cyl(R2, H - TOP, TOP)
+    got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5, lp.b)
+    assert got.stats["support_pocket_slabs"] == 4
+    assert len(got.fills) == 2
+    assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
+
+
+def test_the_slabs_run_across_a_worker_pool(cup, monkeypatch, tmp_path):
+    """The same four slabs, each in a worker reading the staged body and mesh,
+    give the same fills as in this process."""
+    from latticegen2 import occ
+    from latticegen2.classify import save_mesh
+    from latticegen2.parallel import WorkerPool, write_brep
+    from latticegen2.support import voids
+
+    body, mesh, lp = cup
+    monkeypatch.setattr(voids, "_slab_count", lambda workers, junctions: 4)
+    write_brep(body, str(tmp_path / "body.brep"))
+    save_mesh(mesh, str(tmp_path / "mesh.npz"))
+    staged = {"body_path": str(tmp_path / "body.brep"), "mesh_path": str(tmp_path / "mesh.npz"),
+              "lp_args": (lp.cc, lp.t, tuple(lp.orient)), "kept_nodes": NO_NODES,
+              "tmpdir": str(tmp_path)}
+    lid = _cyl(R2, H - TOP, TOP)
+    with WorkerPool(2) as pool:
+        got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5, lp.b,
+                                 pool=pool, staged=staged)
+    assert len(got.fills) == 2
+    assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
+
 def test_a_pocket_the_lattice_already_sealed_is_left_alone(cup):
     from latticegen2.support import voids
 

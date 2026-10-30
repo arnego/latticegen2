@@ -2525,7 +2525,9 @@ flowchart TD
     C --> D[S4 manifold on the support node grid, then on the grid refined to rod faces and caps, rods left out]
     D --> E[S5 staircase solid per connected body, faces merged]
     E --> G[S6 intersect each with the body: sampled estimate, probe gate, STEP round-trip retry]
-    G -->|no rung passes| F2[exit 4, naming the body]
+    G -->|no rung passes| SP[split in two on a support grid plane, each half trimmed, halves joined]
+    SP -->|four levels down, still refused| F2[exit 4, naming the body]
+    SP --> H
     G --> H[debris backing no ceiling point discarded]
     H --> P[S7 pockets per group of touching bodies, filled and joined]
     P --> M{every edge used by two faces?}
@@ -2638,8 +2640,24 @@ the input (200,000 points, the input's own classification mesh, within 3 % or
 four standard errors) and to the gates: valid, no material outside by
 `classify.OutsideProbe`, no free face past the rod angle, no edge used by more
 than two faces. The ladder is `build.FUZZY_LADDER` on the body as built, then
-again on the body after a STEP round trip; a body no rung trims fails the run
-(exit 4) naming it. Coplanar faces of each result are merged unless that moves
+again on the body after a STEP round trip. A body no rung trims is **split in
+two** on a support grid plane near its middle, across its longest extent in the
+lattice frame, read off its vertices — a planar staircase cut on one of its own
+planes, the halves checked to add up — each half is trimmed the same way, and
+the trimmed halves are joined back into one body (`support/join.py`). After
+four levels of splitting, or where no grid plane crosses a piece, a body still
+refused fails the run (exit 4) naming it.
+
+**`SpiralTest.step` at `cc = 5, t = 1`, `--orient -90 45 0` fails there, and
+the failure is the kernel's.** One support body's intersection returned 0.1 mm³
+where sampling found 1,627.5 mm³, at every rung; the exact classifier puts 224
+of 400 points of one of its pieces inside the input, yet `Cut` returns that
+piece whole, `BRepAlgoAPI_Splitter` does not split it, a local block (§7.2)
+and a face-by-face trim fail the same way, and a translation of 0.1 to 10 µm
+changes nothing, so no coincidence is involved. Splitting recovers most of
+the body — on its worst piece, 197.5 of 393 mm³ — and leaves three pieces of
+36 to 42 mm³, one support node each, that no rung trims: the region where
+§7.2 already drops one lattice junction of this part. Coplanar faces of each result are merged unless that moves
 anything — unification has returned a valid solid with material outside the
 body here too, and is then discarded.
 
@@ -2703,7 +2721,19 @@ outside the body is now not counted, and the generator's own count reads
 probes along each sample's own inward direction and re-asks a miss of the
 exact solid.
 
-**Still to come:** the free-standing thickness gate; S6 and S7 dispatched
-across the worker pool (specification.md §4.6's parallelisation, once
-measured); `rehearsal-support` at production scale and the support stage's
+Where the support stage spends its time, from the run's own `support timing`
+line (6 cores):
+
+| part | stage | ceiling points | grid | staircase | trim | backing check | pockets |
+|---|---|---|---|---|---|---|---|
+| ball | 219 s | 16.0 s | 1.6 s | 1.3 s | 11.9 s | 23.1 s | 152.7 s |
+| cylinder | 441 s | 38.1 s | 19.9 s | 4.2 s | 51.6 s | 108.1 s | 194.1 s |
+
+The pocket search is the largest share on both, and on the cylinder the
+backing check — the exact classifier, point by point — the second. Neither
+runs across the worker pool yet.
+
+**Still to come:** the free-standing thickness gate; S6, S7 and the backing
+check dispatched across the worker pool (specification.md §4.6's
+parallelisation: the table above makes more than 5 % likely); `rehearsal-support` at production scale and the support stage's
 weight in `gui/weights.py` (specification.md §10).

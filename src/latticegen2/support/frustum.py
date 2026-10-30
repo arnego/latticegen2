@@ -32,6 +32,7 @@ from __future__ import annotations
 import itertools
 import math
 import os
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -62,6 +63,10 @@ past the sag of a 0.02 mm tessellation of a curved ceiling face."""
 ESTIMATE_SAMPLES = 200_000
 """Points sampled in a support body's box to estimate its intersection with the
 body, which every trim is held to."""
+
+SPLIT_DEPTH = 4
+"""How many times a support body no trim passes is split in two along a grid
+plane, each half trimmed on its own, before the run fails."""
 
 ESTIMATE_REL_TOL = 0.03
 """A trim's volume must agree with the sampled estimate to this fraction (or
@@ -353,7 +358,8 @@ def _unified(s, gates):
 
 
 def _trim(piece, body, gates, tmpdir: str, tag: str):
-    """``(solids, lines)``: ``piece`` intersected with the body, checked.
+    """``(solids, lines)``: ``piece`` intersected with the body, checked;
+    ``solids`` is ``None`` when no rung passed.
 
     The ladder runs the fuzzy values on the piece as built, then again on the
     piece as a STEP round trip gives it back: measured on the cylinder at m=1,
@@ -391,11 +397,46 @@ def _trim(piece, body, gates, tmpdir: str, tag: str):
             lines.append(f"  {tag}, {rung}: rejected, {' | '.join(why)}")
             continue
         return sol, lines
-    where = np.round(np.asarray(occ.centroid(piece), dtype=float), 3).tolist()
-    raise ProcessingError(
-        f"The support body near {where} could not be trimmed to the input body at any "
-        f"fuzzy value ({' '.join(x.strip() for x in lines)}) (docs/algorithm.md §14.3)."
-    )
+    return None, lines
+
+
+def _split(piece, g: _Grid):
+    """The two halves of ``piece`` either side of a support grid plane near its
+    middle, across its longest extent in the lattice frame that a grid plane
+    crosses; ``None`` where none does. A staircase cut along one of its own
+    planes is a well-conditioned boolean, and the halves are checked to add up.
+    Extents are read off the piece's vertices: its world box, turned into the
+    lattice frame, is loose enough that its middle can miss the piece."""
+    from OCP.BRep import BRep_Tool
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS as _T
+
+    from .build import _boolean
+
+    pts = []
+    ex = TopExp_Explorer(piece, TopAbs_ShapeEnum.TopAbs_VERTEX)
+    while ex.More():
+        q = BRep_Tool.Pnt_s(_T.Vertex_s(ex.Current()))
+        pts.append((q.X(), q.Y(), q.Z()))
+        ex.Next()
+    C = g.cube(np.array(pts))
+    clo, chi = C.min(axis=0), C.max(axis=0)
+    v = occ.volume(piece)
+    for k in np.argsort(clo - chi):                 # longest extent first
+        c = round(((clo[k] + chi[k]) / 2.0 + g.h) / g.q) * g.q - g.h
+        if not clo[k] + 1e-6 < c < chi[k] - 1e-6:
+            continue
+        halves = []
+        for a, b in ((clo[k] - 1.0, c), (c, chi[k] + 1.0)):
+            coords = [np.array([clo[i] - 1.0, chi[i] + 1.0]) for i in range(3)]
+            coords[k] = np.array([a, b])
+            box = _staircase(np.ones((1, 1, 1), dtype=bool), coords, g)[0]
+            got = _boolean(BRepAlgoAPI_Common, piece, [box])
+            halves += [] if got is None else occ.solids(got)
+        if len(halves) >= 2 and abs(sum(occ.volume(h) for h in halves) - v) <= 1e-9 * v:
+            return halves
+    return None
 
 
 def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
@@ -415,6 +456,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
 
     if report is not None:
         report("anchoring ceiling points", 0, None)
+    t0 = time.perf_counter()
     v = g.node_of(need)
     anchor, wall = _anchors(g, v, gates.inside_body, in_lattice)
     stats["support_wall_anchors"] = int(wall.sum())
@@ -471,16 +513,46 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     if stuck:
         lines.append(f"support grid: {stuck} contact(s) beside the rods could not be filled")
 
+    t1 = time.perf_counter()
     if report is not None:
         report("building support bodies", 0, None)
     pieces = _staircase(S, coords, g)
+    t2 = time.perf_counter()
+    trim_s = backed_s = 0.0
     solids, debris = [], []
     covered = np.zeros(len(need), dtype=bool)
     probes = need - PROBE_DEPTH * need_n
+    def trim_or_split(piece, tag: str, depth: int = 0):
+        got, trim_lines = _trim(piece, body, gates, tmpdir, tag)
+        if got is not None:
+            return got, trim_lines
+        halves = _split(piece, g) if depth < SPLIT_DEPTH else None
+        if halves is None:
+            where = np.round(np.asarray(occ.centroid(piece), dtype=float), 3).tolist()
+            raise ProcessingError(
+                f"The support body near {where} could not be trimmed to the input body at "
+                f"any fuzzy value, nor in halves "
+                f"({' '.join(x.strip() for x in trim_lines)}) (docs/algorithm.md §14.3)."
+            )
+        from .join import join
+
+        trim_lines.append(f"  {tag}: no trim passed; split in {len(halves)} along a grid plane")
+        out = []
+        for j, half in enumerate(halves):
+            part, more = trim_or_split(half, f"{tag}.{j}", depth + 1)
+            out += part
+            trim_lines += more
+        # The halves meet on the split plane: one body again.
+        joined, _js = join(out, overlaps=False)
+        return joined, trim_lines
+
     for i, piece in enumerate(pieces):
         if report is not None:
             report("trimming support bodies", i, len(pieces))
-        got, trim_lines = _trim(piece, body, gates, tmpdir, f"body-{i}")
+        ta = time.perf_counter()
+        got, trim_lines = trim_or_split(piece, f"body-{i}")
+        tb = time.perf_counter()
+        trim_s += tb - ta
         lines += trim_lines
         for s in got:
             hold = exact_inside(s, probes)
@@ -489,6 +561,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
                 covered |= hold
             else:
                 debris.append(s)
+        backed_s += time.perf_counter() - tb
     if debris:
         lines.append(f"support debris discarded (backs no ceiling point): {len(debris)} "
                      f"solid(s), {sum(occ.volume(s) for s in debris):.3f} mm^3")
@@ -497,5 +570,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     # where a wall continues it: nothing below it can back it, and the wall does.
     covered |= ~gates.inside_body(probes)
     stats.update({"support_debris_solids": len(debris),
-                  "support_ceiling_points_uncovered": int((~covered).sum())})
+                  "support_ceiling_points_uncovered": int((~covered).sum()),
+                  "support_grid_s": round(t1 - t0, 2), "support_staircase_s": round(t2 - t1, 2),
+                  "support_trim_s": round(trim_s, 2), "support_backed_s": round(backed_s, 2)})
     return Frustums(solids, covered, stats, lines)

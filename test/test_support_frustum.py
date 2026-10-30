@@ -187,6 +187,59 @@ def test_a_staircase_has_only_lattice_plane_faces_and_its_nodes_volume():
         assert np.isclose(np.abs(E @ n).max(), 1.0, atol=1e-9)
 
 
+
+def test_a_staircase_splits_on_a_grid_plane_into_halves_that_add_up():
+    from latticegen2 import occ
+    from latticegen2.support.frustum import _Grid, _planes, _split, _staircase
+
+    lp = lattice_params(10.0, 1.5)
+    g = _Grid(lp, 2)
+    coords = [_planes(g, 0, 6) for _ in range(3)]
+    shape = tuple(len(c) - 1 for c in coords)
+    S = np.zeros(shape, dtype=bool)
+    S[0:shape[0], 1:3, 1:3] = True
+    whole = _staircase(S, coords, g)[0]
+    halves = _split(whole, g)
+    assert halves is not None and len(halves) == 2
+    assert sum(occ.volume(h) for h in halves) == pytest.approx(occ.volume(whole), rel=1e-9)
+    E = np.asarray(lp.e)
+    for h in halves:
+        assert occ.is_valid(h)
+        for f in occ.faces(h):
+            n, _off = _plane(f)
+            assert np.isclose(np.abs(E @ n).max(), 1.0, atol=1e-9)
+
+
+def test_a_body_no_trim_passes_is_trimmed_in_halves_and_joined_again(
+        chamber, monkeypatch, tmp_path):
+    """The whole body's intersection is refused, as SpiralTest's was (0.1 mm^3
+    where sampling found 1,627.5): its halves are trimmed instead, and the
+    result is one body again, of the same volume."""
+    from latticegen2.support import frustum
+    from latticegen2.support.generate import supports_for
+
+    body, mesh, lp, kept, occ = chamber
+    real = frustum._trim
+    refused = []
+
+    def first_refused(piece, *args):
+        if not refused:
+            refused.append(args[-1])
+            return None, ["refused"]
+        return real(piece, *args)
+
+    monkeypatch.setattr(frustum, "_trim", first_refused)
+    solids, stats, lines = supports_for(body, mesh, [], kept, lp, 1.5, tmpdir=str(tmp_path))
+    assert refused and any("split in 2" in line for line in lines)
+    assert len(solids) == stats["support_bodies"]
+    assert all(occ.is_valid(s) and frustum.non_manifold_edges(s) == 0 for s in solids)
+    monkeypatch.setattr(frustum, "_trim", real)
+    (tmp_path / "plain").mkdir()
+    plain, _st, _l = supports_for(body, mesh, [], kept, lp, 1.5, tmpdir=str(tmp_path / "plain"))
+    assert len(solids) == len(plain)
+    assert sum(occ.volume(s) for s in solids) == pytest.approx(
+        sum(occ.volume(s) for s in plain), rel=1e-6)
+
 # --- whole supports ----------------------------------------------------------------------
 
 

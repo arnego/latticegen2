@@ -37,6 +37,7 @@ owes that chain:
 from __future__ import annotations
 
 import tempfile
+import time
 
 import numpy as np
 
@@ -55,16 +56,19 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     from . import build, frustum, join, regions, voids
     from .assemble import _LocalLattice
 
+    t0 = time.perf_counter()
     local = _LocalLattice(lp, np.asarray(kept_nodes))
     # Ceiling a strut ends on is backed by the lattice already.
     rmesh = regions.build(body, lp.b, report=report,
                           covered=local.contains if len(kept_nodes) else None)
     gates = build.Gates(mesh, lp.b)
+    ceiling_s = time.perf_counter() - t0
     if tmpdir is None:
         tmpdir = tempfile.mkdtemp(prefix="latticegen2-support-")
     got = frustum.build(body, mesh, rmesh, local, lp, thickness, gates, tmpdir,
                         report=report)
     stats = dict(got.stats)
+    stats["support_ceiling_s"] = round(ceiling_s, 2)
     lines = list(got.lines)
     if not got.solids:
         stats["support_bodies"] = 0
@@ -72,6 +76,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
 
     # S5 per group of touching bodies: free space the supports seal off is
     # filled, and a fill joins the bodies whose faces it lies on.
+    t3 = time.perf_counter()
     out, fills = [], []
     gs = join.groups(got.solids)
     for k, g in enumerate(gs):
@@ -93,6 +98,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                 f"A support body near {where} has {nm} edge(s) used by more than two "
                 f"faces: it is not a manifold solid (docs/algorithm.md §14.3)."
             )
+    stats["support_pockets_s"] = round(time.perf_counter() - t3, 2)
     stats["support_pockets"] = len(fills)
     stats["support_pocket_volume_mm3"] = round(sum(occ.volume(f) for f in fills), 4)
     stats["support_bodies"] = len(out)
@@ -100,6 +106,12 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
         f"support: {len(out)} bod(y/ies), {sum(occ.volume(s) for s in out):.3f} mm^3, "
         f"{len(fills)} sealed pocket(s) filled; "
         f"{int(got.covered.sum())} of {len(got.covered)} ceiling point(s) backed"
+    )
+    lines.append(
+        "support timing: " + ", ".join(
+            f"{k[len('support_'):-2]} {stats[k]:.1f} s" for k in
+            ("support_ceiling_s", "support_grid_s", "support_staircase_s",
+             "support_trim_s", "support_backed_s", "support_pockets_s"))
     )
     return out, stats, lines
 

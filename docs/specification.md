@@ -610,6 +610,13 @@ diagnosis. Remove an item once it's fixed and verified.*
   and pocket searches dispatched across the worker pool if the measurement
   shows more than 5 %; and the free-standing thickness gate. Golden samples for
   the two support scenarios wait for an inspected output.
+* **Supports cannot be trimmed on one region of `SpiralTest.step`**
+  (`-cc 5 -t 1 --orient -90 45 0 --support`, exit 4). OCCT does not intersect
+  three node-sized support pieces with the part's swept surface at any size,
+  fuzzy value or offset (docs/algorithm.md §14.3 S6); it is the region where
+  §7.2 drops one lattice junction of this part. Needs a decision: the run
+  fails, as now, or the pieces are dropped by name as §7.2 drops a junction,
+  which would give up coverage there and change §4.6's full-coverage rule.
 * **The window has not been looked at on a screen in this session.** Its widget
   states and the orientation view's drawing were checked programmatically (the
   canvas was rasterised to an image), not by eye in a running window.

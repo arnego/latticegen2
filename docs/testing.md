@@ -169,6 +169,22 @@ It uses boxes rather than the real part: "contained", "sticking out" and "flush
 with the boundary" are known there by construction, and the real part is covered
 by this harness and by specification.md §11.
 
+**The supported rehearsal of 2026-10-31 found two more of this kind**, both
+failing a sound file:
+
+* a cut came back at **−1.5e-03 mm³** for a 151 mm³ support body, 0 of 273 of
+  whose surface points lie outside. "Exactly zero" was tested one-sidedly, so
+  the negative remainder was believed and its absolute value failed the run;
+  it now goes to the containment check like any other non-zero remainder
+  (`test_a_negative_cut_remainder_is_not_believed`).
+* `self_supporting` exempted a facet as "on the input's surface" by its
+  centre's distance to the input's *mesh*, within three deflections. On that
+  part OCCT's real sag is several times the deflection asked for, and a support
+  face lying on a countersink's 60° cone read 0.097 mm off it: 1.57 mm² past
+  the limit, worst 60.00°. A facet that misses the mesh test is now asked again
+  at its exact point on its own face, against the input exactly, to
+  `CONTAINMENT_TOL`; on that file the over-limit area is 0.
+
 ### Testing against real geometry, not a reproduction of it
 
 `test_boundary.py`'s pinhole-wire tests load `test/TD_HX_rehearsal_test.step`

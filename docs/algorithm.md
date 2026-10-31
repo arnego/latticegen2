@@ -2811,6 +2811,11 @@ The pocket search, across the pool at about three cores, and the overlap check
 of §14.2, on the master at one, are 62 % of the run between them. One slab of
 106 was left open (S7). Resource figures are in docs/profiling-reports.md.
 
+**Its written file fails coverage** (specification.md §6.2): 630 of 125,777
+overhang samples unbacked. 479 are on concave edges of the body, which §14.1
+detects and S1 never turns into ceiling points; 151 are on faces, within 1 mm
+of a support. Everything else the harness asks passes.
+
 **Still to come:** the free-standing thickness gate; the overlap check and S6
 dispatched across the worker pool (specification.md §4.6's parallelisation),
 the first of them the largest serial piece of the supported rehearsal.

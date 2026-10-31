@@ -659,7 +659,11 @@ def material_outside(candidate_path: str, input_path: str) -> dict:
             reason = "not attempted"
         else:
             cut = _cut_volume(solid, body)
-            trustworthy = cut == cut and cut <= own * 1e-9  # exactly zero, in effect
+            # Exactly zero, in effect -- either sign: a cut can come back
+            # negative (-1.5e-03 mm^3 on a 151 mm^3 support body of the
+            # rehearsal part, 0 of 273 surface points outside), and a negative
+            # remainder is no more a measurement than a positive one.
+            trustworthy = cut == cut and abs(cut) <= own * 1e-9
             reason = "contradicted"
         if not trustworthy:
             evidence = surface_points_outside(solid, body)
@@ -747,7 +751,8 @@ re-read at the exact normal: far more than a chord at
 def _oriented_mesh_exact(shape, deflection: float):
     """:func:`_oriented_mesh` plus ``exact(i)``: the true outward normal of
     triangle ``i``'s face at the triangle's centroid in the face's parameters,
-    ``None`` at a pole or where the face has no parameters."""
+    ``None`` at a pole or where the face has no parameters. ``exact(i,
+    point=True)`` is the point there instead, on the face itself."""
     from OCP.TopAbs import TopAbs_Orientation
 
     from latticegen2.support.overhang import _SurfaceNormals
@@ -777,11 +782,11 @@ def _oriented_mesh_exact(shape, deflection: float):
     f, owner, uvc = f[keep], owner[keep], uvc[keep]
     normals = {}
 
-    def exact(i: int):
+    def exact(i: int, point: bool = False):
         k = int(owner[i])
         if k not in normals:
             normals[k] = _SurfaceNormals(faces[k])
-        return normals[k].at(*uvc[i])[1]
+        return normals[k].at(*uvc[i])[0 if point else 1]
 
     return v, f, nrm[keep] / (2.0 * area[keep])[:, None], area[keep], exact
 
@@ -903,10 +908,27 @@ def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
     bad_area = 0.0
     where = []
     worst = 0.0
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
+    from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+    from OCP.gp import gp_Pnt
+
+    def on_body(i) -> bool:
+        # The facet's own point on its face, measured against the input exactly:
+        # a facet centre sits off a curved face by the chord's sag, and on
+        # `TD_HX_rehearsal_test` OCCT's real sag is a multiple of the deflection
+        # asked for (docs/algorithm.md §5.1) -- a support face lying on a
+        # countersink's 60 deg cone read 0.097 mm off the input's mesh.
+        q = exact(int(i), point=True)
+        d = BRepExtrema_DistShapeShape(BRepBuilderAPI_MakeVertex(gp_Pnt(*map(float, q))).Vertex(),
+                                       body)
+        return bool(d.IsDone() and d.Value() <= CONTAINMENT_TOL)
+
     for i in suspect:
         centre = v[f[i]].mean(axis=0)
         if _distance_to_mesh(wall, sh, centre) <= 3.0 * SUPPORT_MESH_DEFLECTION:
             continue                      # closed against the wall
+        if on_body(i):
+            continue
         bad_area += float(area[i])
         worst = max(worst, float(np.degrees(np.arcsin(min(1.0, down[i])))))
         if len(where) < 5:

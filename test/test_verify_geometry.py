@@ -82,6 +82,24 @@ def test_a_solid_sticking_out_is_reported_not_swallowed(outer, tmp_path):
         assert result["unmeasured"][0]["containment"]["contained"] is False
 
 
+def test_a_negative_cut_remainder_is_not_believed(outer, tmp_path, monkeypatch):
+    """A cut can come back with a small negative volume -- measured on a
+    support body of the rehearsal part. That is no measurement of material
+    outside, so it goes to the containment check like any other non-zero
+    remainder, instead of failing a contained solid by its absolute value."""
+    inner = box(10.0, 10.0, 10.0, at=(20.0, 20.0, 20.0))
+    cand, body = tmp_path / "cand.step", tmp_path / "body.step"
+    occ.write_step(inner, str(cand), "cand")
+    occ.write_step(outer, str(body), "body")
+    monkeypatch.setattr(vg, "_cut_volume", lambda a, b: -1.5e-3)
+
+    result = vg.material_outside(str(cand), str(body))
+
+    assert result["exact"] is False
+    assert len(result["unmeasured"]) == 1
+    assert result["unmeasured"][0]["containment"]["contained"] is True
+
+
 def test_containment_is_boolean_free_and_agrees_with_construction(outer):
     """`surface_points_outside` is the arbiter, so it has to be right on its own."""
     inside = vg.surface_points_outside(box(10.0, 10.0, 10.0, at=(20.0, 20.0, 20.0)), outer)

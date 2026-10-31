@@ -27,9 +27,9 @@ it came from, and a piece is a pocket when it was cut off:
 The fill is the pocket itself: an exact solid each of whose faces lies on the
 body, the lattice or a support, joined to the supports that seal it. Having no
 free face, it is self-supporting. With the fills in place no piece is cut off
-any more (gate G5).
+any more (gate G5) -- by construction, since each fill is a whole cut-off piece.
 
-The envelope is searched in **slabs**, one per worker of the run's pool
+The envelope is searched in **slabs** across the run's pool
 (:func:`find_pockets`): on the ball, three cuts by all 777 junctions in the
 envelope were 132 of the search's 157 s.
 """
@@ -46,6 +46,11 @@ from OCP.gp import gp_Pnt
 
 from .. import occ
 from ..errors import ProcessingError
+
+
+class CutRefused(ProcessingError):
+    """The kernel would not cut a slab of the support envelope as checked: a
+    slab raising this is split and searched again, and left open at last."""
 
 WITNESS_DEFLECTION = 0.01
 """mm. Tessellation the witness tests read pieces through."""
@@ -84,6 +89,8 @@ find."""
 class Pockets:
     fills: list = field(default_factory=list)
     stats: dict = field(default_factory=dict)
+    unsearched: list = field(default_factory=list)
+    """One line per slab the kernel would not cut, for the warning."""
 
 
 def _solid_mesh(shape, deflection: float = WITNESS_DEFLECTION):
@@ -180,8 +187,12 @@ def _box(lo: np.ndarray, hi: np.ndarray):
     return BRepPrimAPI_MakeBox(gp_Pnt(*map(float, lo)), gp_Pnt(*map(float, hi))).Shape()
 
 
-def _free(region: list, tools: list, removes: float, what: str) -> list:
-    """The solids of ``region`` minus ``tools``, checked to remove ``removes`` mm^3."""
+def _free(region: list, tools: list, removes: float, what: str,
+          one_by_one: bool = True) -> list:
+    """The solids of ``region`` minus ``tools``, checked to remove ``removes`` mm^3.
+
+    ``one_by_one=False`` skips the tool-at-a-time fallback, for a caller that
+    has a cheaper second route to try first."""
     from .build import _boolean
 
     total = sum(occ.volume(s) for s in region)
@@ -199,10 +210,10 @@ def _free(region: list, tools: list, removes: float, what: str) -> list:
             left = sum(occ.volume(p) for p in pieces)
             if abs((total - left) - removes) <= bar:
                 return pieces
-    got = _free_one_by_one(region, tools, total)
+    got = _free_one_by_one(region, tools, total) if one_by_one else None
     if got is not None and abs((total - sum(occ.volume(p) for p in got)) - removes) <= bar:
         return got
-    raise ProcessingError(
+    raise CutRefused(
         f"Cutting {what} out of the support envelope did not remove their volume "
         f"({removes:.4f} mm^3 of {total:.4f}) at any fuzzy value "
         f"(docs/algorithm.md §14.3 S7)."
@@ -283,10 +294,15 @@ def envelope(cells: list, b: np.ndarray, body_mesh, thickness: float):
     return swept.min(axis=0), swept.max(axis=0)
 
 
-SLAB_MIN_JUNCTIONS = 60
-"""Lattice junctions per slab below which the envelope is not divided further:
-a slab's cuts cost a fixed overhead whatever they cut, so a slab is only worth
-a worker when it has this much lattice to cut."""
+SLAB_JUNCTIONS = 150
+"""Lattice junctions per slab the envelope is divided for. A cut's cost grows
+faster than the number of tools it is given, so the slabs follow the lattice,
+not the workers: on the rehearsal part six slabs of ~3,000 junctions each were
+still cutting after half an hour, where the ball's slabs of ~150 took seconds."""
+
+SLAB_REACH_MULTIPLE = 4.0
+"""A slab is at least this many junction reaches thick: a junction is cut by
+every slab it reaches into, so thinner slabs share most of their tools."""
 
 SLAB_NUDGE = 0.0137
 """mm. Interior slab planes are moved this far off the even division, so that
@@ -296,15 +312,22 @@ planar face makes the box-and-body intersection degenerate."""
 PLANE_TOL = 1e-4
 """mm. A face whose box lies within this of a slab plane is on it."""
 
-CONTACT_AREA = 1e-8
-"""mm^2. Two pieces in neighbouring slabs whose faces on the plane between
-them overlap by more than this are one piece of free space."""
+SLAB_RETRY_SPLITS = 2
+"""Times a slab whose cuts the kernel refuses is split in two and searched
+again. Measured on the rehearsal part: one slab of 106 was refused by both
+routes, the combined cut and the supports alone, at every fuzzy value."""
 
+UNSEARCHED_WARNING = "WARNING: the pocket search could not cut"
+"""Starts the console note naming the slabs left unsearched."""
 
-def _slab_count(workers: int, junctions: int) -> int:
-    """Slabs to cut the envelope into: one per worker, while each still has
-    :data:`SLAB_MIN_JUNCTIONS` of lattice to cut."""
-    return max(1, min(workers, junctions // SLAB_MIN_JUNCTIONS))
+def _slab_count(junctions: int, extent: float, reach: float) -> int:
+    """Slabs to cut an envelope ``extent`` long into: one per
+    :data:`SLAB_JUNCTIONS` of lattice in it, none thinner than
+    :data:`SLAB_REACH_MULTIPLE` junction reaches. The same with a pool and
+    without, so the free space found does not depend on how it was run."""
+    by_lattice = -(-junctions // SLAB_JUNCTIONS)
+    by_size = int(extent // (SLAB_REACH_MULTIPLE * reach)) if reach > 0.0 else by_lattice
+    return max(1, min(by_lattice, by_size))
 
 
 @dataclass
@@ -326,8 +349,8 @@ def _touches(shape, lo, hi) -> bool:
 
 def _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice: list, tools: list) -> _Slab:
     """The free space of the body within the box ``[lo, hi]``, before and after
-    ``tools``: the region cut by the lattice, then those pieces cut by the
-    tools, every cut checked to remove what it should. Each piece after is
+    ``tools``: the region cut by the lattice, and by the lattice and the tools
+    together, every cut checked to remove what it should. Each piece after is
     placed by a witness point in the piece before it came from."""
     region = occ.solids(_boolean(_box(lo, hi), body))
     if not region:
@@ -342,9 +365,22 @@ def _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice: list, tools: list) 
     # call over touching operands partitions them (docs/algorithm.md §7).
     box = _box(lo, hi)
     tools_in = sum(occ.volume(s) for tool in tools for s in occ.solids(_boolean(tool, box)))
+    # The region cut by lattice and supports in one call first. Neither route
+    # is always taken by the kernel, measured on the rehearsal part: the free
+    # space above cut by the supports alone -- whose faces lie on the rod faces
+    # that cut has just made -- was refused on slab after slab, and on one slab
+    # the combined cut was refused where that route removed exactly the
+    # expected 1,234.62 mm^3 (a support beside junctions it touches). So the
+    # combined cut is tried without its slow tool-at-a-time fallback, and the
+    # second route, with only the supports' few tools, carries the fallback.
+    try:
+        freed = _free(region, list(lattice) + list(tools), lattice_in + tools_in,
+                      "the lattice and the supports", one_by_one=False)
+    except CutRefused:
+        freed = _free(before, tools, tools_in, "the supports")
     after, home = [], []
     homes = _Inside(before)
-    for p in _free(before, tools, tools_in, "the supports"):
+    for p in freed:
         if occ.volume(p) <= MIN_POCKET_VOLUME:
             continue
         w = witness(p)
@@ -392,7 +428,10 @@ def _slab_worker(job):
     local = _LocalLattice(lattice_params(*lp_args), kept)
     lattice = list(local.near((lo, hi))) if len(kept) else []
     tools = [s for s in compound_children(read_brep(tools_path)) if _touches(s, lo, hi)]
-    got = _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice, tools)
+    try:
+        got = _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice, tools)
+    except CutRefused as exc:
+        return ("refused", str(exc), peak_rss_bytes())
     write_brep(_compound(got.before), out + "-before.brep")
     write_brep(_compound(got.after), out + "-after.brep")
     return (len(got.before), len(got.after), got.home, got.before_env, got.after_env,
@@ -408,20 +447,50 @@ def _faces_on(piece, ax: int, c: float) -> list:
     return out
 
 
+def _inner_points(faces: list) -> list:
+    """A point inside each of ``faces``: the centroid of its largest triangle."""
+    from .build import _mesh_of
+
+    out = []
+    for f in faces:
+        for _f, pts, _u, tris in _mesh_of(f, 0.05):
+            a, b, c = pts[tris[:, 0]], pts[tris[:, 1]], pts[tris[:, 2]]
+            k = int(np.argmax(np.linalg.norm(np.cross(b - a, c - a), axis=1)))
+            out.append((a[k] + b[k] + c[k]) / 3.0)
+    return out
+
+
+def _in_any(point, faces: list) -> bool:
+    from OCP.BRepClass import BRepClass_FaceClassifier
+    from OCP.TopAbs import TopAbs_State
+
+    for f in faces:
+        cls = BRepClass_FaceClassifier(f, gp_Pnt(*map(float, point)), PLANE_TOL)
+        if cls.State() == TopAbs_State.TopAbs_IN:
+            return True
+    return False
+
+
 def _joined_across(left: list, right: list, ax: int, c: float) -> list:
     """``(i, j)`` pairs of pieces either side of the plane ``x[ax] = c`` whose
-    faces on it overlap: one piece of free space cut in two by the slabs."""
-    from .build import _boolean as run
+    faces on it overlap: one piece of free space cut in two by the slabs.
 
+    Both sides' faces on the plane are the same cross-section -- the body less
+    the same tools, cut from either side -- so a point inside a face of one
+    piece lies inside a face of the other exactly where the two are one piece.
+    Asked both ways, by the face classifier: a boolean between two such faces,
+    each the whole part's section less hundreds of strut holes, costs seconds,
+    and there are two per plane."""
     lf = [_faces_on(p, ax, c) for p in left]
     rf = [_faces_on(p, ax, c) for p in right]
+    lp = [_inner_points(a) for a in lf]
+    rp = [_inner_points(b) for b in rf]
     pairs = []
     for i, a in enumerate(lf):
         for j, b in enumerate(rf):
             if not a or not b:
                 continue
-            got = run(BRepAlgoAPI_Common, _compound(a), [_compound(b)])
-            if got is not None and occ.area(got) > CONTACT_AREA:
+            if any(_in_any(q, b) for q in lp[i]) or any(_in_any(q, a) for q in rp[j]):
                 pairs.append((i, j))
     return pairs
 
@@ -441,7 +510,8 @@ def _components(n: int, pairs) -> list:
 
 
 def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
-                 b: np.ndarray, *, pool=None, staged=None) -> Pockets:
+                 b: np.ndarray, *, pool=None, staged=None, report=None,
+                 reach: float = 0.0) -> Pockets:
     """S7 for a group of support ``cells``, which overlap nothing: the fill of
     every pocket.
 
@@ -450,9 +520,10 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
     measured deviation sizes the witness tolerance.
 
     **The envelope is cut into slabs** across its longest extent, one per
-    worker of ``pool`` while each has :data:`SLAB_MIN_JUNCTIONS` of lattice to
-    cut, and every slab's free space is found on its own -- across the pool
-    when there is one, in this process otherwise, by the same code. Pieces of
+    :data:`SLAB_JUNCTIONS` of lattice in it and none thinner than
+    :data:`SLAB_REACH_MULTIPLE` junction ``reach``-es, and every slab's free
+    space is found on its own -- across the pool when there is one, in this
+    process otherwise, by the same code. Pieces of
     neighbouring slabs whose faces overlap on the plane between them are one
     piece of free space, so pockets are judged on the whole envelope exactly
     as before. ``staged`` -- ``{"body_path", "mesh_path", "lp_args",
@@ -466,21 +537,35 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
     lo, hi = envelope(cells, np.asarray(b, dtype=float), body_mesh, thickness)
     ax = int(np.argmax(hi - lo))
     parallel = pool is not None and pool.active and staged is not None
-    n = _slab_count(pool.workers if parallel else 1, len(lattice_near((lo, hi))))
+    n = _slab_count(len(lattice_near((lo, hi))), float(hi[ax] - lo[ax]), reach)
     edges = lo[ax] + (hi[ax] - lo[ax]) * np.arange(n + 1) / n
     edges[1:-1] += SLAB_NUDGE
-    boxes = []
-    for s in range(n):
-        slo, shi = lo.copy(), hi.copy()
-        slo[ax], shi[ax] = edges[s], edges[s + 1]
-        boxes.append((slo, shi))
     probe = OutsideProbe(body_mesh, 2.0 * body_mesh.deviation)
 
-    def slabs(tools: list) -> list:
-        if n == 1 or not parallel:
-            return [_slab_free(body, probe, slo, shi, lo, hi, list(lattice_near((slo, shi))),
-                               [t for t in tools if _touches(t, slo, shi)])
-                    for slo, shi in boxes]
+    def tick(done: int, total: int) -> None:
+        if report is not None:
+            report("searching the support envelope for sealed pockets, slab", done, total)
+
+    def box(span):
+        slo, shi = lo.copy(), hi.copy()
+        slo[ax], shi[ax] = span
+        return slo, shi
+
+    def search(spans: list, tools: list) -> list:
+        """Per span, its :class:`_Slab`, or the reason the kernel refused it."""
+        if len(spans) == 1 or not parallel:
+            out = []
+            for s, span in enumerate(spans):
+                tick(s, len(spans))
+                slo, shi = box(span)
+                try:
+                    out.append(_slab_free(body, probe, slo, shi, lo, hi,
+                                          list(lattice_near((slo, shi))),
+                                          [t for t in tools if _touches(t, slo, shi)]))
+                except CutRefused as exc:
+                    out.append(str(exc))
+            tick(len(spans), len(spans))
+            return out
         import os
         import uuid
 
@@ -488,25 +573,73 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
         write_brep(_compound(tools), tag + "-tools.brep")
         lp_args = staged["lp_args"]
         jobs = [(staged["body_path"], staged["mesh_path"], lp_args, staged["kept_nodes"],
-                 tag + "-tools.brep", slo, shi, lo, hi, f"{tag}-{s}")
-                for s, (slo, shi) in enumerate(boxes)]
-        results, _rss = pool.run(_slab_worker, jobs)
+                 tag + "-tools.brep", *box(span), lo, hi, f"{tag}-{s}")
+                for s, span in enumerate(spans)]
+        tick(0, len(spans))
+        results, _rss = pool.run(_slab_worker, jobs, on_result=tick)
         out = []
-        for nb, na, home, benv, aenv, path, _r in results:
+        for r in results:
+            if r[0] == "refused":
+                out.append(r[1])
+                continue
+            nb, na, home, benv, aenv, path, _r = r
             before = compound_children(read_brep(path + "-before.brep")) if nb else []
             after = compound_children(read_brep(path + "-after.brep")) if na else []
             out.append(_Slab(before, after, list(home), list(benv), list(aenv)))
         return out
 
+    def slabs(tools: list):
+        """The spans along ``ax`` and their slabs. A refused slab is split in
+        two and searched again, :data:`SLAB_RETRY_SPLITS` times; one still
+        refused stays a reason string."""
+        spans = [(float(edges[s]), float(edges[s + 1])) for s in range(n)]
+        got = search(spans, tools)
+        for _ in range(SLAB_RETRY_SPLITS):
+            if not any(isinstance(g, str) for g in got):
+                break
+            nspans, keep = [], []
+            for span, g in zip(spans, got):
+                if isinstance(g, str):
+                    mid = 0.5 * (span[0] + span[1]) + SLAB_NUDGE
+                    nspans += [(span[0], mid), (mid, span[1])]
+                    keep += [None, None]
+                else:
+                    nspans.append(span)
+                    keep.append(g)
+            todo = [k for k, g in enumerate(keep) if g is None]
+            for k, g in zip(todo, search([nspans[k] for k in todo], tools)):
+                keep[k] = g
+            spans, got = nspans, keep
+        return spans, got
+
+    unsearched, searched = [], {}
+
     def pockets(tools: list) -> list:
-        got = slabs(tools)
+        spans, got = slabs(tools)
+        # A slab still refused is left open: its free space is not known, so
+        # every piece beside it counts as reaching the envelope and nothing
+        # it could belong to is judged sealed.
+        refused = [k for k, g in enumerate(got) if isinstance(g, str)]
+        for k in refused:
+            unsearched.append(
+                f"  {'xyz'[ax]} {spans[k][0]:.3f} to {spans[k][1]:.3f} mm: {got[k]}")
+            got[k] = _Slab([], [], [], [], [])
+        for k in refused:
+            for s, c in ((k - 1, spans[k][0]), (k + 1, spans[k][1])):
+                if 0 <= s < len(got) and s not in refused:
+                    g = got[s]
+                    g.before_env = [e or bool(_faces_on(q, ax, c))
+                                    for q, e in zip(g.before, g.before_env)]
+                    g.after_env = [e or bool(_faces_on(q, ax, c))
+                                   for q, e in zip(g.after, g.after_env)]
+        n = searched["slabs"] = len(got)
         # Global indices of every slab's pieces, then the pieces joined across
         # the planes between slabs.
         b0 = np.cumsum([0] + [len(s.before) for s in got])
         a0 = np.cumsum([0] + [len(s.after) for s in got])
         bpairs, apairs = [], []
         for s in range(n - 1):
-            c = edges[s + 1]
+            c = spans[s][1]
             bpairs += [(b0[s] + i, b0[s + 1] + j)
                        for i, j in _joined_across(got[s].before, got[s + 1].before, ax, c)]
             apairs += [(a0[s] + i, a0[s + 1] + j)
@@ -544,18 +677,16 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
                 f"not a valid solid (docs/algorithm.md §14.3 S7)."
             )
         fills.append(p)
-    if fills:
-        # G5: with the fills in place nothing is cut off any more.
-        again = pockets(list(cells) + fills)
-        if again:
-            where = np.round(occ.centroid(again[0]), 3).tolist()
-            raise ProcessingError(
-                f"A pocket near {where} is still cut off after the pockets were "
-                f"filled (docs/algorithm.md §14.3 S7, gate G5)."
-            )
-    return Pockets(fills, {"support_pockets": len(fills), "support_pocket_slabs": n,
+    # G5 -- with the fills in place nothing is cut off -- holds by construction:
+    # every fill is a whole cut-off piece of the free space just found, and what
+    # remains is exactly the pieces that were not cut off. Re-finding the free
+    # space with the fills as tools cut through nothing but coincident faces,
+    # and was refused on a slab of the rehearsal part after an hour of cutting.
+    return Pockets(fills, {"support_pockets": len(fills), "support_pocket_slabs": searched.get("slabs", n),
+                           "support_pocket_slabs_unsearched": len(unsearched),
                            "support_pocket_volume_mm3":
-                               round(sum(occ.volume(f) for f in fills), 4)})
+                               round(sum(occ.volume(f) for f in fills), 4)},
+                   unsearched)
 
 
 def _compound(shapes: list):
@@ -575,7 +706,7 @@ def _boolean(a, *tools):
 
     got = run(BRepAlgoAPI_Common, a, list(tools))
     if got is None:
-        raise ProcessingError(
+        raise CutRefused(
             "Intersecting the support envelope failed (docs/algorithm.md §14.3 S7)."
         )
     return got

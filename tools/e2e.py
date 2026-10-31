@@ -387,7 +387,7 @@ def support_checks(rep: Report, output: str, input_path: str, cc: float, t: floa
 
     log = open(os.path.splitext(output)[0] + ".log", encoding="utf-8").read()
     order = [log.find(f"stage {name}") for name in
-             ("simplify", "overhang", "support", "validate")]
+             ("simplify", "overhang", "support", "pockets", "validate")]
     rep.check("the support stages ran between simplify and validate",
               -1 not in order and order == sorted(order))
     # A run these checks have nothing to say about, recognised by the line the

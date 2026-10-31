@@ -109,10 +109,10 @@ def test_the_supported_layout_has_bands_for_its_own_stages():
     assert sum(weights.SUPPORT_PERMILLE.values()) == 1000
     assert all(v >= 1 for v in weights.SUPPORT_PERMILLE.values())
     assert all(v >= 1 for v in weights.STAGE_PERMILLE.values())
-    # Each support stage has a band to begin and end, measured or not: the
-    # generator has no measurement yet and is worth exactly the floor.
+    # Each support stage has a band to begin and end, and the measured
+    # rehearsal puts the pocket search ahead of every other stage.
     assert all(weights.SUPPORT_PERMILLE[s] >= 1 for s in SUPPORT_STAGES)
-    assert weights.SUPPORT_PERMILLE["support"] == 1
+    assert max(weights.SUPPORT_PERMILLE, key=weights.SUPPORT_PERMILLE.get) == "pockets"
     # The layout is selected by the announced stages, and by nothing else.
     assert weights.layout(held) == (weights.SUPPORT_PERMILLE, weights.SUPPORT_BAND_START)
     assert weights.layout(STAGES) == weights.layout() == (
@@ -736,7 +736,7 @@ def test_a_supported_run_lays_the_bar_out_over_the_stages_it_announced():
     plain, held = stages_for(False), stages_for(True)
     assert plain == STAGES
     assert held[held.index("simplify") + 1:held.index("validate")] == (
-        "overhang", "support")
+        "overhang", "support", "pockets")
     marks = [weights.overall_permille(s, 0.0, held) for s in held]
     assert marks == sorted(marks) and marks[0] == 0
     assert weights.overall_permille(held[-1], 1.0, held) == 1000

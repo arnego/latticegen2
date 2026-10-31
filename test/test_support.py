@@ -261,7 +261,7 @@ def test_a_supported_box_ships_supports_beside_the_unchanged_lattice(box_step, t
 
     log = open(held[:-5] + ".log", encoding="utf-8").read()
     order = [log.index(f"stage {name}") for name in
-             ("simplify", "overhang", "support", "validate", "export")]
+             ("simplify", "overhang", "support", "pockets", "validate", "export")]
     assert order == sorted(order)
     assert stages_for(True).index("overhang") == stages_for(True).index("simplify") + 1
     assert "stage overhang" not in open(plain[:-5] + ".log", encoding="utf-8").read()

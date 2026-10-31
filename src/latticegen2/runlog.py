@@ -42,7 +42,7 @@ STAGES: tuple[str, ...] = (
 #: the completed lattice, and ``validate`` gates the two together. Kept out of
 #: :data:`STAGES` so a run without support announces, logs and weights exactly
 #: the stages it always has.
-SUPPORT_STAGES: tuple[str, ...] = ("overhang", "support")
+SUPPORT_STAGES: tuple[str, ...] = ("overhang", "support", "pockets")
 
 
 def stages_for(support: bool) -> tuple[str, ...]:

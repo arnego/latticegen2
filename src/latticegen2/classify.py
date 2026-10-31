@@ -867,15 +867,24 @@ class OutsideProbe:
     def __init__(self, mesh: TriMesh, margin: float):
         self._inside = PointInside(mesh)
         self._tris = mesh.triangle_points
+        self._mesh = mesh
+        self._hash = None
         self.margin = float(margin)
 
     def worst_outside(self, points: np.ndarray) -> float:
         """Distance from the surface of the furthest point genuinely outside.
 
         ``0.0`` when nothing is outside by more than :attr:`margin`. Exact
-        point-triangle distances are computed only for the handful of points
-        parity rejects, never for all of them, which is what keeps this at
+        point-triangle distances are computed only for the points parity
+        rejects, never for all of them, which is what keeps this at
         milliseconds per junction.
+
+        **And a rejected point within :attr:`margin` of a nearby triangle is
+        let go without measuring the rest**: it cannot be the worst reading
+        returned, which only counts past the margin. A support body's faces
+        lie on the input's surface, where parity rejects half the points at
+        random, and measuring each of those against every triangle of the mesh
+        kept a rehearsal-scale support stage in its gates for tens of minutes.
         """
         points = np.asarray(points, dtype=float)
         if len(points) == 0:
@@ -883,9 +892,16 @@ class OutsideProbe:
         out = ~self._inside(points)
         if not out.any():
             return 0.0
+        if self._hash is None:
+            self._hash = SpatialHash(self._mesh, min_cell=1.0)
         a, b, c = self._tris
+        r = self.margin + 1e-9
         worst = 0.0
         for p in points[out]:
+            near = self._hash.query(p - r, p + r)
+            if len(near) and float(_point_triangle_dist(
+                    p, a[near], b[near], c[near]).min()) <= self.margin:
+                continue
             d = float(_point_triangle_dist(p, a, b, c).min())
             if d > worst:
                 worst = d

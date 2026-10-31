@@ -91,6 +91,12 @@ class SupportInput:
     """Progress callback, ``report(label, done, total)``; ``total=None`` for
     work with no countable fraction. Drives the window's second bar."""
 
+    pockets_begin: Optional[Callable[[], None]] = None
+    """Called once, when the support bodies are built and the pocket search
+    begins: the boundary between the ``support`` and ``pockets`` stages
+    (docs/algorithm.md §14.2). A generator that never calls it has its whole
+    run timed as ``support``."""
+
 
 @dataclass(frozen=True)
 class SupportResult:

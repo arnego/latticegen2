@@ -65,12 +65,83 @@ def test_the_cup_found_in_slabs_is_the_cup(cup, monkeypatch):
     from latticegen2.support import voids
 
     body, mesh, lp = cup
-    monkeypatch.setattr(voids, "_slab_count", lambda workers, junctions: 4)
+    monkeypatch.setattr(voids, "_slab_count", lambda *args: 4)
     lid = _cyl(R2, H - TOP, TOP)
     got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5, lp.b)
     assert got.stats["support_pocket_slabs"] == 4
     assert len(got.fills) == 2
     assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
+
+
+
+def test_a_refused_combined_cut_is_redone_in_two_steps(cup, monkeypatch):
+    """The region cut by lattice and supports in one call can be refused --
+    on the rehearsal part, a support beside junctions it touches -- and the
+    lattice-free space is then cut by the supports alone, to the same pocket."""
+    from latticegen2 import occ
+    from latticegen2.support import voids
+
+    body, mesh, lp = cup
+    real = voids._free
+    refused = []
+
+    def refuse_combined(region, tools, removes, what, one_by_one=True):
+        if what == "the lattice and the supports":
+            refused.append(what)
+            raise voids.CutRefused("refused")
+        return real(region, tools, removes, what, one_by_one)
+
+    monkeypatch.setattr(voids, "_free", refuse_combined)
+    got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5, lp.b)
+    assert refused
+    assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
+
+
+def _refusing(voids, monkeypatch, refuse):
+    """``voids._slab_free`` refusing every box ``refuse(lo, hi)`` names; the
+    x extents of the boxes asked for are recorded."""
+    real = voids._slab_free
+    asked = []
+
+    def slab_free(body, probe, lo, hi, *args):
+        asked.append((float(lo[0]), float(hi[0])))
+        if refuse(lo, hi):
+            raise voids.CutRefused("refused")
+        return real(body, probe, lo, hi, *args)
+
+    monkeypatch.setattr(voids, "_slab_free", slab_free)
+    return asked
+
+
+def test_a_refused_slab_is_split_and_searched_again(cup, monkeypatch):
+    """Four slabs, each refused while wider than 3 mm: every one is split in
+    two, the halves are searched, and the pocket is found whole."""
+    from latticegen2 import occ
+    from latticegen2.support import voids
+
+    body, mesh, lp = cup
+    monkeypatch.setattr(voids, "_slab_count", lambda *args: 4)
+    asked = _refusing(voids, monkeypatch, lambda lo, hi: hi[0] - lo[0] > 3.0)
+    got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5, lp.b)
+    assert len(asked) == 4 + 8
+    assert got.stats["support_pocket_slabs"] == 8
+    assert got.unsearched == []
+    assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
+
+
+def test_a_slab_refused_at_every_split_is_left_open(cup, monkeypatch):
+    """The slabs through the cup's middle refused however finely they are
+    split: the free space beside them counts as open, so nothing is filled,
+    and the slabs left are named."""
+    from latticegen2.support import voids
+
+    body, mesh, lp = cup
+    monkeypatch.setattr(voids, "_slab_count", lambda *args: 4)
+    _refusing(voids, monkeypatch, lambda lo, hi: lo[0] < 0.5 and hi[0] > -0.5)
+    got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5, lp.b)
+    assert got.fills == []
+    assert got.unsearched and got.stats["support_pocket_slabs_unsearched"] == len(got.unsearched)
+    assert all(line.lstrip().startswith("x ") and "refused" in line for line in got.unsearched)
 
 
 def test_the_slabs_run_across_a_worker_pool(cup, monkeypatch, tmp_path):
@@ -82,7 +153,7 @@ def test_the_slabs_run_across_a_worker_pool(cup, monkeypatch, tmp_path):
     from latticegen2.support import voids
 
     body, mesh, lp = cup
-    monkeypatch.setattr(voids, "_slab_count", lambda workers, junctions: 4)
+    monkeypatch.setattr(voids, "_slab_count", lambda *args: 4)
     write_brep(body, str(tmp_path / "body.brep"))
     save_mesh(mesh, str(tmp_path / "mesh.npz"))
     staged = {"body_path": str(tmp_path / "body.brep"), "mesh_path": str(tmp_path / "mesh.npz"),

@@ -325,6 +325,34 @@ def exact_inside(solid, P: np.ndarray) -> np.ndarray:
     return out
 
 
+def backs_any(solid, P: np.ndarray) -> bool:
+    """Whether ``solid`` holds any of ``P``, by the exact classifier, stopping at
+    the first. A real support holds most of the ceiling points in its box, so
+    this asks a handful; a piece of debris is small, and few lie in its box."""
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.TopAbs import TopAbs_State
+    from OCP.gp import gp_Pnt
+
+    P = np.asarray(P, dtype=float)
+    lo, hi = (np.asarray(x, dtype=float) for x in occ.bounding_box(solid))
+    cls = BRepClass3d_SolidClassifier(solid)
+    for i in np.nonzero(np.all((P >= lo - 1e-6) & (P <= hi + 1e-6), axis=1))[0]:
+        cls.Perform(gp_Pnt(*map(float, P[i])), 1e-7)
+        if cls.State() in (TopAbs_State.TopAbs_IN, TopAbs_State.TopAbs_ON):
+            return True
+    return False
+
+
+def _on_grid(g: "_Grid", coords: list, S: np.ndarray, P: np.ndarray) -> np.ndarray:
+    """Which ``P`` lie in a support node of ``S`` on the fine grid ``coords``."""
+    C = g.cube(P)
+    idx = np.stack([np.searchsorted(coords[k], C[:, k]) - 1 for k in range(3)], axis=1)
+    ok = np.all((idx >= 0) & (idx < np.array(S.shape)), axis=1)
+    out = np.zeros(len(P), dtype=bool)
+    out[ok] = S[idx[ok, 0], idx[ok, 1], idx[ok, 2]]
+    return out
+
+
 def _estimate(piece, in_body, seed: int = 1):
     """``(volume, standard error)`` of ``piece`` within the body, by sampling."""
     lo, hi = (np.asarray(x, dtype=float) for x in occ.bounding_box(piece))
@@ -536,7 +564,6 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     t2 = time.perf_counter()
     trim_s = backed_s = 0.0
     solids, debris = [], []
-    covered = np.zeros(len(need), dtype=bool)
     probes = need - PROBE_DEPTH * need_n
     dropped = []      # (tag, centroid, mm^3 inside the body, ceiling points it held)
 
@@ -587,20 +614,22 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
         trim_s += tb - ta
         lines += trim_lines
         for s in got:
-            hold = exact_inside(s, probes)
-            if hold.any():
-                solids.append(s)
-                covered |= hold
-            else:
-                debris.append(s)
+            (solids if backs_any(s, probes) else debris).append(s)
         backed_s += time.perf_counter() - tb
     if debris:
         lines.append(f"support debris discarded (backs no ceiling point): {len(debris)} "
                      f"solid(s), {sum(occ.volume(s) for s in debris):.3f} mm^3")
-    covered |= in_lattice(probes)
+    # Backed by the support grid the bodies were built from -- every trim is
+    # held to that grid's volume by its sampled estimate and gates -- or by a
+    # strut. Classifying every ceiling point against the exact solids instead
+    # took over half an hour on the rehearsal part: 6 ms a point on a
+    # 5,000-face body, and 125,000 points.
+    covered = _on_grid(g, coords, S, probes) | in_lattice(probes)
     # A probe outside the body is a ceiling point on the ceiling's own rim,
     # where a wall continues it: nothing below it can back it, and the wall does.
     covered |= ~gates.inside_body(probes)
+    for _tag, _where, _est, held in dropped:
+        covered &= ~held
     notes = []
     if dropped:
         lost = np.zeros(len(need), dtype=bool)

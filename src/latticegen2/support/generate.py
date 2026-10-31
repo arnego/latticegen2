@@ -45,7 +45,8 @@ from .contract import SupportInput, SupportResult
 
 
 def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
-                 report=None, tmpdir: str | None = None, pool=None, staged=None):
+                 report=None, tmpdir: str | None = None, pool=None, staged=None,
+                 pockets_begin=None):
     """``(solids, stats, lines)``: every support body for ``body``.
 
     The generator proper, shared by :func:`generate` and by
@@ -76,18 +77,22 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
         stats["support_bodies"] = 0
         return [], stats, lines
 
-    # S5 per group of touching bodies: free space the supports seal off is
+    # S7 per group of touching bodies: free space the supports seal off is
     # filled, and a fill joins the bodies whose faces it lies on.
+    if pockets_begin is not None:
+        pockets_begin()
     t3 = time.perf_counter()
-    out, fills = [], []
+    out, fills, unsearched = [], [], []
     gs = join.groups(got.solids)
     for k, g in enumerate(gs):
         if report is not None:
             report("looking for sealed pockets", k, len(gs))
         mine = [got.solids[i] for i in g]
         pockets = voids.find_pockets(body, mesh, mine, local.near, thickness, lp.b,
-                                     pool=pool, staged=staged)
+                                     pool=pool, staged=staged, report=report,
+                                     reach=local.reach)
         fills += pockets.fills
+        unsearched += pockets.unsearched
         if pockets.fills:
             mine, _js = join.join(mine + pockets.fills, overlaps=False)
         out += mine
@@ -105,10 +110,17 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     stats["support_pockets"] = len(fills)
     stats["support_pocket_volume_mm3"] = round(sum(occ.volume(f) for f in fills), 4)
     stats["support_bodies"] = len(out)
+    stats["support_pocket_slabs_unsearched"] = len(unsearched)
+    if unsearched:
+        lines.append(f"{voids.UNSEARCHED_WARNING} {len(unsearched)} slab(s) of the "
+                     f"support envelope at any fuzzy value; free space touching them "
+                     f"is taken as open and no pocket there is filled:")
+        lines += unsearched
     lines.append(
         f"support: {len(out)} bod(y/ies), {sum(occ.volume(s) for s in out):.3f} mm^3, "
         f"{len(fills)} sealed pocket(s) filled; "
-        f"{int(got.covered.sum())} of {len(got.covered)} ceiling point(s) backed"
+        f"{int(got.covered.sum())} of {len(got.covered)} ceiling point(s) backed "
+        f"by the support grid or a strut"
     )
     lines.append(
         "support timing: " + ", ".join(
@@ -122,6 +134,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
 def generate(inp: SupportInput) -> SupportResult:
     """Support solids backing the ceiling of ``inp.body``, anchored on ``inp.lattice``."""
     from .frustum import DROPPED_WARNING
+    from .voids import UNSEARCHED_WARNING
 
     staged = {"body_path": inp.body_path, "mesh_path": inp.mesh_path,
               "lp_args": (inp.lp.cc, inp.lp.t, tuple(inp.lp.orient)),
@@ -129,11 +142,15 @@ def generate(inp: SupportInput) -> SupportResult:
     solids, stats, lines = supports_for(inp.body, inp.mesh, list(inp.lattice),
                                         inp.kept_nodes, inp.lp, inp.thickness_mm,
                                         report=inp.report, tmpdir=inp.tmpdir,
-                                        pool=inp.pool, staged=staged)
-    # The dropped pieces' report goes to the console whatever -v says.
-    k = next((i for i, line in enumerate(lines) if line.startswith(DROPPED_WARNING)), None)
+                                        pool=inp.pool, staged=staged,
+                                        pockets_begin=inp.pockets_begin)
+    # The dropped pieces' and unsearched slabs' reports go to the console
+    # whatever -v says.
     notes = []
-    if k is not None:
-        notes = lines[k:k + 1 + stats["support_pieces_dropped"]]
-        lines = lines[:k] + lines[k + len(notes):]
+    for head, count in ((DROPPED_WARNING, stats.get("support_pieces_dropped", 0)),
+                        (UNSEARCHED_WARNING, stats.get("support_pocket_slabs_unsearched", 0))):
+        k = next((i for i, line in enumerate(lines) if line.startswith(head)), None)
+        if k is not None:
+            notes += lines[k:k + 1 + count]
+            lines = lines[:k] + lines[k + 1 + count:]
     return SupportResult(supports=solids, stats=stats, lines=lines, notes=notes)

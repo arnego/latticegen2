@@ -2461,13 +2461,19 @@ a region's border; ending at the 60° isocline is that guard now.)
 
 ### 14.2 The support stage
 
-Two stages run, under `--support` only, between `simplify` and `validate`
+Three stages run, under `--support` only, between `simplify` and `validate`
 (`runlog.SUPPORT_STAGES`):
 
 | Stage | Does |
 |---|---|
 | `overhang` | §14.1's detection on the input body, at the run's orientation |
-| `support` | hands the lattice, the body and the samples to the generator (§14.3); checks what it returns; appends it to the output |
+| `support` | hands the lattice, the body and the samples to the generator (§14.3), which finds the ceiling points, anchors them, builds the support bodies on the grid and trims them to the body (S1–S6) |
+| `pockets` | the generator's pocket search and join (S7), opened by its call to `SupportInput.pockets_begin`; then checks what the generator returns and appends it to the output |
+
+One generator call spans the two last stages, and the boundary between them is
+the generator's own call to `pockets_begin`: the progress bar needs it, because
+on the rehearsal part the two are very unequal (specification.md §3.1). A
+generator that never calls it is timed whole as `support`.
 
 The lattice's faces are merged by `simplify` (§9) **before** the generator sees
 it, so the generator works on exactly the solids a run without `--support`
@@ -2681,19 +2687,31 @@ earlier piece reaches the envelope's faces and it no longer does, or, where
 the envelope holds all of its earlier piece, where it is not the largest. The
 fill is the cut-off piece itself, an exact solid every face of which lies on
 the body, the lattice or a support; with the fills in place nothing is cut off
-(gate G5), and the fills are fused with the bodies of their group
+(gate G5) — by construction, each fill being a whole cut-off piece of the free
+space just found. The search used to find the free space again with the fills
+as tools to prove it, a cut through nothing but coincident faces, which was
+refused on a slab of the rehearsal part after an hour of cutting. The fills are
+fused with the bodies of their group
 (`support/join.py`). Pieces under 1e-3 mm³ are boolean specks along shared
 faces, not pockets.
 
 **The search runs in slabs across the worker pool.** The envelope reaches down
 to the body's lowest point, so it holds most of the lattice: on the ball, three
 cuts by all 777 junctions in it were 132 s of the search's 157 s. The envelope
-is cut across its longest extent into one slab per worker, as long as each
-still holds `SLAB_MIN_JUNCTIONS` (60) junctions, the interior planes moved
-0.0137 mm off the even division so that none lies on a face of the input. Each
-slab's region is cut by the junctions near it, then — the lattice already
-gone — by the supports alone, each cut checked to remove what it should (the
-supports' volume measured inside the slab one support per call) to
+is cut across its longest extent into one slab per `SLAB_JUNCTIONS` (150)
+junctions in it, none thinner than four junction reaches, and the slabs are
+queued across the pool. The slabs follow the lattice rather than the workers
+because a cut's cost grows faster than its tool count: on the rehearsal part,
+six slabs of about 3,000 junctions each were still cutting after half an hour.
+The interior planes are moved 0.0137 mm off the even division so that none lies
+on a face of the input. Each
+slab's region is cut by the junctions near it, for the free space before the
+supports, and then by those junctions and the supports together in one call,
+for the free space after them — not the first result cut by the supports, whose
+faces coincide with the rod faces that cut has just made free-space faces: that
+cut was refused on slab after slab of the rehearsal part. Each cut is checked
+to remove what it should (the supports' volume measured inside the slab one
+support per call) to
 `CUT_VOLUME_REL_TOL` of the region or `CUT_PER_TOOL_TOL` (0.05 mm³) per tool,
 whichever is larger: neighbouring junctions touch on their caps, and a cut by
 hundreds of them and their intersection differ by slivers there — 2.7 mm³ over
@@ -2701,10 +2719,29 @@ hundreds of them and their intersection differ by slivers there — 2.7 mm³ ove
 and a dropped tool, what the check is for, is a whole junction or support node;
 each piece after is placed in the piece before it by its witness. Pieces of
 neighbouring slabs whose faces on the plane between them overlap are one piece
-of free space, so pockets are judged on the whole envelope exactly as with one
+of free space — asked by classifying a point inside each face of one against
+the other's faces, both ways, since the two sides' faces on a plane are the
+same section of the body less the same tools — so pockets are judged on the whole envelope exactly as with one
 slab, and a pocket a plane crosses is filled in pieces that the join fuses. A
 worker reads the staged body and mesh and rebuilds the lattice from its kept
 nodes; with no pool the same slabs run in this process.
+
+**A slab the kernel will not cut is split, and at last left open.** Neither
+cut route always succeeds: on the rehearsal part one slab refused the combined
+cut where the free space before the supports, cut by the supports alone, came
+out exactly (a support beside junctions it touches), so that route is the
+fallback, with the tool-at-a-time ladder of S5. Another slab of 106 refused
+both, at every fuzzy value. A slab refused both ways (`CutRefused`, raised
+only by a cut or intersection that fails its volume check, never by a witness
+that disagrees with one) is split in two at its middle and each half searched
+again, `SLAB_RETRY_SPLITS` (2) times. A slab still refused is **open**: its
+free space is not known, so every piece in a neighbouring slab with a face on
+the plane between them counts as reaching the envelope, and nothing it could
+belong to is judged sealed. A pocket lying in it is therefore not filled, and
+the run says so regardless of `-v` — `voids.UNSEARCHED_WARNING`, one line per
+open slab with its extent and the kernel's reason — and counts it
+(`support_pocket_slabs_unsearched`). It never fills free space it has not
+found: a fill is always a whole cut-off piece of a search that succeeded.
 
 **Every body is then asked once more for edges used by more than two of its
 faces**, and one that has any fails the run (exit 4): STEP carries such a body,
@@ -2757,10 +2794,23 @@ line (6 cores):
 
 The pocket search was the largest share on both, and now runs in slabs across
 the worker pool (S7): the supported ball's whole run fell from 262 s to 142 s,
-the cylinder's from 506 s to 353 s. The backing check — the exact classifier,
-point by point — is the cylinder's next largest and still runs in this
-process.
+the cylinder's from 506 s to 353 s. The backing check, then point by point
+with the exact classifier, now reads the support grid instead (S6) and is
+under a second on every part measured.
 
-**Still to come:** the free-standing thickness gate; S6 and the backing check
-dispatched across the worker pool (specification.md §4.6's parallelisation); `rehearsal-support` at production scale and the support stage's
-weight in `gui/weights.py` (specification.md §10).
+**At production scale** — `rehearsal-support`, `TD_HX_rehearsal_test` at
+`cc = 7, t = 1.4`, `t_s = 1`, turned over, 6 cores, 2026-10-31 — the run takes
+1 h 40 m and writes 28 support bodies of 35,281 mm³ backing 225,971 of 225,984
+ceiling points, with 59 pockets filled:
+
+| stage | ceiling points | grid | staircase | trim | backing check | pocket search | overlap check |
+|---|---|---|---|---|---|---|---|
+| `support` 490 s, `pockets` 3,743 s | 136.4 s | 22.9 s | 56.4 s | 269.2 s | 0.7 s | 2,380.2 s | ~1,360 s |
+
+The pocket search, across the pool at about three cores, and the overlap check
+of §14.2, on the master at one, are 62 % of the run between them. One slab of
+106 was left open (S7). Resource figures are in docs/profiling-reports.md.
+
+**Still to come:** the free-standing thickness gate; the overlap check and S6
+dispatched across the worker pool (specification.md §4.6's parallelisation),
+the first of them the largest serial piece of the supported rehearsal.

@@ -676,3 +676,86 @@ in the other rows as noise.
 columns as `SECONDS_PLAIN` and `SECONDS_SUPPORT` and derives the progress
 bar's two layouts from them. If either run is re-measured, those two tables
 have to be updated with it.
+
+## What changed between the previous entry and the next
+
+The support generator was replaced. v4.0.0's cell-by-cell algorithm, which ran
+`plan` and `support` between `boundary` and `connect`, is gone; the frustum
+generator (docs/algorithm.md §14.3) runs against the completed lattice, after
+`simplify`, in three stages — `overhang`, `support` and `pockets`. Nothing
+upstream of `simplify` knows supports exist any more, so `connect` no longer
+repairs 375 disagreeing interfaces. `--overhang` is gone; the 60° bar is fixed.
+
+## 2026-10-31 — frustum supports, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, single run
+
+The `rehearsal-support` e2e scenario, on `db8bd0f` plus the uncommitted pocket
+changes committed with this entry (slabs of 150 junctions, a refused slab split
+and at last left open), profiled at 5 s:
+
+```
+python tools/profile_run.py --out run.csv --interval 5 -- python tools/e2e.py --only rehearsal-support --keep <dir>
+```
+
+```
+-cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1
+```
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| tessellate | 3.0s | 0% | 0% | 0.00 | 471 MB | 471 MB | 2 | 0 MB | 0 MB |
+| classify | 14.0s | 524% | 530% | 5.24 | 1,929 MB | 1,954 MB | 8 | 81 MB | 1 MB |
+| boundary | 581.0s | 526% | 584% | 5.26 | 2,212 MB | 2,259 MB | 8 | 43 MB | 81 MB |
+| connect | 10.0s | 99% | 99% | 0.99 | 2,443 MB | 2,443 MB | 8 | 0 MB | 0 MB |
+| stitch | 260.0s | 118% | 568% | 1.18 | 3,011 MB | 3,600 MB | 8 | 209 MB | 178 MB |
+| instance | 13.0s | 99% | 100% | 0.99 | 3,155 MB | 3,207 MB | 8 | 0 MB | 0 MB |
+| assemble | 9.0s | 100% | 100% | 1.00 | 3,233 MB | 3,233 MB | 8 | 0 MB | 0 MB |
+| simplify | 237.0s | 100% | 118% | 1.00 | 4,771 MB | 7,332 MB | 8 | 349 MB | 333 MB |
+| overhang | 7.0s | 96% | 96% | 0.96 | 3,623 MB | 3,623 MB | 8 | 0 MB | 0 MB |
+| support | 490.0s | 101% | 153% | 1.01 | 4,441 MB | 5,115 MB | 8 | 0 MB | 0 MB |
+| pockets | 3,743.0s | 313% | 582% | 3.13 | 7,050 MB | 15,060 MB | 8 | 853 MB | 456 MB |
+| validate | 531.0s | 114% | 446% | 1.14 | 6,204 MB | 8,428 MB | 8 | 753 MB | 753 MB |
+| export | 105.0s | 99% | 100% | 0.99 | 5,587 MB | 8,270 MB | 8 | 763 MB | 763 MB |
+
+```
+total to last stage : 6,004.0s (100.1 min)
+peak tree RSS       : 15,060 MB
+min system available: 7,979 MB
+```
+
+**Run 1 h 40 m 09 s**, 817 MB written, 28 support bodies of 35,281 mm³ beside
+331,441 mm³ of lattice; 225,971 of 225,984 ceiling points backed, 59 pockets
+filled. The run's own `support timing` line splits the generator:
+
+| part | seconds |
+|---|---|
+| ceiling points | 136.4 |
+| grid and both manifold repairs | 22.9 |
+| staircase solids | 56.4 |
+| trim (S6) | 269.2 |
+| backing check | 0.7 |
+| pocket search and fill join (S7) | 2,380.2 |
+
+**`pockets` is 62 % of the run, in two halves of different kinds.** The search
+is 40 min across the pool — 106 slabs, about 3 cores on average because slabs
+are very unequal and the retries run after the first pass. The rest, about
+**23 min at one core**, is `assemble.assemble`'s overlap check on the master:
+one `Common` per support body against every lattice junction near it, which
+the construction already makes zero (docs/algorithm.md §14.3 S4). It is the
+largest serial piece of the run and the obvious next lever.
+
+**One slab of the 106 was refused** by both cut routes and by both halves of
+both splits: `z 932.832 to 940.139`, the supports' cut removing 98.69 mm³ of
+the 764.98 expected. It was left open and reported (docs/algorithm.md §14.3
+S7); the previous attempt, on the same code without that rule, failed the run
+after 68 minutes on a refused slab.
+
+Against the 2026-10-11 supported run of the removed algorithm (50 m 16 s) this
+is twice as long, the difference more than accounted for by `pockets`; the lattice stages agree with that
+entry's plain column to within the 7 % noise it measured (`boundary` 581 s
+against 668 s), except `validate`, which checks the support bodies too.
+
+**Downstream consumer.** `src/latticegen2/gui/weights.py` holds this run's
+Duration column as `SECONDS_SUPPORT`; `SECONDS_PLAIN` is still the plain
+column of the 2026-10-11 pair.

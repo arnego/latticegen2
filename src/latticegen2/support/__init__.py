@@ -4,15 +4,19 @@ Loaded only by a run with ``--support``: :mod:`latticegen2.pipeline` imports
 this package inside the one branch that needs it, so a run without supports
 never executes — or even imports — any of it.
 
-Two stages, between ``simplify`` and ``validate``:
+Three stages, between ``simplify`` and ``validate``:
 
 ``overhang``
     Find where the input body's inner surface needs support (:mod:`.overhang`).
 ``support``
     Hand the completed, unified lattice, the body and the overhangs to the
-    generator (:mod:`.generate`) through the contract in :mod:`.contract`;
-    check that what comes back is support material that overlaps nothing, and
-    append it to the output beside the lattice (:mod:`.assemble`).
+    generator (:mod:`.generate`) through the contract in :mod:`.contract`,
+    which builds the support bodies and trims them to the body.
+``pockets``
+    The generator's pocket search and join, which it opens by calling
+    ``SupportInput.pockets_begin``; then check that what comes back is support
+    material that overlaps nothing, and append it to the output beside the
+    lattice (:mod:`.assemble`).
 
 Supports are **not** merged with the lattice: they ship as separate bodies that
 share faces with it. ``validate`` then gates lattice and supports together.
@@ -72,7 +76,17 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
     stats["overhang_samples"] = len(samples)
 
     lattice = list(lattice)
-    with Timer(rl, "support"):
+    # Two stages around one generator call: ``support`` until the generator
+    # says its bodies are built, ``pockets`` from then on, and the overlap
+    # check at the end of it.
+    timer = [Timer(rl, "support").__enter__()]
+
+    def pockets_begin():
+        if timer[0].name == "support":
+            timer[0].__exit__(None, None, None)
+            timer[0] = Timer(rl, "pockets").__enter__()
+
+    try:
         if len(samples) == 0:
             # Not a failure: a body with no inner overhang at this orientation
             # needs no support, and saying so is the whole result.
@@ -84,9 +98,13 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
                 thickness_mm=args.support_thickness,
                 samples=samples, kept_nodes=kept_nodes, pool=pool,
                 workers=args.workers, tmpdir=tmpdir, report=rl.substage,
+                pockets_begin=pockets_begin,
             ))
+        pockets_begin()
         assembled = assemble.assemble(lattice, list(result.supports), lp,
                                       kept_nodes, report=rl.substage)
+    finally:
+        timer[0].__exit__(None, None, None)
 
     for line in result.lines:
         rl.line(line)

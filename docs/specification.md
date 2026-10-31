@@ -180,12 +180,12 @@ becomes `Stop!`, and two bars appear:
 * the **top** bar names the running stage and fills according to a fixed share
   per stage, declared in [`gui/weights.py`](../src/latticegen2/gui/weights.py).
   **There are two layouts, chosen by whether the run generates supports.** A
-  supported run goes through two more stages — `overhang` and `support`,
-  between `simplify` and `validate` — and each gets a band of its own. The
-  plain layout and the `overhang` band come from the 2026-10-11 controlled
-  pair in docs/profiling-reports.md; the `support` band is worth the floor
-  until the generator exists to be measured (docs/algorithm.md §14.3). Both
-  are computed once when the window starts. A run announces its stages when it
+  supported run goes through three more stages — `overhang`, `support` and
+  `pockets`, between `simplify` and `validate` — and each gets a band of its
+  own. The plain layout comes from the plain run of the 2026-10-11 controlled
+  pair in docs/profiling-reports.md, the supported layout from the 2026-10-31
+  `rehearsal-support` run, every stage of it; there `pockets` alone is 62 % of
+  the bar. Both are computed once when the window starts. A run announces its stages when it
   begins, and that list is what selects the layout;
 * the **second** bar shows work within the stage — `boundary trim: 9,776 /
   19,552` — with the text drawn over it.
@@ -383,6 +383,11 @@ An opt-in stage that creates support structures, as used for
   one would, or in which a body is not manifold, fails rather than ships.
 - **Enclosed voids are filled.** Powder must not be trapped: a pocket of free
   space that supports seal off is filled with support material.
+  [TODO: proposed] Where the geometry kernel cannot cut a part of the
+  support envelope even after splitting it, that part is left unsearched and
+  reported by a console warning naming where, and a pocket in it is not
+  filled, rather than the run failing. Implemented on that basis
+  (docs/algorithm.md §14.3 S7), pending a decision.
 - **Self-supporting.** No support surface or edge exceeds the rod angle.
 - **Thickness.** No free-standing support member is thinner than the minimum
   support thickness, which defaults to the strut size `t`. The support grid divides the lattice cube as finely as still leaves at least that thickness
@@ -596,14 +601,15 @@ diagnosis. Remove an item once it's fixed and verified.*
 
 * **Finish the print support generator** (§4.6, docs/algorithm.md §14.3–§14.4).
   The frustum algorithm is implemented on branch
-  `custom-designed-support-feature`, and `support-tilted` and
-  `support-cylinder` pass every support check of §6.2. What remains is
-  measurement and the production scale: `rehearsal-support` within 12 h on 6
-  cores (final verification only); `SECONDS_SUPPORT["support"]` in
-  `gui/weights.py` from that measurement; docs/profiling-reports.md; the trims
-  and pocket searches dispatched across the worker pool if the measurement
-  shows more than 5 %; and the free-standing thickness gate. Golden samples for
-  the two support scenarios wait for an inspected output.
+  `custom-designed-support-feature`; `support-tilted`, `support-cylinder` and
+  `rehearsal-support` (1 h 40 m, 2026-10-31) pass, and `gui/weights.py` holds
+  that rehearsal's stage times. What remains: the overlap check of
+  docs/algorithm.md §14.2 dispatched across the worker pool — ~23 min at one
+  core on the rehearsal, its largest serial piece — and the trims likewise if
+  a measurement shows more than 5 %; the free-standing thickness gate; and a
+  decision on the [TODO: proposed] rule for slabs the pocket search cannot cut
+  (§4.6). Golden samples for the three support scenarios wait for an inspected
+  output.
 * **The window has not been looked at on a screen in this session.** Its widget
   states and the orientation view's drawing were checked programmatically (the
   canvas was rasterised to an image), not by eye in a running window.

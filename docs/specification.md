@@ -502,9 +502,10 @@ no `SpiralTest.step`.
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
 | dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | oriented-lattice | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 | valid STEP through every §6.2 check with the lattice turned to the bed; the orientation recorded in the log and no support stage run. No golden sample. |
+| support-gaps | -i test/support-gaps.step -cc 10 -t 1.5 --cores 4 --support | valid STEP through every §6.2 check, on a small part (`tools/make_support_gaps_part.py`) holding the two ways `rehearsal-support` left ceiling bare: a keel no face of which overhangs past 60°, and a strut tip dropped as a floating body from a node still kept. Both are checked to be present, so it cannot pass by no longer testing them. Before the fix: 16 of 1,836 face samples and 32 of 33 keel samples unbacked. **Measured: 21 s, none unbacked**, and none at 0.1 mm sampling either (42,690). |
 | support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 142 s**, one support body, 12,524 of 12,524 overhang samples backed. |
 | support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 353 s**, three support bodies, 33,065 of 33,065 overhang samples backed, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
-| rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Measured 2026-10-31: 1 h 40 m, and coverage fails** — 630 of 125,777 overhang samples unbacked, 479 of them on concave edges (§10). Valid, closed, manifold, inside the body and self-supporting; the two harness defects that run exposed are fixed (docs/testing.md). **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+| rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Measured 2026-10-31: 1 h 40 m, and coverage failed** — 630 of 125,777 overhang samples unbacked. The causes are fixed and verified on `support-gaps`; **not re-run since** (§10). Otherwise valid, closed, manifold, inside the body and self-supporting; the two harness defects that run exposed are fixed (docs/testing.md). **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
@@ -603,14 +604,14 @@ diagnosis. Remove an item once it's fixed and verified.*
   The frustum algorithm is implemented on branch
   `custom-designed-support-feature`; `support-tilted` and `support-cylinder`
   pass, and `gui/weights.py` holds the stage times of `rehearsal-support`
-  (1 h 40 m, 2026-10-31). **That rehearsal fails coverage, in two ways the
-  smaller parts cannot show:** 479 of its 590 samples on concave edges are
-  unbacked, median 6.7 mm from any support, because S1 takes ceiling points
-  from faces only (docs/algorithm.md §14.3); and 151 of 125,167 face samples,
-  every one within 1 mm of a support and none near the 60° border, most
-  likely in support nodes the ceiling crosses without holding a mesh vertex
-  of it — unverified. Both are generator work, and the rehearsal (about 5 h
-  with its checks) is what verifies them. What else remains: the overlap check of
+  (1 h 40 m, 2026-10-31). **That rehearsal failed coverage, and both causes are
+  fixed but not yet proven at scale:** concave edges were never ceiling points,
+  and strut tips dropped from kept nodes read as lattice (docs/algorithm.md
+  §14.3 S1). `support-gaps` reproduces and verifies both; re-running
+  `rehearsal-support` (about 5 h with its checks, on the user's command) is
+  what remains, and will change the support bodies, so `gui/weights.py` and
+  docs/profiling-reports.md may want it too. 5 of its 151 face misses are
+  outside both causes, and unexplained until then. What else remains: the overlap check of
   docs/algorithm.md §14.2 dispatched across the worker pool — ~23 min at one
   core on the rehearsal, its largest serial piece — and the trims likewise if
   a measurement shows more than 5 %; the free-standing thickness gate; and a

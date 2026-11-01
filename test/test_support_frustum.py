@@ -10,6 +10,7 @@ asked of the solids, never of the plan that built them.
 from __future__ import annotations
 
 import itertools
+import os
 
 import numpy as np
 import pytest
@@ -355,3 +356,87 @@ def test_supports_are_assembled_beside_the_lattice(chamber, chamber_supports):
     solids, _stats, _lines = chamber_supports
     got = assemble.assemble([], solids, lp, kept)
     assert got.support_volume == pytest.approx(sum(occ.volume(s) for s in solids))
+
+
+def _box(lo, hi):
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Pnt
+
+    return BRepPrimAPI_MakeBox(gp_Pnt(*lo), gp_Pnt(*hi)).Solid()
+
+
+def test_a_lost_junction_piece_is_not_lattice():
+    """A strut tip the floating-body rule dropped from a kept node: neither the
+    point test nor the junction instances may claim it is there."""
+    from latticegen2 import occ
+    from latticegen2.support.assemble import _LocalLattice
+
+    lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+    nodes = np.zeros((1, 3), dtype=np.int64)
+    tip = 3.0 * lp.e[0]
+    lost = _box(tip - 1.5, tip + 1.5)
+    whole = _LocalLattice(lp, nodes)
+    local = _LocalLattice(lp, nodes, [lost])
+
+    assert whole.contains(tip[None])[0] and whole.in_template(tip[None])[0]
+    assert not local.contains(tip[None])[0] and local.in_template(tip[None])[0]
+    hub = 0.1 * lp.e[1]
+    assert local.contains(hub[None])[0]
+
+    box = (tip - 5.0, tip + 5.0)
+    full = sum(occ.volume(s) for s in whole.near(box))
+    less = sum(occ.volume(s) for s in local.near(box))
+    assert 0.0 < less < full
+
+
+def test_a_fine_node_is_freed_only_if_no_kept_lattice_is_in_it():
+    """A wall can cross a rod's fine node with a lost tip on one side and kept
+    lattice on the other: support there would overlap the lattice, so that node
+    stays lattice, while one wholly inside the lost piece is freed."""
+    from latticegen2.support.assemble import _LocalLattice
+    from latticegen2.support.frustum import _free_of_lattice, _Grid, _planes, _staircase
+
+    lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+    g = _Grid(lp, 2)
+    coords = [_planes(g, -2, 4) for _ in range(3)]
+    centres = [(c[:-1] + c[1:]) / 2.0 for c in coords]
+    C = np.stack(np.meshgrid(*centres, indexing="ij"), -1)
+    # The rod along e_0: fine nodes on its axis, past the hub, in order.
+    on_axis = (np.abs(C[..., 1]) < 1e-9) & (np.abs(C[..., 2]) < 1e-9) & (C[..., 0] > lp.t)
+    inner, outer = [tuple(i) for i in np.argwhere(on_axis)[np.argsort(C[on_axis][:, 0])][:2]]
+    # All of the rod from the middle of the first of them onward is lost.
+    start = (coords[0][inner[0]] + coords[0][inner[0] + 1]) / 2.0
+    cube = [np.array([start, coords[0][-1] + 1.0]),
+            np.array([coords[1][0] - 1.0, coords[1][-1] + 1.0]),
+            np.array([coords[2][0] - 1.0, coords[2][-1] + 1.0])]
+    lost = _staircase(np.ones((1, 1, 1), dtype=bool), cube, g)[0]
+    local = _LocalLattice(lp, np.zeros((1, 3), dtype=np.int64), [lost])
+    L0 = np.ones(tuple(len(c) for c in centres), dtype=bool)
+
+    L = _free_of_lattice(g, coords, local, lambda P: np.ones(len(P), dtype=bool), L0)
+
+    assert L[inner], "kept lattice remains in the node the wall crosses"
+    assert not L[outer], "nothing of the lattice is left in the node beyond it"
+
+
+def test_a_keel_is_supported_though_no_face_of_it_is_ceiling():
+    """The flanks of test/support-gaps.step's keel are 45 deg, under the bar,
+    so its concave edge alone asks for support, and gets it."""
+    from latticegen2 import occ
+    from latticegen2.classify import tessellate_surface
+    from latticegen2.support import overhang
+    from latticegen2.support.frustum import exact_inside
+    from latticegen2.support.generate import supports_for
+
+    lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+    body = occ.read_step(os.path.join(os.path.dirname(__file__), "support-gaps.step"))
+    mesh = tessellate_surface(body, lp)
+    samples = overhang.detect(body, lp.b)
+    keel = samples.points[samples.kind == overhang.EDGE]
+    assert len(keel) > 10
+    solids, _stats, _lines = supports_for(body, mesh, [], np.empty((0, 3), dtype=np.int64),
+                                          lp, 1.5, samples=samples)
+    backed = np.zeros(len(keel), dtype=bool)
+    for s in solids:
+        backed |= exact_inside(s, keel - 2e-3 * lp.b)
+    assert backed.all(), f"{int((~backed).sum())} of {len(keel)} keel samples unbacked"

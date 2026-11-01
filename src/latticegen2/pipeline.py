@@ -32,6 +32,7 @@ from OCP.TopoDS import TopoDS_Shape
 from . import occ, weld
 from .boundary import (
     CAP_AREA_REL_TOL,
+    _rebuild_solid,
     finalize_pieces,
     fuse_disagreeing_pairs,
     resolve_interfaces,
@@ -474,6 +475,9 @@ def _run_with_pool(
         )
 
     kept = _partition_kept(comps, keep_labels, boundary.pieces)
+    lost_lattice = _lost_lattice(comps, dropped, boundary.pieces, kept) if args.support else []
+    if lost_lattice:
+        stats["lattice_pieces_lost"] = len(lost_lattice)
     want_rings = _rings_needed(kept.interior_groups, iface.interfaces)
 
     # The boundary layer is sewn to itself first, because it is the only part
@@ -656,7 +660,7 @@ def _run_with_pool(
 
         outcome = run_support(
             args, rl, lp, body, body_path, mesh, mesh_path, result_solids,
-            _kept_nodes(kept), pool, tmpdir, stats,
+            _kept_nodes(kept), pool, tmpdir, stats, lost=lost_lattice,
         )
         result_solids, lattice_volume = outcome.solids, outcome.lattice_volume
         if lattice_volume is not None:
@@ -1595,6 +1599,27 @@ def _partition_kept(comps, keep_labels: set[int], boundary_pieces) -> _Kept:
         else np.empty((0, 3), dtype=np.int64)
     )
     return _Kept(nodes_arr, interior_groups, keep_pieces, piece_groups)
+
+
+def _lost_lattice(comps, dropped: set[int], boundary_pieces, kept: _Kept) -> list:
+    """The dropped pieces of junctions whose node is still kept, as solids.
+
+    The print supports read the lattice's material off the kept nodes, and a
+    tip the floating-body rule dropped is not in it (docs/algorithm.md §14.3
+    S1). :func:`boundary._rebuild_solid` holds for a finalized piece as well:
+    finalizing only moves faces between ``cap_faces`` and ``faces``.
+    """
+    kept_nodes = {tuple(int(x) for x in row) for row in _kept_nodes(kept)}
+    out = []
+    for i, v in enumerate(comps.vertices):
+        if int(comps.labels[i]) not in dropped or v.is_interior:
+            continue
+        piece = boundary_pieces[v.piece_index]
+        if kept_nodes.isdisjoint(tuple(int(x) for x in n)
+                                 for n in (piece.spans or (piece.node,))):
+            continue
+        out.append(_rebuild_solid(piece))
+    return out
 
 
 def _kept_nodes(kept: _Kept) -> np.ndarray:

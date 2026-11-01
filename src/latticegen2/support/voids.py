@@ -421,11 +421,13 @@ def _slab_worker(job):
     from ..runlog import peak_rss_bytes
     from .assemble import _LocalLattice
 
-    (body_path, mesh_path, lp_args, kept, tools_path, lo, hi, env_lo, env_hi, out) = job
+    (body_path, mesh_path, lp_args, kept, lost_path, tools_path, lo, hi, env_lo, env_hi,
+     out) = job
     body = read_brep(body_path)
     mesh = load_mesh(mesh_path)
     probe = OutsideProbe(mesh, 2.0 * mesh.deviation)
-    local = _LocalLattice(lattice_params(*lp_args), kept)
+    lost = compound_children(read_brep(lost_path)) if lost_path else ()
+    local = _LocalLattice(lattice_params(*lp_args), kept, lost)
     lattice = list(local.near((lo, hi))) if len(kept) else []
     tools = [s for s in compound_children(read_brep(tools_path)) if _touches(s, lo, hi)]
     try:
@@ -573,7 +575,7 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
         write_brep(_compound(tools), tag + "-tools.brep")
         lp_args = staged["lp_args"]
         jobs = [(staged["body_path"], staged["mesh_path"], lp_args, staged["kept_nodes"],
-                 tag + "-tools.brep", *box(span), lo, hi, f"{tag}-{s}")
+                 staged.get("lost_path"), tag + "-tools.brep", *box(span), lo, hi, f"{tag}-{s}")
                 for s, span in enumerate(spans)]
         tick(0, len(spans))
         results, _rss = pool.run(_slab_worker, jobs, on_result=tick)

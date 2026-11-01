@@ -61,7 +61,7 @@ class SupportOutcome:
 
 
 def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
-                kept_nodes, pool, tmpdir, stats) -> SupportOutcome:
+                kept_nodes, pool, tmpdir, stats, lost=()) -> SupportOutcome:
     """Run the two support stages on the completed lattice."""
     with Timer(rl, "overhang"):
         samples = overhang.detect(body, lp.b, STEP, report=rl.substage)
@@ -96,13 +96,13 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
                 lattice=tuple(lattice), body=body, body_path=body_path,
                 mesh=mesh, mesh_path=mesh_path, lp=lp,
                 thickness_mm=args.support_thickness,
-                samples=samples, kept_nodes=kept_nodes, pool=pool,
+                samples=samples, kept_nodes=kept_nodes, lost_lattice=tuple(lost), pool=pool,
                 workers=args.workers, tmpdir=tmpdir, report=rl.substage,
                 pockets_begin=pockets_begin,
             ))
         pockets_begin()
         assembled = assemble.assemble(lattice, list(result.supports), lp,
-                                      kept_nodes, report=rl.substage)
+                                      kept_nodes, report=rl.substage, lost=lost)
     finally:
         timer[0].__exit__(None, None, None)
 

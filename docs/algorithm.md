@@ -2549,6 +2549,22 @@ normal. A vertex is a **ceiling point** when `n·b > sin φ_s + REQUIRED_SLACK`
 on a required triangle. Ceiling under a strut end is backed by the lattice
 already and is not a ceiling point.
 
+**§14.1's keel and tip samples are ceiling points too**, as they stand, asked
+what backs them straight below: an edge has no face to refine, and the flanks
+of a keel are by definition under the bar. Reading ceiling off faces alone left
+479 of the rehearsal's 590 edge samples bare, the nearest ceiling point 7.5 mm
+away.
+
+**"Backed by the lattice" means by what the lattice still holds.** The struts
+are read off the kept nodes analytically (`_LocalLattice`), and a kept node's
+junction is not always whole: a trim can cut a strut's tip off from its node,
+the floating-body rule (§8) drops the tip, and the node stays kept through its
+other arms. Measured on the rehearsal: 146 samples of ceiling above such tips,
+read as backed by a strut that is not there. So the pipeline hands those pieces
+over (`SupportInput.lost_lattice`), and neither the point test nor the junction
+instances count them. Only a piece whose node is still kept matters: a junction
+dropped whole never read as lattice.
+
 **The support grid.** Support node `(i, j, k)` spans `[i q − t/2, (i+1) q − t/2]` along each
 cube axis `e_0, e_1, e_2` of the lattice frame (§2), with pitch `q = a/m`.
 Its planes are the rods' `−t/2` face planes, and every `m`-th plane carries a
@@ -2620,6 +2636,12 @@ support nodes less the lattice's. The same repair fills free fine nodes only, ne
 a lattice one — where it would fill `D` and `D` is a rod, it fills `A` below
 the pair instead. On the cylinder at `m = 2` that fills 186 fine support nodes and leaves
 no contact unresolved; the 69 edges become 0 and the touching holes vanish.
+
+A fine node a lost tip passes through is freed for support only if no kept
+lattice is in it, sampled across the whole node, `FREE_SAMPLES` per axis, and not
+at its centre alone: a wall can cross one rod's fine node with the tip on one
+side and kept lattice on the other, and support there would overlap the lattice.
+Such a node stays lattice, and the tip's share of it stays bare.
 
 **The support leaves the rods out by construction**, so it shares faces with
 the struts and needs no cut against the lattice. Measured: 0.000000 mm³ of
@@ -2811,10 +2833,12 @@ The pocket search, across the pool at about three cores, and the overlap check
 of §14.2, on the master at one, are 62 % of the run between them. One slab of
 106 was left open (S7). Resource figures are in docs/profiling-reports.md.
 
-**Its written file fails coverage** (specification.md §6.2): 630 of 125,777
-overhang samples unbacked. 479 are on concave edges of the body, which §14.1
-detects and S1 never turns into ceiling points; 151 are on faces, within 1 mm
-of a support. Everything else the harness asks passes.
+**That run's file failed coverage** (specification.md §6.2): 630 of 125,777
+overhang samples unbacked. 479 were on concave edges, which S1 did not yet take
+as ceiling points; 146 of the 151 on faces lay above strut tips dropped from
+kept nodes (S1), and 5 are unexplained. Both causes are fixed and verified on
+`test/support-gaps.step` (`support-gaps`, specification.md §6.1), which
+reproduces them in seconds; **the rehearsal itself has not been run since**.
 
 **Still to come:** the free-standing thickness gate; the overlap check and S6
 dispatched across the worker pool (specification.md §4.6's parallelisation),

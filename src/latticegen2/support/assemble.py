@@ -16,9 +16,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
-from OCP.TopAbs import TopAbs_ShapeEnum
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut
+from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+from OCP.TopAbs import TopAbs_ShapeEnum, TopAbs_State
 from OCP.TopTools import TopTools_ListOfShape
+from OCP.gp import gp_Pnt
 
 from .. import lattice as _lattice
 from .. import occ
@@ -116,9 +118,17 @@ class _LocalLattice:
     path once per cell. The template's faces are the lattice's own faces
     (docs/algorithm.md §3.2), so the two answer the overlap question alike
     inside the body, which is where supports are.
+
+    ``lost`` is the exception: pieces of a kept node's junction that are **not**
+    in the lattice, because the floating-body rule dropped them (specification.md
+    §5). A trim can cut a strut's tip off from its node; the node stays kept
+    through its other arms, and the tip is gone. Measured on
+    `TD_HX_rehearsal_test`: 146 ceiling samples under such tips, read as backed
+    by a strut that is not there. Neither :meth:`contains` nor :meth:`near`
+    counts that material.
     """
 
-    def __init__(self, lp, kept_nodes: np.ndarray):
+    def __init__(self, lp, kept_nodes: np.ndarray, lost=()):
         self.lp = lp
         self._nodes = np.asarray(kept_nodes, dtype=np.int64).reshape(-1, 3)
         self.positions = (_lattice.nodes(lp, kept_nodes) if len(kept_nodes)
@@ -127,6 +137,10 @@ class _LocalLattice:
         self._keys = None
         # A junction reaches a/2 along a strut, plus the profile's circumradius.
         self.reach = lp.a / 2.0 + lp.r
+        self.lost = list(lost)
+        self.lost_boxes = [tuple(np.asarray(x, dtype=float) for x in occ.bounding_box(s))
+                           for s in self.lost]
+        self._instances = {}
 
     def near(self, box) -> list:
         if not len(self.positions):
@@ -140,10 +154,51 @@ class _LocalLattice:
             from ..junction import build_template
 
             self._template = build_template(self.lp).solid
-        return [self._template.Moved(occ.translation(p))
-                for p in self.positions[hit]]
+        return [self._instance(int(i)) for i in np.nonzero(hit)[0]]
+
+    def _instance(self, i: int):
+        """Junction ``i``'s template, less any lost piece of it.
+
+        A cut that does not take out what it should leaves the template: the
+        overlap check then falls back on the lattice solids, and the pocket
+        search on its refusal path, so neither is misled."""
+        got = self._instances.get(i)
+        if got is not None:
+            return got
+        p = self.positions[i]
+        got = self._template.Moved(occ.translation(p))
+        for s, (lo, hi) in zip(self.lost, self.lost_boxes):
+            if np.any(lo > p + self.reach) or np.any(hi < p - self.reach):
+                continue
+            v = occ.volume(got)
+            cut = BRepAlgoAPI_Cut(got, s)
+            if not cut.IsDone():
+                continue
+            gone = v - occ.volume(cut.Shape())
+            if -1e-9 <= gone <= occ.volume(s) * (1.0 + 1e-3):
+                got = cut.Shape()
+        self._instances[i] = got
+        return got
 
     def contains(self, points) -> np.ndarray:
+        """Which ``points`` lie in the lattice's material: the junction
+        instances', less what was lost. :meth:`in_template` is the first half."""
+        P = np.asarray(points, dtype=float).reshape(-1, 3)
+        out = self.in_template(P)
+        if not self.lost or not out.any():
+            return out
+        for s, (lo, hi) in zip(self.lost, self.lost_boxes):
+            at = np.nonzero(out & np.all((P >= lo - 1e-6) & (P <= hi + 1e-6), axis=1))[0]
+            if not len(at):
+                continue
+            cls = BRepClass3d_SolidClassifier(s)
+            for i in at:
+                cls.Perform(gp_Pnt(*map(float, P[i])), 1e-7)
+                if cls.State() in (TopAbs_State.TopAbs_IN, TopAbs_State.TopAbs_ON):
+                    out[i] = False
+        return out
+
+    def in_template(self, points) -> np.ndarray:
         """Which ``points`` lie in the junction instances' material, exactly.
 
         ``J`` is the union of six half-strut prisms (docs/algorithm.md §3.2), so
@@ -184,7 +239,7 @@ class _LocalLattice:
 
 
 def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
-             report=None) -> AssembleResult:
+             report=None, lost=()) -> AssembleResult:
     """Check ``supports`` overlap nothing, then return lattice + supports."""
     if not supports:
         # Nothing to add and nothing to measure: the lattice passes through as
@@ -192,7 +247,7 @@ def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
         return AssembleResult(list(lattice), None, 0.0, {})
     check_supports(supports, lattice)
 
-    local = _LocalLattice(lp, np.asarray(kept_nodes))
+    local = _LocalLattice(lp, np.asarray(kept_nodes), lost)
     boxes = _boxes(supports)
     n = len(supports)
     for i, s in enumerate(supports):
@@ -200,9 +255,9 @@ def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
             report("checking supports against the lattice", i, n)
         overlap = _common_volume(s, local.near(boxes[i]))
         if overlap > SUPPORT_OVERLAP_TOL:
-            # The junction instances include material the floating-body rule
-            # may have dropped from a kept node, so a reading here is confirmed
-            # against the lattice solids themselves before it is believed.
+            # A junction instance is the template, untrimmed, so a reading here
+            # is confirmed against the lattice solids themselves before it is
+            # believed.
             real = _common_volume(
                 s, [l for l in lattice if _touch(boxes[i], _boxes([l])[0])])
             if real > SUPPORT_OVERLAP_TOL:

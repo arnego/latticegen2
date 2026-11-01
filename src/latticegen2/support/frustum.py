@@ -56,6 +56,10 @@ ANCHOR_EPS = 1e-3
 """mm. A support node is tested this far inside its lowest corner, along its
 diagonal, so that a corner exactly on a rod face reads as inside the rod."""
 
+FREE_SAMPLES = 6
+"""Points per axis a fine support node near a lost junction piece is sampled at,
+to ask whether any kept lattice is in it."""
+
 PROBE_DEPTH = 0.1
 """mm. How far into the body a ceiling point is moved to ask what backs it:
 past the sag of a 0.02 mm tessellation of a curved ceiling face."""
@@ -483,11 +487,58 @@ def _split(piece, g: _Grid):
     return None
 
 
+def _free_of_lattice(g: _Grid, coords: list, local, in_body, L: np.ndarray) -> np.ndarray:
+    """``L`` with the fine support nodes a lost junction piece leaves empty taken
+    out of it.
+
+    Asked of the whole node, not its centre: a wall can cross a rod's fine node
+    with a lost tip on one side and kept lattice on the other, and support there
+    would overlap the lattice. Such a node stays lattice, and the tip's share of
+    it stays bare."""
+    if not local.lost:
+        return L
+    n = len(coords[0]) - 1, len(coords[1]) - 1, len(coords[2]) - 1
+    lows = [np.array(c[:-1]) for c in coords]
+    highs = [np.array(c[1:]) for c in coords]
+    corners = [g.cube(np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                                for z in (lo[2], hi[2])])) for lo, hi in local.lost_boxes]
+    w = (np.arange(FREE_SAMPLES) + 0.5) / FREE_SAMPLES
+    W = np.stack(np.meshgrid(w, w, w, indexing="ij"), -1).reshape(-1, 3)
+    L = L.copy()
+    seen = set()
+    for c in corners:
+        rng = [(int(np.searchsorted(coords[k], c[:, k].min()) - 1),
+                int(np.searchsorted(coords[k], c[:, k].max()))) for k in range(3)]
+        for i in range(max(rng[0][0], 0), min(rng[0][1], n[0])):
+            for j in range(max(rng[1][0], 0), min(rng[1][1], n[1])):
+                for k in range(max(rng[2][0], 0), min(rng[2][1], n[2])):
+                    if (i, j, k) in seen:
+                        continue
+                    seen.add((i, j, k))
+                    lo = np.array([lows[0][i], lows[1][j], lows[2][k]])
+                    hi = np.array([highs[0][i], highs[1][j], highs[2][k]])
+                    Q = g.world(lo + W * (hi - lo))
+                    if not local.in_template(Q).any():
+                        continue
+                    real = local.contains(Q)
+                    if real.any():
+                        real[real] = in_body(Q[real])
+                    L[i, j, k] = bool(real.any())
+    return L
+
+
 def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
-          report=None) -> Frustums:
-    """The support bodies for the ceiling points of ``rmesh``, before pockets."""
+          report=None, extra=None) -> Frustums:
+    """The support bodies for the ceiling points of ``rmesh``, before pockets.
+
+    ``extra`` is ``(points, normals)``: further ceiling points, unless a strut
+    already backs them."""
     need = rmesh.verts[rmesh.vert_required]
     need_n = rmesh.normals[rmesh.vert_required]
+    if extra is not None and len(extra[0]):
+        unbacked = ~local.contains(extra[0] - PROBE_DEPTH * extra[1])
+        need = np.vstack([need, extra[0][unbacked]])
+        need_n = np.vstack([need_n, extra[1][unbacked]])
     m = grid_divisions(lp, thickness)
     g = _Grid(lp, m)
     stats = {"support_ceiling_points": int(len(need)), "support_grid_divisions": m}
@@ -544,6 +595,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     S = U[own[:, 0], own[:, 1], own[:, 2]].reshape(rshape)
     L = np.concatenate([in_lattice(g.world(CC[i:i + 50_000]))
                         for i in range(0, len(CC), 50_000)]).reshape(rshape)
+    L = _free_of_lattice(g, coords, local, gates.inside_body, L)
     S &= ~L
     S, rod_filled, stuck = make_manifold(S, L)
     stats.update({"support_nodes": int(U.sum()), "support_nodes_grown": grown,

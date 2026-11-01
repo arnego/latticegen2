@@ -36,6 +36,7 @@ owes that chain:
 
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 
@@ -46,21 +47,25 @@ from .contract import SupportInput, SupportResult
 
 def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                  report=None, tmpdir: str | None = None, pool=None, staged=None,
-                 pockets_begin=None):
+                 pockets_begin=None, samples=None, lost=()):
     """``(solids, stats, lines)``: every support body for ``body``.
 
     The generator proper, shared by :func:`generate` and by
     ``tools/support_dev.py``, which calls it with no lattice: every anchor is
     then on a wall. ``pool`` and ``staged`` -- the body's ``.brep`` and the
     mesh's ``.npz`` -- let the pocket search run across the run's workers;
-    without them it runs in this process.
+    without them it runs in this process. ``samples`` is what the detector
+    found, detected here if not given; ``lost`` the junction pieces the
+    floating-body rule took from kept nodes.
     """
     from .. import occ
-    from . import build, frustum, join, regions, voids
+    from . import build, frustum, join, overhang, regions, voids
     from .assemble import _LocalLattice
 
     t0 = time.perf_counter()
-    local = _LocalLattice(lp, np.asarray(kept_nodes))
+    local = _LocalLattice(lp, np.asarray(kept_nodes), lost)
+    if samples is None:
+        samples = overhang.detect(body, lp.b)
     # Ceiling a strut ends on is backed by the lattice already.
     rmesh = regions.build(body, lp.b, report=report,
                           covered=local.contains if len(kept_nodes) else None)
@@ -68,8 +73,11 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     ceiling_s = time.perf_counter() - t0
     if tmpdir is None:
         tmpdir = tempfile.mkdtemp(prefix="latticegen2-support-")
+    # Keels and tips have no face to refine: their samples are ceiling points
+    # as they stand, asked what backs them straight below (§14.1).
+    other = samples.kind != overhang.FACE
     got = frustum.build(body, mesh, rmesh, local, lp, thickness, gates, tmpdir,
-                        report=report)
+                        report=report, extra=(samples.points[other], -samples.inward[other]))
     stats = dict(got.stats)
     stats["support_ceiling_s"] = round(ceiling_s, 2)
     lines = list(got.lines) + list(got.notes)
@@ -139,11 +147,18 @@ def generate(inp: SupportInput) -> SupportResult:
     staged = {"body_path": inp.body_path, "mesh_path": inp.mesh_path,
               "lp_args": (inp.lp.cc, inp.lp.t, tuple(inp.lp.orient)),
               "kept_nodes": np.asarray(inp.kept_nodes), "tmpdir": inp.tmpdir}
+    if inp.lost_lattice:
+        from .. import occ
+        from ..parallel import write_brep
+
+        staged["lost_path"] = os.path.join(inp.tmpdir, "lost-lattice.brep")
+        write_brep(occ.compound(list(inp.lost_lattice)), staged["lost_path"])
     solids, stats, lines = supports_for(inp.body, inp.mesh, list(inp.lattice),
                                         inp.kept_nodes, inp.lp, inp.thickness_mm,
                                         report=inp.report, tmpdir=inp.tmpdir,
                                         pool=inp.pool, staged=staged,
-                                        pockets_begin=inp.pockets_begin)
+                                        pockets_begin=inp.pockets_begin,
+                                        samples=inp.samples, lost=inp.lost_lattice)
     # The dropped pieces' and unsearched slabs' reports go to the console
     # whatever -v says.
     notes = []

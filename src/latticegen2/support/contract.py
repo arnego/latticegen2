@@ -91,6 +91,11 @@ class SupportInput:
     """Progress callback, ``report(label, done, total)``; ``total=None`` for
     work with no countable fraction. Drives the window's second bar."""
 
+    lost_lattice: tuple = ()
+    """Solids: the pieces of those nodes' junctions the floating-body rule
+    dropped (specification.md §5), which the analytic struts would otherwise
+    claim are there."""
+
     pockets_begin: Optional[Callable[[], None]] = None
     """Called once, when the support bodies are built and the pocket search
     begins: the boundary between the ``support`` and ``pockets`` stages

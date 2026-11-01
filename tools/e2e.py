@@ -35,6 +35,7 @@ MAIN = os.path.join(ROOT, "src", "main.py")
 TESTDIR = os.path.join(ROOT, "test")
 BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
+GAPS = os.path.join(TESTDIR, "support-gaps.step")
 BALL_GOLDEN = os.path.join(TESTDIR, "80mm-test-ball-cc20t4-golden-sample.step")
 CYLINDER_GOLDEN = os.path.join(TESTDIR, "test-cylinder-cc10t1.5-golden-sample.step")
 
@@ -462,6 +463,39 @@ def scenario_oriented_lattice(outdir: str) -> Report:
     return rep
 
 
+def scenario_support_gaps(outdir: str) -> Report:
+    """The two ways the supported rehearsal left ceiling bare, in a part that
+    takes seconds (tools/make_support_gaps_part.py): a keel no face of which is
+    ceiling, and a strut tip the floating-body rule dropped from a kept node.
+    Both are checked to be present, so that this cannot pass by no longer
+    testing them."""
+    from latticegen2.classify import tessellate_surface
+    from latticegen2.lattice import lattice_params
+    from latticegen2.support import overhang
+
+    rep = Report("support-gaps")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "support-gaps.step")
+    proc, elapsed = run_generator(
+        ["-i", GAPS, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "4", "--support"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+    rep.check("runtime under 2 minutes", elapsed < 120, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        with open(os.path.splitext(out)[0] + ".log", encoding="utf-8") as fh:
+            lost = re.search(r"lattice_pieces_lost: (\d+)", fh.read())
+        rep.check("a strut tip was dropped from a kept node", lost is not None,
+                  f"{lost.group(1)} piece(s)" if lost else "none: the part no longer tests this")
+        lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+        body = occ.read_step(GAPS)
+        tessellate_surface(body, lp)
+        keel = overhang.detect(body, lp.b).counts()["edge"]
+        rep.check("the part has a keel to support", keel > 0, f"{keel} edge sample(s)")
+        geometry_checks(rep, out, GAPS, 10.0, 1.5)
+        support_checks(rep, out, GAPS, 10.0, 1.5, (0.0, 0.0, 0.0), 1.5)
+    return rep
+
+
 def scenario_support_tilted(outdir: str) -> Report:
     """Orientation and support together, on the ball: a curved overhang, tilted."""
     rep = Report("support-tilted")
@@ -568,6 +602,7 @@ SCENARIOS = {
     "smoke-verified": scenario_smoke_verified,
     "dense-lattice": scenario_dense_lattice,
     "oriented-lattice": scenario_oriented_lattice,
+    "support-gaps": scenario_support_gaps,
     "support-tilted": scenario_support_tilted,
     "support-cylinder": scenario_support_cylinder,
     "rehearsal-support": scenario_rehearsal_support,

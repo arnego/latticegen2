@@ -53,6 +53,45 @@ def stages_for(support: bool) -> tuple[str, ...]:
     return STAGES[:at] + SUPPORT_STAGES + STAGES[at:]
 
 
+#: What a warning starts with, and all the window's filter looks at
+#: (specification.md §3.1). A warning is one message, however many lines it runs
+#: to, so the filter needs no memory of the line before.
+WARNING_PREFIX = "WARNING: "
+
+#: How many places one warning lists; the rest are counted.
+WARNING_PLACES = 20
+
+
+def warning_text(title: str, what: str, risk: str, places=()) -> str:
+    """One warning, in the one form every warning takes (docs/algorithm.md §10).
+
+    ``title`` names it, ``what`` says what went wrong and ``risk`` what that may
+    cause, each without a final full stop; ``places`` are where to look in the
+    part, one line each, from :func:`point_text` and :func:`box_text`. A warning
+    is for an output that may be wrong, incomplete or degraded: a repair that
+    left the output as intended is a ``note:``.
+    """
+    text = f"{WARNING_PREFIX}{title}: {what}. {risk}."
+    places = list(places)
+    if not places:
+        return text
+    rows = [f"  {place}" for place in places[:WARNING_PLACES]]
+    if len(places) > WARNING_PLACES:
+        rows.append(f"  ... and {len(places) - WARNING_PLACES} more")
+    return "\n".join([f"{text} Inspect, in the part's coordinates:", *rows])
+
+
+def point_text(p) -> str:
+    """A point of the part, for :func:`warning_text`."""
+    return "[" + ", ".join(f"{float(x):.3f}" for x in p) + "] mm"
+
+
+def box_text(lo, hi) -> str:
+    """A region of the part, for :func:`warning_text`."""
+    return ", ".join(f"{'xyz'[a]} {float(lo[a]):.3f} to {float(hi[a]):.3f}"
+                     for a in range(3)) + " mm"
+
+
 #: Shortest gap between two sub-stage events, in seconds.
 #:
 #: Not polish. ``boundary``'s sequential path calls its progress callback once

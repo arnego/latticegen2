@@ -1478,10 +1478,12 @@ def _widen_self_intersection_vertices(
 def fix_vertex_tolerances(
     faces: Iterable[TopoDS_Face],
     max_vertex_tol: float | None = None,
+    residual_at: list | None = None,
 ) -> tuple[int, int]:
     """Correct vertex tolerances the boundary sew leaves wrong.
 
-    Returns ``(repaired, still_invalid)`` counted in faces.
+    Returns ``(repaired, still_invalid)`` counted in faces; each still-invalid
+    face's centroid is added to ``residual_at`` if given.
 
     ``max_vertex_tol`` bounds rung 2's widening absolutely. Callers inside the
     pipeline pass :data:`SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION` times the
@@ -1591,6 +1593,8 @@ def fix_vertex_tolerances(
             touched |= _widen_self_intersection_vertices(face, max_vertex_tol)
         if not touched:
             still_invalid += 1
+            if residual_at is not None:
+                residual_at.append(centroid(face))
             continue
         after = area(face)
         if after != before:
@@ -1603,6 +1607,8 @@ def fix_vertex_tolerances(
             repaired += 1
         else:
             still_invalid += 1
+            if residual_at is not None:
+                residual_at.append(centroid(face))
     return repaired, still_invalid
 
 

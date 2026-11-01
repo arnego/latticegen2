@@ -213,6 +213,8 @@ class BoundaryResult:
     the output reaches outside at all: specification.md §1 requires the lattice
     to fit exactly within the input, so what could not be trimmed was dropped."""
     worst_outside_node: tuple | None = None
+    dropped_nodes: list = field(default_factory=list)
+    """The nodes of those junctions, for the warning to name."""
     max_worker_rss: int = 0
     """Highest peak RSS reported by any worker process.
 
@@ -1234,7 +1236,7 @@ def _worker_trim(job):
     n_pinhole_wires = 0
     n_retrimmed = 0
     n_localized = 0
-    n_dropped = 0
+    dropped_nodes = []
     worst_outside = 0.0
     worst_node = None
     for i in range(len(node_batch)):
@@ -1245,7 +1247,7 @@ def _worker_trim(job):
         if trim.localized:
             n_localized += 1
         if trim.dropped:
-            n_dropped += 1
+            dropped_nodes.append(tuple(int(x) for x in node_batch[i]))
             if trim.outside_mm > worst_outside:
                 worst_outside = trim.outside_mm
                 worst_node = tuple(int(x) for x in node_batch[i])
@@ -1264,7 +1266,7 @@ def _worker_trim(job):
 
     rss = peak_rss_bytes()
     pinholes = (n_pinhole_junctions, n_pinhole_wires, n_retrimmed,
-                n_localized, worst_outside, worst_node, n_dropped)
+                n_localized, worst_outside, worst_node, dropped_nodes)
     # `rss` stays last: WorkerPool.run reads it positionally at rss_index=-1, a
     # convention shared by every worker function in this codebase.
     if bundles:
@@ -1351,6 +1353,7 @@ def trim_boundary(
                 result.n_localized_junctions += 1
             if trim.dropped:
                 result.n_dropped_junctions += 1
+                result.dropped_nodes.append(tuple(int(x) for x in boundary_nodes[i]))
                 if trim.outside_mm > result.worst_outside_mm:
                     result.worst_outside_mm = trim.outside_mm
                     result.worst_outside_node = tuple(int(x) for x in boundary_nodes[i])
@@ -1405,7 +1408,8 @@ def trim_boundary(
             result.n_pinhole_wires += pinholes[1]
             result.n_retrimmed_junctions += pinholes[2]
             result.n_localized_junctions += pinholes[3]
-            result.n_dropped_junctions += pinholes[6]
+            result.n_dropped_junctions += len(pinholes[6])
+            result.dropped_nodes += pinholes[6]
             if pinholes[4] > result.worst_outside_mm:
                 result.worst_outside_mm = pinholes[4]
                 result.worst_outside_node = pinholes[5]

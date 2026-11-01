@@ -271,6 +271,50 @@ def test_a_clean_run_leaves_the_unticked_view_completely_empty():
     assert len(state.visible_lines(verbose=True)) == 66
 
 
+WARNING = "WARNING: a title: what went wrong. What it may cause.\n  [1.000, 2.000, 3.000] mm"
+
+
+def test_a_warning_shows_whichever_way_the_box_is_set():
+    """It carries no flag of its own: the run's other console-true lines must
+    stay hidden unticked, and a line merely mentioning the word is not one."""
+    state = model.reduce_stream([
+        event(progress.LOG, msg="stage boundary: 8.1s", console=False),
+        event(progress.LOG, msg=WARNING, console=True),
+        event(progress.LOG, msg="note: a repair, WARNING: not a warning", console=True),
+    ])
+    assert state.visible_lines(verbose=False) == [WARNING]
+    assert len(state.visible_lines(verbose=True)) == 3
+
+
+def test_a_warning_outlives_the_backlog():
+    """The first thing a run says can be the most important thing an hour later."""
+    state = model.reduce_stream(
+        [event(progress.LOG, msg=WARNING, console=True)]
+        + [event(progress.LOG, msg=f"line {i}", console=False)
+           for i in range(model.LOG_BACKLOG * 2)]
+    )
+    assert state.visible_lines(verbose=False) == [WARNING]
+    assert len(state.lines) == model.LOG_BACKLOG
+    assert state.lines[0][0] == WARNING
+    assert state.lines[-1][0] == f"line {model.LOG_BACKLOG * 2 - 1}"
+
+
+def test_warning_text_says_what_what_it_may_cause_and_where():
+    from latticegen2.runlog import WARNING_PLACES, box_text, point_text, warning_text
+
+    text = warning_text("a title", "it broke", "It may leak",
+                         [point_text((1, 2, 3)), box_text((0, 0, 0), (1, 2, 3))])
+    assert text.split("\n") == [
+        "WARNING: a title: it broke. It may leak. Inspect, in the part's coordinates:",
+        "  [1.000, 2.000, 3.000] mm",
+        "  x 0.000 to 1.000, y 0.000 to 2.000, z 0.000 to 3.000 mm",
+    ]
+    assert warning_text("a title", "it broke", "It may leak") == (
+        "WARNING: a title: it broke. It may leak.")
+    many = warning_text("t", "w", "r", [f"place {i}" for i in range(WARNING_PLACES + 3)])
+    assert many.endswith("  ... and 3 more")
+
+
 def test_lines_seen_keeps_counting_after_the_backlog_is_full():
     """What the window redraws its log pane on.
 
@@ -688,6 +732,20 @@ def test_a_new_line_reaches_the_pane_after_the_backlog_saturates(tk_root):
     app.state.add_line("the newest line", model.OUT)
     app._render_log()
     assert app.log_text.get("1.0", "end").strip().endswith("the newest line")
+
+
+def test_a_warning_opens_the_pane_with_the_box_unticked(tk_root):
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+    app.panel.grid(row=7, column=0, columnspan=3, sticky="ew")
+    app.state.apply(json.loads(event(progress.LOG, msg="a statistic", console=True)))
+    app._render_log()
+    assert not app.log_frame.winfo_manager()
+    app.state.apply(json.loads(event(progress.LOG, msg=WARNING, console=True)))
+    app._render_log()
+    assert app.log_frame.winfo_manager() == "grid"
+    assert app.log_text.get("1.0", "end").strip() == WARNING
 
 
 def test_stderr_and_kernel_chatter_are_shown_whatever_the_box_says(tmp_path, tk_root):

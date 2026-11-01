@@ -141,7 +141,11 @@ def test_a_slab_refused_at_every_split_is_left_open(cup, monkeypatch):
     got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5, lp.b)
     assert got.fills == []
     assert got.unsearched and got.stats["support_pocket_slabs_unsearched"] == len(got.unsearched)
-    assert all(line.lstrip().startswith("x ") and "refused" in line for line in got.unsearched)
+    # Whole coordinates, so the region can be found in the part; the kernel's
+    # reason is for the log.
+    for line in got.unsearched:
+        assert all(f"{axis} " in line for axis in "xyz") and "refused" not in line
+    assert len(got.refusals) == len(got.unsearched) and "refused" in got.refusals[0]
 
 
 def test_the_slabs_run_across_a_worker_pool(cup, monkeypatch, tmp_path):

@@ -101,6 +101,8 @@ Upon success the script shall produce an end of run summary report in the .log f
 
 Upon failure, the script shall output a human readable reason for the failure, e.g.: parameter bounds exceeded, issues with input geometry, issues with resarouces from the run-time system, write or read access issues, etc.
 
+A run that succeeds with an output that may be wrong, incomplete or degraded says so in a warning, on the console and in the `.log` regardless of `-v`: one message starting `WARNING: `, stating what went wrong, what it may cause, and where to inspect in the part's coordinates. A repair that left the output as intended is a `note:`.
+
 Upon cancellation by the user (Ctrl+C), the script shall shut down gracefully rather than terminate abruptly: worker processes are stopped in an orderly way (force-stopped only if they do not respond within a short grace period), a single human readable `CANCELLED` line is written to console and `.log` file, the temporary folder is left in place for analysis, and the exit code is 130. See docs/algorithm.md §10.
   
 **Logging:**
@@ -197,11 +199,18 @@ the line says only that rather than padding itself out.
 Beneath *that*, with **verbose** ticked, the run's own output in a scrolling
 pane — every line of it, which is what the `.log` gets.
 
-**Unticked, the pane holds only what the child wrote outside the event stream:**
-kernel chatter on stdout, and anything at all on stderr, which is where a
-failure's one reason line lands (§7). It is hidden entirely when that is empty,
-so an ordinary run does not carry a blank box around for the hour it takes —
-and the box appearing is itself the signal that something spoke up.
+**Unticked, the pane holds only what the user has to know about:** the run's
+warnings (below), kernel chatter on stdout, and anything at all on stderr, which
+is where a failure's one reason line lands (§7). It is hidden entirely when that
+is empty, so an ordinary run does not carry a blank box around for the hour it
+takes — and the box appearing is itself the signal that something spoke up.
+
+**A warning is any line starting `WARNING: `, and it always gets through.** It
+means the output may be wrong, incomplete or degraded, and no widget says so. A
+warning opens the pane whichever way the box is set, and the backlog the window
+keeps never drops one, so an early warning is still there at the end of an hour.
+Every warning takes one form (docs/algorithm.md §10): what went wrong, what it
+may cause, and where to inspect in the part's coordinates.
 
 **Nothing else is shown unticked, deliberately.** The window is not a terminal,
 and everything a clean run logs is either already on screen in a widget — the
@@ -361,7 +370,11 @@ An opt-in stage that creates support structures, as used for
   as a lattice junction no trim produces is (docs/algorithm.md §7.2), and the
   run reports it regardless of `-v` — by name and position, the support
   volume lost, and the ceiling points it leaves unbacked
-  (docs/algorithm.md §14.3).
+  (docs/algorithm.md §14.3). A run also warns, with coordinates, of any ceiling
+  point nothing in its output backs. Chips of about 1e-3 mm³ that trimming leaves
+  where a ceiling grazes a support node are discarded rather than shipped as
+  floating micro-solids; the harness reports the bare samples beside them as
+  slivers, within 0.05 mm of a support (§6.2).
 - **Anchoring and design depth.** A support runs from the ceiling down to the
   nearest lattice rod below it, or, where no rod is reached, to the enveloping
   wall — the nearest anchor by drop, searched down the three rod directions —
@@ -382,12 +395,11 @@ An opt-in stage that creates support structures, as used for
   Support bodies never overlap the lattice or each other, and a run in which
   one would, or in which a body is not manifold, fails rather than ships.
 - **Enclosed voids are filled.** Powder must not be trapped: a pocket of free
-  space that supports seal off is filled with support material.
-  [TODO: proposed] Where the geometry kernel cannot cut a part of the
-  support envelope even after splitting it, that part is left unsearched and
-  reported by a console warning naming where, and a pocket in it is not
-  filled, rather than the run failing. Implemented on that basis
-  (docs/algorithm.md §14.3 S7), pending a decision.
+  space that supports seal off is filled with support material. Where the
+  geometry kernel cannot cut a part of the support envelope even after splitting
+  it, that part is left unsearched rather than the run failing, and the run
+  warns regardless of `-v` that enclosed pockets may remain there, giving each
+  region's x, y and z range (docs/algorithm.md §14.3 S7).
 - **Self-supporting.** No support surface or edge exceeds the rod angle.
 - **Thickness.** No free-standing support member is thinner than the minimum
   support thickness, which defaults to the strut size `t`. The support grid divides the lattice cube as finely as still leaves at least that thickness
@@ -503,6 +515,7 @@ no `SpiralTest.step`.
 | dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | oriented-lattice | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 | valid STEP through every §6.2 check with the lattice turned to the bed; the orientation recorded in the log and no support stage run. No golden sample. |
 | support-gaps | -i test/support-gaps.step -cc 10 -t 1.5 --cores 4 --support | valid STEP through every §6.2 check, on a small part (`tools/make_support_gaps_part.py`) holding the two ways `rehearsal-support` left ceiling bare: a keel no face of which overhangs past 60°, and a strut tip dropped as a floating body from a node still kept. Both are checked to be present, so it cannot pass by no longer testing them. Before the fix: 16 of 1,836 face samples and 32 of 33 keel samples unbacked. **Measured: 21 s, none unbacked**, and none at 0.1 mm sampling either (42,690). |
+| support-clipped | -i test/support-clipped-{cone,cylinder}.step -cc 7 -t 1.4 --cores 4 --orient 180 0 0 --support --support-thickness 1 | valid STEP through every §6.2 check on two small cuts of `TD_HX_rehearsal_test.step`, kept in its coordinates, where a ceiling just past the bar clips support nodes no refined mesh vertex lands in. Coverage is also asked at 0.1 mm, since 0.5 mm can step over such a sliver. Before the fix: 16 and 481 samples bare at 0.1 mm. **Measured: 13 s and 21 s; none bare, 1 sliver within 0.05 mm** beside the discarded chips, 11 samples on a rim. |
 | support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 142 s**, one support body, 12,524 of 12,524 overhang samples backed. |
 | support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 353 s**, three support bodies, 33,065 of 33,065 overhang samples backed, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 | rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Measured 2026-10-31: 1 h 40 m, and coverage failed** — 630 of 125,777 overhang samples unbacked. The causes are fixed and verified on `support-gaps`; **not re-run since** (§10). Otherwise valid, closed, manifold, inside the body and self-supporting; the two harness defects that run exposed are fixed (docs/testing.md). **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
@@ -541,7 +554,9 @@ For every scenario the harness must verify, without human intervention:
   material in the output.** The input's surface overhanging more than 60° is
   sampled afresh at 0.5 mm, and every sample, moved a hair into the body, must
   lie inside the *written file's* support or lattice material — independently
-  of how the supports were placed or built.
+  of how the supports were placed or built. A sample whose probe leaves the body
+  is on a rim a wall continues, and one within 0.05 mm of output material is a
+  sliver (§4.6); both are reported, and neither fails.
 - **With `--support`: supports overlap neither the lattice nor each other,**
   and a support face resting on a strut lies on that strut's plane, so the
   downstream merge finds shared faces.
@@ -607,17 +622,16 @@ diagnosis. Remove an item once it's fixed and verified.*
   (1 h 40 m, 2026-10-31). **That rehearsal failed coverage, and both causes are
   fixed but not yet proven at scale:** concave edges were never ceiling points,
   and strut tips dropped from kept nodes read as lattice (docs/algorithm.md
-  §14.3 S1). `support-gaps` reproduces and verifies both; re-running
-  `rehearsal-support` (about 5 h with its checks, on the user's command) is
-  what remains, and will change the support bodies, so `gui/weights.py` and
-  docs/profiling-reports.md may want it too. 5 of its 151 face misses are
-  outside both causes, and unexplained until then. What else remains: the overlap check of
+  §14.3 S1). The last 5 of its 151 face misses were ceiling clipping a support
+  node's corner, also fixed. `support-gaps` and `support-clipped` reproduce and
+  verify all three; re-running `rehearsal-support` (about 5 h with its checks, on
+  the user's command) is what remains, and will change the support bodies, so
+  `gui/weights.py` and docs/profiling-reports.md may want it too. What else
+  remains: the overlap check of
   docs/algorithm.md §14.2 dispatched across the worker pool — ~23 min at one
   core on the rehearsal, its largest serial piece — and the trims likewise if
-  a measurement shows more than 5 %; the free-standing thickness gate; and a
-  decision on the [TODO: proposed] rule for slabs the pocket search cannot cut
-  (§4.6). Golden samples for the three support scenarios wait for an inspected
-  output.
+  a measurement shows more than 5 %; and the free-standing thickness gate.
+  Golden samples for the three support scenarios wait for an inspected output.
 * **The window has not been looked at on a screen in this session.** Its widget
   states and the orientation view's drawing were checked programmatically (the
   canvas was rasterised to an image), not by eye in a running window.

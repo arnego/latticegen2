@@ -42,7 +42,53 @@ import time
 
 import numpy as np
 
+from ..runlog import WARNING_PREFIX, point_text, warning_text
 from .contract import SupportInput, SupportResult
+
+UNBACKED_WARNING = "ceiling left without support"
+"""Title of the warning naming ceiling points nothing in the output backs."""
+
+
+def _touching(a, b, gap: float = 1e-3) -> bool:
+    return bool(np.all(a[0] <= b[1] + gap) and np.all(b[0] <= a[1] + gap))
+
+
+def absorb_lost(solids: list, lost, bare: np.ndarray) -> tuple[list, int]:
+    """``(solids, n)``: ``solids`` with the ``n`` lost junction pieces that hold a
+    ``bare`` point made part of them.
+
+    A fine support node a wall crosses, with a lost strut tip on one side and
+    kept lattice on the other, stays lattice, so the tip's share of it stays
+    empty, and the ceiling above it is backed only if the supports around happen
+    to seal it as a pocket. The tip itself is the exact solid that is missing: it
+    lies in the body, leaves the kept lattice along faces, and its faces lie on
+    rod planes and the body's surface. What the supports do not already hold of
+    it joins them. A piece that would make a body non-manifold is left out, for
+    the count at the end to report.
+    """
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+
+    from .. import occ
+    from . import build, frustum, join
+
+    n = 0
+    for piece in lost:
+        if not frustum.exact_inside(piece, bare).any():
+            continue
+        box = occ.bounding_box(piece)
+        near = [s for s in solids if _touching(occ.bounding_box(s), box)]
+        got = build._boolean(BRepAlgoAPI_Cut, piece, near) if near else piece
+        rest = [] if got is None else occ.solids(got)
+        rest = [r for r in rest if occ.volume(r) > 1e-3 and occ.is_valid(r, parallel=False)]
+        if not rest or sum(occ.volume(r) for r in rest) > occ.volume(piece) * (1.0 + 1e-6):
+            continue
+        joined, _js = join.join(near + rest, overlaps=False)
+        if any(frustum.non_manifold_edges(s) for s in joined):
+            continue
+        keep = [s for s in solids if not any(s is o for o in near)]
+        solids = keep + joined
+        n += 1
+    return solids, n
 
 
 def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
@@ -81,7 +127,13 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     stats = dict(got.stats)
     stats["support_ceiling_s"] = round(ceiling_s, 2)
     lines = list(got.lines) + list(got.notes)
-    if not got.solids:
+    covered = got.covered.copy()
+    shallow = got.points - frustum.SHALLOW_DEPTH * got.normals
+    bodies = list(got.solids)
+    if lost and not covered.all():
+        bodies, stats["support_lost_pieces_absorbed"] = absorb_lost(bodies, lost,
+                                                                    shallow[~covered])
+    if not bodies:
         stats["support_bodies"] = 0
         return [], stats, lines
 
@@ -90,17 +142,18 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     if pockets_begin is not None:
         pockets_begin()
     t3 = time.perf_counter()
-    out, fills, unsearched = [], [], []
-    gs = join.groups(got.solids)
+    out, fills, unsearched, refusals = [], [], [], []
+    gs = join.groups(bodies)
     for k, g in enumerate(gs):
         if report is not None:
             report("looking for sealed pockets", k, len(gs))
-        mine = [got.solids[i] for i in g]
+        mine = [bodies[i] for i in g]
         pockets = voids.find_pockets(body, mesh, mine, local.near, thickness, lp.b,
                                      pool=pool, staged=staged, report=report,
                                      reach=local.reach)
         fills += pockets.fills
         unsearched += pockets.unsearched
+        refusals += pockets.refusals
         if pockets.fills:
             mine, _js = join.join(mine + pockets.fills, overlaps=False)
         out += mine
@@ -120,15 +173,37 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     stats["support_bodies"] = len(out)
     stats["support_pocket_slabs_unsearched"] = len(unsearched)
     if unsearched:
-        lines.append(f"{voids.UNSEARCHED_WARNING} {len(unsearched)} slab(s) of the "
-                     f"support envelope at any fuzzy value; free space touching them "
-                     f"is taken as open and no pocket there is filled:")
-        lines += unsearched
+        lines.append(warning_text(
+            voids.UNSEARCHED_WARNING,
+            f"the geometry kernel could not cut {len(unsearched)} region(s) of the "
+            f"support envelope, even split in halves, so they were not searched",
+            "Powder may be trapped in enclosed pockets there",
+            unsearched,
+        ))
+        lines += [f"pocket search refused: {r}" for r in refusals]
+    # The grid's answer was a first one: a pocket fill or an absorbed piece can
+    # back what it could not. The final bodies decide, and are few to ask about.
+    for s in out:
+        if covered.all():
+            break
+        todo = np.nonzero(~covered)[0]
+        covered[todo] = (frustum.exact_inside(s, shallow[todo])
+                         | frustum.exact_inside(s, got.points[todo] - frustum.PROBE_DEPTH
+                                                * got.normals[todo]))
+    stats["support_ceiling_points_uncovered"] = int((~covered).sum())
+    if not covered.all():
+        bare = got.points[~covered]
+        lines.append(warning_text(
+            UNBACKED_WARNING,
+            f"{len(bare)} of {len(covered)} ceiling point(s) are backed by nothing in "
+            f"the output",
+            "Those overhangs may print unsupported",
+            [point_text(p) for p in bare],
+        ))
     lines.append(
         f"support: {len(out)} bod(y/ies), {sum(occ.volume(s) for s in out):.3f} mm^3, "
         f"{len(fills)} sealed pocket(s) filled; "
-        f"{int(got.covered.sum())} of {len(got.covered)} ceiling point(s) backed "
-        f"by the support grid or a strut"
+        f"{int(covered.sum())} of {len(covered)} ceiling point(s) backed"
     )
     lines.append(
         "support timing: " + ", ".join(
@@ -141,9 +216,6 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
 
 def generate(inp: SupportInput) -> SupportResult:
     """Support solids backing the ceiling of ``inp.body``, anchored on ``inp.lattice``."""
-    from .frustum import DROPPED_WARNING
-    from .voids import UNSEARCHED_WARNING
-
     staged = {"body_path": inp.body_path, "mesh_path": inp.mesh_path,
               "lp_args": (inp.lp.cc, inp.lp.t, tuple(inp.lp.orient)),
               "kept_nodes": np.asarray(inp.kept_nodes), "tmpdir": inp.tmpdir}
@@ -159,13 +231,7 @@ def generate(inp: SupportInput) -> SupportResult:
                                         pool=inp.pool, staged=staged,
                                         pockets_begin=inp.pockets_begin,
                                         samples=inp.samples, lost=inp.lost_lattice)
-    # The dropped pieces' and unsearched slabs' reports go to the console
-    # whatever -v says.
-    notes = []
-    for head, count in ((DROPPED_WARNING, stats.get("support_pieces_dropped", 0)),
-                        (UNSEARCHED_WARNING, stats.get("support_pocket_slabs_unsearched", 0))):
-        k = next((i for i, line in enumerate(lines) if line.startswith(head)), None)
-        if k is not None:
-            notes += lines[k:k + 1 + count]
-            lines = lines[:k] + lines[k + 1 + count:]
+    # What a run did not do goes to the console whatever -v says.
+    notes = [line for line in lines if line.startswith(WARNING_PREFIX)]
+    lines = [line for line in lines if not line.startswith(WARNING_PREFIX)]
     return SupportResult(supports=solids, stats=stats, lines=lines, notes=notes)

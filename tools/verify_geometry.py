@@ -711,6 +711,13 @@ SUPPORT_EXACT_STEP = 2e-3
 """Millimetres. Probe depth for the exact re-check of a mesh miss — the depth
 the pipeline's own coverage proof uses."""
 
+COVERAGE_SLIVER_TOL = 0.05
+"""Millimetres. A bare sample this near an output solid is reported as a sliver
+and does not fail coverage. Where a ceiling only grazes a support node, trimming
+the node can leave a chip of about 1e-3 mm^3 on the far side of a grid plane,
+which the generator discards rather than ship a floating micro-solid: well under
+a powder grain, and no support could print it."""
+
 EXACT_RECHECK_MAX = 2000
 """Most mesh misses the exact classifier is asked about. Past this the misses
 are reported as they stand: that many is a real gap, not a thin wedge."""
@@ -792,13 +799,15 @@ def _oriented_mesh_exact(shape, deflection: float):
 
 
 def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
-                      orient, thickness: float) -> dict:
+                      orient, thickness: float, pitch: float | None = None) -> dict:
     """Is every inner overhang of the input backed by material in the output?
 
     Asked of the **written file**, and independently of how the supports were
     placed or built: the input's overhangs are sampled afresh, each sample is
     moved a hair into the body, and the output's own tessellation is asked
-    whether that point is inside it. Nothing here reads the plan.
+    whether that point is inside it. Nothing here reads the plan. ``pitch`` is
+    the sample spacing, the support step by default: a finer one finds ceiling
+    bare over less than that, which clipped corners of support nodes are.
     """
     from latticegen2.classify import PointInside, tessellate_surface
     from latticegen2.support import overhang as oh
@@ -806,7 +815,7 @@ def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
     lp = lattice_params(cc, t, orient)
     body = occ.read_step(input_path)
     tessellate_surface(body, lp)
-    samples = oh.detect(body, lp.b)
+    samples = oh.detect(body, lp.b) if pitch is None else oh.detect(body, lp.b, pitch)
     out = occ.read_step(candidate_path)
     v, f, _n, _a = _oriented_mesh(out, SUPPORT_MESH_DEFLECTION)
     v, f = _weld(v, f)
@@ -841,11 +850,44 @@ def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
                     covered[i] = True
                     thin += 1
                     break
+    # A sample within a hair of a body edge can probe out of the body: its rim
+    # is continued by a wall, and nothing inside the body can lie behind it.
+    # Bare samples are then measured against the output, which is exact.
+    rim = slivers = 0
+    if 0 < int((~covered).sum()) <= EXACT_RECHECK_MAX:
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
+        from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+        from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+        from OCP.TopAbs import TopAbs_State
+        from OCP.gp import gp_Pnt
+
+        in_body = BRepClass3d_SolidClassifier(body)
+        solids = occ.solids(out)
+        boxes = [occ.bounding_box(s) for s in solids]
+        for i in np.nonzero(~covered)[0]:
+            q = samples.points[i] + SUPPORT_EXACT_STEP * samples.inward[i]
+            in_body.Perform(gp_Pnt(*map(float, q)), 1e-7)
+            if in_body.State() == TopAbs_State.TopAbs_OUT:
+                covered[i] = True
+                rim += 1
+                continue
+            p = samples.points[i]
+            vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*map(float, p))).Vertex()
+            for s, (lo, hi) in zip(solids, boxes):
+                if (np.any(p < lo - COVERAGE_SLIVER_TOL) or np.any(p > hi + COVERAGE_SLIVER_TOL)):
+                    continue
+                d = BRepExtrema_DistShapeShape(vertex, s)
+                if d.IsDone() and d.Value() <= COVERAGE_SLIVER_TOL:
+                    covered[i] = True
+                    slivers += 1
+                    break
     missing = samples.points[~covered]
     return {
         "samples": int(len(probe)),
         "uncovered": int(len(missing)),
         "thin": thin,
+        "rim": rim,
+        "slivers": slivers,
         "area_mm2": float(samples.area),
         "where": [np.round(p, 3).tolist() for p in missing[:5]],
     }

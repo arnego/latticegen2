@@ -344,9 +344,10 @@ def test_a_piece_no_trim_produces_is_dropped_and_reported(chamber, monkeypatch, 
     solids, stats, lines = supports_for(body, mesh, [], kept, lp, 1.5, tmpdir=str(tmp_path))
     assert stats["support_pieces_dropped"] == 1
     assert stats["support_dropped_volume_mm3"] == pytest.approx(123.0)
-    warning = [line for line in lines if line.startswith(frustum.DROPPED_WARNING)]
+    warning = [line for line in lines
+               if line.startswith(f"WARNING: {frustum.DROPPED_WARNING}")]
     assert len(warning) == 1 and "123.0 mm^3" in warning[0]
-    assert any(line.startswith("  body-0 near [") for line in lines)
+    assert "\n  body-0 near [" in warning[0]
     assert stats["support_ceiling_points_uncovered"] > 0
 
 def test_supports_are_assembled_beside_the_lattice(chamber, chamber_supports):
@@ -440,3 +441,47 @@ def test_a_keel_is_supported_though_no_face_of_it_is_ceiling():
     for s in solids:
         backed |= exact_inside(s, keel - 2e-3 * lp.b)
     assert backed.all(), f"{int((~backed).sum())} of {len(keel)} keel samples unbacked"
+
+
+def test_a_ceiling_clipping_a_node_corner_gets_a_ceiling_point():
+    """A triangle with no vertex in a node, clipping its corner: that node needs
+    a ceiling point. One under the bar, or on a strut, does not."""
+    from latticegen2.support.frustum import _clipped_ceiling, _Grid
+
+    lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+    g = _Grid(lp, 2)
+    # In cube coordinates, across the corner of node (1, 1, 1) nearest the origin.
+    corner = np.array([1, 1, 1]) * g.q - g.h
+    tri = corner + np.array([[0.2, -0.1, -0.05], [-0.1, 0.2, -0.05], [-0.05, -0.1, 0.2]])
+    verts = g.world(tri)
+    tris = np.array([[0, 1, 2]])
+    b = np.asarray(lp.b, dtype=float)
+    up = np.broadcast_to(b, (3, 3))
+    nowhere = lambda P: np.zeros(len(P), dtype=bool)                    # noqa: E731
+    held = {tuple(x) for x in g.node_of(verts).tolist()}
+    assert (1, 1, 1) not in held
+
+    p, n = _clipped_ceiling(g, verts, up, tris, held, nowhere, b, 0.866)
+    assert (1, 1, 1) in {tuple(x) for x in g.node_of(p).tolist()}
+    assert np.allclose(n, b)
+
+    assert not len(_clipped_ceiling(g, verts, up, tris, held, nowhere, b, 1.1)[0])
+    on_strut = lambda P: np.ones(len(P), dtype=bool)                    # noqa: E731
+    assert not len(_clipped_ceiling(g, verts, up, tris, held, on_strut, b, 0.866)[0])
+
+
+def test_a_lost_piece_holding_a_bare_point_joins_the_support_it_touches():
+    from latticegen2 import occ
+    from latticegen2.support.frustum import exact_inside
+    from latticegen2.support.generate import absorb_lost
+
+    support = _box((0.0, 0.0, 0.0), (2.0, 2.0, 2.0))
+    tip = _box((1.0, 0.0, 0.0), (3.0, 2.0, 2.0))
+    elsewhere = _box((10.0, 0.0, 0.0), (11.0, 1.0, 1.0))
+    bare = np.array([[2.5, 1.0, 1.0]])
+
+    solids, n = absorb_lost([support], [elsewhere, tip], bare)
+
+    assert n == 1 and len(solids) == 1
+    assert occ.volume(solids[0]) == pytest.approx(12.0)     # overlap counted once
+    assert exact_inside(solids[0], bare).all()

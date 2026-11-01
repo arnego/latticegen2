@@ -36,6 +36,8 @@ TESTDIR = os.path.join(ROOT, "test")
 BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
 GAPS = os.path.join(TESTDIR, "support-gaps.step")
+CLIPPED = {name: os.path.join(TESTDIR, f"support-clipped-{name}.step")
+           for name in ("cone", "cylinder")}
 BALL_GOLDEN = os.path.join(TESTDIR, "80mm-test-ball-cc20t4-golden-sample.step")
 CYLINDER_GOLDEN = os.path.join(TESTDIR, "test-cylinder-cc10t1.5-golden-sample.step")
 
@@ -463,6 +465,44 @@ def scenario_oriented_lattice(outdir: str) -> Report:
     return rep
 
 
+def _unbacked(log: str) -> str:
+    got = re.search(r"support_ceiling_points_uncovered: (\d+)", log)
+    return f"{got.group(1)} reported" if got else "not reported"
+
+
+def scenario_support_clipped(outdir: str) -> Report:
+    """Ceiling just past the bar that clips a support node's corner, leaving
+    ceiling bare beside a support: two small cuts of the rehearsal part
+    (tools/make_support_gaps_part.py). Coverage is asked at 0.1 mm, since the
+    0.5 mm the harness otherwise samples at can step over such a sliver."""
+    rep = Report("support-clipped")
+    print(f"=== {rep.name} ===", flush=True)
+    orient = (180.0, 0.0, 0.0)
+    for name, part in CLIPPED.items():
+        out = os.path.join(outdir, f"support-clipped-{name}.step")
+        proc, elapsed = run_generator(
+            ["-i", part, "-cc", "7", "-t", "1.4", "-o", out, "--cores", "4",
+             "--orient", "180", "0", "0", "--support", "--support-thickness", "1"]
+        )
+        rep.check(f"{name}: process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+        rep.check(f"{name}: runtime under 2 minutes", elapsed < 120, f"{elapsed:.1f}s")
+        if proc.returncode != 0:
+            continue
+        with open(os.path.splitext(out)[0] + ".log", encoding="utf-8") as fh:
+            log = fh.read()
+        got = re.search(r"support_ceiling_points_clipped: (\d+)", log)
+        rep.check(f"{name}: the ceiling clips a support node", got and int(got.group(1)) > 0,
+                  f"{got.group(1) if got else 0} point(s)")
+        cov = vg.overhang_coverage(out, part, 7.0, 1.4, orient, 1.0, pitch=0.1)
+        rep.check(f"{name}: backed at 0.1 mm sampling", cov["uncovered"] == 0,
+                  f"{cov['uncovered']} of {cov['samples']} bare, {cov['rim']} on a rim, "
+                  f"{cov['slivers']} sliver(s) within {vg.COVERAGE_SLIVER_TOL:g} mm" +
+                  (f", first at {cov['where'][0]}" if cov["where"] else ""))
+        geometry_checks(rep, out, part, 7.0, 1.4)
+        support_checks(rep, out, part, 7.0, 1.4, orient, 1.0)
+    return rep
+
+
 def scenario_support_gaps(outdir: str) -> Report:
     """The two ways the supported rehearsal left ceiling bare, in a part that
     takes seconds (tools/make_support_gaps_part.py): a keel no face of which is
@@ -483,9 +523,12 @@ def scenario_support_gaps(outdir: str) -> Report:
     rep.check("runtime under 2 minutes", elapsed < 120, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         with open(os.path.splitext(out)[0] + ".log", encoding="utf-8") as fh:
-            lost = re.search(r"lattice_pieces_lost: (\d+)", fh.read())
+            log = fh.read()
+        lost = re.search(r"lattice_pieces_lost: (\d+)", log)
         rep.check("a strut tip was dropped from a kept node", lost is not None,
                   f"{lost.group(1)} piece(s)" if lost else "none: the part no longer tests this")
+        rep.check("the generator's own count agrees: no ceiling point bare",
+                  "support_ceiling_points_uncovered: 0" in log, _unbacked(log))
         lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
         body = occ.read_step(GAPS)
         tessellate_surface(body, lp)
@@ -603,6 +646,7 @@ SCENARIOS = {
     "dense-lattice": scenario_dense_lattice,
     "oriented-lattice": scenario_oriented_lattice,
     "support-gaps": scenario_support_gaps,
+    "support-clipped": scenario_support_clipped,
     "support-tilted": scenario_support_tilted,
     "support-cylinder": scenario_support_cylinder,
     "rehearsal-support": scenario_rehearsal_support,

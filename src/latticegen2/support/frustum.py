@@ -41,6 +41,8 @@ from OCP.TopoDS import TopoDS
 
 from .. import occ
 from ..errors import ProcessingError
+from ..runlog import point_text, warning_text
+from .params import REQUIRED_SLACK, SIN_START
 
 ANCHOR_DROP_PITCHES = 3
 """How many grid pitches *per division* a ceiling point's anchor is first
@@ -64,6 +66,9 @@ PROBE_DEPTH = 0.1
 """mm. How far into the body a ceiling point is moved to ask what backs it:
 past the sag of a 0.02 mm tessellation of a curved ceiling face."""
 
+SHALLOW_DEPTH = 2e-3
+"""mm. The depth the harness's exact check asks at (`SUPPORT_EXACT_STEP`)."""
+
 ESTIMATE_SAMPLES = 200_000
 """Points sampled in a support body's box to estimate its intersection with the
 body, which every trim is held to."""
@@ -72,7 +77,7 @@ SPLIT_DEPTH = 4
 """How many times a support body no trim passes is split in two along a grid
 plane, each half trimmed on its own, before the piece is dropped."""
 
-DROPPED_WARNING = "WARNING: support piece(s) the geometry kernel could not trim were dropped"
+DROPPED_WARNING = "support pieces dropped"
 """Opens the note a run prints when it drops support pieces (docs/algorithm.md
 §14.3 S6), regardless of ``-v``."""
 
@@ -96,7 +101,13 @@ class Frustums:
     """The trimmed support bodies, disjoint, each backing at least one ceiling
     point."""
     covered: np.ndarray
-    """Per ceiling point: backed by one of :attr:`solids`."""
+    """Per ceiling point: backed by one of :attr:`solids`, by the grid they were
+    built from, or by a strut. A first answer: :func:`.generate.supports_for`
+    asks the final bodies about the rest."""
+    points: np.ndarray
+    """The ceiling points."""
+    normals: np.ndarray
+    """Their outward normals."""
     stats: dict = field(default_factory=dict)
     lines: list = field(default_factory=list)
     notes: list = field(default_factory=list)
@@ -527,6 +538,78 @@ def _free_of_lattice(g: _Grid, coords: list, local, in_body, L: np.ndarray) -> n
     return L
 
 
+def _clip_to_node(tri: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+    """The part of triangle ``tri`` (cube coordinates) inside the box ``[lo, hi]``,
+    as a polygon; empty when none is. Sutherland-Hodgman, one plane at a time."""
+    poly = tri
+    for k in range(3):
+        for sign, c in ((1.0, lo[k]), (-1.0, hi[k])):
+            if not len(poly):
+                return poly
+            d = sign * (poly[:, k] - c)
+            keep = []
+            for i in range(len(poly)):
+                j = (i + 1) % len(poly)
+                if d[i] >= 0.0:
+                    keep.append(poly[i])
+                if (d[i] >= 0.0) != (d[j] >= 0.0):
+                    keep.append(poly[i] + (poly[j] - poly[i]) * d[i] / (d[i] - d[j]))
+            poly = np.array(keep) if keep else np.empty((0, 3))
+    return poly
+
+
+def _clipped_ceiling(g: _Grid, verts: np.ndarray, normals: np.ndarray, tris: np.ndarray,
+                     held: set, backed, b: np.ndarray, bar: float):
+    """``(points, normals)``: a ceiling point in every support node the ceiling
+    passes through and that holds none yet.
+
+    The ceiling's refined vertices are ``h`` apart and a node is several times
+    that, so a node nearly always holds one. Not where the surface only clips a
+    corner, which takes a grazing contact: on the rehearsal part, cones and
+    cylinders just past the bar, leaving ceiling bare 0.02 to 0.07 mm from the
+    support beside it. So the triangles are walked across the grid, each clipped
+    to the nodes it spans that hold no ceiling point; the point taken is the
+    polygon's corner or centre that overhangs most, normals interpolated, and it
+    must itself be over the bar and not on a strut."""
+    C = g.cube(verts)
+    node = np.floor((C + g.h) / g.q).astype(np.int64)
+    tn = node[tris]
+    spans = np.nonzero((tn.min(axis=1) != tn.max(axis=1)).any(axis=1))[0]
+    pts, nrm = [], []
+    held = set(held)
+    for t in spans:
+        nlo, nhi = tn[t].min(axis=0), tn[t].max(axis=0)
+        for i, j, k in itertools.product(*(range(nlo[a], nhi[a] + 1) for a in range(3))):
+            if (i, j, k) in held:
+                continue
+            idx = np.array([i, j, k])
+            lo = idx * g.q - g.h
+            tri = C[tris[t]]
+            poly = _clip_to_node(tri, lo, lo + g.q)
+            if len(poly) < 3:
+                continue
+            cands = np.vstack([poly, poly.mean(axis=0)])
+            # Barycentric weights of each candidate, for the normal there.
+            A = np.vstack([tri.T, np.ones(3)])
+            w = np.linalg.lstsq(A, np.vstack([cands.T, np.ones(len(cands))]), rcond=None)[0].T
+            n = w @ normals[tris[t]]
+            n /= np.linalg.norm(n, axis=1, keepdims=True)
+            dots = n @ b
+            pick = int(np.argmax(dots))
+            if dots[pick] <= bar:
+                continue
+            # Nudged off the node's own faces, so that it reads as in this node.
+            p = g.world(cands[pick] + 1e-9 * (lo + g.q / 2.0 - cands[pick]))
+            if backed(p[None])[0]:
+                continue
+            held.add((i, j, k))
+            pts.append(p)
+            nrm.append(n[pick])
+    if not pts:
+        return np.empty((0, 3)), np.empty((0, 3))
+    return np.array(pts), np.array(nrm)
+
+
 def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
           report=None, extra=None) -> Frustums:
     """The support bodies for the ceiling points of ``rmesh``, before pockets.
@@ -541,10 +624,20 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
         need_n = np.vstack([need_n, extra[1][unbacked]])
     m = grid_divisions(lp, thickness)
     g = _Grid(lp, m)
-    stats = {"support_ceiling_points": int(len(need)), "support_grid_divisions": m}
+    bar = SIN_START + REQUIRED_SLACK
+    over = rmesh.normals @ np.asarray(lp.b, dtype=float) > bar
+    near_bar = over[rmesh.tris].any(axis=1) if len(rmesh.tris) else np.zeros(0, dtype=bool)
+    clipped, clipped_n = _clipped_ceiling(
+        g, rmesh.verts, rmesh.normals, rmesh.tris[near_bar],
+        {tuple(x) for x in g.node_of(need).tolist()}, local.contains,
+        np.asarray(lp.b, dtype=float), bar)
+    need = np.vstack([need, clipped])
+    need_n = np.vstack([need_n, clipped_n])
+    stats = {"support_ceiling_points": int(len(need)), "support_grid_divisions": m,
+             "support_ceiling_points_clipped": int(len(clipped))}
     lines = []
     if not len(need):
-        return Frustums([], np.zeros(0, dtype=bool), stats, lines)
+        return Frustums([], np.zeros(0, dtype=bool), need, need_n, stats, lines)
 
     def in_lattice(P):
         return local.contains(P) if len(local.positions) else np.zeros(len(P), dtype=bool)
@@ -617,6 +710,9 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     trim_s = backed_s = 0.0
     solids, debris = [], []
     probes = need - PROBE_DEPTH * need_n
+    # A sliver of support under a ceiling that only clips a node is thinner than
+    # a probe is deep, so debris is also asked of the point just inside the ceiling.
+    shallow = need - SHALLOW_DEPTH * need_n
     dropped = []      # (tag, centroid, mm^3 inside the body, ceiling points it held)
 
     def trim_or_split(piece, tag: str, depth: int = 0):
@@ -666,7 +762,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
         trim_s += tb - ta
         lines += trim_lines
         for s in got:
-            (solids if backs_any(s, probes) else debris).append(s)
+            (solids if backs_any(s, probes) or backs_any(s, shallow) else debris).append(s)
         backed_s += time.perf_counter() - tb
     if debris:
         lines.append(f"support debris discarded (backs no ceiling point): {len(debris)} "
@@ -688,17 +784,21 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
         for _tag, _where, _est, held in dropped:
             lost |= held
         lost &= ~covered
-        notes.append(
-            f"{DROPPED_WARNING} (docs/algorithm.md §14.3 S6): {len(dropped)} piece(s), "
-            f"{sum(d[2] for d in dropped):.1f} mm^3 of support inside the body; "
-            f"{int(lost.sum())} ceiling point(s) left unbacked by them")
-        for tag, where, est, held in dropped:
-            notes.append(f"  {tag} near {where}: {est:.1f} mm^3, "
-                         f"{int((held & ~covered).sum())} ceiling point(s)")
+        notes.append(warning_text(
+            DROPPED_WARNING,
+            f"the geometry kernel could not trim {len(dropped)} piece(s) of support to "
+            f"the input at any fuzzy value, after a STEP round trip, or in halves "
+            f"(docs/algorithm.md §14.3 S6)",
+            f"{sum(d[2] for d in dropped):.1f} mm^3 of support is missing, and "
+            f"{int(lost.sum())} ceiling point(s) may print unsupported",
+            [f"{tag} near {point_text(where)}: {est:.1f} mm^3, "
+             f"{int((held & ~covered).sum())} ceiling point(s)"
+             for tag, where, est, held in dropped],
+        ))
     stats.update({"support_debris_solids": len(debris),
                   "support_pieces_dropped": len(dropped),
                   "support_dropped_volume_mm3": round(sum(d[2] for d in dropped), 3),
                   "support_ceiling_points_uncovered": int((~covered).sum()),
                   "support_grid_s": round(t1 - t0, 2), "support_staircase_s": round(t2 - t1, 2),
                   "support_trim_s": round(trim_s, 2), "support_backed_s": round(backed_s, 2)})
-    return Frustums(solids, covered, stats, lines, notes)
+    return Frustums(solids, covered, need, need_n, stats, lines, notes)

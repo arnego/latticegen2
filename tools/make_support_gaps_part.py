@@ -15,7 +15,14 @@ extruded along Y:
   stays kept through its other arms. The ceiling above the tip is backed by
   nothing.
 
-Run from the repository root; the file it writes is committed.
+Also ``test/support-clipped-*.step``, for ``-cc 7 -t 1.4 --orient 180 0 0
+--support-thickness 1``: small boxes cut from ``TD_HX_rehearsal_test.step``, in
+that part's own coordinates so the support grid falls on them exactly as it does
+there. Where the ceiling just passes the 60 deg bar it clips the corner of a
+support node with no refined mesh vertex landing inside. That needs this grazing
+contact, and 120 placements of an idealised cone never produced it.
+
+Run from the repository root; the files it writes are committed.
 """
 
 from __future__ import annotations
@@ -25,8 +32,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut                        # noqa: E402
-from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon  # noqa: E402
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut    # noqa: E402
+from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,  # noqa: E402
+                                BRepBuilderAPI_MakeVertex)
+from OCP.BRepExtrema import BRepExtrema_DistShapeShape             # noqa: E402
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakePrism  # noqa: E402
 from OCP.gp import gp_Pnt, gp_Vec                                  # noqa: E402
 
@@ -41,7 +50,12 @@ KEEL = (-10.0, -8.0)
 RIB_X = (1.2, 2.0)
 RIB_BOTTOM = 0.0
 RIB_Y_HALF = 3.0
-OUT = os.path.join(os.path.dirname(__file__), "..", "test", "support-gaps.step")
+TESTDIR = os.path.join(os.path.dirname(__file__), "..", "test")
+OUT = os.path.join(TESTDIR, "support-gaps.step")
+CLIPPED = {"cone": ((1993.246, -4.848, 938.304), 5.0),
+           "cylinder": ((2065.544, 77.74, 980.7), 8.0)}
+"""``(centre, half width)``, mm, of the boxes: centred on two of the rehearsal's
+bare samples."""
 
 
 def part():
@@ -61,9 +75,27 @@ def part():
     return occ.solids(BRepAlgoAPI_Cut(block, rib).Shape())[0]
 
 
+def clipped(full, centre, half):
+    """The solid of ``full`` in the box round ``centre`` that lies nearest it."""
+    lo = [c - half for c in centre]
+    hi = [c + half for c in centre]
+    box = BRepPrimAPI_MakeBox(gp_Pnt(*lo), gp_Pnt(*hi)).Shape()
+    solids = occ.solids(BRepAlgoAPI_Common(full, box).Shape())
+    vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*centre)).Vertex()
+    return min(solids, key=lambda s: BRepExtrema_DistShapeShape(vertex, s).Value())
+
+
 if __name__ == "__main__":
     solid = part()
     assert occ.is_valid(solid), "the part is not a valid solid"
     occ.write_step(solid, OUT, "support-gaps")
     print(f"{os.path.normpath(OUT)}: {occ.volume(solid):.1f} mm^3, "
           f"{occ.count_subshapes(solid)[0]} faces")
+    full = occ.read_step(os.path.join(TESTDIR, "TD_HX_rehearsal_test.step"))
+    for name, (centre, half) in CLIPPED.items():
+        solid = clipped(full, centre, half)
+        assert occ.is_valid(solid), f"the {name} cut is not a valid solid"
+        out = os.path.join(TESTDIR, f"support-clipped-{name}.step")
+        occ.write_step(solid, out, f"support-clipped-{name}")
+        print(f"{os.path.normpath(out)}: {occ.volume(solid):.1f} mm^3, "
+              f"{occ.count_subshapes(solid)[0]} faces")

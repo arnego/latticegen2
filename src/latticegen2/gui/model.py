@@ -18,12 +18,13 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from .. import progress
-from ..runlog import STAGES, format_bytes, format_duration
+from ..runlog import STAGES, WARNING_PREFIX, format_bytes, format_duration
 from .weights import overall_permille
 
 #: How many lines of the run's own output to keep for the failure panel. The
-#: rehearsal writes a few hundred; a bounded deque means an hour-long run cannot
-#: grow the window's memory without bound.
+#: rehearsal writes a few hundred; a bounded backlog means an hour-long run
+#: cannot grow the window's memory without bound. A warning is never what gets
+#: dropped: an early one must still be there at the end of an hour.
 LOG_BACKLOG = 400
 
 #: Where a line came from, which is what the window's **verbose** tick box
@@ -40,8 +41,14 @@ LOG_BACKLOG = 400
 #: line lands (specification.md §7). That is shown whichever way the box is set,
 #: because it is the run reporting that something went wrong rather than `-v`
 #: output.
+#:
+#: ``WARN`` is the run's own logging too, but a line starting with
+#: :data:`~latticegen2.runlog.WARNING_PREFIX`: the output may be wrong or
+#: incomplete, and nothing in a widget says so. It is shown whichever way the
+#: box is set, and it opens the pane.
 LOG = "log"
 OUT = "out"
+WARN = "warn"
 
 
 @dataclass
@@ -65,13 +72,13 @@ class RunState:
     log: str | None = None
     tmpdir: str | None = None
     summary: dict = field(default_factory=dict)
-    #: ``(text, source)`` pairs, source being :data:`LOG` or :data:`OUT`.
-    lines: deque = field(default_factory=lambda: deque(maxlen=LOG_BACKLOG))
+    #: ``(text, source)`` pairs, source being :data:`LOG`, :data:`OUT` or
+    #: :data:`WARN`.
+    lines: deque = field(default_factory=deque)
     #: How many lines have *ever* arrived, which ``len(lines)`` cannot say once
-    #: the backlog is full and the deque starts dropping from the left. The
-    #: window redraws its log pane only when this changes, so without it a long
-    #: run would stop updating the pane at exactly the point there is most to
-    #: read.
+    #: the backlog is full and the oldest lines start to be dropped. The window
+    #: redraws its log pane only when this changes, so without it a long run
+    #: would stop updating the pane at exactly the point there is most to read.
     lines_seen: int = 0
     #: The stages this run announced in its ``hello``. A run with print supports
     #: goes through two more than the plain pipeline, and both the stage
@@ -79,10 +86,16 @@ class RunState:
     stages: tuple = STAGES
 
     def add_line(self, text: str, source: str) -> None:
-        """Record one line the child produced. ``source`` is :data:`LOG` or
-        :data:`OUT`."""
+        """Record one line the child produced. ``source`` is :data:`LOG`,
+        :data:`OUT` or :data:`WARN`. Past the backlog the oldest line that is
+        not a warning goes."""
         self.lines.append((text, source))
         self.lines_seen += 1
+        if len(self.lines) > LOG_BACKLOG:
+            oldest = next((i for i, (_text, kind) in enumerate(self.lines)
+                           if kind != WARN), None)
+            if oldest is not None:
+                del self.lines[oldest]
 
     def visible_lines(self, verbose: bool) -> list[str]:
         """The lines the log pane shows.
@@ -94,7 +107,7 @@ class RunState:
         the run's own account of itself is still there to read.
         """
         return [text for text, source in self.lines
-                if verbose or source == OUT]
+                if verbose or source != LOG]
 
     # -- derived, for the widgets -----------------------------------------
 
@@ -192,7 +205,8 @@ class RunState:
                                            self.sub_fraction, self.stages))
 
         elif ev == progress.LOG:
-            self.add_line(event["msg"], LOG)
+            self.add_line(event["msg"],
+                          WARN if event["msg"].startswith(WARNING_PREFIX) else LOG)
 
         elif ev == progress.SUMMARY:
             self.summary = dict(event["stats"])

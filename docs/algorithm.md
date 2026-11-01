@@ -2062,12 +2062,33 @@ program builds itself.
   run — which the window's **verbose** tick box is (specification.md §3.1), and
   it is the one control there that stays live while a run is going. That window
   filters harder than the flag does, showing nothing of the run's own logging
-  until it is ticked: the flag answers "would a *terminal* have printed this",
-  and §3 makes the whole end-of-run summary console-true, most of which the
-  window has already drawn in its own widgets.
+  until it is ticked, warnings apart: the flag answers "would a *terminal* have
+  printed this", and §3 makes the whole end-of-run summary console-true, most of
+  which the window has already drawn in its own widgets.
   And `stage_begin` **emits without logging** — a reader has to be told that
   `simplify` is what has been running for the last nineteen minutes, but nothing
   may be added to the `.log` for the front-end's benefit.
+* **Warnings have one form, and it is what the window filters on.** A warning
+  means the output may be wrong, incomplete or degraded; a repair that left the
+  output as intended is a `note:`, and a `Dropped ... floating body` line is §8's
+  rule doing its job. `runlog.warning_text` builds every warning as one message
+  starting `WARNING: ` — title, what went wrong, what it may cause, then one
+  indented line per place to inspect, in the part's coordinates, up to
+  `WARNING_PLACES` of them. One message, however many lines, so the filter reads
+  the prefix and needs no memory of the line before; `RunLog.always` writes it to
+  the console and the `.log` regardless of `-v`.
+
+  | Warning | Where it names |
+  |---|---|
+  | faces of the input do not meet (§7.4) | the worst gap |
+  | lattice junctions left out (§7.2) | each junction |
+  | trims resting on their own tolerance (§7.3) | each body's worst face |
+  | struts closed off where they should join, not joined, not welded (§7.1, §8) | each junction |
+  | boundary faces left invalid (§8) | each face |
+  | solids exported without merging their faces (§9) | each solid's box |
+  | support pieces dropped (§14.3 S6) | each piece |
+  | enclosed pockets may remain unfilled (§14.3 S7) | each region |
+  | ceiling left without support (§14.3) | each point |
 * **A run can be cancelled by a sentinel file**, `<output-stem>.cancel`, which
   `latticegen2.gui` writes for its Stop button. The watcher removes it and calls
   `_thread.interrupt_main`, so the run takes the ordinary `KeyboardInterrupt`
@@ -2565,6 +2586,16 @@ over (`SupportInput.lost_lattice`), and neither the point test nor the junction
 instances count them. Only a piece whose node is still kept matters: a junction
 dropped whole never read as lattice.
 
+**A support node the ceiling only clips gets a ceiling point too.** The refined
+vertices are `h` apart and a node several times that, so a node the ceiling
+crosses nearly always holds one, except where a surface just past the bar
+grazes a node's corner. Measured on the rehearsal, on cones and cylinders at 60.3
+to 63.3°: bare ceiling 0.02 to 0.07 mm from the support beside it, in nodes
+holding no ceiling point. So the triangles at the bar are walked across the grid
+(`frustum._clipped_ceiling`), each clipped to the nodes it spans that hold none,
+and the point of the clipped polygon overhanging most becomes a ceiling point,
+if it is over the bar and not on a strut.
+
 **The support grid.** Support node `(i, j, k)` spans `[i q − t/2, (i+1) q − t/2]` along each
 cube axis `e_0, e_1, e_2` of the lattice frame (§2), with pitch `q = a/m`.
 Its planes are the rods' `−t/2` face planes, and every `m`-th plane carries a
@@ -2641,7 +2672,12 @@ A fine node a lost tip passes through is freed for support only if no kept
 lattice is in it, sampled across the whole node, `FREE_SAMPLES` per axis, and not
 at its centre alone: a wall can cross one rod's fine node with the tip on one
 side and kept lattice on the other, and support there would overlap the lattice.
-Such a node stays lattice, and the tip's share of it stays bare.
+Such a node stays lattice, and the tip's share of it would stay empty, backed
+only if the supports around happened to seal it as a pocket. So a lost piece
+holding a ceiling point still bare after the trims joins the supports
+(`generate.absorb_lost`): the tip is the exact solid that is missing, in the
+body, its faces on rod planes and the body's surface. What the supports do not
+already hold of it is fused to them, unless that would make a body non-manifold.
 
 **The support leaves the rods out by construction**, so it shares faces with
 the struts and needs no cut against the lattice. Measured: 0.000000 mm³ of
@@ -2695,8 +2731,13 @@ anything — unification has returned a valid solid with material outside the
 body here too, and is then discarded.
 
 A trimmed piece that backs no ceiling point — asked of the exact solid with
-`BRepClass3d_SolidClassifier`, a point on its boundary counting — is
-construction debris and is discarded, never shipped (specification.md §5).
+`BRepClass3d_SolidClassifier`, a point on its boundary counting, at the probe
+and just under the ceiling — is construction debris and is discarded, never
+shipped (specification.md §5). Where a ceiling grazes a node, that can be a real
+chip of ceiling contact: 0.001 mm³ on the rehearsal's cuts, on the far side of a
+grid plane from the support. It stays discarded, since a floating micro-solid in
+the file serves nothing, and the harness reports the bare samples beside it as
+slivers (`verify_geometry.COVERAGE_SLIVER_TOL`).
 
 **S7 — Pockets** (`support/voids.py`). Powder must not be trapped. Per group of
 bodies whose boxes touch, the free space in the support envelope — the
@@ -2760,10 +2801,19 @@ again, `SLAB_RETRY_SPLITS` (2) times. A slab still refused is **open**: its
 free space is not known, so every piece in a neighbouring slab with a face on
 the plane between them counts as reaching the envelope, and nothing it could
 belong to is judged sealed. A pocket lying in it is therefore not filled, and
-the run says so regardless of `-v` — `voids.UNSEARCHED_WARNING`, one line per
-open slab with its extent and the kernel's reason — and counts it
-(`support_pocket_slabs_unsearched`). It never fills free space it has not
-found: a fill is always a whole cut-off piece of a search that succeeded.
+the run says so regardless of `-v` — `voids.UNSEARCHED_WARNING`, that enclosed
+pockets of trapped powder may remain, with one line per open region giving its
+x, y and z range within the body's box; slabs split from one are one region —
+and counts them (`support_pocket_slabs_unsearched`). The kernel's reason goes to
+the log. It never fills free space it has not found: a fill is always a whole
+cut-off piece of a search that succeeded.
+
+**The count a run reports is the final bodies' answer.** `build` answers from
+the support grid and the struts, which knows nothing of pocket fills or absorbed
+pieces, so what it leaves bare is asked again of the bodies as finished
+(`generate.supports_for`), and a ceiling point still bare is a warning with
+coordinates regardless of `-v` (`generate.UNBACKED_WARNING`). It read 11 on
+`support-gaps` while every one of them lay in a pocket fill.
 
 **Every body is then asked once more for edges used by more than two of its
 faces**, and one that has any fails the run (exit 4): STEP carries such a body,
@@ -2836,9 +2886,10 @@ of §14.2, on the master at one, are 62 % of the run between them. One slab of
 **That run's file failed coverage** (specification.md §6.2): 630 of 125,777
 overhang samples unbacked. 479 were on concave edges, which S1 did not yet take
 as ceiling points; 146 of the 151 on faces lay above strut tips dropped from
-kept nodes (S1), and 5 are unexplained. Both causes are fixed and verified on
-`test/support-gaps.step` (`support-gaps`, specification.md §6.1), which
-reproduces them in seconds; **the rehearsal itself has not been run since**.
+kept nodes, and 5 where the ceiling clips a support node's corner (S1). All three
+are fixed and verified on small parts (`support-gaps`, `support-clipped`,
+specification.md §6.1) that reproduce them in seconds; **the rehearsal itself has
+not been run since**.
 
 **Still to come:** the free-standing thickness gate; the overlap check and S6
 dispatched across the worker pool (specification.md §4.6's parallelisation),

@@ -46,6 +46,7 @@ from OCP.gp import gp_Pnt
 
 from .. import occ
 from ..errors import ProcessingError
+from ..runlog import box_text
 
 
 class CutRefused(ProcessingError):
@@ -90,7 +91,9 @@ class Pockets:
     fills: list = field(default_factory=list)
     stats: dict = field(default_factory=dict)
     unsearched: list = field(default_factory=list)
-    """One line per slab the kernel would not cut, for the warning."""
+    """One line per region the kernel would not cut, with its coordinates."""
+    refusals: list = field(default_factory=list)
+    """The kernel's reason for each of them, for the log."""
 
 
 def _solid_mesh(shape, deflection: float = WITNESS_DEFLECTION):
@@ -317,8 +320,8 @@ SLAB_RETRY_SPLITS = 2
 again. Measured on the rehearsal part: one slab of 106 was refused by both
 routes, the combined cut and the supports alone, at every fuzzy value."""
 
-UNSEARCHED_WARNING = "WARNING: the pocket search could not cut"
-"""Starts the console note naming the slabs left unsearched."""
+UNSEARCHED_WARNING = "enclosed pockets may remain unfilled"
+"""Title of the warning naming the regions left unsearched."""
 
 def _slab_count(junctions: int, extent: float, reach: float) -> int:
     """Slabs to cut an envelope ``extent`` long into: one per
@@ -614,7 +617,8 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
             spans, got = nspans, keep
         return spans, got
 
-    unsearched, searched = [], {}
+    unsearched, refusals, searched = [], [], {}
+    body_lo, body_hi = body_mesh.verts.min(axis=0), body_mesh.verts.max(axis=0)
 
     def pockets(tools: list) -> list:
         spans, got = slabs(tools)
@@ -622,9 +626,18 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
         # every piece beside it counts as reaching the envelope and nothing
         # it could belong to is judged sealed.
         refused = [k for k, g in enumerate(got) if isinstance(g, str)]
+        run = []
+        for k in refused + [None]:
+            # Neighbours left refused by a split read as one region.
+            if run and (k is None or k != run[-1] + 1):
+                rlo, rhi = box((spans[run[0]][0], spans[run[-1]][1]))
+                rlo, rhi = np.maximum(rlo, body_lo), np.minimum(rhi, body_hi)
+                unsearched.append(box_text(rlo, rhi))
+                refusals.append(f"{unsearched[-1]}: {got[run[0]]}")
+                run = []
+            if k is not None:
+                run.append(k)
         for k in refused:
-            unsearched.append(
-                f"  {'xyz'[ax]} {spans[k][0]:.3f} to {spans[k][1]:.3f} mm: {got[k]}")
             got[k] = _Slab([], [], [], [], [])
         for k in refused:
             for s, c in ((k - 1, spans[k][0]), (k + 1, spans[k][1])):
@@ -688,7 +701,7 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
                            "support_pocket_slabs_unsearched": len(unsearched),
                            "support_pocket_volume_mm3":
                                round(sum(occ.volume(f) for f in fills), 4)},
-                   unsearched)
+                   unsearched, refusals)
 
 
 def _compound(shapes: list):

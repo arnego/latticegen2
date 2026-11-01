@@ -420,3 +420,34 @@ def test_thread_budget_is_bounded_and_never_raises():
         assert OSD_ThreadPool.DefaultPool_s().NbDefaultThreadsToLaunch() == 1
     finally:
         set_thread_budget(os.cpu_count() or 1)
+
+
+def test_interface_warnings_reach_the_filter_and_name_a_place(tmp_path):
+    """Each disagreement is one message the window's filter passes, with the
+    junction's position in the part rather than only its lattice index."""
+    from types import SimpleNamespace
+
+    from latticegen2.gui import model
+    from latticegen2.lattice import lattice_params
+    from latticegen2.lattice import node as lattice_node
+    from latticegen2.pipeline import _log_interfaces
+    from latticegen2.runlog import RunLog, point_text
+
+    said = []
+
+    class Recorder(RunLog):
+        def line(self, msg, console=None):
+            said.append((msg, console))
+
+    lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+    node = (1, 2, 3)
+    _log_interfaces(Recorder(str(tmp_path / "run.log")), lp, SimpleNamespace(
+        n_pairs=7, unpaired=[(node, 0)], mismatched=[(node, 1, 1.0, 0.5)],
+        unweldable=[(node, 2)]))
+    state = model.RunState()
+    for msg, _console in said:
+        state.apply({"ev": "log", "msg": msg, "console": True})
+    warnings = state.visible_lines(verbose=False)
+    assert len(warnings) == 3 and len(said) == 4
+    assert all(point_text(lattice_node(lp, node)) in w for w in warnings)
+    assert all(console is True for msg, console in said if msg in warnings)

@@ -100,6 +100,30 @@ def test_a_negative_cut_remainder_is_not_believed(outer, tmp_path, monkeypatch):
     assert result["unmeasured"][0]["containment"]["contained"] is True
 
 
+def test_a_bare_sliver_is_told_from_a_bare_ceiling(tmp_path):
+    """Coverage of a flat roof: material stopping just short of it is a sliver
+    and does not fail, stopping well short does, and a sample that probes out of
+    the body is never counted against the output."""
+    body = box(20.0, 20.0, 20.0)
+    body_path = tmp_path / "body.step"
+    occ.write_step(body, str(body_path), "body")
+
+    def coverage(gap):
+        cand = tmp_path / f"cand-{gap}.step"
+        occ.write_step(box(20.0 - gap, 20.0, 20.0), str(cand), "cand")
+        return vg.overhang_coverage(str(cand), str(body_path), 10.0, 1.5, (0.0, 0.0, 0.0), 1.5,
+                                    pitch=0.5)
+
+    whole = coverage(0.0)
+    assert whole["uncovered"] == 0 and whole["slivers"] == 0
+
+    near = coverage(vg.COVERAGE_SLIVER_TOL / 2.0)
+    assert near["uncovered"] == 0 and near["slivers"] > 0
+
+    far = coverage(2.0)
+    assert far["uncovered"] > 0
+
+
 def test_containment_is_boolean_free_and_agrees_with_construction(outer):
     """`surface_points_outside` is the arbiter, so it has to be right on its own."""
     inside = vg.surface_points_outside(box(10.0, 10.0, 10.0, at=(20.0, 20.0, 20.0)), outer)

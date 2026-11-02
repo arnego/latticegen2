@@ -294,6 +294,40 @@ Every non-zero exit prints one human-readable reason line.
 
 ---
 
+## Output warnings reference
+
+These are the situations a run can detect and warn about. **Each one is a
+possibility rather than something to expect**: most runs print none of them. A
+warning means the run finished or carried on, but what it wrote may be wrong,
+incomplete or degraded in a way you should look at. A problem it cannot
+tolerate stops the run with a non-zero exit code instead, and a repair that left
+the output as intended is logged as a `note:`, not a warning.
+
+A warning always reaches the console and the `.log`, whatever `-v` says. In the
+window it opens the text pane, with **verbose** ticked or not. Each has the same
+form: `WARNING: `, its title, what went wrong, what it may cause, then one line
+per place to inspect, in the input's coordinate system and in millimetres. At
+most 20 places are listed, followed by how many more there are.
+
+| Warning | What was detected | What it may cause | Where it points |
+|---|---|---|---|
+| **faces of the input do not meet** | Two faces sharing an edge of the input body sit apart by more than a thousandth of `t`, held together only by the file's own tolerance. | The trim cuts that region into features smaller than the gap, and the run may fail at the export-truth check. Fix the input model there if it does. | The worst gap |
+| **lattice junctions left out** | No intersection could keep a junction inside the input body, so it was discarded. | A gap in the lattice at each one. The lattice still stays within the boundary. | Each junction |
+| **trims resting on their own tolerance** | Junctions in an output body needed a tolerance comparable to the feature they bound. | The body may not survive being written to STEP. The export-truth check refuses the run if so, so this can also appear on a run that then succeeds. | Each body's worst face |
+| **struts closed off where they should join** | A cap faces a junction that produced no matching cap. | The output stays watertight, but the lattice is not joined across that cap and a strut may end there. | Each junction |
+| **struts not joined where two trims disagree** | The two sides of a cap present regions that differ. | An extra solid in the output rather than a hole, with the lattice not joined there. | Each junction |
+| **struts not welded where two trims disagree** | The holes on the two sides of a cap do not correspond edge for edge. | An extra solid in the output rather than a hole, with the lattice not joined there. | Each junction |
+| **boundary faces left invalid** | A sewn boundary face is invalid, and correcting its vertex tolerances does not repair it. | The validity check refuses the run (exit 4) unless a later repair clears the face. | Each face |
+| **solids exported without merging their faces** | The geometry kernel declined to unify a solid, or unifying it gave an invalid result, so the solid as built was kept. | The geometry is unchanged, but the solid carries more faces, making the file larger and slower to open. | Each solid's bounding box |
+| **support pieces dropped** *(`--support`)* | The geometry kernel could not trim a piece of support to the input at any setting, so it was left out. | That support volume is missing, and the overhang it backed may print unsupported. | Each piece |
+| **enclosed pockets may remain unfilled** *(`--support`)* | The geometry kernel could not cut a region of the support envelope, so it was not searched for pockets. | Powder may be trapped in enclosed pockets there. | Each region's x, y and z range |
+| **ceiling left without support** *(`--support`)* | Points of an inner overhang are backed by nothing in the output. | Those overhangs may print unsupported. | Each point |
+
+docs/algorithm.md §10 gives the form and links each warning to the section of
+the algorithm it comes from.
+
+---
+
 ## How it works
 
 Full detail is in [docs/algorithm.md](docs/algorithm.md); the measurements behind

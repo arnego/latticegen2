@@ -301,6 +301,7 @@ def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
 
     local = _LocalLattice(lp, np.asarray(kept_nodes), lost)
     boxes = _boxes(supports)
+    lattice_boxes = None
     n = len(supports)
     for i, s in enumerate(supports):
         if report is not None:
@@ -315,8 +316,10 @@ def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
             # A junction instance is the template, untrimmed, so a reading here
             # is confirmed against the lattice solids themselves before it is
             # believed.
+            if lattice_boxes is None:
+                lattice_boxes = _boxes(lattice)
             common = _common_solids(
-                s, [l for l in lattice if _touch(boxes[i], _boxes([l])[0])])
+                s, [l for l, lb in zip(lattice, lattice_boxes) if _touch(boxes[i], lb)])
             real = float(sum(occ.volume(c) for c in common))
             if real > SUPPORT_OVERLAP_TOL:
                 raise ProcessingError(

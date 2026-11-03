@@ -92,6 +92,12 @@ class Gates:
         a, b, c = self.body_mesh.triangle_points
         return float(_point_triangle_dist(p, a[cand], b[cand], c[cand]).min())
 
+    def outside(self, solid) -> float:
+        """How far ``solid``'s surface reaches outside the body, by the probe;
+        ``0.0`` within its margin."""
+        pts = np.vstack([p for _f, p, _u, _t in _mesh_of(solid, GATE_DEFLECTION)])
+        return self.probe.worst_outside(pts)
+
     def check(self, solid) -> tuple[list, dict]:
         """``(failures, stats)`` of ``solid``: validity, material outside the
         body, and free faces overhanging past the rod angle."""

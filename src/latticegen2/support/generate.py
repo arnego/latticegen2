@@ -49,6 +49,15 @@ UNBACKED_WARNING = "ceiling left without support"
 """Title of the warning naming ceiling points nothing in the output backs."""
 
 
+def _unbacked_warning(bare: np.ndarray, total: int) -> str:
+    return warning_text(
+        UNBACKED_WARNING,
+        f"{len(bare)} of {total} ceiling point(s) are backed by nothing in the output",
+        "Those overhangs may print unsupported",
+        [point_text(p) for p in bare],
+    )
+
+
 def _touching(a, b, gap: float = 1e-3) -> bool:
     return bool(np.all(a[0] <= b[1] + gap) and np.all(b[0] <= a[1] + gap))
 
@@ -134,7 +143,11 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
         bodies, stats["support_lost_pieces_absorbed"] = absorb_lost(bodies, lost,
                                                                     shallow[~covered])
     if not bodies:
+        # Nothing to search pockets in or to ask again, but what the grid left
+        # bare -- every piece dropped, say -- is still reported.
         stats["support_bodies"] = 0
+        if not covered.all():
+            lines.append(_unbacked_warning(got.points[~covered], len(covered)))
         return [], stats, lines
 
     # S7 per group of touching bodies: free space the supports seal off is
@@ -192,14 +205,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                                                 * got.normals[todo]))
     stats["support_ceiling_points_uncovered"] = int((~covered).sum())
     if not covered.all():
-        bare = got.points[~covered]
-        lines.append(warning_text(
-            UNBACKED_WARNING,
-            f"{len(bare)} of {len(covered)} ceiling point(s) are backed by nothing in "
-            f"the output",
-            "Those overhangs may print unsupported",
-            [point_text(p) for p in bare],
-        ))
+        lines.append(_unbacked_warning(got.points[~covered], len(covered)))
     lines.append(
         f"support: {len(out)} bod(y/ies), {sum(occ.volume(s) for s in out):.3f} mm^3, "
         f"{len(fills)} sealed pocket(s) filled; "

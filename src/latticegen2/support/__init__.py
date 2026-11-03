@@ -118,7 +118,10 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
     if len(samples) == 0:
         rl.always(NO_OVERHANG_NOTE)
     elif not result.supports:
-        rl.always(LATTICE_BACKS_ALL_NOTE)
+        # Only when it is true: with every piece dropped, the generator's own
+        # warnings say what is bare, and this note would contradict them.
+        if not result.stats.get("support_ceiling_points_uncovered"):
+            rl.always(LATTICE_BACKS_ALL_NOTE)
     else:
         rl.line(
             f"supports: {len(result.supports)} separate bod(y/ies), "

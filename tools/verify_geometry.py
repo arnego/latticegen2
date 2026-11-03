@@ -1038,7 +1038,9 @@ def supports_disjoint(candidate_path: str, n_supports: int) -> dict:
                 continue
             pairs += 1
             v = _common(s, o)
-            if not v <= worst:                     # NaN counts as the worst
+            # NaN counts as the worst, and stays the worst: a failed boolean is
+            # an unverified pair, which no later reading can vouch for.
+            if worst == worst and not v <= worst:
                 worst = v
                 where = np.round((sb[i][0] + sb[i][1]) / 2.0, 3).tolist()
     return {"pairs": pairs, "worst_mm3": worst, "where": where}

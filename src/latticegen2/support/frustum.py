@@ -403,21 +403,23 @@ def _unified(s, gates):
     """``s`` with its coplanar faces merged -- unless unification moved anything.
     Measured on the cylinder: a valid unified solid with material 2.25 mm
     outside the body."""
-    from .build import GATE_DEFLECTION, _mesh_of
-
     u = occ.unify_same_domain(s)
     if not occ.is_valid(u, parallel=False):
         return s
     if abs(occ.volume(u) - occ.volume(s)) > 1e-6 * occ.volume(s):
         return s
-    pts = np.vstack([p for _f, p, _u, _t in _mesh_of(u, GATE_DEFLECTION)])
-    return u if gates.probe.worst_outside(pts) == 0.0 else s
+    return u if gates.outside(u) == 0.0 else s
 
 
-def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True):
+def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True, refused=None):
     """``(solids, lines, estimate)``: ``piece`` intersected with the body,
-    checked; ``solids`` is ``None`` when no rung passed. ``estimate`` is the
-    sampled volume of ``piece`` inside the body, mm^3.
+    checked; ``solids`` is ``None`` when no rung passed. ``estimate`` is
+    ``(volume, standard error)``, the sampled volume of ``piece`` inside the
+    body, mm^3.
+
+    ``refused`` is the ``estimate`` of a ``full=False`` call already refused on
+    this same piece: it is reused, and the fuzzy-0 rung that call ran is not
+    run again.
 
     The full ladder runs the fuzzy values on the piece as built, then again on
     the piece as a STEP round trip gives it back: measured on the cylinder at
@@ -433,10 +435,12 @@ def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True):
     from .build import FUZZY_LADDER, _boolean
 
     lines = []
-    est, sig = _estimate(piece, gates.inside_body)
+    est, sig = refused if refused is not None else _estimate(piece, gates.inside_body)
     if est < 3.0 * sig:
-        return [], [f"  {tag}: no material inside the body by sampling; dropped"], est
+        return [], [f"  {tag}: no material inside the body by sampling; dropped"], (est, sig)
     rungs = [(piece, f) for f in (FUZZY_LADDER if full else FUZZY_LADDER[:1])]
+    if refused is not None:
+        rungs = rungs[1:]
     if full:
         path = os.path.join(tmpdir, f"support-{tag}.step")
         occ.write_step(piece, path, "support-piece")
@@ -463,8 +467,8 @@ def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True):
         if why:
             lines.append(f"  {tag}, {rung}: rejected, {' | '.join(why)}")
             continue
-        return sol, lines, est
-    return None, lines, est
+        return sol, lines, (est, sig)
+    return None, lines, (est, sig)
 
 
 def _split(piece, g: _Grid):
@@ -836,7 +840,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
                 return got, trim_lines
             halves = _split(piece, g)
             if halves is None:
-                got, more, est = _trim(piece, body, gates, tmpdir, tag)
+                got, more, est = _trim(piece, body, gates, tmpdir, tag, refused=est)
                 trim_lines += more
                 if got is not None:
                     return got, trim_lines
@@ -851,7 +855,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
             # Through its tessellation, not the exact classifier: a figure for a
             # report, and on a 10,000-face piece the classifier would take hours.
             held = _tessellated_inside(piece)(probes) & gates.inside_body(probes)
-            dropped.append((tag, where, est, held))
+            dropped.append((tag, where, est[0], held))
             trim_lines.append(f"  {tag}: no trim passed and no split is left; dropped")
             return [], trim_lines
         from .join import join
@@ -893,10 +897,10 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
         covered &= ~held
     notes = []
     if dropped:
+        # Every point a dropped piece held is uncovered by now, just above.
         lost = np.zeros(len(need), dtype=bool)
         for _tag, _where, _est, held in dropped:
             lost |= held
-        lost &= ~covered
         notes.append(warning_text(
             DROPPED_WARNING,
             f"the geometry kernel could not trim {len(dropped)} piece(s) of support to "
@@ -905,7 +909,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
             f"{sum(d[2] for d in dropped):.1f} mm^3 of support is missing, and "
             f"{int(lost.sum())} ceiling point(s) may print unsupported",
             [f"{tag} near {point_text(where)}: {est:.1f} mm^3, "
-             f"{int((held & ~covered).sum())} ceiling point(s)"
+             f"{int(held.sum())} ceiling point(s)"
              for tag, where, est, held in dropped],
         ))
     stats.update({"support_debris_solids": len(debris),

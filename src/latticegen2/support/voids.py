@@ -181,8 +181,12 @@ def witness(piece) -> np.ndarray | None:
     cands = cands[PointInside(m)(cands)]
     if not len(cands):
         return None
+    # Depth is measured for at most 200 of them, spread over all candidates so
+    # that every offset and every part of the surface takes part.
+    if len(cands) > 200:
+        cands = cands[np.linspace(0, len(cands) - 1, 200).astype(int)]
     A, B, C = m.triangle_points
-    depth = np.array([_point_triangle_dist(p, A, B, C).min() for p in cands[:200]])
+    depth = np.array([_point_triangle_dist(p, A, B, C).min() for p in cands])
     return cands[int(np.argmax(depth))]
 
 

@@ -270,7 +270,7 @@ def test_a_body_no_trim_passes_is_trimmed_in_halves_and_joined_again(
     def first_refused(piece, *args, **kw):
         if not refused:
             refused.append(args[-1])
-            return None, ["refused"], 0.0
+            return None, ["refused"], (0.0, 0.0)
         return real(piece, *args, **kw)
 
     monkeypatch.setattr(frustum, "_trim", first_refused)
@@ -380,7 +380,7 @@ def test_a_piece_no_trim_produces_is_dropped_and_reported(chamber, monkeypatch, 
 
     def refuse_first_body(piece, *args, **kw):
         if args[-1].startswith("body-0"):
-            return None, ["refused"], 123.0
+            return None, ["refused"], (123.0, 1.0)
         return real(piece, *args, **kw)
 
     monkeypatch.setattr(frustum, "_trim", refuse_first_body)

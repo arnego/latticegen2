@@ -140,6 +140,50 @@ def test_the_repair_leaves_no_contact_it_could_fill(seed):
     assert _remaining(got, L) == 0
 
 
+@pytest.mark.parametrize("seed", range(6))
+def test_contacts_are_what_the_repair_leaves(seed):
+    from latticegen2.support.frustum import _contacts, make_manifold
+
+    rng = np.random.default_rng(seed)
+    S = rng.random((7, 6, 5)) < 0.3
+    L = (rng.random(S.shape) < 0.3) & ~S
+    got, _filled, stuck = make_manifold(S, L)
+    assert (stuck > 0) == bool(_contacts(got))
+    for nodes, upper in _contacts(got):
+        assert got[tuple(upper)] and any(tuple(n) == tuple(upper) for n in nodes.tolist())
+
+
+def _stuck_pair():
+    """A diagonal pair with rod nodes on both of the other two sides."""
+    S = np.zeros((2, 2, 1), dtype=bool)
+    L = np.zeros_like(S)
+    S[0, 0, 0] = S[1, 1, 0] = True
+    L[1, 0, 0] = L[0, 1, 0] = True
+    return S, L
+
+
+def test_a_contact_beside_a_rod_node_the_body_does_not_reach_is_filled(monkeypatch):
+    """Three such contacts made the rehearsal part's 58,000 mm3 support body
+    invalid, so that no trim and no split could take it."""
+    from latticegen2.support import frustum
+
+    monkeypatch.setattr(frustum, "_holds_kept", lambda *a: False)
+    S, L = _stuck_pair()
+    got, filled, removed = frustum._resolve_contacts(S, L, None, None, None, None, None)
+    assert removed == 0 and filled >= 1 and got[0, 0, 0] and got[1, 1, 0]
+    assert not frustum._contacts(got)
+
+
+def test_a_contact_between_real_rods_loses_its_upper_node(monkeypatch):
+    from latticegen2.support import frustum
+
+    monkeypatch.setattr(frustum, "_holds_kept", lambda *a: True)
+    S, L = _stuck_pair()
+    got, _filled, removed = frustum._resolve_contacts(S, L, None, None, None, None, None)
+    assert removed == 1 and got[0, 0, 0] and not got[1, 1, 0] and not (got & L).any()
+    assert not frustum._contacts(got)
+
+
 # --- the fine grid ------------------------------------------------------------------
 
 
@@ -414,10 +458,62 @@ def test_a_fine_node_is_freed_only_if_no_kept_lattice_is_in_it():
     local = _LocalLattice(lp, np.zeros((1, 3), dtype=np.int64), [lost])
     L0 = np.ones(tuple(len(c) for c in centres), dtype=bool)
 
-    L = _free_of_lattice(g, coords, local, lambda P: np.ones(len(P), dtype=bool), L0)
+    L = _free_of_lattice(g, coords, local, lambda P: np.ones(len(P), dtype=bool),
+                         _box((-50.0, -50.0, -50.0), (50.0, 50.0, 50.0)), L0)
 
     assert L[inner], "kept lattice remains in the node the wall crosses"
     assert not L[outer], "nothing of the lattice is left in the node beyond it"
+
+
+@pytest.mark.parametrize("wedge", [True, False])
+def test_a_wedge_of_kept_lattice_between_the_samples_keeps_its_node(wedge):
+    """A node the samples call free can still hold kept lattice, across a wall from
+    the lost tip: on the rehearsal part a 0.003 mm3 wedge became an overlap."""
+    from latticegen2 import occ
+    from latticegen2.support.assemble import _LocalLattice
+    from latticegen2.support.frustum import FREE_SAMPLES, _Grid, _holds_kept, _planes, _staircase
+
+    lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+    g = _Grid(lp, 2)
+    coords = [_planes(g, -2, 4) for _ in range(3)]
+    centres = [(c[:-1] + c[1:]) / 2.0 for c in coords]
+    C = np.stack(np.meshgrid(*centres, indexing="ij"), -1)
+    on_axis = (np.abs(C[..., 1]) < 1e-9) & (np.abs(C[..., 2]) < 1e-9) & (C[..., 0] > lp.t)
+    node = tuple(np.argwhere(on_axis)[np.argsort(C[on_axis][:, 0])][0])
+    lo = np.array([coords[a][node[a]] for a in range(3)])
+    hi = np.array([coords[a][node[a] + 1] for a in range(3)])
+    side = 0.4 * (hi - lo).min() / FREE_SAMPLES     # short of the first sample
+    wall = lo[0] + 0.3 * (hi - lo)[0]
+
+    def box(a, b):
+        cube = [np.array([a[k], b[k]]) for k in range(3)]
+        return _staircase(np.ones((1, 1, 1), dtype=bool), cube, g)[0]
+
+    tip = box([wall, lo[1] - 1.0, lo[2] - 1.0], [hi[0] + 1.0, hi[1] + 1.0, hi[2] + 1.0])
+    chip = box(lo, lo + side)
+    body = occ.compound([tip, chip]) if wedge else tip
+    local = _LocalLattice(lp, np.zeros((1, 3), dtype=np.int64), [tip])
+
+    def in_body(P):
+        return g.cube(P)[:, 0] >= wall
+
+    assert _holds_kept(g, coords, local, in_body, body, node) is wedge
+
+
+def test_an_overlap_that_is_a_lost_piece_is_not_one():
+    from latticegen2.support.assemble import _LocalLattice
+    from latticegen2.support.frustum import _Grid, _staircase
+
+    lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+    g = _Grid(lp, 2)
+
+    def box(a, b):
+        return _staircase(np.ones((1, 1, 1), dtype=bool),
+                          [np.array([a, b]) for _ in range(3)], g)[0]
+
+    local = _LocalLattice(lp, np.zeros((1, 3), dtype=np.int64), [box(0.0, 1.0)])
+    assert local.is_lost(box(0.25, 0.75))
+    assert not local.is_lost(box(2.0, 2.5))
 
 
 def test_a_keel_is_supported_though_no_face_of_it_is_ceiling():

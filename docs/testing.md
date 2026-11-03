@@ -62,7 +62,7 @@ and applies every applicable §6.2 check. Scenarios are independent — one fail
 scenario does not prevent the others from running — and the exit code reflects the
 run as a whole. `--only smoke-fast,invalid-input` restricts the set.
 
-`rehearsal-support` is **opt-in**: it is tens of minutes, so a plain
+`rehearsal-support` is **opt-in**: it is about five hours with its checks, so a plain
 `python tools/e2e.py` leaves it out and it runs only when named with `--only`.
 `--keep <dir>` writes a run's output, log and (on failure) temp folder into a
 folder of your choosing instead of a temporary one, which is what makes a

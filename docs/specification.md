@@ -185,8 +185,8 @@ becomes `Stop!`, and two bars appear:
   supported run goes through three more stages — `overhang`, `support` and
   `pockets`, between `simplify` and `validate` — and each gets a band of its
   own. The plain layout comes from the plain run of the 2026-10-11 controlled
-  pair in docs/profiling-reports.md, the supported layout from the 2026-10-31
-  `rehearsal-support` run, every stage of it; there `pockets` alone is 62 % of
+  pair in docs/profiling-reports.md, the supported layout from the 2026-11-02
+  `rehearsal-support` run, every stage of it; there `pockets` alone is 61 % of
   the bar. Both are computed once when the window starts. A run announces its stages when it
   begins, and that list is what selects the layout;
 * the **second** bar shows work within the stage — `boundary trim: 9,776 /
@@ -518,7 +518,7 @@ no `SpiralTest.step`.
 | support-clipped | -i test/support-clipped-{cone,cylinder}.step -cc 7 -t 1.4 --cores 4 --orient 180 0 0 --support --support-thickness 1 | valid STEP through every §6.2 check on two small cuts of `TD_HX_rehearsal_test.step`, kept in its coordinates, where a ceiling just past the bar clips support nodes no refined mesh vertex lands in. Coverage is also asked at 0.1 mm, since 0.5 mm can step over such a sliver. Before the fix: 16 and 481 samples bare at 0.1 mm. **Measured: 13 s and 21 s; none bare, 1 sliver within 0.05 mm** beside the discarded chips, 11 samples on a rim. |
 | support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 142 s**, one support body, 12,524 of 12,524 overhang samples backed. |
 | support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 353 s**, three support bodies, 33,065 of 33,065 overhang samples backed, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
-| rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Measured 2026-10-31: 1 h 40 m, and coverage failed** — 630 of 125,777 overhang samples unbacked. The causes are fixed and verified on `support-gaps`; **not re-run since** (§10). Otherwise valid, closed, manifold, inside the body and self-supporting; the two harness defects that run exposed are fixed (docs/testing.md). **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+| rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Measured 2026-10-31: 1 h 40 m, and coverage failed** — 630 of 125,777 overhang samples unbacked. The causes are fixed and verified on `support-gaps`. **Re-run 2026-11-02: failed at exit 4 after 8 h 22 m**, a support body overlapping the lattice by 1.475e-02 mm³; no file written. **Run again 2026-11-02 after those fixes: passes every §6.2 check. Measured: 2 h 08 m**, 4 h 56 m with the harness's checks; 27 support bodies of 40,136 mm³, 125,777 of 125,777 overhang samples backed, no overlap, 3 pocket regions left unsearched and reported. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
 
@@ -617,20 +617,14 @@ diagnosis. Remove an item once it's fixed and verified.*
 
 * **Finish the print support generator** (§4.6, docs/algorithm.md §14.3–§14.4).
   The frustum algorithm is implemented on branch
-  `custom-designed-support-feature`; `support-tilted` and `support-cylinder`
-  pass, and `gui/weights.py` holds the stage times of `rehearsal-support`
-  (1 h 40 m, 2026-10-31). **That rehearsal failed coverage, and both causes are
-  fixed but not yet proven at scale:** concave edges were never ceiling points,
-  and strut tips dropped from kept nodes read as lattice (docs/algorithm.md
-  §14.3 S1). The last 5 of its 151 face misses were ceiling clipping a support
-  node's corner, also fixed. `support-gaps` and `support-clipped` reproduce and
-  verify all three; re-running `rehearsal-support` (about 5 h with its checks, on
-  the user's command) is what remains, and will change the support bodies, so
-  `gui/weights.py` and docs/profiling-reports.md may want it too. What else
-  remains: the overlap check of
-  docs/algorithm.md §14.2 dispatched across the worker pool — ~23 min at one
-  core on the rehearsal, its largest serial piece — and the trims likewise if
-  a measurement shows more than 5 %; and the free-standing thickness gate.
+  `custom-designed-support-feature`; every support scenario passes, and
+  `rehearsal-support` passes at production scale since 2026-11-02 (2 h 08 m;
+  docs/algorithm.md §14.4), its stage times in `gui/weights.py`. What remains:
+  the overlap check of docs/algorithm.md §14.2 dispatched across the worker
+  pool — ~35 min at one core on that run, its largest serial piece — and the
+  trims likewise if a measurement shows more than 5 %; the free-standing
+  thickness gate; and the 3 pocket regions that run left unsearched, where the
+  kernel refused every cut, which may hold trapped powder.
   Golden samples for the three support scenarios wait for an inspected output.
 * **The window has not been looked at on a screen in this session.** Its widget
   states and the orientation view's drawing were checked programmatically (the

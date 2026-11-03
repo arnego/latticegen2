@@ -37,7 +37,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
 from OCP.TopoDS import TopoDS
+from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
 
 from .. import occ
 from ..errors import ProcessingError
@@ -60,7 +62,13 @@ diagonal, so that a corner exactly on a rod face reads as inside the rod."""
 
 FREE_SAMPLES = 6
 """Points per axis a fine support node near a lost junction piece is sampled at,
-to ask whether any kept lattice is in it."""
+to ask whether any kept lattice is in it. A point in kept lattice settles it;
+none settles nothing, and the node is then cut against the body."""
+
+KEPT_MIN_VOLUME = 1e-8
+"""mm³. A solid of a fine support node inside the body that is not lost counts as
+kept lattice from this size, well under ``assemble.SUPPORT_OVERLAP_TOL``, so that
+several in one body cannot add up to it."""
 
 PROBE_DEPTH = 0.1
 """mm. How far into the body a ceiling point is moved to ask what backs it:
@@ -498,7 +506,7 @@ def _split(piece, g: _Grid):
     return None
 
 
-def _free_of_lattice(g: _Grid, coords: list, local, in_body, L: np.ndarray) -> np.ndarray:
+def _free_of_lattice(g: _Grid, coords: list, local, in_body, body, L: np.ndarray) -> np.ndarray:
     """``L`` with the fine support nodes a lost junction piece leaves empty taken
     out of it.
 
@@ -508,34 +516,135 @@ def _free_of_lattice(g: _Grid, coords: list, local, in_body, L: np.ndarray) -> n
     it stays bare."""
     if not local.lost:
         return L
+    from .build import GATE_DEFLECTION, _mesh_of
+
     n = len(coords[0]) - 1, len(coords[1]) - 1, len(coords[2]) - 1
-    lows = [np.array(c[:-1]) for c in coords]
-    highs = [np.array(c[1:]) for c in coords]
-    corners = [g.cube(np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
-                                for z in (lo[2], hi[2])])) for lo, hi in local.lost_boxes]
-    w = (np.arange(FREE_SAMPLES) + 0.5) / FREE_SAMPLES
-    W = np.stack(np.meshgrid(w, w, w, indexing="ij"), -1).reshape(-1, 3)
     L = L.copy()
     seen = set()
-    for c in corners:
-        rng = [(int(np.searchsorted(coords[k], c[:, k].min()) - 1),
-                int(np.searchsorted(coords[k], c[:, k].max()))) for k in range(3)]
+    for piece in local.lost:
+        # Read off the piece's own surface: its world box, turned into the
+        # lattice frame, is several times the piece. A node this misses stays
+        # lattice, which leaves it empty and never overlaps anything.
+        C = g.cube(np.vstack([p for _f, p, _u, _t in _mesh_of(piece, GATE_DEFLECTION)]))
+        rng = [(int(np.searchsorted(coords[k], C[:, k].min() - GATE_DEFLECTION) - 1),
+                int(np.searchsorted(coords[k], C[:, k].max() + GATE_DEFLECTION)))
+               for k in range(3)]
         for i in range(max(rng[0][0], 0), min(rng[0][1], n[0])):
             for j in range(max(rng[1][0], 0), min(rng[1][1], n[1])):
                 for k in range(max(rng[2][0], 0), min(rng[2][1], n[2])):
                     if (i, j, k) in seen:
                         continue
                     seen.add((i, j, k))
-                    lo = np.array([lows[0][i], lows[1][j], lows[2][k]])
-                    hi = np.array([highs[0][i], highs[1][j], highs[2][k]])
-                    Q = g.world(lo + W * (hi - lo))
-                    if not local.in_template(Q).any():
-                        continue
-                    real = local.contains(Q)
-                    if real.any():
-                        real[real] = in_body(Q[real])
-                    L[i, j, k] = bool(real.any())
+                    got = _holds_kept(g, coords, local, in_body, body, (i, j, k))
+                    if got is not None:
+                        L[i, j, k] = got
     return L
+
+
+def _holds_kept(g: _Grid, coords: list, local, in_body, body, node) -> "bool | None":
+    """Whether fine support node ``node`` holds kept lattice inside the body;
+    ``None`` when none of it lies in a junction.
+
+    Sampling can only say yes: a wedge of kept lattice slips between the samples,
+    and support there overlaps the lattice. Measured on the rehearsal part: 23 of
+    the 364 nodes the samples called free, wedges of 7e-05 to 2.4e-02 mm³. So a
+    no is settled exactly, by cutting the node with the body. Each solid that
+    leaves lies in one connected piece of the junction's trim, since all of a rod's
+    fine node is junction, and a piece is lost or kept whole, so one point inside
+    it decides. Where the kernel will not answer the node stays lattice: that
+    leaves it empty, and overlaps nothing."""
+    w = (np.arange(FREE_SAMPLES) + 0.5) / FREE_SAMPLES
+    W = np.stack(np.meshgrid(w, w, w, indexing="ij"), -1).reshape(-1, 3)
+    lo = np.array([coords[a][node[a]] for a in range(3)])
+    hi = np.array([coords[a][node[a] + 1] for a in range(3)])
+    Q = g.world(lo + W * (hi - lo))
+    Q = Q[local.in_template(Q)]
+    if not len(Q):
+        return None
+    Q = Q[in_body(Q)]
+    if len(Q) and local.any_kept(Q):
+        return True
+    cut = BRepAlgoAPI_Common(_node_box(g, lo, hi), body)
+    if not cut.IsDone():
+        return True
+    solids = occ.solids(cut.Shape())
+    if len(Q) and not solids:
+        return True
+    return any(occ.volume(s) >= KEPT_MIN_VOLUME and not local.is_lost(s) for s in solids)
+
+
+def _node_box(g: _Grid, lo: np.ndarray, hi: np.ndarray):
+    """The box ``[lo, hi]`` in cube coordinates, as a solid. The frame is
+    right-handed (`e0 x e1 = e2`), which is what the box's axes need."""
+    axes = gp_Ax2(gp_Pnt(*map(float, g.world(lo))), gp_Dir(*map(float, g.E[2])),
+                  gp_Dir(*map(float, g.E[0])))
+    d = hi - lo
+    return BRepPrimAPI_MakeBox(axes, float(d[0]), float(d[1]), float(d[2])).Shape()
+
+
+def _contacts(S: np.ndarray) -> list:
+    """``(nodes, upper)`` of every edge or corner contact left in ``S``: the
+    window of nodes it lies in, and the one of the pair nearest the ceiling."""
+    P = np.pad(S, 1)
+    out = []
+    for i, j in ((0, 1), (0, 2), (1, 2)):
+        ei = np.eye(3, dtype=np.int64)[i]
+        ej = np.eye(3, dtype=np.int64)[j]
+        A, B, C, D = P, _roll(P, ei), _roll(P, ej), _roll(P, ei + ej)
+        window = [np.zeros(3, dtype=np.int64), ei, ej, ei + ej]
+        out += [(c - 1, window, ei + ej) for c in np.argwhere(A & D & ~B & ~C)]
+        out += [(c - 1, window, ei) for c in np.argwhere(B & C & ~A & ~D)]
+    for s1 in (1, -1):
+        for s2 in (1, -1):
+            d = np.array((1, s1, s2))
+            window = [np.array((x, y, z)) for x in (0, 1) for y in (0, s1) for z in (0, s2)]
+            bad = P & _roll(P, d)
+            for o in window[1:-1]:
+                bad &= ~_roll(P, o)
+            upper = d if d.sum() > 0 else np.zeros(3, dtype=np.int64)
+            out += [(c - 1, window, upper) for c in np.argwhere(bad)]
+    return [(c + np.array(window), c + upper) for c, window, upper in out]
+
+
+def _resolve_contacts(S: np.ndarray, L: np.ndarray, coords: list, g: _Grid, local, in_body, body):
+    """``(S, filled, removed)``: ``S`` manifold on the fine grid beside the rods.
+
+    :func:`make_manifold` will not fill a node of ``L``, and not all of ``L`` is
+    material: a rod's node the body does not reach reads as lattice too, unless a
+    lost piece happened to bring :func:`_free_of_lattice` to it. Measured on the
+    rehearsal part: three contacts between such a node and one left standing,
+    which made the 58,000 mm³ body invalid, so that no trim and no split could
+    take it and it was dropped whole. So the nodes around a stuck contact are
+    asked. One with kept lattice on both sides is real, and cannot be filled: the
+    node of the pair nearest the ceiling goes, for the coverage count to report
+    anything that leaves bare."""
+    L = L.copy()
+    S, filled, stuck = make_manifold(S.copy(), L)
+    removed = 0
+    asked = set()
+    while stuck:
+        freed = False
+        found = _contacts(S)
+        for nodes, _upper in found:
+            for node in nodes:
+                t = tuple(int(x) for x in node)
+                if t in asked or min(t) < 0 or any(t[a] >= S.shape[a] for a in range(3)):
+                    continue
+                asked.add(t)
+                if L[t] and not _holds_kept(g, coords, local, in_body, body, t):
+                    L[t] = False
+                    freed = True
+        if not freed:
+            for _nodes, upper in found:
+                t = tuple(int(x) for x in upper)
+                if S[t]:
+                    S[t] = False
+                    L[t] = True
+                    asked.add(t)
+                    removed += 1
+        S, more, stuck = make_manifold(S, L)
+        filled += more
+    return S, filled, removed
 
 
 def _clip_to_node(tri: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
@@ -688,19 +797,21 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     S = U[own[:, 0], own[:, 1], own[:, 2]].reshape(rshape)
     L = np.concatenate([in_lattice(g.world(CC[i:i + 50_000]))
                         for i in range(0, len(CC), 50_000)]).reshape(rshape)
-    L = _free_of_lattice(g, coords, local, gates.inside_body, L)
+    L = _free_of_lattice(g, coords, local, gates.inside_body, body, L)
     S &= ~L
-    S, rod_filled, stuck = make_manifold(S, L)
+    S, rod_filled, rod_removed = _resolve_contacts(S, L, coords, g, local, gates.inside_body, body)
     stats.update({"support_nodes": int(U.sum()), "support_nodes_grown": grown,
-                  "support_nodes_joined": filled, "support_nodes_beside_rods": rod_filled})
+                  "support_nodes_joined": filled, "support_nodes_beside_rods": rod_filled,
+                  "support_nodes_removed_beside_rods": rod_removed})
     lines.append(
         f"support grid: m = {m}, pitch {g.q:.3f} mm; {len(need)} ceiling point(s), "
         f"{int(wall.sum())} anchored on the wall; {int(U.sum())} support node(s) "
         f"({grown} grown along the ceiling, {filled} joining an edge or corner contact), "
         f"{rod_filled} fine support node(s) filled beside the rods"
     )
-    if stuck:
-        lines.append(f"support grid: {stuck} contact(s) beside the rods could not be filled")
+    if rod_removed:
+        lines.append(f"support grid: {rod_removed} fine support node(s) removed at contacts "
+                     f"beside the rods that could not be filled")
 
     t1 = time.perf_counter()
     if report is not None:
@@ -737,7 +848,9 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
             # The kernel cannot trim it at any rung or size: dropped and
             # reported, as a junction no trim produces is (§7.2).
             where = np.round(np.asarray(occ.centroid(piece), dtype=float), 3).tolist()
-            held = exact_inside(piece, probes) & gates.inside_body(probes)
+            # Through its tessellation, not the exact classifier: a figure for a
+            # report, and on a 10,000-face piece the classifier would take hours.
+            held = _tessellated_inside(piece)(probes) & gates.inside_body(probes)
             dropped.append((tag, where, est, held))
             trim_lines.append(f"  {tag}: no trim passed and no split is left; dropped")
             return [], trim_lines

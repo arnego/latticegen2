@@ -101,16 +101,18 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
                 pockets_begin=pockets_begin,
             ))
         pockets_begin()
+        # Before the overlap check, which can fail the run: what the generator
+        # did is what a failure there has to be read against.
+        for line in result.lines:
+            rl.line(line)
+        for note in result.notes:
+            rl.always(note)
+        stats.update(result.stats)
         assembled = assemble.assemble(lattice, list(result.supports), lp,
                                       kept_nodes, report=rl.substage, lost=lost)
     finally:
         timer[0].__exit__(None, None, None)
 
-    for line in result.lines:
-        rl.line(line)
-    for note in result.notes:
-        rl.always(note)
-    stats.update(result.stats)
     stats.update(assembled.stats)
     stats["support_solids_generated"] = len(result.supports)
     if len(samples) == 0:

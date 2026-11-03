@@ -14,11 +14,12 @@ without — ``overhang``, ``support`` and ``pockets``, between ``simplify`` and
 :data:`SECONDS_PLAIN` is the run without ``--support`` of the 2026-10-11
 controlled pair. :data:`SECONDS_SUPPORT` is the ``rehearsal-support`` e2e
 scenario (docs/specification.md §6.1, ``--support-thickness 1``) of
-2026-10-31, every stage of it, with the frustum support generator
-(docs/algorithm.md §14.3): 1 h 40 m end to end, of which ``pockets`` -- the
+2026-11-02, every stage of it, with the frustum support generator
+(docs/algorithm.md §14.3): 2 h 08 m end to end, of which ``pockets`` -- the
 pocket search across the pool, then the overlap check on the master -- is
-62 %. Its lattice stages agree with the plain run's to within a few per cent
-except ``validate``, which checks the 28 support bodies too.
+61 % and ``support`` 15 %. Its lattice stages agree with the plain run's to
+within a few per cent except ``validate``, which checks the 27 support bodies
+too.
 
 **What these tables are not.** They are one part's shape, on one machine. A
 small part is boundary- and export-dominated — on ``80mm-test-ball``
@@ -27,7 +28,8 @@ little overhanging surface will run through the support stages almost at
 once. ``validate`` is dominated by the export-truth gate (docs/algorithm.md
 §9), which writes, re-reads and tessellates every output solid; at
 ``cc=5, t=1`` on this same part that gate alone is half an hour and
-``validate`` is the largest stage of the run, where here it is a sixth of it.
+``validate`` is the largest stage of the run, where here it is a quarter of
+the plain run and a fifteenth of the supported one.
 That is the accepted trade: a fixed weighting is monotone and never lies about
 what has finished, where a time-based estimate would sit at 100 % of a stage
 that had not ended. Read the bar as "how far through the work", never as an
@@ -61,21 +63,21 @@ SECONDS_PLAIN: dict[str, float] = {
 #: Wall-clock seconds per stage of a run **with** ``--support``.
 SECONDS_SUPPORT: dict[str, float] = {
     "template": 0.05,
-    "import": 1.2,
-    "tessellate": 2.4,
-    "classify": 14.3,
-    "boundary": 580.6,
-    "connect": 10.1,
-    "stitch": 260.1,
-    "instance": 13.3,
-    "assemble": 8.2,
-    "simplify": 237.9,
-    "overhang": 6.7,
-    "support": 490.0,
-    "pockets": 3743.1,
-    "validate": 528.1,
-    "export": 104.8,
-}  # 1 h 40 m 01 s end to end
+    "import": 1.6,
+    "tessellate": 2.3,
+    "classify": 14.1,
+    "boundary": 662.9,
+    "connect": 10.3,
+    "stitch": 272.1,
+    "instance": 13.8,
+    "assemble": 8.1,
+    "simplify": 240.9,
+    "overhang": 6.9,
+    "support": 1184.4,
+    "pockets": 4655.3,
+    "validate": 495.3,
+    "export": 105.3,
+}  # 2 h 08 m 01 s end to end
 
 
 def _permille(seconds: dict[str, float], stages: tuple) -> dict[str, int]:

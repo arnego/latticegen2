@@ -2668,10 +2668,24 @@ a lattice one — where it would fill `D` and `D` is a rod, it fills `A` below
 the pair instead. On the cylinder at `m = 2` that fills 186 fine support nodes and leaves
 no contact unresolved; the 69 edges become 0 and the touching holes vanish.
 
+A contact can still stick where a rod's fine node reads as lattice and the body
+does not reach it (`frustum._resolve_contacts`): on the rehearsal part three did,
+and the 58,000 mm³ body they lay in was invalid, so that no trim passed, each rung
+returning nothing, and no split could help. So the nodes round a stuck contact are
+asked as above and freed if they hold no kept lattice; one holding it on both
+sides cannot be filled, and the node of the pair nearest the ceiling is removed,
+for the coverage count to report anything that leaves bare.
+
 A fine node a lost tip passes through is freed for support only if no kept
-lattice is in it, sampled across the whole node, `FREE_SAMPLES` per axis, and not
-at its centre alone: a wall can cross one rod's fine node with the tip on one
-side and kept lattice on the other, and support there would overlap the lattice.
+lattice is in it, and not by its centre alone: a wall can cross one rod's fine
+node with the tip on one side and kept lattice on the other, and support there
+would overlap the lattice. Samples, `FREE_SAMPLES` per axis, can only say yes, a
+wedge of kept lattice slipping between them: on the rehearsal part 23 of the 364
+nodes they called free, 7e-05 to 2.4e-02 mm³, and one overlap. So a no is settled
+exactly (`frustum._holds_kept`): the node is cut with the body, and each solid
+left lies in one connected piece of a junction's trim, since all of a rod's fine
+node is junction, and is lost or kept whole, so one point inside it decides. 30 s
+on the rehearsal part. A cut the kernel refuses keeps the node as lattice.
 Such a node stays lattice, and the tip's share of it would stay empty, backed
 only if the supports around happened to seal it as a pocket. So a lost piece
 holding a ceiling point still bare after the trims joins the supports
@@ -2819,6 +2833,11 @@ coordinates regardless of `-v` (`generate.UNBACKED_WARNING`). It read 11 on
 faces**, and one that has any fails the run (exit 4): STEP carries such a body,
 and a CAD kernel downstream does not.
 
+**The overlap check ignores what is left of a lost piece.** An instance is the
+template less its lost pieces, a cut that can fail, so each solid an overlap
+reading finds is asked as in S4; only those not lost count, and only those are
+confirmed against the lattice solids (§14.2).
+
 **What a support owes the rest of the pipeline**, and what
 `tools/verify_geometry.py` asks of the written file (specification.md §6.2):
 
@@ -2888,8 +2907,40 @@ overhang samples unbacked. 479 were on concave edges, which S1 did not yet take
 as ceiling points; 146 of the 151 on faces lay above strut tips dropped from
 kept nodes, and 5 where the ceiling clips a support node's corner (S1). All three
 are fixed and verified on small parts (`support-gaps`, `support-clipped`,
-specification.md §6.1) that reproduce them in seconds; **the rehearsal itself has
-not been run since**.
+specification.md §6.1) that reproduce them in seconds.
+
+**The re-run of 2026-11-02 failed at exit 4 after 8 h 22 m**, before `validate`:
+a support body overlapped the lattice by 1.475e-02 mm³, and `support` had taken
+7 h 47 m against 490 s. Three edge contacts beside rod fine nodes the body does
+not reach had made the 58,000 mm³ body invalid, so no trim passed and it was
+dropped whole (S4); the hours are inferred, not measured, to be the exact
+classifier asked of that piece's ~10,700 faces, which a dropped piece no longer
+uses. The overlap was a wedge of kept lattice between the samples (S4), and that
+exact position was not reproduced on the old code.
+
+**Replaying the generator on that run's saved inputs**, with the worker pool, gives
+27 bodies, 40,137 mm³, all 225,770 ceiling points backed, no piece dropped, 26
+pockets filled, 3 regions of the envelope unsearched and reported, and no overlap
+in any body, in 3,873 s (ceiling 323, grid 295, staircase 61, trim 357, pockets
+2,673), with about 2,300 s more for the overlap check against junction instances,
+nearly all of it the 32,697 mm³ body. A replay reads kept nodes off the
+classification and has no lattice solids, `validate` or `export`.
+
+**The rehearsal run after those fixes, 2026-11-02, passes every check of
+specification.md §6.2** in 2 h 08 m: 27 support bodies of 40,136 mm³ beside
+331,441 mm³ of lattice, all 225,582 ceiling points backed, no piece dropped, 30
+pockets filled, and the harness finding all 125,777 overhang samples backed and
+no overlap. Three regions of the envelope were refused and reported (S7). Two
+support bodies are chips of 2.8e-03 and 1.0e-05 mm³, four faces each, valid and
+written faithfully.
+
+| stage | ceiling points | grid | staircase | trim | backing check | pocket search | overlap check |
+|---|---|---|---|---|---|---|---|
+| `support` 1,184 s, `pockets` 4,655 s | 339.1 s | 292.8 s | 62.4 s | 380.2 s | 1.1 s | 2,578.0 s | ~2,077 s |
+
+`support` grew 2.4× over the 2026-10-31 run, from the exact rod-node cuts (S4),
+the keel, tip and clipped-node ceiling points (S1) and their trims; `pockets` is
+61 % of the run. Resource figures are in docs/profiling-reports.md.
 
 **Still to come:** the free-standing thickness gate; the overlap check and S6
 dispatched across the worker pool (specification.md §4.6's parallelisation),

@@ -74,8 +74,17 @@ def check_supports(supports: list, lattice: list) -> None:
 
 
 def _common_volume(a, tools: list) -> float:
+    return float(sum(occ.volume(s) for s in _common_solids(a, tools)))
+
+
+def _overlap_at(solids: list) -> list:
+    """Where the largest of ``solids`` is, for the message naming an overlap."""
+    return np.round(occ.centroid(max(solids, key=occ.volume)), 3).tolist()
+
+
+def _common_solids(a, tools: list) -> list:
     if not tools:
-        return 0.0
+        return []
     algo = BRepAlgoAPI_Common()
     args = TopTools_ListOfShape()
     args.Append(a)
@@ -90,7 +99,7 @@ def _common_volume(a, tools: list) -> float:
             "Checking a support for overlap did not complete: the intersection "
             "failed (docs/algorithm.md §14.2)."
         )
-    return float(sum(occ.volume(s) for s in occ.solids(algo.Shape())))
+    return occ.solids(algo.Shape())
 
 
 def _boxes(solids):
@@ -140,6 +149,8 @@ class _LocalLattice:
         self.lost = list(lost)
         self.lost_boxes = [tuple(np.asarray(x, dtype=float) for x in occ.bounding_box(s))
                            for s in self.lost]
+        self._lost_lo = self._lost_hi = None
+        self._lost_cls = {}
         self._instances = {}
 
     def near(self, box) -> list:
@@ -187,16 +198,57 @@ class _LocalLattice:
         out = self.in_template(P)
         if not self.lost or not out.any():
             return out
-        for s, (lo, hi) in zip(self.lost, self.lost_boxes):
+        for j in self._lost_near(P[out]):
+            lo, hi = self.lost_boxes[j]
             at = np.nonzero(out & np.all((P >= lo - 1e-6) & (P <= hi + 1e-6), axis=1))[0]
-            if not len(at):
-                continue
-            cls = BRepClass3d_SolidClassifier(s)
             for i in at:
-                cls.Perform(gp_Pnt(*map(float, P[i])), 1e-7)
-                if cls.State() in (TopAbs_State.TopAbs_IN, TopAbs_State.TopAbs_ON):
+                if self._in_lost(j, P[i]):
                     out[i] = False
         return out
+
+    def any_kept(self, points) -> bool:
+        """Whether any of ``points``, all in a junction's template, is not in a
+        lost piece: :meth:`contains` for a caller that needs only the one answer,
+        so it stops at the first such point."""
+        P = np.asarray(points, dtype=float).reshape(-1, 3)
+        near = self._lost_near(P)
+        for p in P:
+            for j in near:
+                lo, hi = self.lost_boxes[j]
+                if np.all(p >= lo - 1e-6) and np.all(p <= hi + 1e-6) and self._in_lost(j, p):
+                    break
+            else:
+                return True
+        return False
+
+    def _lost_near(self, P: np.ndarray) -> np.ndarray:
+        """The lost pieces whose boxes meet the box of ``P``."""
+        if self._lost_lo is None:
+            self._lost_lo = np.array([b[0] for b in self.lost_boxes]).reshape(-1, 3)
+            self._lost_hi = np.array([b[1] for b in self.lost_boxes]).reshape(-1, 3)
+        if not len(P):
+            return np.zeros(0, dtype=np.int64)
+        return np.nonzero(np.all((self._lost_lo <= P.max(axis=0) + 1e-6)
+                                 & (self._lost_hi >= P.min(axis=0) - 1e-6), axis=1))[0]
+
+    def _in_lost(self, j: int, p: np.ndarray) -> bool:
+        cls = self._lost_cls.get(j)
+        if cls is None:
+            cls = self._lost_cls[j] = BRepClass3d_SolidClassifier(self.lost[j])
+        cls.Perform(gp_Pnt(*map(float, p)), 1e-7)
+        return cls.State() in (TopAbs_State.TopAbs_IN, TopAbs_State.TopAbs_ON)
+
+    def is_lost(self, solid) -> bool:
+        """Whether ``solid`` is lost material, for one connected solid inside a
+        junction's trim: it lies in one connected piece of that trim, and a piece
+        is lost or kept whole, so one point inside it decides. No such point reads
+        as kept, which fails towards refusing rather than shipping an overlap."""
+        from .voids import witness
+
+        w = witness(solid)
+        if w is None:
+            return False
+        return any(self._in_lost(int(j), w) for j in self._lost_near(w.reshape(1, 3)))
 
     def in_template(self, points) -> np.ndarray:
         """Which ``points`` lie in the junction instances' material, exactly.
@@ -253,17 +305,23 @@ def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
     for i, s in enumerate(supports):
         if report is not None:
             report("checking supports against the lattice", i, n)
-        overlap = _common_volume(s, local.near(boxes[i]))
+        # Cutting a lost piece out of an instance can fail, so what is left of
+        # one here is not an overlap: on the rehearsal part, two tips of 0.008
+        # and 0.002 mm³, which would send a 9,000-face support body to the
+        # dominant lattice solid for nothing.
+        overlap = float(sum(occ.volume(c) for c in _common_solids(s, local.near(boxes[i]))
+                            if not local.is_lost(c)))
         if overlap > SUPPORT_OVERLAP_TOL:
             # A junction instance is the template, untrimmed, so a reading here
             # is confirmed against the lattice solids themselves before it is
             # believed.
-            real = _common_volume(
+            common = _common_solids(
                 s, [l for l in lattice if _touch(boxes[i], _boxes([l])[0])])
+            real = float(sum(occ.volume(c) for c in common))
             if real > SUPPORT_OVERLAP_TOL:
                 raise ProcessingError(
                     f"A support body overlaps the lattice by {real:.3e} mm^3 near "
-                    f"{_where(boxes[i])}; supports must share faces with the "
+                    f"{_overlap_at(common)}; supports must share faces with the "
                     f"lattice, never volume (docs/algorithm.md §14.2)."
                 )
     pairs = 0
@@ -274,11 +332,12 @@ def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
             if not _touch(boxes[i], boxes[j]):
                 continue
             pairs += 1
-            overlap = _common_volume(supports[i], [supports[j]])
+            common = _common_solids(supports[i], [supports[j]])
+            overlap = float(sum(occ.volume(c) for c in common))
             if overlap > SUPPORT_OVERLAP_TOL:
                 raise ProcessingError(
                     f"Two support bodies overlap by {overlap:.3e} mm^3 near "
-                    f"{_where(boxes[i])}; neighbouring supports must share faces, "
+                    f"{_overlap_at(common)}; neighbouring supports must share faces, "
                     f"never volume (docs/algorithm.md §14.2)."
                 )
     if report is not None:

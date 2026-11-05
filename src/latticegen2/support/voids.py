@@ -2,21 +2,20 @@
 
 Powder must not be trapped. A **pocket** is a region of free space -- inside the
 body, outside the lattice and the supports -- that the supports have cut off
-from the free space it used to belong to. Every new pocket is bounded partly by
-support, and below the support that seals it, so it lies in the **support
-envelope**: one box per region, the cells' bounds inflated by ``t_s`` and swept
-down along ``-b`` to the body's lowest point. Inflated alone, the box reaches
-``t_s`` below the cells, and a cup 5 mm deep under a lid would touch its floor
-and never read as sealed.
+from the free space it used to belong to. Every pocket is bounded partly by
+support, so it is looked for in the **support envelope**: the box of a group of
+support bodies whose envelopes touch, inflated by ``t_s``. A pocket can reach
+past it -- the inside of a well a support puts a lid on -- and the envelope is
+then widened, where the supports split free space into pieces that each still
+reach its faces (:func:`find_pockets`).
 
-The free space is found by cutting, not by splitting: ``envelope ∩ body`` minus
-the lattice is the free space before the supports, and minus the cells as well
-is the free space after them, each a list of solids. The cells are disjoint by
-then (S6 runs first), so the second cut must remove exactly their volume; a
-split by the cells, tried first, lost volume where neighbouring cells share
-faces. Every free piece after the supports is placed by a **witness** point --
-asked of tessellations, not of the kernel (§7.2) -- in the piece of free space
-it came from, and a piece is a pocket when it was cut off:
+The free space is found by cutting: ``envelope ∩ body`` minus the lattice is the
+free space before the supports, and minus the supports as well is the free
+space after them, each a list of solids. The supports overlap nothing by then
+(S6 runs first), so the second cut must remove exactly their volume. Every free
+piece after the supports is placed by a **witness** point -- asked of
+tessellations, not of the kernel (§7.2) -- in the piece of free space it came
+from, and a piece is a pocket when it was cut off:
 
 * where that free space reaches the envelope's own faces, every piece that no
   longer does is cut off;
@@ -30,8 +29,9 @@ free face, it is self-supporting. With the fills in place no piece is cut off
 any more (gate G5) -- by construction, since each fill is a whole cut-off piece.
 
 The envelope is searched in **slabs** across the run's pool
-(:func:`find_pockets`): on the ball, three cuts by all 777 junctions in the
-envelope were 132 of the search's 157 s.
+(:func:`find_pockets`), since a cut's cost grows faster than the number of
+junctions it is given. A slab the kernel will not cut is split and searched
+again, and at last left open and reported.
 """
 
 from __future__ import annotations
@@ -277,28 +277,31 @@ def _free_one_by_one(region: list, tools: list, total: float):
     return None
 
 
-def _on_envelope(piece, lo: np.ndarray, hi: np.ndarray) -> bool:
-    """Whether any face of ``piece`` lies on one of the envelope box's planes."""
+OPEN = frozenset({(-1, -1)})
+"""Marks a piece beside a slab the kernel refused: it counts as reaching the
+envelope, and nothing is widened for it."""
+
+
+def _envelope_faces(piece, lo: np.ndarray, hi: np.ndarray) -> frozenset:
+    """``(axis, side)`` of every envelope plane a face of ``piece`` lies on,
+    ``side`` 0 for ``lo`` and 1 for ``hi``."""
     from .build import _mesh_of
 
+    out = set()
     for _f, pts, _u, _t in _mesh_of(piece, 0.1):
         for k in range(3):
-            for plane in (lo[k], hi[k]):
+            for side, plane in enumerate((lo[k], hi[k])):
                 if np.all(np.abs(pts[:, k] - plane) <= ON_ENVELOPE_TOL):
-                    return True
-    return False
+                    out.add((k, side))
+    return frozenset(out)
 
 
-def envelope(cells: list, b: np.ndarray, body_mesh, thickness: float):
-    """``(lo, hi)``: the cells' box inflated by ``thickness``, swept down ``-b``
-    to the lowest point of the body."""
+def envelope(cells: list, thickness: float):
+    """``(lo, hi)``: the cells' box inflated by ``thickness``, where the search
+    for the pockets they seal starts."""
     lo = np.min([occ.bounding_box(c)[0] for c in cells], axis=0) - thickness
     hi = np.max([occ.bounding_box(c)[1] for c in cells], axis=0) + thickness
-    corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
-                        for z in (lo[2], hi[2])])
-    drop = float((corners @ b).min() - (body_mesh.verts @ b).min()) + thickness
-    swept = np.vstack([corners, corners - max(drop, 0.0) * b])
-    return swept.min(axis=0), swept.max(axis=0)
+    return np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
 
 
 SLAB_JUNCTIONS = 150
@@ -415,8 +418,8 @@ def _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice: list, tools: list) 
         after.append(p)
         home.append(k[0])
     return _Slab(before, after, home,
-                 [_on_envelope(q, env_lo, env_hi) for q in before],
-                 [_on_envelope(p, env_lo, env_hi) for p in after])
+                 [_envelope_faces(q, env_lo, env_hi) for q in before],
+                 [_envelope_faces(p, env_lo, env_hi) for p in after])
 
 
 def _slab_worker(job):
@@ -518,15 +521,25 @@ def _components(n: int, pairs) -> list:
     return [root(i) for i in range(n)]
 
 
-def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
-                 b: np.ndarray, *, pool=None, staged=None, report=None,
+def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float, *,
+                 others=(), pool=None, staged=None, report=None,
                  reach: float = 0.0) -> Pockets:
     """S7 for a group of support ``cells``, which overlap nothing: the fill of
     every pocket.
 
     ``lattice_near(box)`` returns the lattice junctions near a box (an empty
     list with no lattice). ``body_mesh`` is the classification mesh, whose
-    measured deviation sizes the witness tolerance.
+    measured deviation sizes the witness tolerance. ``others`` are the support
+    bodies of other groups: those inside the envelope are cut out with the
+    group's own, being support rather than free space.
+
+    **The envelope is widened only where that can change the answer**: where
+    the supports split one piece of free space into several that each still
+    reach the envelope's faces, the largest is taken to be the free space the
+    rest of the part's powder lies in, and the envelope is widened past every
+    face the others reach -- by its own extent, to the body's box at most -- and
+    searched again. A lid on a well is found so: the well's inside reaches only
+    the envelope's lower face until the envelope holds the well.
 
     **The envelope is cut into slabs** across its longest extent, one per
     :data:`SLAB_JUNCTIONS` of lattice in it and none thinner than
@@ -543,66 +556,73 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
 
     if not cells:
         return Pockets(stats={"support_pockets": 0})
-    lo, hi = envelope(cells, np.asarray(b, dtype=float), body_mesh, thickness)
-    ax = int(np.argmax(hi - lo))
+    lo, hi = envelope(cells, thickness)
     parallel = pool is not None and pool.active and staged is not None
-    n = _slab_count(len(lattice_near((lo, hi))), float(hi[ax] - lo[ax]), reach)
-    edges = lo[ax] + (hi[ax] - lo[ax]) * np.arange(n + 1) / n
-    edges[1:-1] += SLAB_NUDGE
     probe = OutsideProbe(body_mesh, 2.0 * body_mesh.deviation)
+    body_lo, body_hi = body_mesh.verts.min(axis=0), body_mesh.verts.max(axis=0)
+    # Planes this far out lie beyond the body, so no free space can reach them.
+    beyond_lo, beyond_hi = (np.asarray(x, dtype=float) for x in occ.bounding_box(body))
+    beyond_lo, beyond_hi = beyond_lo - thickness, beyond_hi + thickness
 
     def tick(done: int, total: int) -> None:
         if report is not None:
             report("searching the support envelope for sealed pockets, slab", done, total)
 
-    def box(span):
-        slo, shi = lo.copy(), hi.copy()
-        slo[ax], shi[ax] = span
-        return slo, shi
+    def search_box(lo, hi, tools: list):
+        """``(cut_off, widen, unsearched, refusals, slabs)`` for the envelope
+        ``[lo, hi]``: the pieces cut off, and the faces to widen it past."""
+        ax = int(np.argmax(hi - lo))
+        n = _slab_count(len(lattice_near((lo, hi))), float(hi[ax] - lo[ax]), reach)
+        edges = lo[ax] + (hi[ax] - lo[ax]) * np.arange(n + 1) / n
+        edges[1:-1] += SLAB_NUDGE
 
-    def search(spans: list, tools: list) -> list:
-        """Per span, its :class:`_Slab`, or the reason the kernel refused it."""
-        if len(spans) == 1 or not parallel:
+        def box(span):
+            slo, shi = lo.copy(), hi.copy()
+            slo[ax], shi[ax] = span
+            return slo, shi
+
+        def search(spans: list) -> list:
+            """Per span, its :class:`_Slab`, or the reason the kernel refused it."""
+            if len(spans) == 1 or not parallel:
+                out = []
+                for s, span in enumerate(spans):
+                    tick(s, len(spans))
+                    slo, shi = box(span)
+                    try:
+                        out.append(_slab_free(body, probe, slo, shi, lo, hi,
+                                              list(lattice_near((slo, shi))),
+                                              [t for t in tools if _touches(t, slo, shi)]))
+                    except CutRefused as exc:
+                        out.append(str(exc))
+                tick(len(spans), len(spans))
+                return out
+            import os
+            import uuid
+
+            tag = os.path.join(staged["tmpdir"], f"pockets-{uuid.uuid4().hex[:8]}")
+            write_brep(_compound(tools), tag + "-tools.brep")
+            lp_args = staged["lp_args"]
+            jobs = [(staged["body_path"], staged["mesh_path"], lp_args, staged["kept_nodes"],
+                     staged.get("lost_path"), tag + "-tools.brep", *box(span), lo, hi,
+                     f"{tag}-{s}")
+                    for s, span in enumerate(spans)]
+            tick(0, len(spans))
+            results, _rss = pool.run(_slab_worker, jobs, on_result=tick)
             out = []
-            for s, span in enumerate(spans):
-                tick(s, len(spans))
-                slo, shi = box(span)
-                try:
-                    out.append(_slab_free(body, probe, slo, shi, lo, hi,
-                                          list(lattice_near((slo, shi))),
-                                          [t for t in tools if _touches(t, slo, shi)]))
-                except CutRefused as exc:
-                    out.append(str(exc))
-            tick(len(spans), len(spans))
+            for r in results:
+                if r[0] == "refused":
+                    out.append(r[1])
+                    continue
+                nb, na, home, benv, aenv, path, _r = r
+                before = compound_children(read_brep(path + "-before.brep")) if nb else []
+                after = compound_children(read_brep(path + "-after.brep")) if na else []
+                out.append(_Slab(before, after, list(home), list(benv), list(aenv)))
             return out
-        import os
-        import uuid
 
-        tag = os.path.join(staged["tmpdir"], f"pockets-{uuid.uuid4().hex[:8]}")
-        write_brep(_compound(tools), tag + "-tools.brep")
-        lp_args = staged["lp_args"]
-        jobs = [(staged["body_path"], staged["mesh_path"], lp_args, staged["kept_nodes"],
-                 staged.get("lost_path"), tag + "-tools.brep", *box(span), lo, hi, f"{tag}-{s}")
-                for s, span in enumerate(spans)]
-        tick(0, len(spans))
-        results, _rss = pool.run(_slab_worker, jobs, on_result=tick)
-        out = []
-        for r in results:
-            if r[0] == "refused":
-                out.append(r[1])
-                continue
-            nb, na, home, benv, aenv, path, _r = r
-            before = compound_children(read_brep(path + "-before.brep")) if nb else []
-            after = compound_children(read_brep(path + "-after.brep")) if na else []
-            out.append(_Slab(before, after, list(home), list(benv), list(aenv)))
-        return out
-
-    def slabs(tools: list):
-        """The spans along ``ax`` and their slabs. A refused slab is split in
-        two and searched again, :data:`SLAB_RETRY_SPLITS` times; one still
-        refused stays a reason string."""
+        # A refused slab is split in two and searched again,
+        # SLAB_RETRY_SPLITS times; one still refused stays a reason string.
         spans = [(float(edges[s]), float(edges[s + 1])) for s in range(n)]
-        got = search(spans, tools)
+        got = search(spans)
         for _ in range(SLAB_RETRY_SPLITS):
             if not any(isinstance(g, str) for g in got):
                 break
@@ -616,19 +636,14 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
                     nspans.append(span)
                     keep.append(g)
             todo = [k for k, g in enumerate(keep) if g is None]
-            for k, g in zip(todo, search([nspans[k] for k in todo], tools)):
+            for k, g in zip(todo, search([nspans[k] for k in todo])):
                 keep[k] = g
             spans, got = nspans, keep
-        return spans, got
 
-    unsearched, refusals, searched = [], [], {}
-    body_lo, body_hi = body_mesh.verts.min(axis=0), body_mesh.verts.max(axis=0)
-
-    def pockets(tools: list) -> list:
-        spans, got = slabs(tools)
         # A slab still refused is left open: its free space is not known, so
-        # every piece beside it counts as reaching the envelope and nothing
-        # it could belong to is judged sealed.
+        # every piece beside it counts as reaching the envelope, and nothing it
+        # could belong to is judged sealed or widened for.
+        unsearched, refusals = [], []
         refused = [k for k, g in enumerate(got) if isinstance(g, str)]
         run = []
         for k in refused + [None]:
@@ -647,17 +662,17 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
             for s, c in ((k - 1, spans[k][0]), (k + 1, spans[k][1])):
                 if 0 <= s < len(got) and s not in refused:
                     g = got[s]
-                    g.before_env = [e or bool(_faces_on(q, ax, c))
+                    g.before_env = [e | OPEN if _faces_on(q, ax, c) else e
                                     for q, e in zip(g.before, g.before_env)]
-                    g.after_env = [e or bool(_faces_on(q, ax, c))
+                    g.after_env = [e | OPEN if _faces_on(q, ax, c) else e
                                    for q, e in zip(g.after, g.after_env)]
-        n = searched["slabs"] = len(got)
+        m = len(got)
         # Global indices of every slab's pieces, then the pieces joined across
         # the planes between slabs.
         b0 = np.cumsum([0] + [len(s.before) for s in got])
         a0 = np.cumsum([0] + [len(s.after) for s in got])
         bpairs, apairs = [], []
-        for s in range(n - 1):
+        for s in range(m - 1):
             c = spans[s][1]
             bpairs += [(b0[s] + i, b0[s + 1] + j)
                        for i, j in _joined_across(got[s].before, got[s + 1].before, ax, c)]
@@ -666,30 +681,57 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
         bcomp = _components(int(b0[-1]), bpairs)
         acomp = _components(int(a0[-1]), apairs)
         before_env = [e for s in got for e in s.before_env]
-        after = [(s, i) for s in range(n) for i in range(len(got[s].after))]
+        after = [(s, i) for s in range(m) for i in range(len(got[s].after))]
         groups = defaultdict(lambda: defaultdict(list))   # before comp -> after comp -> pieces
         for g, (s, i) in enumerate(after):
             groups[bcomp[b0[s] + got[s].home[i]]][acomp[g]].append(g)
-        out = []
+
+        def piece(g):
+            return got[after[g][0]].after[after[g][1]]
+
+        def volume(members):
+            return sum(occ.volume(piece(g)) for g in members)
+
+        cut_off, widen = [], set()
         for bc, members in groups.items():
             reaches = any(e for k, e in enumerate(before_env) if bcomp[k] == bc)
             comps = list(members.values())
+            faces = [frozenset().union(*(got[after[g][0]].after_env[after[g][1]] for g in c))
+                     for c in comps]
             if reaches:
-                cut_off = [m for m in comps
-                           if not any(got[after[g][0]].after_env[after[g][1]] for g in m)]
+                cut = [c for c, f in zip(comps, faces) if not f]
+                reaching = [k for k, f in enumerate(faces) if f]
+                if len(reaching) > 1:
+                    main = max(reaching, key=lambda k: volume(comps[k]))
+                    for k in reaching:
+                        if k != main and OPEN.isdisjoint(faces[k]):
+                            widen |= faces[k]
             elif len(comps) > 1:
-                vol = [sum(occ.volume(got[after[g][0]].after[after[g][1]]) for g in m)
-                       for m in comps]
-                largest = int(np.argmax(vol))
-                cut_off = [m for k, m in enumerate(comps) if k != largest]
+                largest = int(np.argmax([volume(c) for c in comps]))
+                cut = [c for k, c in enumerate(comps) if k != largest]
             else:
-                cut_off = []
-            for m in cut_off:
-                out += [got[after[g][0]].after[after[g][1]] for g in m]
-        return out
+                cut = []
+            for c in cut:
+                cut_off += [piece(g) for g in c]
+        return cut_off, widen, unsearched, refusals, m
+
+    widenings = 0
+    while True:
+        tools = list(cells) + [s for s in others if _touches(s, lo, hi)]
+        cut_off, widen, unsearched, refusals, slabs = search_box(lo, hi, tools)
+        grown = False
+        for k, side in widen:
+            step = max(float(hi[k] - lo[k]), 2.0 * reach, thickness)
+            if side == 0 and lo[k] > beyond_lo[k]:
+                lo[k], grown = max(lo[k] - step, beyond_lo[k]), True
+            elif side == 1 and hi[k] < beyond_hi[k]:
+                hi[k], grown = min(hi[k] + step, beyond_hi[k]), True
+        if not grown:
+            break
+        widenings += 1
 
     fills = []
-    for p in pockets(list(cells)):
+    for p in cut_off:
         if not occ.is_valid(p, parallel=False):
             raise ProcessingError(
                 f"The fill of a pocket near {np.round(occ.centroid(p), 3).tolist()} is "
@@ -701,11 +743,21 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float,
     # remains is exactly the pieces that were not cut off. Re-finding the free
     # space with the fills as tools cut through nothing but coincident faces,
     # and was refused on a slab of the rehearsal part after an hour of cutting.
-    return Pockets(fills, {"support_pockets": len(fills), "support_pocket_slabs": searched.get("slabs", n),
+    return Pockets(fills, {"support_pockets": len(fills), "support_pocket_slabs": slabs,
                            "support_pocket_slabs_unsearched": len(unsearched),
+                           "support_pocket_widenings": widenings,
                            "support_pocket_volume_mm3":
                                round(sum(occ.volume(f) for f in fills), 4)},
                    unsearched, refusals)
+
+
+def found_before(fill, fills: list) -> bool:
+    """Whether ``fill`` is one of ``fills`` again: an envelope widened over
+    another group's supports finds that group's pockets too."""
+    if not fills:
+        return False
+    w = witness(fill)
+    return w is not None and bool(_Inside(fills).which(w))
 
 
 def _compound(shapes: list):

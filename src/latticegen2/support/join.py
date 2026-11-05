@@ -1,24 +1,19 @@
-"""S6: supports that share a face or volume become one body (docs/algorithm.md §14.3).
+"""Support solids that share a face become one body (docs/algorithm.md §14.3).
 
-Cells that share rays along a cut or a fold share the face those rays span,
-and on the cup fixture the two sides of every such face coincide to 1e-15 mm.
-Cells of different regions can overlap where their rays cross under an
-unsupported band between the regions -- 2.8e-4 to 0.155 mm^3 on
-Hole-block-chamfered. A pocket fill shares faces with the supports that seal
-it. All of them are joined here; cells that meet only along a parting, where
-their side faces diverge in a V from one edge on the ceiling, stay separate
-bodies, since one body joined along an edge would not be a manifold solid.
+Three places in the generator hand over solids that belong to one body:
 
-**The join is one boolean fuse per group of supports whose boxes touch.** The
-kernel's fuse makes exactly that partition: solids sharing a face or volume
-come back as one, solids meeting along an edge stay apart. Stitching without a
-boolean -- dropping the coincident faces and sewing the rest -- was measured
-first and holds only where the two sides' shared faces correspond one for one:
-valid on the cup's ring of eight cut cells, 0.63 s against the fuse's 1.00 s,
-and invalid, 0.85 mm^3 short, on the ledge and the lid it borders by folds,
-whose shared faces the two cells subdivide differently; likewise on every pocket
-fill and every overlapping pair. A path that needs the fuse behind it saves
-less than its own cost in code.
+* S6, the trimmed halves of a support body that was split on a support grid
+  plane, which meet on that plane;
+* S6, a lost lattice piece absorbed into the supports beside it
+  (``generate.absorb_lost``);
+* S7, a pocket fill and the support bodies that seal it.
+
+**The join is one boolean fuse per group of solids whose boxes touch.** The
+kernel's fuse makes exactly the partition wanted: solids sharing a face or a
+volume come back as one, and solids meeting only along an edge or at a vertex
+stay apart, since one body joined there would not be a manifold solid. Each
+fused body's coplanar faces are then merged, and the merge is kept only if it
+is valid and leaves the volume unchanged.
 """
 
 from __future__ import annotations
@@ -39,9 +34,10 @@ check is for is a fuse that returns garbage -- one of its operands, as
 :func:`latticegen2.boundary._fuse_solids` records -- which is orders larger."""
 
 
-def groups(solids: list) -> list:
-    """Indices of ``solids`` in groups whose bounding boxes touch, transitively."""
-    boxes = _boxes(solids)
+def groups(solids: list, grow: float = 0.0) -> list:
+    """Indices of ``solids`` in groups whose bounding boxes, each inflated by
+    ``grow``, touch, transitively."""
+    boxes = [(lo - grow, hi + grow) for lo, hi in _boxes(solids)]
     parent = list(range(len(solids)))
 
     def root(i):

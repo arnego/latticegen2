@@ -38,12 +38,16 @@ def cup():
 
 
 def test_a_lid_on_the_cup_fills_exactly_the_cup(cup):
+    """The envelope starts 1.5 mm below the lid, where the cup's inside and the
+    chamber around the ring both reach its faces; the cup's inside, the smaller,
+    reaches only the lower one, so the envelope is widened past it once."""
     from latticegen2 import occ
     from latticegen2.support import voids
 
     body, mesh, lp = cup
     lid = _cyl(R2, H - TOP, TOP)
-    got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5, lp.b)
+    got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5)
+    assert got.stats["support_pocket_widenings"] == 1
     assert len(got.fills) == 1
     fill = got.fills[0]
     assert occ.volume(fill) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
@@ -67,7 +71,7 @@ def test_the_cup_found_in_slabs_is_the_cup(cup, monkeypatch):
     body, mesh, lp = cup
     monkeypatch.setattr(voids, "_slab_count", lambda *args: 4)
     lid = _cyl(R2, H - TOP, TOP)
-    got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5, lp.b)
+    got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5)
     assert got.stats["support_pocket_slabs"] == 4
     assert len(got.fills) == 2
     assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
@@ -92,7 +96,7 @@ def test_a_refused_combined_cut_is_redone_in_two_steps(cup, monkeypatch):
         return real(region, tools, removes, what, one_by_one)
 
     monkeypatch.setattr(voids, "_free", refuse_combined)
-    got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5, lp.b)
+    got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5)
     assert refused
     assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
 
@@ -122,8 +126,9 @@ def test_a_refused_slab_is_split_and_searched_again(cup, monkeypatch):
     body, mesh, lp = cup
     monkeypatch.setattr(voids, "_slab_count", lambda *args: 4)
     asked = _refusing(voids, monkeypatch, lambda lo, hi: hi[0] - lo[0] > 3.0)
-    got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5, lp.b)
-    assert len(asked) == 4 + 8
+    got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5)
+    # Once before the envelope is widened past the cup and once after.
+    assert len(asked) == 2 * (4 + 8)
     assert got.stats["support_pocket_slabs"] == 8
     assert got.unsearched == []
     assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
@@ -138,7 +143,7 @@ def test_a_slab_refused_at_every_split_is_left_open(cup, monkeypatch):
     body, mesh, lp = cup
     monkeypatch.setattr(voids, "_slab_count", lambda *args: 4)
     _refusing(voids, monkeypatch, lambda lo, hi: lo[0] < 0.5 and hi[0] > -0.5)
-    got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5, lp.b)
+    got = voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5)
     assert got.fills == []
     assert got.unsearched and got.stats["support_pocket_slabs_unsearched"] == len(got.unsearched)
     # Whole coordinates, so the region can be found in the part; the kernel's
@@ -165,7 +170,7 @@ def test_the_slabs_run_across_a_worker_pool(cup, monkeypatch, tmp_path):
               "tmpdir": str(tmp_path)}
     lid = _cyl(R2, H - TOP, TOP)
     with WorkerPool(2) as pool:
-        got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5, lp.b,
+        got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5,
                                  pool=pool, staged=staged)
     assert len(got.fills) == 2
     assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
@@ -176,7 +181,7 @@ def test_a_pocket_the_lattice_already_sealed_is_left_alone(cup):
     body, mesh, lp = cup
     plug = _cyl(R1, 0.5, TOP - 0.5)        # lattice in the cup's mouth
     lid = _cyl(R2, H - TOP, TOP)
-    got = voids.find_pockets(body, mesh, [lid], lambda box: [plug], 1.5, lp.b)
+    got = voids.find_pockets(body, mesh, [lid], lambda box: [plug], 1.5)
     assert got.fills == []
 
 
@@ -186,8 +191,28 @@ def test_a_cell_that_seals_nothing_fills_nothing(cup):
 
     body, mesh, lp = cup
     post = _cyl(1.0, H - TOP, TOP).Moved(occ.translation(np.array([8.0, 0.0, 0.0])))
-    got = voids.find_pockets(body, mesh, [post], lambda box: [], 1.5, lp.b)
+    got = voids.find_pockets(body, mesh, [post], lambda box: [], 1.5)
     assert got.fills == []
+    assert got.stats["support_pocket_widenings"] == 0
+
+
+def test_another_groups_support_in_the_envelope_is_not_free_space(cup):
+    """A support of another group standing in the cup is support, not powder:
+    the fill is the cup less that support, and overlaps it nowhere."""
+    from latticegen2 import occ
+    from latticegen2.support import voids
+
+    body, mesh, lp = cup
+    other = _cyl(1.0, 2.0, 0.0)            # on the cup's floor
+    lid = _cyl(R2, H - TOP, TOP)
+    got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5, others=[other])
+    assert len(got.fills) == 1
+    assert occ.volume(got.fills[0]) == pytest.approx(
+        np.pi * (R1 ** 2 * TOP - 1.0 ** 2 * 2.0), rel=1e-6)
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+
+    common = occ.solids(BRepAlgoAPI_Common(got.fills[0], other).Shape())
+    assert sum(occ.volume(s) for s in common) < 1e-6
 
 
 def test_a_witness_the_cut_disagrees_with_fails_loudly(cup, monkeypatch):
@@ -197,7 +222,7 @@ def test_a_witness_the_cut_disagrees_with_fails_loudly(cup, monkeypatch):
     body, mesh, lp = cup
     monkeypatch.setattr(voids, "witness", lambda piece: np.array([0.0, 0.0, -5.0]))
     with pytest.raises(ProcessingError, match="disagree"):
-        voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5, lp.b)
+        voids.find_pockets(body, mesh, [_cyl(R2, H - TOP, TOP)], lambda box: [], 1.5)
 
 
 def test_the_generator_leaves_no_pocket_sealed_on_the_cup(cup, tmp_path):
@@ -214,6 +239,6 @@ def test_the_generator_leaves_no_pocket_sealed_on_the_cup(cup, tmp_path):
     assert all(occ.is_valid(s) for s in solids)
     for g in join.groups(solids):
         again = voids.find_pockets(body, mesh, [solids[i] for i in g],
-                                   lambda box: [], 1.5, lp.b)
+                                   lambda box: [], 1.5)
         assert again.fills == []
     assemble.assemble([], solids, lp, NO_NODES)

@@ -69,6 +69,17 @@ def test_supports_apart_are_left_as_they_are():
     assert len(got) == 2 and got[0].IsSame(a) and got[1].IsSame(b)
 
 
+def test_groups_grown_by_a_thickness_take_in_supports_that_close():
+    """3 mm apart: one group once each box is grown by 1.5 mm, which is how the
+    pocket search groups supports whose envelopes touch."""
+    from latticegen2.support import join
+
+    a = _solid(_box((0, 0, 0), (2, 2, 2)))
+    b = _solid(_box((5, 0, 0), (2, 2, 2)))
+    assert join.groups([a, b]) == [[0], [1]]
+    assert join.groups([a, b], grow=1.5) == [[0, 1]]
+
+
 def test_a_fuse_that_loses_volume_is_folded_one_at_a_time(monkeypatch):
     from latticegen2 import occ
     from latticegen2.support import join

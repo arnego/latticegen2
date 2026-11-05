@@ -150,26 +150,35 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
             lines.append(_unbacked_warning(got.points[~covered], len(covered)))
         return [], stats, lines
 
-    # S7 per group of touching bodies: free space the supports seal off is
-    # filled, and a fill joins the bodies whose faces it lies on.
+    # S7 per group of bodies whose envelopes touch: free space the supports seal
+    # off is filled, and a fill joins the bodies whose faces it lies on.
     if pockets_begin is not None:
         pockets_begin()
     t3 = time.perf_counter()
-    out, fills, unsearched, refusals = [], [], [], []
-    gs = join.groups(bodies)
+    fills, unsearched, refusals, widenings = [], [], [], 0
+    gs = join.groups(bodies, grow=thickness)
     for k, g in enumerate(gs):
         if report is not None:
             report("looking for sealed pockets", k, len(gs))
-        mine = [bodies[i] for i in g]
-        pockets = voids.find_pockets(body, mesh, mine, local.near, thickness, lp.b,
+        mine = set(g)
+        pockets = voids.find_pockets(body, mesh, [bodies[i] for i in g], local.near,
+                                     thickness,
+                                     others=[s for i, s in enumerate(bodies) if i not in mine],
                                      pool=pool, staged=staged, report=report,
                                      reach=local.reach)
-        fills += pockets.fills
+        fills += [f for f in pockets.fills if not voids.found_before(f, fills)]
         unsearched += pockets.unsearched
         refusals += pockets.refusals
-        if pockets.fills:
-            mine, _js = join.join(mine + pockets.fills, overlaps=False)
-        out += mine
+        widenings += pockets.stats.get("support_pocket_widenings", 0)
+    out = list(bodies)
+    if fills:
+        every = bodies + fills
+        out = []
+        for g in join.groups(every):
+            members = [every[i] for i in g]
+            if any(i >= len(bodies) for i in g):
+                members, _js = join.join(members, overlaps=False)
+            out += members
     for s in out:
         nm = frustum.non_manifold_edges(s)
         if nm:
@@ -185,6 +194,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     stats["support_pocket_volume_mm3"] = round(sum(occ.volume(f) for f in fills), 4)
     stats["support_bodies"] = len(out)
     stats["support_pocket_slabs_unsearched"] = len(unsearched)
+    stats["support_pocket_widenings"] = widenings
     if unsearched:
         lines.append(warning_text(
             voids.UNSEARCHED_WARNING,

@@ -2556,7 +2556,7 @@ flowchart TD
     SP -->|four levels down, or one support node, still refused| F2[piece dropped and reported: name, position, volume, ceiling points left unbacked]
     SP --> H
     G --> H[debris backing no ceiling point discarded]
-    H --> P[S7 pockets per group of touching bodies, filled and joined]
+    H --> P[S7 pockets per group of touching envelopes, filled and joined]
     P --> M{every edge used by two faces?}
     M -->|no| F3[exit 4, naming the body]
     M -->|yes| Q[SupportResult: one solid per body]
@@ -2754,10 +2754,13 @@ the file serves nothing, and the harness reports the bare samples beside it as
 slivers (`verify_geometry.COVERAGE_SLIVER_TOL`).
 
 **S7 — Pockets** (`support/voids.py`). Powder must not be trapped. Per group of
-bodies whose boxes touch, the free space in the support envelope — the
-group's box inflated by `t_s` and swept down along `−b` to the body's lowest
-point — is found by cutting the lattice junctions and the supports out of
-`envelope ∩ Ω`, each cut checked to remove exactly the volume it was given.
+bodies whose envelopes touch, the free space in the support envelope — the
+group's box inflated by `t_s` — is found by cutting the lattice junctions and
+the supports out of `envelope ∩ Ω`, each cut checked to remove exactly the
+volume it was given. The supports cut out are every support body in the
+envelope, the group's own and any other: another group's body is support, not
+free space, and counted as free space it could be filled over (exit 4 at the
+overlap check) or connect two pieces two groups seal between them.
 Every free piece is given a witness point by its own tessellation and placed
 in the piece of free space it came from; a piece is **cut off** where its
 earlier piece reaches the envelope's faces and it no longer does, or, where
@@ -2768,14 +2771,31 @@ the body, the lattice or a support; with the fills in place nothing is cut off
 space just found. The search used to find the free space again with the fills
 as tools to prove it, a cut through nothing but coincident faces, which was
 refused on a slab of the rehearsal part after an hour of cutting. The fills are
-fused with the bodies of their group
-(`support/join.py`). Pieces under 1e-3 mm³ are boolean specks along shared
-faces, not pockets.
+fused with the bodies whose faces they lie on (`support/join.py`); a fill an
+envelope widened over another group finds again is skipped, by its witness.
+Pieces under 1e-3 mm³ are boolean specks along shared faces, not pockets.
 
-**The search runs in slabs across the worker pool.** The envelope reaches down
-to the body's lowest point, so it holds most of the lattice: on the ball, three
-cuts by all 777 junctions in it were 132 s of the search's 157 s. The envelope
-is cut across its longest extent into one slab per `SLAB_JUNCTIONS` (150)
+**The envelope is widened only where that can change the answer.** "Reaches
+the envelope's faces" stands for "is still connected to the rest of the part's
+powder", and that reading fails in one case: a support lidding a well, whose
+inside reaches the envelope's lower face and nothing else. So where the
+supports split one piece of free space into several that each still reach the
+envelope's faces, the largest is taken to be the open one, and the envelope is
+widened past every face the others reach — by its own extent, at most to just
+beyond the body's box — and searched again, until no such split is left. The
+cup fixture (`test/test_support_voids.py`) is found after one widening.
+
+The envelope used to be swept down along `−b` to the body's lowest point for
+that case, on every group. Measured on the five small support parts, old
+against new on the same machine, pocket search time: support-gaps 4.3 → 3.3 s,
+the two clipped parts 2.4 → 2.7 s and 3.3 → 3.2 s, the ball 137.9 → 51.0 s, the
+cylinder 158.0 → 63.0 s — with the same pockets, fills and support bodies on
+every part, and no widening on any. The swept envelope also held other groups'
+supports: on the cylinder, the largest group's held the whole of another's.
+
+**The search runs in slabs across the worker pool.** An envelope can still hold
+much of the lattice, and a cut's cost grows faster than its tool count. The
+envelope is cut across its longest extent into one slab per `SLAB_JUNCTIONS` (150)
 junctions in it, none thinner than four junction reaches, and the slabs are
 queued across the pool. The slabs follow the lattice rather than the workers
 because a cut's cost grows faster than its tool count: on the rehearsal part,

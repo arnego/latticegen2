@@ -282,3 +282,33 @@ def test_a_support_against_a_tilted_wall_is_rooted_on_it():
     assert free == {"face": 0, "edge": 0, "vertex": 0}
     # The control: the same solid with the floor somewhere else hangs whole.
     assert _free([trimmed])[1] == cand
+
+
+def test_a_saddle_whose_edges_all_rise_is_not_a_tip():
+    """Three unit boxes in the octants (+,-,-), (+,-,+) and (+,+,-) round a
+    point, with up along (1,1,1): every edge at that point runs along a +e_k,
+    yet the faces there hold material below it. The one tip is the union's
+    lowest corner, (0,-1,-1) from it."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    from OCP.TopTools import TopTools_ListOfShape
+
+    o = np.array([50.0, 50.0, 50.0])
+    parts = [box(1.0, 1.0, 1.0, at=tuple(o + d)) for d in
+             ((0, -1, -1), (0, -1, 0), (0, 0, -1))]
+    fuse = BRepAlgoAPI_Fuse()
+    args, tools = TopTools_ListOfShape(), TopTools_ListOfShape()
+    args.Append(parts[0])
+    for p in parts[1:]:
+        tools.Append(p)
+    fuse.SetArguments(args)
+    fuse.SetTools(tools)
+    fuse.Build()
+    # Unified, as the generator's staircases are: split coplanar faces would
+    # leave edges running down from the saddle, and the edge test alone would
+    # pass.
+    solid = occ.unify_same_domain(occ.solids(fuse.Shape())[0])
+    up = np.ones(3) / np.sqrt(3.0)
+    occ.mesh_shape(solid, vg.SUPPORT_MESH_DEFLECTION)
+    tips = vg._material_tip_samples(solid, -up)
+    assert len(tips) == 1
+    assert np.allclose(tips[0], o + (0.0, -1.0, -1.0))

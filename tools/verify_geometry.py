@@ -1148,11 +1148,36 @@ def _material_keel_samples(solid, down: np.ndarray, bar: float, pitch: float) ->
     return out
 
 
+def _faces_rise_from(faces, v: np.ndarray, up: np.ndarray, eps: float) -> bool:
+    """Does every one of ``faces`` rise away from vertex ``v``?
+
+    Read off each face's triangulation: every triangle with a node at ``v``
+    must have its other nodes no lower. Rising edges alone do not make a tip.
+    Where three of the eight octants round a staircase vertex hold material --
+    (+,-,-), (+,-,+) and (+,+,-) -- every edge there runs along a ``+e_k``, yet
+    the planar faces carry material lower than the vertex: a saddle, not a
+    tip. Measured on the ball's supports, 1 of 34 readings."""
+    for face in faces:
+        got = occ.face_triangulation(face)
+        if got is None:
+            continue
+        pts, tris = got
+        d = np.linalg.norm(pts - v, axis=1)
+        at = np.nonzero(d <= 1e-6)[0]
+        if not len(at):
+            continue
+        inc = tris[np.isin(tris, at).any(axis=1)]
+        if len(inc) and float(((pts[inc.ravel()] - v) @ up).min()) < -eps:
+            return False
+    return True
+
+
 def _material_tip_samples(solid, down: np.ndarray) -> list:
     """Vertices of ``solid`` lower than everything attached to them, with the
     solid not directly beneath: the tip of a stalactite. A copy of
     `overhang._vertex_samples`, asking of the material what it asks of the
-    void."""
+    void, with one test added: the faces at the vertex must rise from it too
+    (:func:`_faces_rise_from`). ``solid`` must be meshed."""
     from OCP.BRep import BRep_Tool
     from OCP.BRepAdaptor import BRepAdaptor_Curve
     from OCP.BRepClass3d import BRepClass3d_SolidClassifier
@@ -1166,6 +1191,9 @@ def _material_tip_samples(solid, down: np.ndarray) -> list:
     owners = TopTools_IndexedDataMapOfShapeListOfShape()
     TopExp.MapShapesAndAncestors_s(solid, TopAbs_ShapeEnum.TopAbs_VERTEX,
                                    TopAbs_ShapeEnum.TopAbs_EDGE, owners)
+    face_owners = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(solid, TopAbs_ShapeEnum.TopAbs_VERTEX,
+                                   TopAbs_ShapeEnum.TopAbs_FACE, face_owners)
     lo, hi = occ.bounding_box(solid)
     eps = 1e-4 * float(np.linalg.norm(hi - lo))
     out, classifier = [], None
@@ -1188,6 +1216,10 @@ def _material_tip_samples(solid, down: np.ndarray) -> list:
                 break
             rises += 1
         if not tip or rises == 0:
+            continue
+        key = owners.FindKey(i)
+        faces = [TopoDS.Face_s(f) for f in face_owners.FindFromKey(key)]
+        if not _faces_rise_from(faces, v, up, eps * 1e-3):
             continue
         if classifier is None:
             classifier = BRepClass3d_SolidClassifier(solid)

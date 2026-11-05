@@ -2962,6 +2962,17 @@ written faithfully.
 the keel, tip and clipped-node ceiling points (S1) and their trims; `pockets` is
 61 % of the run. Resource figures are in docs/profiling-reports.md.
 
+**With the local pocket search (S7), 2026-11-05, the run takes 1 h 42 m** and
+passes every check again, writing the same 27 support bodies of 40,136 mm³ and
+filling the same 30 pockets. The pocket search falls from 2,578 s to 1,103 s,
+with one envelope widened; two regions were refused rather than three. The
+overlap check, ~2,062 s at one core, is now two thirds of `pockets` and the
+largest serial piece of the run.
+
+| stage | ceiling points | grid | staircase | trim | backing check | pocket search | overlap check |
+|---|---|---|---|---|---|---|---|
+| `support` 1,183 s, `pockets` 3,165 s | 339.5 s | 291.8 s | 62.1 s | 380.5 s | 1.1 s | 1,102.6 s | ~2,062 s |
+
 **Still to come:** the free-standing thickness gate; the overlap check and S6
 dispatched across the worker pool (specification.md §4.6's parallelisation),
 the first of them the largest serial piece of the supported rehearsal.

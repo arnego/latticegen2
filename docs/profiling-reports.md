@@ -841,6 +841,79 @@ open. **Two support bodies are chips**, 2.8e-03 mm³ near
 `[1954.8, 32.4, 911.4]` and 1.0e-05 mm³ near `[2065.2, 90.5, 973.3]`, four faces
 each; both pass validity and export truth.
 
+**Downstream consumer.** `src/latticegen2/gui/weights.py` held this run's
+log stage times as `SECONDS_SUPPORT` until the 2026-11-05 entry below replaced
+them.
+
+## What changed between the previous entry and the next
+
+The pocket search (docs/algorithm.md §14.3 S7) searches each group of support
+bodies whose envelopes touch, in that group's box inflated by `t_s`, rather
+than in a box swept down to the body's lowest point; other groups' supports in
+the envelope are cut out as support. The envelope is widened only where the
+supports split one piece of free space into several that each reach its faces.
+On the five small support parts this gave the same pockets, fills and bodies
+with no widening, and cut the pocket search 2.5–2.7× on the ball and cylinder.
+
+## 2026-11-05 — local pocket search, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, single run
+
+The `rehearsal-support` e2e scenario on `96378a9`, profiled at the default 2 s,
+the same command and parameters as the previous entry. Output kept in
+`inspection/rehearsal-support-2026-11-05/` (not committed).
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| tessellate | 3.0s | 366% | 614% | 3.66 | 586 MB | 728 MB | 8 | 27 MB | 5 MB |
+| classify | 14.0s | 520% | 565% | 5.20 | 1,918 MB | 1,921 MB | 8 | 66 MB | 1 MB |
+| boundary | 599.0s | 515% | 591% | 5.15 | 2,223 MB | 2,347 MB | 8 | 75 MB | 81 MB |
+| connect | 11.0s | 100% | 101% | 1.00 | 2,472 MB | 2,486 MB | 8 | 0 MB | 3 MB |
+| stitch | 256.0s | 119% | 589% | 1.19 | 2,994 MB | 3,616 MB | 8 | 209 MB | 174 MB |
+| instance | 14.0s | 100% | 101% | 1.00 | 3,153 MB | 3,225 MB | 8 | 0 MB | 0 MB |
+| assemble | 8.0s | 100% | 100% | 1.00 | 3,209 MB | 3,209 MB | 8 | 0 MB | 0 MB |
+| simplify | 236.0s | 100% | 150% | 1.00 | 4,757 MB | 7,336 MB | 8 | 376 MB | 364 MB |
+| overhang | 7.0s | 97% | 100% | 0.97 | 3,612 MB | 3,622 MB | 8 | 0 MB | 2 MB |
+| support | 1,183.0s | 100% | 216% | 1.00 | 4,253 MB | 5,231 MB | 8 | 1 MB | 1 MB |
+| pockets | 3,165.0s | 190% | 592% | 1.90 | 5,407 MB | 10,002 MB | 8 | 667 MB | 180 MB |
+| validate | 497.0s | 115% | 584% | 1.15 | 5,638 MB | 8,365 MB | 8 | 762 MB | 762 MB |
+| export | 106.0s | 98% | 101% | 0.98 | 5,061 MB | 8,001 MB | 8 | 768 MB | 768 MB |
+
+```
+total to last stage : 6,100.0s (101.7 min)
+peak tree RSS       : 10,002 MB
+min system available: 10,298 MB
+```
+
+**Run 1 h 41 m 46 s, and every check of specification.md §6.2 passes**: 784 MB
+written, 60 solids, 331,441 mm³ of lattice and the same 27 support bodies of
+40,136 mm³ as the previous entry, all 225,582 ceiling points backed, no piece
+dropped and the same 30 pockets filled; the harness finds all 125,777 overhang
+samples backed and no overlap. The harness's own checks took a further 2 h 49 m,
+4 h 31 m in all. The `support timing` line:
+
+| part | seconds |
+|---|---|
+| ceiling points | 339.5 |
+| grid, both manifold repairs and the exact rod-node cuts | 291.8 |
+| staircase solids | 62.1 |
+| trim (S6) | 380.5 |
+| backing check | 1.1 |
+| pocket search and fill join (S7) | 1,102.6 |
+
+**The pocket search fell from 2,578 s to 1,103 s** (2.3×), with one envelope
+widened. **`pockets` fell from 4,656 s to 3,165 s**, and is now 52 % of the run
+rather than 61 %. Its peak tree RSS fell from 14,423 MB to 10,002 MB. The rest
+of the stage, about **2,062 s at one core**, is the overlap check of
+docs/algorithm.md §14.2. It is now two thirds of `pockets` and the largest
+serial piece of the run. Every other stage is within a few per cent of the
+previous entry, except `boundary`, 663 s → 599 s, which this change does not
+touch.
+
+**Two slabs were refused** rather than three, each reported in a `WARNING:` with
+its region: `x 1999.3 to 2007.0, y 49.8 to 71.0, z 969.5 to 983.6` and
+`x 2068.6 to 2076.2, y -71.0 to -49.8, z 969.8 to 983.6` mm.
+
 **Downstream consumer.** `src/latticegen2/gui/weights.py` holds this run's
 log stage times as `SECONDS_SUPPORT`; `SECONDS_PLAIN` is still the plain column
 of the 2026-10-11 pair.

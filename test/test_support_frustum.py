@@ -116,29 +116,6 @@ def test_beside_a_rod_the_node_below_is_filled_instead():
     assert got[0, 0, 0] and not got[1, 1, 0] and (filled, stuck) == (1, 0)
 
 
-def test_the_node_filled_below_a_rod_can_hang_and_is_found():
-    """The fill below an edge contact beside a rod (docs/algorithm.md §14.3
-    S4) rests on nothing when B and C hang beside the rod from supports of
-    their own: its lowest corner prints onto powder. `hanging_nodes` finds it,
-    and finds nothing before the repair, where B and C rest on lattice."""
-    from latticegen2.support.frustum import _Grid, hanging_nodes, make_manifold
-
-    S = np.zeros((4, 4, 5), dtype=bool)
-    L = np.zeros_like(S)
-    S[2, 1, 2:5] = S[1, 2, 2:5] = True          # B and C, columns along e_2
-    L[2, 2, :] = True                           # D: the rod between them
-    L[2, 1, 1] = L[1, 2, 1] = True              # what B and C stand on
-    g = _Grid(lattice_params(10.0, 1.5), 2)
-    coords = [np.arange(n + 1, dtype=float) for n in S.shape]
-    inside = lambda P: np.ones(len(P), dtype=bool)  # noqa: E731
-    assert len(hanging_nodes(S, L, coords, g, inside)) == 0
-    got, filled, _stuck = make_manifold(S, L)
-    assert filled == 3 and got[1, 1, 2:5].all()
-    assert hanging_nodes(got, L, coords, g, inside).tolist() == [[1, 1, 2]]
-    # Outside the body a wall takes it, and it is not hanging.
-    assert len(hanging_nodes(got, L, coords, g, lambda P: np.zeros(len(P), bool))) == 0
-
-
 def test_a_corner_contact_is_joined_by_a_path_round_the_rods():
     from latticegen2.support.frustum import make_manifold
 
@@ -348,9 +325,6 @@ def test_a_chamber_lid_is_carried_down_to_the_rods(chamber, chamber_supports):
     # The rods are near: few if any ceiling points need the wall.
     assert stats["support_wall_anchors"] < stats["support_ceiling_points"] / 2
     assert stats["support_ceiling_points_uncovered"] == 0
-    # Nothing rests on powder: every support node stands on support, a rod or
-    # a wall, those the manifold repair left hanging anchored in their turn.
-    assert stats["support_hanging_left"] == 0
     for s in solids:
         assert occ.is_valid(s)
 

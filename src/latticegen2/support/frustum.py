@@ -723,85 +723,6 @@ def _clipped_ceiling(g: _Grid, verts: np.ndarray, normals: np.ndarray, tris: np.
     return np.array(pts), np.array(nrm)
 
 
-HANGING_ROUNDS = 8
-"""Most times the support grid is rebuilt to anchor support nodes it leaves
-hanging. Each round adds at least one support node to a bounded grid, so this
-only caps a pathological case."""
-
-HANGING_WARNING = "support nodes left hanging"
-
-WARNING_POINTS = 5
-
-
-def hanging_nodes(S: np.ndarray, L: np.ndarray, coords: list, g: _Grid, in_body) -> np.ndarray:
-    """Fine support nodes of ``S`` that rest on nothing: no support node and no
-    lattice node below them along any ``-e_k``, and their lowest corner inside
-    the body, where no wall takes them either. ``(n, 3)`` fine indices.
-
-    Such a node's lowest corner is a down-pointing tip printed onto powder. A
-    box standing on its anchor has none, by construction; the manifold
-    repair's fill below an edge contact beside a rod (:func:`make_manifold`)
-    can leave one."""
-    Q = np.pad(S | L, 1)
-    free = S.copy()
-    for ax in range(3):
-        free &= ~np.roll(Q, 1, axis=ax)[1:-1, 1:-1, 1:-1]
-    idx = np.argwhere(free)
-    if not len(idx):
-        return idx
-    corner = np.stack([coords[ax][idx[:, ax]] for ax in range(3)], axis=1)
-    return idx[in_body(g.world(corner + ANCHOR_EPS))]
-
-
-def _support_grid(g: _Grid, pairs: np.ndarray, need, need_n, local, in_body, body, in_lattice):
-    """The support grid for the boxes ``pairs``, one ``[anchor, top]`` per row:
-    their union grown along the ceiling and made manifold, then refined so that
-    every rod is whole fine nodes, the rods left out and the support made
-    manifold beside them."""
-    lo = pairs[:, :3].min(axis=0) - 1
-    hi = pairs[:, 3:].max(axis=0) + 2
-    shape = tuple((hi - lo).tolist())
-    U = np.zeros(shape, dtype=bool)
-    for r in pairs:
-        a_, c_ = r[:3] - lo, r[3:] - lo
-        U[a_[0]:c_[0] + 1, a_[1]:c_[1] + 1, a_[2]:c_[2] + 1] = True
-    # Growth along the ceiling: a support node holding a ceiling point, or the
-    # point PROBE_DEPTH into the body, that rests on support directly below it
-    # along a rod direction.
-    ceiling = np.zeros(shape, dtype=bool)
-    for P in (need, need - PROBE_DEPTH * need_n):
-        vi = g.node_of(P) - lo
-        ok = np.all((vi >= 0) & (vi < np.array(shape)), axis=1)
-        ceiling[vi[ok, 0], vi[ok, 1], vi[ok, 2]] = True
-    grown = 0
-    while True:
-        below = np.zeros(shape, dtype=bool)
-        Pd = np.pad(U, 1)
-        for k in range(3):
-            below |= np.roll(Pd, 1, axis=k)[1:-1, 1:-1, 1:-1]
-        add = below & ceiling & ~U
-        if not add.any():
-            break
-        grown += int(add.sum())
-        U |= add
-    U, filled, _ = make_manifold(U)
-
-    # The fine grid: every rod is whole fine support nodes, and the support
-    # leaves them out.
-    coords = [_planes(g, int(lo[ax]), shape[ax]) for ax in range(3)]
-    centres = [(c[:-1] + c[1:]) / 2.0 for c in coords]
-    rshape = tuple(len(c) for c in centres)
-    CC = np.stack(np.meshgrid(*centres, indexing="ij"), -1).reshape(-1, 3)
-    own = np.floor((CC + g.h) / g.q).astype(np.int64) - lo
-    S = U[own[:, 0], own[:, 1], own[:, 2]].reshape(rshape)
-    L = np.concatenate([in_lattice(g.world(CC[i:i + 50_000]))
-                        for i in range(0, len(CC), 50_000)]).reshape(rshape)
-    L = _free_of_lattice(g, coords, local, in_body, body, L)
-    S &= ~L
-    S, rod_filled, rod_removed = _resolve_contacts(S, L, coords, g, local, in_body, body)
-    return U, grown, filled, coords, S, L, rod_filled, rod_removed
-
-
 def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
           report=None, extra=None) -> Frustums:
     """The support bodies for the ceiling points of ``rmesh``, before pockets.
@@ -834,7 +755,6 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     def in_lattice(P):
         return local.contains(P) if len(local.positions) else np.zeros(len(P), dtype=bool)
 
-    notes = []
     if report is not None:
         report("anchoring ceiling points", 0, None)
     t0 = time.perf_counter()
@@ -842,60 +762,57 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     anchor, wall = _anchors(g, v, gates.inside_body, in_lattice)
     stats["support_wall_anchors"] = int(wall.sum())
 
-    # Boxes [anchor, ceiling point's node], then the fine grid; then every
-    # support node the grid leaves hanging is anchored too, and the grid rebuilt.
+    # Boxes [anchor, ceiling point's node], then growth along the ceiling: a
+    # support node holding a ceiling point, or the point PROBE_DEPTH into the
+    # body, that rests on support directly below it along a rod direction.
     pairs = np.unique(np.hstack([anchor, v]), axis=0)
-    hanging_anchored, rounds, unanchored = 0, 0, 0
+    lo = pairs[:, :3].min(axis=0) - 1
+    hi = pairs[:, 3:].max(axis=0) + 2
+    shape = tuple((hi - lo).tolist())
+    U = np.zeros(shape, dtype=bool)
+    for r in pairs:
+        a_, c_ = r[:3] - lo, r[3:] - lo
+        U[a_[0]:c_[0] + 1, a_[1]:c_[1] + 1, a_[2]:c_[2] + 1] = True
+    ceiling = np.zeros(shape, dtype=bool)
+    for P in (need, need - PROBE_DEPTH * need_n):
+        vi = g.node_of(P) - lo
+        ok = np.all((vi >= 0) & (vi < np.array(shape)), axis=1)
+        ceiling[vi[ok, 0], vi[ok, 1], vi[ok, 2]] = True
+    grown = 0
     while True:
-        rounds += 1
-        U, grown, filled, coords, S, L, rod_filled, rod_removed = _support_grid(
-            g, pairs, need, need_n, local, gates.inside_body, body, in_lattice)
-        hang = hanging_nodes(S, L, coords, g, gates.inside_body)
-        if not len(hang) or rounds > HANGING_ROUNDS:
-            unanchored = len(hang)
+        below = np.zeros(shape, dtype=bool)
+        Pd = np.pad(U, 1)
+        for k in range(3):
+            below |= np.roll(Pd, 1, axis=k)[1:-1, 1:-1, 1:-1]
+        add = below & ceiling & ~U
+        if not add.any():
             break
-        cs = np.unique(np.stack(
-            [np.floor(((coords[ax][hang[:, ax]] + coords[ax][hang[:, ax] + 1]) / 2.0 + g.h)
-                      / g.q).astype(np.int64) for ax in range(3)], axis=1), axis=0)
-        try:
-            fa, _fw = _anchors(g, cs, gates.inside_body, in_lattice)
-        except ProcessingError as exc:
-            unanchored = len(hang)
-            lines.append(f"support grid: {len(hang)} hanging fine support node(s) found no "
-                         f"anchor ({exc})")
-            break
-        more = np.unique(np.vstack([pairs, np.hstack([fa, cs])]), axis=0)
-        if len(more) == len(pairs):
-            unanchored = len(hang)
-            break
-        hanging_anchored += len(cs)
-        pairs = more
+        grown += int(add.sum())
+        U |= add
+    U, filled, _ = make_manifold(U)
+
+    # The fine grid: every rod is whole fine support nodes, and the support
+    # leaves them out.
+    coords = [_planes(g, int(lo[ax]), shape[ax]) for ax in range(3)]
+    centres = [(c[:-1] + c[1:]) / 2.0 for c in coords]
+    rshape = tuple(len(c) for c in centres)
+    CC = np.stack(np.meshgrid(*centres, indexing="ij"), -1).reshape(-1, 3)
+    own = np.floor((CC + g.h) / g.q).astype(np.int64) - lo
+    S = U[own[:, 0], own[:, 1], own[:, 2]].reshape(rshape)
+    L = np.concatenate([in_lattice(g.world(CC[i:i + 50_000]))
+                        for i in range(0, len(CC), 50_000)]).reshape(rshape)
+    L = _free_of_lattice(g, coords, local, gates.inside_body, body, L)
+    S &= ~L
+    S, rod_filled, rod_removed = _resolve_contacts(S, L, coords, g, local, gates.inside_body, body)
     stats.update({"support_nodes": int(U.sum()), "support_nodes_grown": grown,
                   "support_nodes_joined": filled, "support_nodes_beside_rods": rod_filled,
-                  "support_nodes_removed_beside_rods": rod_removed,
-                  "support_hanging_anchored": hanging_anchored,
-                  "support_hanging_left": unanchored,
-                  "support_grid_rounds": rounds})
+                  "support_nodes_removed_beside_rods": rod_removed})
     lines.append(
         f"support grid: m = {m}, pitch {g.q:.3f} mm; {len(need)} ceiling point(s), "
         f"{int(wall.sum())} anchored on the wall; {int(U.sum())} support node(s) "
         f"({grown} grown along the ceiling, {filled} joining an edge or corner contact), "
         f"{rod_filled} fine support node(s) filled beside the rods"
     )
-    if hanging_anchored:
-        lines.append(f"support grid: {hanging_anchored} support node(s) the manifold repair "
-                     f"left hanging, anchored like ceiling points, in {rounds} round(s)")
-    if unanchored:
-        where = [point_text(np.round(g.world(np.array(
-            [coords[ax][int(n[ax])] for ax in range(3)])), 3).tolist())
-            for n in hang[:WARNING_POINTS]]
-        notes.append(warning_text(
-            HANGING_WARNING,
-            f"{unanchored} fine support node(s) rest on no support, lattice or wall after "
-            f"{rounds} round(s) of anchoring (docs/algorithm.md §14.3 S4)",
-            "their lowest corners print onto powder",
-            where,
-        ))
     if rod_removed:
         lines.append(f"support grid: {rod_removed} fine support node(s) removed at contacts "
                      f"beside the rods that could not be filled")
@@ -978,6 +895,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     covered |= ~gates.inside_body(probes)
     for _tag, _where, _est, held in dropped:
         covered &= ~held
+    notes = []
     if dropped:
         # Every point a dropped piece held is uncovered by now, just above.
         lost = np.zeros(len(need), dtype=bool)

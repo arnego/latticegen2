@@ -2086,7 +2086,6 @@ program builds itself.
   | struts closed off where they should join, not joined, not welded (§7.1, §8) | each junction |
   | boundary faces left invalid (§8) | each face |
   | solids exported without merging their faces (§9) | each solid's box |
-  | support nodes left hanging (§14.3 S4) | each node's lowest corner |
   | support pieces dropped (§14.3 S6) | each piece |
   | enclosed pockets may remain unfilled (§14.3 S7) | each region |
   | ceiling left without support (§14.3) | each point |
@@ -2669,28 +2668,6 @@ a lattice one — where it would fill `D` and `D` is a rod, it fills `A` below
 the pair instead. On the cylinder at `m = 2` that fills 186 fine support nodes and leaves
 no contact unresolved; the 69 edges become 0 and the touching holes vanish.
 
-**A node filled below the pair can hang, and is then anchored like a ceiling
-point** (`frustum.hanging_nodes`). `A` lies under the rod's keel, between `B`
-and `C`, which each hang beside the rod from boxes of their own, so nothing
-need lie under `A`: its lowest corner was a down-pointing tip printed onto
-powder, 2.8 to 3.5 mm from the nearest strut and 3.5 to 4.8 mm above the next
-material. Measured before this rule: 33 of the ball's 57 such fills and 110 of
-the cylinder's 199, every face of them inside the rod angle, so only a check of
-the finished print's tips saw them (specification.md §6.2). So a fine support
-node with no support or lattice node below it along any `-e_k`, and its lowest
-corner inside the body, has its support node anchored by `_anchors`, the box
-from that anchor is added, and the grid is rebuilt — up to `HANGING_ROUNDS`
-(8) times, since a new box can make new contacts. Each round adds a support
-node to a bounded grid, so it terminates; nodes still hanging after the last
-are reported (`HANGING_WARNING`), never failed on. A box standing on its anchor
-has no such node, so the rule changes nothing where the repair left none.
-
-It costs support volume, because each hanging node gets a whole box down to its
-anchor: measured 2026-11-05, the ball's support 6,170 → 13,378 mm³ with 64
-nodes anchored, the cylinder's 19,089 → 34,182 mm³ with 147, 7 rounds on both,
-and the extra support sealing 13 pockets on the cylinder. The runs took 129 s
-and 282 s, against 105 s and 239 s before.
-
 A contact can still stick where a rod's fine node reads as lattice and the body
 does not reach it (`frustum._resolve_contacts`): on the rehearsal part three did,
 and the 58,000 mm³ body they lay in was invalid, so that no trim passed, each rung
@@ -2906,8 +2883,8 @@ Measured with the lattice, `cc = 10, t = t_s = 1.5`, `m = 2`:
 
 | part | orientation | bodies | support | non-manifold edges | lattice overlap |
 |---|---|---|---|---|---|
-| `80mm-test-ball.step` | 35 20 −110 | 1 | 13,378 mm³ | 0 | 0 mm³ |
-| `test-cylinder.STEP` | 0 −90 0 | 3 | 34,182 mm³ | 0 | 0 mm³ |
+| `80mm-test-ball.step` | 35 20 −110 | 1 | 6,170 mm³ | 0 | 0 mm³ |
+| `test-cylinder.STEP` | 0 −90 0 | 3 | 18,404 mm³ | 0 | 0 mm³ |
 
 Coverage on the cylinder: 179 ceiling points read as unbacked by a probe moved
 0.1 mm along their normal, and none of them is a gap — they lie on edges where

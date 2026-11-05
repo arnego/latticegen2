@@ -377,7 +377,7 @@ CYLINDER_SUPPORT_GOLDEN = os.path.join(
 
 
 def support_checks(rep: Report, output: str, input_path: str, cc: float, t: float,
-                   orient, thickness: float) -> None:
+                   orient, thickness: float, final_print: bool = False) -> None:
     """specification.md §6.2's support checks, asked of the written file.
 
     A run with nothing to support at its orientation says so in its log, and
@@ -439,6 +439,27 @@ def support_checks(rep: Report, output: str, input_path: str, cc: float, t: floa
               f"{sp['worst_mm']:.3e} mm off its plane"
               + (f" near {sp['where']}" if sp["worst_mm"] > vg.CONTACT_PLANE_TOL
                  else ""))
+    if final_print:
+        final_print_check(rep, output, input_path, cc, t, orient, n, cov)
+
+
+def final_print_check(rep: Report, output: str, input_path: str, cc: float, t: float,
+                      orient, n_supports: int, cov: dict) -> None:
+    """No overhang, keel or tip of the finished print hangs over powder: the
+    input's inner surface past 60 deg, and the support bodies past the rod
+    angle, each unless it rests on the wall, the lattice or another support."""
+    fp = vg.final_print_overhangs(output, input_path, cc, t, orient, n_supports, cov)
+    inp, sup, cand = fp["input_free"], fp["free"], fp["candidates"]
+    bare = sum(inp.values()) + sum(sup.values())
+    first = next((f"support {w[0][0]} at {w[0][1]}" for w in fp["where"].values() if w),
+                 None) or (f"input at {fp['input_where'][0]}" if sum(inp.values()) else None)
+    rep.check("the final print has no unsupported overhang, keel or tip",
+              bare == 0,
+              f"input bare: {inp.get('face', 0)} face / {inp.get('edge', 0)} keel / "
+              f"{inp.get('vertex', 0)} tip sample(s); supports free: "
+              f"{sup['face']} of {cand['face']} face / {sup['edge']} of {cand['edge']} keel / "
+              f"{sup['vertex']} of {cand['vertex']} tip sample(s)"
+              + (f", first {first}" if first else ""))
 
 
 def scenario_oriented_lattice(outdir: str) -> Report:
@@ -553,7 +574,7 @@ def scenario_support_tilted(outdir: str) -> Report:
     rep.check("runtime under 10 minutes", elapsed < 600, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, BALL, 10.0, 1.5)
-        support_checks(rep, out, BALL, 10.0, 1.5, orient, 1.5)
+        support_checks(rep, out, BALL, 10.0, 1.5, orient, 1.5, final_print=True)
     return rep
 
 
@@ -585,7 +606,7 @@ def scenario_support_cylinder(outdir: str) -> Report:
     rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, CYLINDER, 10.0, 1.5)
-        support_checks(rep, out, CYLINDER, 10.0, 1.5, orient, 1.5)
+        support_checks(rep, out, CYLINDER, 10.0, 1.5, orient, 1.5, final_print=True)
         ref, _ = run_generator(
             ["-i", CYLINDER, "-cc", "10", "-t", "1.5", "-o", plain,
              "--cores", "6", "--orient", "0", "-90", "0"]

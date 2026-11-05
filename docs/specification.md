@@ -565,6 +565,11 @@ For every scenario the harness must verify, without human intervention:
   surface nor a lattice strut face must be inside 54.74°, read at exact surface
   normals, since a tessellated curved face built at the limit can read a hair
   past it.
+- **With `--support`, on the ball and the cylinder: nothing in the finished
+  print hangs over powder.** The input's inner surface past 60° and every
+  support body are searched for faces facing down past their limit, keels and
+  down-pointing tips; one touching the input's wall, the lattice or another
+  support is rooted there and passes. The lattice is not analysed.
 - Bounding box of output matches requested `--input` within tolerance.
 - Runtime stays under an agreed performance budget: `smoke-fast` and
   `dense-lattice` < 10 minutes, `smoke-verified` < 20 minutes.

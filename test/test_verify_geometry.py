@@ -184,3 +184,101 @@ def test_the_distance_contradiction_exonerates_only_points_actually_on_the_body(
     ev = vg.surface_points_outside(flush, outer)
     assert ev["contained"] is True
     assert ev["worst_distance_mm"] <= vg.PROTRUSION_MIN_MM
+
+
+# --- the final print's free overhangs (tools/verify_geometry.py) -------------
+#
+# A support node is a cube standing on its corner: its faces lean 35.26 deg
+# from vertical and its edges exactly the rod angle, so the only thing about it
+# that can hang is its lowest corner. Each case below is one detector's true
+# positive in free space and the same solid rooted on a floor, the lattice or
+# another support, which must pass.
+
+import numpy as np  # noqa: E402
+
+UP = np.array([0.0, 0.0, 1.0])
+
+
+def _moved(shape, rotate=None, to=(0.0, 0.0, 0.0)):
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt, gp_Trsf, gp_Vec
+
+    if rotate is not None:
+        axis, angle = rotate
+        r = gp_Trsf()
+        r.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(*axis)), angle)
+        shape = BRepBuilderAPI_Transform(shape, r, True).Shape()
+    m = gp_Trsf()
+    m.SetTranslation(gp_Vec(*to))
+    return occ.solids(BRepBuilderAPI_Transform(shape, m, True).Shape())[0]
+
+
+def _node(at):
+    """A 2 mm cube with its (1,1,1) diagonal vertical, lowest corner at ``at``."""
+    axis = np.cross([1.0, 1.0, 1.0], UP)
+    return _moved(box(2.0, 2.0, 2.0), (axis, float(np.arccos(1.0 / np.sqrt(3.0)))), at)
+
+
+def _keel(at):
+    """A 2 mm cube rolled 45 deg about x: a horizontal edge at the bottom, its
+    two faces 45 deg from vertical, inside the rod angle."""
+    return _moved(box(2.0, 2.0, 2.0), ((1.0, 0.0, 0.0), np.pi / 4.0), at)
+
+
+def _free(supports, lattice=(), body=None):
+    got = vg.free_support_overhangs(list(supports), list(lattice),
+                                    body if body is not None else box(100.0, 100.0, 100.0), UP)
+    return got["candidates"], got["free"]
+
+
+def test_a_support_node_hanging_in_free_space_is_a_free_tip():
+    cand, free = _free([_node((50.0, 50.0, 50.0))])
+    assert cand == {"face": 0, "edge": 0, "vertex": 1}
+    assert free == {"face": 0, "edge": 0, "vertex": 1}
+
+
+def test_a_support_node_standing_on_a_floor_the_lattice_or_a_support_is_rooted():
+    on_floor = _node((50.0, 50.0, 0.0))
+    assert _free([on_floor])[1] == {"face": 0, "edge": 0, "vertex": 0}
+    strut = box(4.0, 4.0, 4.0, at=(48.0, 48.0, 46.0))          # top at z = 50
+    assert _free([_node((50.0, 50.0, 50.0))], [strut])[1]["vertex"] == 0
+    below = box(4.0, 4.0, 4.0, at=(20.0, 20.0, 26.0))
+    cand, free = _free([_node((22.0, 22.0, 30.0)), below])
+    assert cand["vertex"] == 1 and free["vertex"] == 0         # the slab's own corners rise flat
+
+
+def test_a_horizontal_edge_in_free_space_is_a_free_keel_and_rooted_on_a_floor():
+    cand, free = _free([_keel((50.0, 50.0, 50.0))])
+    assert free["face"] == 0 and free["vertex"] == 0
+    assert cand["edge"] >= 5 and free["edge"] == cand["edge"]   # 2 mm at 0.5 mm
+    assert _free([_keel((50.0, 50.0, 0.0))])[1] == {"face": 0, "edge": 0, "vertex": 0}
+
+
+def test_a_flat_underside_hangs_unless_it_rests_on_something():
+    cand, free = _free([box(4.0, 4.0, 1.0, at=(50.0, 50.0, 50.0))])
+    assert cand["face"] > 0 and free["face"] == cand["face"]
+    assert free["edge"] == 0 and free["vertex"] == 0
+    cand, free = _free([box(4.0, 4.0, 1.0, at=(50.0, 50.0, 0.0))])
+    assert cand["face"] > 0 and free == {"face": 0, "edge": 0, "vertex": 0}
+    strut = box(10.0, 10.0, 2.0, at=(47.0, 47.0, 48.0))
+    cand, free = _free([box(4.0, 4.0, 1.0, at=(50.0, 50.0, 50.0))], [strut])
+    assert free == {"face": 0, "edge": 0, "vertex": 0}
+
+
+def test_a_support_against_a_tilted_wall_is_rooted_on_it():
+    """Where a support's rod-plane face meets the wall, their edge can run
+    flatter than the rod angle; it lies on the wall and is rooted there. The
+    floor here is tilted 30 deg and cuts the node's lowest corner off, so the
+    trimmed node rests on it with a face, keels and corners, none of them
+    free."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+
+    body = _moved(box(100.0, 100.0, 100.0), ((0.0, 1.0, 0.0), np.radians(30.0)), (0, 0, 0))
+    node = _moved(box(20.0, 20.0, 20.0), (np.cross([1.0, 1.0, 1.0], UP),
+                                          float(np.arccos(1.0 / np.sqrt(3.0)))), (30.0, 50.0, -20.0))
+    trimmed = occ.solids(BRepAlgoAPI_Common(node, body).Shape())[0]
+    cand, free = _free([trimmed], body=body)
+    assert cand["face"] > 0
+    assert free == {"face": 0, "edge": 0, "vertex": 0}
+    # The control: the same solid with the floor somewhere else hangs whole.
+    assert _free([trimmed])[1] == cand

@@ -459,6 +459,8 @@ def final_print_check(rep: Report, output: str, input_path: str, cc: float, t: f
               f"{inp.get('vertex', 0)} tip sample(s); supports free: "
               f"{sup['face']} of {cand['face']} face / {sup['edge']} of {cand['edge']} keel / "
               f"{sup['vertex']} of {cand['vertex']} tip sample(s)"
+              + (f", {sum(fp['near'].values())} within {vg.NEAR_TOL} mm of material"
+                 if sum(fp["near"].values()) else "")
               + (f", first {first}" if first else ""))
 
 

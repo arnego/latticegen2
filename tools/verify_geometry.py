@@ -1010,6 +1010,14 @@ ROOT_TOL = CONTAINMENT_TOL
 lattice, another support — is rooted on it. Contact, exactly measured: a support
 built onto a strut, a wall or a floor touches it at distance 0."""
 
+NEAR_TOL = COVERAGE_SLIVER_TOL
+"""Millimetres. A sample farther than :data:`ROOT_TOL` from other material but
+within this is a near contact: reported, and not failed. It is the sliver
+coverage already allows (:data:`COVERAGE_SLIVER_TOL`), seen from the support's
+side: where a trim cuts a support node against a curved wall, a grid corner can
+be left a few hundredths short of it -- 0.017 mm from a bore wall on the
+cylinder -- well under a powder grain."""
+
 
 def _material_face_samples(face, down: np.ndarray, bar: float, pitch: float):
     """Points of ``face`` whose outward normal faces ``down`` past ``bar``.
@@ -1256,10 +1264,12 @@ class _Contact:
         self.owner = np.concatenate(owner)
         self.face_of = np.concatenate(face_of)
         self.faces = faces
-        self.reach = ROOT_TOL + deflection
+        self.reach = NEAR_TOL + deflection
         self.sh = SpatialHash(self.mesh, min_cell=1.0)
 
-    def rooted(self, p: np.ndarray, own: int) -> bool:
+    def gap(self, p: np.ndarray, own: int) -> float:
+        """Exact distance from ``p`` to material other than shape ``own``, or
+        infinity past :data:`NEAR_TOL`."""
         from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
         from OCP.BRepExtrema import BRepExtrema_DistShapeShape
         from OCP.gp import gp_Pnt
@@ -1269,23 +1279,26 @@ class _Contact:
         cand = self.sh.query(p - self.reach, p + self.reach)
         cand = cand[self.owner[cand] != own]
         if len(cand) == 0:
-            return False
+            return float("inf")
         A, B, C = self.mesh.triangle_points
         d = segment_triangle_dist(p, p, A[cand], B[cand], C[cand])
         near = d <= self.reach
         if not near.any():
-            return False
+            return float("inf")
         order = np.argsort(d[near])
         seen = set()
+        best = float("inf")
         vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*map(float, p))).Vertex()
         for fi in self.face_of[cand[near][order]]:
             if fi in seen:
                 continue
             seen.add(fi)
             ext = BRepExtrema_DistShapeShape(vertex, self.faces[int(fi)])
-            if ext.IsDone() and ext.Value() <= ROOT_TOL:
-                return True
-        return False
+            if ext.IsDone():
+                best = min(best, ext.Value())
+                if best <= ROOT_TOL:
+                    break
+        return best if best <= NEAR_TOL else float("inf")
 
 
 def free_support_overhangs(supports: list, lattice: list, body, b: np.ndarray,
@@ -1297,7 +1310,8 @@ def free_support_overhangs(supports: list, lattice: list, body, b: np.ndarray,
     edge running flatter than it with both its faces steep enough, and every
     vertex lower than everything attached to it is a candidate; one touching
     the input's wall (``body``), the lattice or another support is rooted on it
-    and passes. What is left would be printed onto powder.
+    and passes, and one within :data:`NEAR_TOL` of them is counted as near and
+    passes. What is left would be printed onto powder.
     """
     from latticegen2.cli import SUPPORT_OVERHANG_DEG
 
@@ -1308,6 +1322,7 @@ def free_support_overhangs(supports: list, lattice: list, body, b: np.ndarray,
                         *supports], SUPPORT_MESH_DEFLECTION)
     found = {"face": [], "edge": [], "vertex": []}
     candidates = {"face": 0, "edge": 0, "vertex": 0}
+    near = {"face": 0, "edge": 0, "vertex": 0}
     for i, solid in enumerate(supports):
         own = 2 + i
         pts = {"face": [], "edge": _material_keel_samples(solid, down, bar, pitch),
@@ -1320,10 +1335,14 @@ def free_support_overhangs(supports: list, lattice: list, body, b: np.ndarray,
             candidates[kind] += len(ps)
             for p in ps:
                 p = np.asarray(p, dtype=float)
-                if not contact.rooted(p, own):
+                gap = contact.gap(p, own)
+                if gap > NEAR_TOL:
                     found[kind].append((i, np.round(p, 3).tolist()))
+                elif gap > ROOT_TOL:
+                    near[kind] += 1
     return {
         "candidates": candidates,
+        "near": near,
         "free": {k: len(v) for k, v in found.items()},
         "where": {k: v[:5] for k, v in found.items()},
     }

@@ -631,6 +631,24 @@ diagnosis. Remove an item once it's fixed and verified.*
   thickness gate; and the 2 pocket regions that run left unsearched, where the
   kernel refused every cut, which may hold trapped powder.
   Golden samples for the three support scenarios wait for an inspected output.
+* **Supports carry free stalactite tips, left by the fine-grid manifold
+  repair.** Found 2026-11-05 by §6.2's final-print check, which now fails
+  `support-tilted` (33 tips) and `support-cylinder` (110). Where two fine
+  support nodes B, C meet along a rod's corner line and the node D above both
+  is the rod, `frustum.make_manifold` fills the node A *below* them
+  (`bad & LD & ~LA`, docs/algorithm.md §14.3 S4) and nothing asks what A rests
+  on. A lies under the rod's keel, between two supports that each hang beside
+  it from their own anchors, so its lowest corner is often a down-pointing tip
+  2.8–3.5 mm from the nearest strut and 3.5–4.8 mm above the next material:
+  every one of the 143 is such a fill (57 fills on the ball, 33 of them free;
+  199 on the cylinder, 110 free). The other checks pass: every face of it
+  leans 35.26°, and coverage asks only the input. **Fix [TODO: proposed]:** a
+  fill left with no support node, rod or wall under it is given an anchor as a
+  ceiling point is — its coarse node is anchored by `_anchors`, the box from
+  that anchor added to `U`, and the fine grid rebuilt, until no fill is free.
+  Members then stay at the support grid's pitch, so `t_s` holds, which a
+  column of fine nodes under A (0.75 mm wide) would not. Verify with
+  `python tools/e2e.py --only support-tilted,support-cylinder`.
 * **The window has not been looked at on a screen in this session.** Its widget
   states and the orientation view's drawing were checked programmatically (the
   canvas was rasterised to an image), not by eye in a running window.

@@ -312,3 +312,12 @@ def test_a_saddle_whose_edges_all_rise_is_not_a_tip():
     tips = vg._material_tip_samples(solid, -up)
     assert len(tips) == 1
     assert np.allclose(tips[0], o + (0.0, -1.0, -1.0))
+
+
+def test_a_tip_a_hair_off_the_floor_is_near_and_one_clear_of_it_is_free():
+    """The sliver coverage already allows, from the support's side: a corner
+    0.02 mm above a floor is counted as near and passes; 0.2 mm is free."""
+    got = vg.free_support_overhangs([_node((50.0, 50.0, 0.02))], [], box(100.0, 100.0, 100.0), UP)
+    assert got["free"]["vertex"] == 0 and got["near"]["vertex"] == 1
+    got = vg.free_support_overhangs([_node((50.0, 50.0, 0.2))], [], box(100.0, 100.0, 100.0), UP)
+    assert got["free"]["vertex"] == 1 and got["near"]["vertex"] == 0

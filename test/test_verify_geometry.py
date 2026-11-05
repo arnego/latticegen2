@@ -321,3 +321,24 @@ def test_a_tip_a_hair_off_the_floor_is_near_and_one_clear_of_it_is_free():
     assert got["free"]["vertex"] == 0 and got["near"]["vertex"] == 1
     got = vg.free_support_overhangs([_node((50.0, 50.0, 0.2))], [], box(100.0, 100.0, 100.0), UP)
     assert got["free"]["vertex"] == 1 and got["near"]["vertex"] == 0
+
+
+def test_a_point_where_two_empty_octants_touch_is_not_a_tip():
+    """A staircase of six support nodes round a point, all but (-,-,-) and
+    (+,+,+), sewn as the generator sews them: the two empty octants touch only
+    at the point, so one of the vertices there has only rising edges and faces,
+    yet the full octants reach below it. Measured on the cylinder's supports.
+    The staircase's tips are its three lowest corners."""
+    from latticegen2.lattice import lattice_params
+    from latticegen2.support.frustum import _Grid, _staircase
+
+    lp = lattice_params(10.0, 1.5)
+    g = _Grid(lp, 2)
+    S = np.ones((2, 2, 2), dtype=bool)
+    S[0, 0, 0] = S[1, 1, 1] = False
+    coords = [np.arange(3, dtype=float) + 5.0 for _ in range(3)]
+    (solid,) = _staircase(S, coords, g)
+    occ.mesh_shape(solid, vg.SUPPORT_MESH_DEFLECTION)
+    tips = sorted(tuple(np.round(g.cube(np.asarray(t)) - 5.0, 6))
+                  for t in vg._material_tip_samples(solid, -lp.b))
+    assert tips == [(0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)]

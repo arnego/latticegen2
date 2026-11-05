@@ -1232,9 +1232,43 @@ def _material_tip_samples(solid, down: np.ndarray) -> list:
         if classifier is None:
             classifier = BRepClass3d_SolidClassifier(solid)
         classifier.Perform(gp_Pnt(*(v + eps * down)), 1e-7)
-        if classifier.State() == TopAbs_State.TopAbs_OUT:
-            out.append(tuple(v))
+        if classifier.State() != TopAbs_State.TopAbs_OUT:
+            continue
+        # Nothing of the solid may lie below the vertex near it, in any
+        # direction. One B-rep vertex need not see all the material at its
+        # point: where two empty octants of a staircase touch only there,
+        # (-,-,-) and (+,+,+), the solid's boundary is two cones meeting at a
+        # point, and the vertex of the upper one has only rising edges and
+        # faces while the six full octants reach well below it.
+        if any(_inside(classifier, v + TIP_PROBE_RADIUS * d) for d in _down_directions(up)):
+            continue
+        out.append(tuple(v))
     return out
+
+
+TIP_PROBE_RADIUS = 0.02
+"""Millimetres. How near a tip the solid is asked for material below it: well
+inside the smallest support feature, a fine node 0.75 mm wide at ``t = 1.5``."""
+
+
+def _down_directions(up: np.ndarray, n: int = 96) -> np.ndarray:
+    """Unit directions spread over the sphere, those pointing down by more than
+    a hair. A tip's own material lies in a cone opening upward, which none of
+    them enters."""
+    k = np.arange(n) + 0.5
+    z = 1.0 - 2.0 * k / n
+    phi = np.pi * (1.0 + 5.0 ** 0.5) * k
+    rr = np.sqrt(1.0 - z * z)
+    d = np.stack([rr * np.cos(phi), rr * np.sin(phi), z], axis=1)
+    return d[d @ up < -0.05]
+
+
+def _inside(classifier, p) -> bool:
+    from OCP.TopAbs import TopAbs_State
+    from OCP.gp import gp_Pnt
+
+    classifier.Perform(gp_Pnt(*map(float, p)), 1e-7)
+    return classifier.State() == TopAbs_State.TopAbs_IN
 
 
 class _Contact:

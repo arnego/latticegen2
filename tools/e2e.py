@@ -522,7 +522,7 @@ def scenario_support_clipped(outdir: str) -> Report:
                   f"{cov['slivers']} sliver(s) within {vg.COVERAGE_SLIVER_TOL:g} mm" +
                   (f", first at {cov['where'][0]}" if cov["where"] else ""))
         geometry_checks(rep, out, part, 7.0, 1.4)
-        support_checks(rep, out, part, 7.0, 1.4, orient, 1.0)
+        support_checks(rep, out, part, 7.0, 1.4, orient, 1.0, final_print=True)
     return rep
 
 
@@ -558,7 +558,7 @@ def scenario_support_gaps(outdir: str) -> Report:
         keel = overhang.detect(body, lp.b).counts()["edge"]
         rep.check("the part has a keel to support", keel > 0, f"{keel} edge sample(s)")
         geometry_checks(rep, out, GAPS, 10.0, 1.5)
-        support_checks(rep, out, GAPS, 10.0, 1.5, (0.0, 0.0, 0.0), 1.5)
+        support_checks(rep, out, GAPS, 10.0, 1.5, (0.0, 0.0, 0.0), 1.5, final_print=True)
     return rep
 
 

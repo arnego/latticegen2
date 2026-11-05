@@ -116,6 +116,33 @@ def test_beside_a_rod_the_node_below_is_filled_instead():
     assert got[0, 0, 0] and not got[1, 1, 0] and (filled, stuck) == (1, 0)
 
 
+@pytest.mark.parametrize("origin, fills", [(0.0, 0), (-1.0, 1)])
+def test_boxes_passing_a_rod_on_its_lower_sides_meet_inside_it(monkeypatch, origin, fills):
+    """Two support nodes passing a rod on its two lower sides, as boxes from
+    two neighbouring rods do. On a grid through the rods' axes they meet along
+    the axis, inside the rod, and with the rod left out they do not meet at
+    all: nothing to repair. On a grid on the rods' -t/2 faces they meet along
+    the rod's lowest corner line, outside it, and the repair fills the node
+    below them -- a node with nothing under it (specification.md §6.2's
+    final-print check found 33 on the ball and 110 on the cylinder)."""
+    from latticegen2.support import frustum
+
+    monkeypatch.setattr(frustum, "GRID_ORIGIN", origin)
+    lp = lattice_params(10.0, 1.5)
+    g = frustum._Grid(lp, 2)
+    coords = [frustum._planes(g, -1, 2), frustum._planes(g, -1, 2), frustum._planes(g, 0, 1)]
+    centres = [(c[:-1] + c[1:]) / 2.0 for c in coords]
+    C = np.stack(np.meshgrid(*centres, indexing="ij"), -1)
+    coarse = np.floor((C - g.o) / g.q).astype(np.int64)
+    S = (np.all(coarse == (0, -1, 0), axis=-1) | np.all(coarse == (-1, 0, 0), axis=-1))
+    L = (np.abs(C[..., 0]) < g.h) & (np.abs(C[..., 1]) < g.h)   # the rod along e_2
+    S &= ~L
+    assert (len(frustum._contacts(S)) > 0) == (fills > 0)
+    _got, filled, stuck = frustum.make_manifold(S, L)
+    assert stuck == 0
+    assert filled >= fills and (filled == 0) == (fills == 0)
+
+
 def test_a_corner_contact_is_joined_by_a_path_round_the_rods():
     from latticegen2.support.frustum import make_manifold
 
@@ -446,23 +473,27 @@ def test_a_fine_node_is_freed_only_if_no_kept_lattice_is_in_it():
     coords = [_planes(g, -2, 4) for _ in range(3)]
     centres = [(c[:-1] + c[1:]) / 2.0 for c in coords]
     C = np.stack(np.meshgrid(*centres, indexing="ij"), -1)
-    # The rod along e_0: fine nodes on its axis, past the hub, in order.
-    on_axis = (np.abs(C[..., 1]) < 1e-9) & (np.abs(C[..., 2]) < 1e-9) & (C[..., 0] > lp.t)
-    inner, outer = [tuple(i) for i in np.argwhere(on_axis)[np.argsort(C[on_axis][:, 0])][:2]]
-    # All of the rod from the middle of the first of them onward is lost.
-    start = (coords[0][inner[0]] + coords[0][inner[0] + 1]) / 2.0
-    cube = [np.array([start, coords[0][-1] + 1.0]),
-            np.array([coords[1][0] - 1.0, coords[1][-1] + 1.0]),
-            np.array([coords[2][0] - 1.0, coords[2][-1] + 1.0])]
-    lost = _staircase(np.ones((1, 1, 1), dtype=bool), cube, g)[0]
-    local = _LocalLattice(lp, np.zeros((1, 3), dtype=np.int64), [lost])
+    # The rod along e_0: its fine nodes in one quadrant round its axis, which
+    # the support grid's planes run through, past the hub, in order.
+    q4 = lp.t / 4.0
+    on_axis = (np.abs(C[..., 1] - q4) < 1e-9) & (np.abs(C[..., 2] - q4) < 1e-9) & (C[..., 0] > lp.t)
+    node = tuple(np.argwhere(on_axis)[np.argsort(C[on_axis][:, 0])][0])
     L0 = np.ones(tuple(len(c) for c in centres), dtype=bool)
+    body = _box((-50.0, -50.0, -50.0), (50.0, 50.0, 50.0))
 
-    L = _free_of_lattice(g, coords, local, lambda P: np.ones(len(P), dtype=bool),
-                         _box((-50.0, -50.0, -50.0), (50.0, 50.0, 50.0)), L0)
+    def stays_lattice(start):
+        """Whether the node stays lattice with all of the rod from ``start`` on lost."""
+        cube = [np.array([start, coords[0][-1] + 1.0]),
+                np.array([coords[1][0] - 1.0, coords[1][-1] + 1.0]),
+                np.array([coords[2][0] - 1.0, coords[2][-1] + 1.0])]
+        lost = _staircase(np.ones((1, 1, 1), dtype=bool), cube, g)[0]
+        local = _LocalLattice(lp, np.zeros((1, 3), dtype=np.int64), [lost])
+        return _free_of_lattice(g, coords, local, lambda P: np.ones(len(P), dtype=bool),
+                                body, L0)[node]
 
-    assert L[inner], "kept lattice remains in the node the wall crosses"
-    assert not L[outer], "nothing of the lattice is left in the node beyond it"
+    lo, hi = coords[0][node[0]], coords[0][node[0] + 1]
+    assert stays_lattice((lo + hi) / 2.0), "kept lattice remains in the node the wall crosses"
+    assert not stays_lattice(lo - 0.01), "nothing of the lattice is left in a node wholly lost"
 
 
 @pytest.mark.parametrize("wedge", [True, False])
@@ -478,7 +509,8 @@ def test_a_wedge_of_kept_lattice_between_the_samples_keeps_its_node(wedge):
     coords = [_planes(g, -2, 4) for _ in range(3)]
     centres = [(c[:-1] + c[1:]) / 2.0 for c in coords]
     C = np.stack(np.meshgrid(*centres, indexing="ij"), -1)
-    on_axis = (np.abs(C[..., 1]) < 1e-9) & (np.abs(C[..., 2]) < 1e-9) & (C[..., 0] > lp.t)
+    q4 = lp.t / 4.0
+    on_axis = (np.abs(C[..., 1] - q4) < 1e-9) & (np.abs(C[..., 2] - q4) < 1e-9) & (C[..., 0] > lp.t)
     node = tuple(np.argwhere(on_axis)[np.argsort(C[on_axis][:, 0])][0])
     lo = np.array([coords[a][node[a]] for a in range(3)])
     hi = np.array([coords[a][node[a] + 1] for a in range(3)])
@@ -547,7 +579,7 @@ def test_a_ceiling_clipping_a_node_corner_gets_a_ceiling_point():
     lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
     g = _Grid(lp, 2)
     # In cube coordinates, across the corner of node (1, 1, 1) nearest the origin.
-    corner = np.array([1, 1, 1]) * g.q - g.h
+    corner = np.array([1, 1, 1]) * g.q + g.o
     tri = corner + np.array([[0.2, -0.1, -0.05], [-0.1, 0.2, -0.05], [-0.05, -0.1, 0.2]])
     verts = g.world(tri)
     tris = np.array([[0, 1, 2]])

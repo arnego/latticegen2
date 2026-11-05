@@ -410,9 +410,13 @@ An opt-in stage that creates support structures, as used for
 - **Integral.** Once merged downstream, supports are a permanent part of the
   produced body, with solid interfaces and no feature designed to ease removal.
 - **Shape.** Supports are staircases of support nodes on a grid of the lattice's
-  own frame: every face lies on a plane of that frame — every downward face on a
-  rod face's plane — except where it lies on the input's own surface, and
-  coplanar faces are merged.
+  own frame: every face lies on a plane of that frame — the grid's planes run
+  through the rods' centre axes, so a support standing on a rod has its lowest
+  edge on the rod's axis, and a face meeting a rod lies on the rod's own face —
+  except where it lies on the input's own surface, and coplanar faces are
+  merged.
+- **Rooted.** Every support stands on a rod, a wall or another support: no
+  corner of it hangs over powder.
 - **File and part name:** `-sup` (part name `+sup`) is added last when support
   is enabled.
 - **Parallelisation** is used wherever a run-time reduction above 5 % is likely.
@@ -516,8 +520,8 @@ no `SpiralTest.step`.
 | oriented-lattice | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 | valid STEP through every §6.2 check with the lattice turned to the bed; the orientation recorded in the log and no support stage run. No golden sample. |
 | support-gaps | -i test/support-gaps.step -cc 10 -t 1.5 --cores 4 --support | valid STEP through every §6.2 check, on a small part (`tools/make_support_gaps_part.py`) holding the two ways `rehearsal-support` left ceiling bare: a keel no face of which overhangs past 60°, and a strut tip dropped as a floating body from a node still kept. Both are checked to be present, so it cannot pass by no longer testing them. Before the fix: 16 of 1,836 face samples and 32 of 33 keel samples unbacked. **Measured: 21 s, none unbacked**, and none at 0.1 mm sampling either (42,690). |
 | support-clipped | -i test/support-clipped-{cone,cylinder}.step -cc 7 -t 1.4 --cores 4 --orient 180 0 0 --support --support-thickness 1 | valid STEP through every §6.2 check on two small cuts of `TD_HX_rehearsal_test.step`, kept in its coordinates, where a ceiling just past the bar clips support nodes no refined mesh vertex lands in. Coverage is also asked at 0.1 mm, since 0.5 mm can step over such a sliver. Before the fix: 16 and 481 samples bare at 0.1 mm. **Measured: 13 s and 21 s; none bare, 1 sliver within 0.05 mm** beside the discarded chips, 11 samples on a rim. |
-| support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 142 s**, one support body, 12,524 of 12,524 overhang samples backed. |
-| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 353 s**, three support bodies, 33,065 of 33,065 overhang samples backed, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+| support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 107 s**, one support body of 5,296 mm³, 12,524 of 12,524 overhang samples backed, no support corner hanging free. |
+| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 235 s**, three support bodies of 15,206 mm³, 33,065 of 33,065 overhang samples backed, no support corner hanging free, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 | rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Measured 2026-10-31: 1 h 40 m, and coverage failed** — 630 of 125,777 overhang samples unbacked. The causes are fixed and verified on `support-gaps`. **Re-run 2026-11-02: failed at exit 4 after 8 h 22 m**, a support body overlapping the lattice by 1.475e-02 mm³; no file written. **Run again 2026-11-02 after those fixes: passes every §6.2 check. Measured: 2 h 08 m**, 4 h 56 m with the harness's checks; 27 support bodies of 40,136 mm³, 125,777 of 125,777 overhang samples backed, no overlap, 3 pocket regions left unsearched and reported. **Run 2026-11-05 with the local pocket search: passes every §6.2 check. Measured: 1 h 42 m**, 4 h 31 m with the harness's checks; the same 27 support bodies and 40,136 mm³, all overhang samples backed, no overlap, 2 pocket regions left unsearched and reported. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
@@ -565,8 +569,7 @@ For every scenario the harness must verify, without human intervention:
   surface nor a lattice strut face must be inside 54.74°, read at exact surface
   normals, since a tessellated curved face built at the limit can read a hair
   past it.
-- **With `--support`, on the ball and the cylinder: nothing in the finished
-  print hangs over powder.** The input's inner surface past 60° and every
+- **With `--support`: nothing in the finished print hangs over powder.** The input's inner surface past 60° and every
   support body are searched for faces facing down past their limit, keels and
   down-pointing tips; one touching the input's wall, the lattice or another
   support is rooted there and passes. The lattice is not analysed.
@@ -631,24 +634,6 @@ diagnosis. Remove an item once it's fixed and verified.*
   thickness gate; and the 2 pocket regions that run left unsearched, where the
   kernel refused every cut, which may hold trapped powder.
   Golden samples for the three support scenarios wait for an inspected output.
-* **Supports carry free stalactite tips, left by the fine-grid manifold
-  repair.** Found 2026-11-05 by §6.2's final-print check, which now fails
-  `support-tilted` (33 tips) and `support-cylinder` (110). Where two fine
-  support nodes B, C meet along a rod's corner line and the node D above both
-  is the rod, `frustum.make_manifold` fills the node A *below* them
-  (`bad & LD & ~LA`, docs/algorithm.md §14.3 S4) and nothing asks what A rests
-  on. A lies under the rod's keel, between two supports that each hang beside
-  it from their own anchors, so its lowest corner is often a down-pointing tip
-  2.8–3.5 mm from the nearest strut and 3.5–4.8 mm above the next material:
-  every one of the 143 is such a fill (57 fills on the ball, 33 of them free;
-  199 on the cylinder, 110 free). The other checks pass: every face of it
-  leans 35.26°, and coverage asks only the input. **Fix [TODO: proposed]:** a
-  fill left with no support node, rod or wall under it is given an anchor as a
-  ceiling point is — its coarse node is anchored by `_anchors`, the box from
-  that anchor added to `U`, and the fine grid rebuilt, until no fill is free.
-  Members then stay at the support grid's pitch, so `t_s` holds, which a
-  column of fine nodes under A (0.75 mm wide) would not. Verify with
-  `python tools/e2e.py --only support-tilted,support-cylinder`.
 * **The window has not been looked at on a screen in this session.** Its widget
   states and the orientation view's drawing were checked programmatically (the
   canvas was rasterised to an image), not by eye in a running window.

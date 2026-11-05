@@ -7,19 +7,19 @@ enveloping wall. The support for that point is the **box of support nodes**
 between its anchor and the support node holding the point. The support grid is
 the lattice's own cube frame divided ``m`` times (:func:`grid_divisions`), so
 every face of every box lies on a plane of the lattice frame: downward faces
-are rod faces (35.26 deg from horizontal), every edge leans at most the rod
-angle, and the lowest corner of every box is its anchor. Self-support is a
-property of the construction, not a check.
+lean 35.26 deg from vertical, every edge leans at most the rod angle, and the
+lowest corner of every box is its anchor. The grid's planes run through the
+rods' centre axes, so a box anchored on a rod has its lowest edge on the rod's
+axis: it sits on the rod. Self-support is a property of the construction, not
+a check.
 
 The union of the boxes is made **manifold** twice: once on the support grid,
 and once on a fine grid refined with every rod face and cap plane, on which
-every rod is made of whole fine support nodes -- because the support grid's
-planes are rod face planes, a rod's corner line can otherwise lie exactly where
-two support nodes meet diagonally, and once the rod is left out the support
-touches itself along that line (an edge four faces share, which no CAD kernel
-downstream accepts as a solid). On the fine grid the support leaves the rod's
-nodes out by construction, so it shares faces with the lattice and needs no cut
-against it.
+every rod is made of whole fine support nodes, so the support leaves the rods'
+nodes out by construction, shares faces with the lattice and needs no cut
+against it. Two boxes passing a rod on its two lower sides meet along the
+rod's axis, inside the rod, so leaving the rod out leaves them apart rather
+than touching along an edge.
 
 The support bodies are then trimmed to the input body, one intersection per body,
 each result held to a point-sampled estimate and to the material-outside probe,
@@ -55,6 +55,15 @@ further (:data:`ANCHOR_DROP_MAX_PITCHES`)."""
 ANCHOR_DROP_MAX_PITCHES = 4096
 """The furthest an anchor is searched, in grid pitches: past any body this tool
 can mesh. A ceiling point with no anchor within it fails the run."""
+
+GRID_ORIGIN = 0.0
+"""Where the support grid's planes sit, in half strut widths off the rods'
+centre planes. ``0`` puts them through the rod axes; ``-1``, on the rods'
+``-t/2`` faces, is the grid this generator used until 2026-11-05, kept
+selectable for the comparison docs/algorithm.md §14.3 S4 records: there two
+boxes passing a rod on its lower sides meet along its corner line, the
+manifold repair fills the node below them, and that node rests on nothing --
+33 of them on the ball, 110 on the cylinder."""
 
 ANCHOR_EPS = 1e-3
 """mm. A support node is tested this far inside its lowest corner, along its
@@ -124,8 +133,9 @@ class Frustums:
 
 class _Grid:
     """The support grid: support node ``(i, j, k)`` spans
-    ``[i q - t/2, (i+1) q - t/2]`` along each cube axis, so its planes are the
-    rods' ``-t/2`` face planes."""
+    ``[i q + o, (i+1) q + o]`` along each cube axis, ``o`` from
+    :data:`GRID_ORIGIN` -- ``0``, so every ``m``-th plane runs through a rod's
+    centre axis."""
 
     def __init__(self, lp, m: int):
         self.E = np.asarray(lp.e, dtype=float)      # rows e_k: cube coords C = x @ E.T
@@ -133,6 +143,7 @@ class _Grid:
         self.a = lp.a
         self.q = lp.a / m
         self.h = lp.t / 2.0
+        self.o = GRID_ORIGIN * self.h
 
     def cube(self, x):
         return np.asarray(x, dtype=float) @ self.E.T
@@ -141,11 +152,11 @@ class _Grid:
         return np.asarray(c, dtype=float) @ self.E
 
     def node_of(self, x):
-        return np.floor((self.cube(x) + self.h) / self.q).astype(np.int64)
+        return np.floor((self.cube(x) - self.o) / self.q).astype(np.int64)
 
     def corner(self, idx):
         """World position of support node ``idx``'s lowest corner, nudged inside it."""
-        return self.world(np.asarray(idx) * self.q - self.h + ANCHOR_EPS)
+        return self.world(np.asarray(idx) * self.q + self.o + ANCHOR_EPS)
 
 
 def _anchors(g: _Grid, v: np.ndarray, in_body, in_lattice):
@@ -274,9 +285,9 @@ def _planes(g: _Grid, lo: int, n: int) -> np.ndarray:
     """Cube coordinates of the fine grid's planes along one axis: the support
     grid's planes of support nodes ``lo .. lo + n - 1`` plus every rod face
     (``±t/2``) and cap (``±a/2``) plane between them."""
-    c0 = lo * g.q - g.h
-    c1 = (lo + n) * g.q - g.h
-    out = {round(float(x), 9) for x in (lo + np.arange(n + 1)) * g.q - g.h}
+    c0 = lo * g.q + g.o
+    c1 = (lo + n) * g.q + g.o
+    out = {round(float(x), 9) for x in (lo + np.arange(n + 1)) * g.q + g.o}
     for lattice_node in range(int(np.floor(c0 / g.a)) - 1, int(np.ceil(c1 / g.a)) + 2):
         for off in (-g.h, g.h, -g.a / 2.0, g.a / 2.0):
             x = lattice_node * g.a + off
@@ -495,7 +506,7 @@ def _split(piece, g: _Grid):
     clo, chi = C.min(axis=0), C.max(axis=0)
     v = occ.volume(piece)
     for k in np.argsort(clo - chi):                 # longest extent first
-        c = round(((clo[k] + chi[k]) / 2.0 + g.h) / g.q) * g.q - g.h
+        c = round(((clo[k] + chi[k]) / 2.0 - g.o) / g.q) * g.q + g.o
         if not clo[k] + 1e-6 < c < chi[k] - 1e-6:
             continue
         halves = []
@@ -685,7 +696,7 @@ def _clipped_ceiling(g: _Grid, verts: np.ndarray, normals: np.ndarray, tris: np.
     polygon's corner or centre that overhangs most, normals interpolated, and it
     must itself be over the bar and not on a strut."""
     C = g.cube(verts)
-    node = np.floor((C + g.h) / g.q).astype(np.int64)
+    node = np.floor((C - g.o) / g.q).astype(np.int64)
     tn = node[tris]
     spans = np.nonzero((tn.min(axis=1) != tn.max(axis=1)).any(axis=1))[0]
     pts, nrm = [], []
@@ -696,7 +707,7 @@ def _clipped_ceiling(g: _Grid, verts: np.ndarray, normals: np.ndarray, tris: np.
             if (i, j, k) in held:
                 continue
             idx = np.array([i, j, k])
-            lo = idx * g.q - g.h
+            lo = idx * g.q + g.o
             tri = C[tris[t]]
             poly = _clip_to_node(tri, lo, lo + g.q)
             if len(poly) < 3:
@@ -797,7 +808,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     centres = [(c[:-1] + c[1:]) / 2.0 for c in coords]
     rshape = tuple(len(c) for c in centres)
     CC = np.stack(np.meshgrid(*centres, indexing="ij"), -1).reshape(-1, 3)
-    own = np.floor((CC + g.h) / g.q).astype(np.int64) - lo
+    own = np.floor((CC - g.o) / g.q).astype(np.int64) - lo
     S = U[own[:, 0], own[:, 1], own[:, 2]].reshape(rshape)
     L = np.concatenate([in_lattice(g.world(CC[i:i + 50_000]))
                         for i in range(0, len(CC), 50_000)]).reshape(rshape)

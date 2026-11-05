@@ -2596,11 +2596,15 @@ holding no ceiling point. So the triangles at the bar are walked across the grid
 and the point of the clipped polygon overhanging most becomes a ceiling point,
 if it is over the bar and not on a strut.
 
-**The support grid.** Support node `(i, j, k)` spans `[i q − t/2, (i+1) q − t/2]` along each
+**The support grid.** Support node `(i, j, k)` spans `[i q, (i+1) q]` along each
 cube axis `e_0, e_1, e_2` of the lattice frame (§2), with pitch `q = a/m`.
-Its planes are the rods' `−t/2` face planes, and every `m`-th plane carries a
-rod. `m` is the largest division whose gap between parallel rod faces,
-`q − t`, still holds the minimum support thickness:
+Every `m`-th plane runs through rods' **centre axes** (`frustum.GRID_ORIGIN`),
+so a rod's cross-section is split in four by the grid, a quadrant in each of
+the four support nodes round it, and a support node whose lowest corner lies on
+a rod's axis has its lowest edge along that rod: it sits on the rod.
+`m` is the largest division whose gap between parallel rod faces,
+`q − t`, still holds the minimum support thickness — conservatively now, since
+a support node beside a rod loses only a quadrant of it, `q − t/2`:
 
 ```python
 m = max(1, floor(a / (t + t_s)))        # frustum.grid_divisions
@@ -2649,14 +2653,37 @@ filled, which rest on `A`; of an anti-diagonal pair `B`, `C`, the support node `
 above both, which rests on them; two support nodes touching at a corner are joined
 through a monotone path of two support nodes.
 
-That alone is not enough, because the support node planes are rod face planes. A
-rod's corner line can lie exactly on the line where two support nodes meet
-diagonally — support on two sides of it, the rod on the third, free space on
-the fourth — and once the rod is left out, the support touches itself along
-that line: **an edge four faces share.** Measured on the cylinder's top
-support at `m = 2`: 69 such edges, every one of that pattern; where one reaches
-the ceiling, a hole in the ceiling face touches the face's outer boundary at a
-vertex. That is the body SolidWorks showed without its top face.
+**Why the grid runs through the rod axes.** Until 2026-11-05 its planes
+were the rods' `−t/2` face planes, and a rod then sat whole in the lowest
+corner of the support node anchored on it. Two boxes passing a rod on its two
+lower sides, as boxes from neighbouring rods do, met along the rod's lowest
+corner line — on the rod's surface, so the contact survived leaving the rod out:
+support on two sides of the line, the rod on the third, free space on the
+fourth, **an edge four faces share.** Measured on the cylinder's top support at
+`m = 2`: 69 such edges; where one reached the ceiling, a hole in the ceiling face
+touched the face's outer boundary at a vertex, the body SolidWorks showed
+without its top face. The fine-grid repair below filled the free node under
+the pair — and nothing asked what that node rests on: it hung under the rod's
+keel, its lowest corner a tip printed onto powder 2.8 to 3.5 mm from the
+nearest strut. specification.md §6.2's final-print check found 33 on the ball
+and 110 on the cylinder, every face of them inside the rod angle. Giving each
+such node a box of its own down to an anchor was tried and reverted: it ran
+the support a cell down the rods, doubling its volume.
+
+On a grid through the axes the same two boxes meet along the rod's axis,
+inside the rod, and the rod left out leaves them apart: there is no contact
+to repair. The three fine nodes such a fill involves — under the rod on each
+side and diagonally below it — all lie in one support node, so they are
+support or free together. Measured on the same lattices, old grid against new
+(`test_boxes_passing_a_rod_on_its_lower_sides_meet_inside_it` pins the case):
+
+| part | fine fills beside rods | free tips | support |
+|---|---|---|---|
+| `80mm-test-ball.step`, 35 20 −110 | 57 → **0** | 33 → **0** | 6,170 → **5,296** mm³ |
+| `test-cylinder.STEP`, 0 −90 0 | 199 → **0** | 110 → **0** | 19,089 → **15,206** mm³ |
+
+The repair still runs on the fine grid, for what cap planes and lost pieces
+can leave; on these parts it fills nothing.
 
 So the repair runs again on a **refined grid**: the support node planes plus every
 rod face (`n a ± t/2`) and cap (`n a ± a/2`) plane, on which every rod is a
@@ -2665,8 +2692,9 @@ corners against its centre). A fine support node is lattice when its centre lies
 junction's material (`_LocalLattice.contains`); support's fine nodes are those of its
 support nodes less the lattice's. The same repair fills free fine nodes only, never
 a lattice one — where it would fill `D` and `D` is a rod, it fills `A` below
-the pair instead. On the cylinder at `m = 2` that fills 186 fine support nodes and leaves
-no contact unresolved; the 69 edges become 0 and the touching holes vanish.
+the pair instead. On the old grid this filled 186 fine support nodes on the
+cylinder at `m = 2` and left no contact unresolved; on the grid through the
+axes it fills none there.
 
 A contact can still stick where a rod's fine node reads as lattice and the body
 does not reach it (`frustum._resolve_contacts`): on the rehearsal part three did,
@@ -2883,8 +2911,8 @@ Measured with the lattice, `cc = 10, t = t_s = 1.5`, `m = 2`:
 
 | part | orientation | bodies | support | non-manifold edges | lattice overlap |
 |---|---|---|---|---|---|
-| `80mm-test-ball.step` | 35 20 −110 | 1 | 6,170 mm³ | 0 | 0 mm³ |
-| `test-cylinder.STEP` | 0 −90 0 | 3 | 18,404 mm³ | 0 | 0 mm³ |
+| `80mm-test-ball.step` | 35 20 −110 | 1 | 5,296 mm³ | 0 | 0 mm³ |
+| `test-cylinder.STEP` | 0 −90 0 | 3 | 15,206 mm³ | 0 | 0 mm³ |
 
 Coverage on the cylinder: 179 ceiling points read as unbacked by a probe moved
 0.1 mm along their normal, and none of them is a gap — they lie on edges where

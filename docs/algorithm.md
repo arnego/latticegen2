@@ -2586,6 +2586,14 @@ over (`SupportInput.lost_lattice`), and neither the point test nor the junction
 instances count them. Only a piece whose node is still kept matters: a junction
 dropped whole never read as lattice.
 
+**A strut backs a point a hair below it, not only at the probe.** The lattice is
+asked at both depths a support body is asked at, `PROBE_DEPTH` (0.1 mm) and
+`SHALLOW_DEPTH` (2e-3 mm) along the inward direction (`frustum.lattice_backs`),
+both where a keel or tip sample becomes a ceiling point and where coverage is
+counted. Asked at the probe alone, a keel resting on a strut's face read as bare:
+on the rehearsal, 2026-11-06, one lay in a strut down to 0.08 mm and was
+reported unbacked; six keel and tip samples there rest on struts this way.
+
 **A support node the ceiling only clips gets a ceiling point too.** The refined
 vertices are `h` apart and a node several times that, so a node the ceiling
 crosses nearly always holds one, except where a surface just past the bar
@@ -2595,6 +2603,14 @@ holding no ceiling point. So the triangles at the bar are walked across the grid
 (`frustum._clipped_ceiling`), each clipped to the nodes it spans that hold none,
 and the point of the clipped polygon overhanging most becomes a ceiling point,
 if it is over the bar and not on a strut.
+
+**Over the bar by the face's own normal** (`RegionMesh.surface_points`), not by
+the vertex normals, which are averaged across a crease. Two faces each under
+the bar can average to a ceiling: on the rehearsal, a roof apex of 13° and 30°
+faces averaged to 8.5° from flat, and a ceiling point there was reported
+unbacked with nothing to support. 84 of the rehearsal's 374 clipped points were
+of that kind, and they drew in 127 support nodes. A crease that does
+overhang is a keel, which §14.1 samples.
 
 **The support grid.** Support node `(i, j, k)` spans `[i q, (i+1) q]` along each
 cube axis `e_0, e_1, e_2` of the lattice frame (§2), with pitch `q = a/m`.
@@ -2870,6 +2886,27 @@ and counts them (`support_pocket_slabs_unsearched`). The kernel's reason goes to
 the log. It never fills free space it has not found: a fill is always a whole
 cut-off piece of a search that succeeded.
 
+**Before a slab is split, a third route cuts it with the supports' cores.** A
+support is trimmed to the body, so its faces lie on the body's, and the free
+space cut from the body has them too: two shapes sharing the body's own curved
+faces. On the rehearsal of 2026-11-06 that refused four regions, and none of
+them held a pocket — each region's free space, sampled at 0.1 mm without the
+kernel and flood-filled, was one piece of 3,000 to 3,300 mm³ reaching the
+surrounding powder. The kernel was wrong, not the supports: a 243.3 mm³ support
+wholly inside the body, clean at 3e-7 mm, intersected with the body at
+−0.0035 mm³, and the boolean raised one of its vertex tolerances to 1.17 mm on
+the way. A **core** is the staircase solid a support was trimmed from, less the
+debris and the pieces dropped (`frustum.Frustums.cores`), with any lost piece
+absorbed into a support added: inside the body it is the support, and none of
+its faces lies on the body. So where both cuts by the supports are refused, the
+region is cut by the lattice and the cores (`voids._free_by_cores`), after
+their volume inside the region is checked to be the supports' in the box, to
+the bar of the cut itself; a core that is not the support there leaves the slab
+refused as before. Replayed on that run's inputs, the route cut all seven slabs
+refused there, in 3 to 9 s each, and the three envelopes were searched
+completely. It runs only where both other routes are refused, so a slab they
+cut is cut as before.
+
 **The count a run reports is the final bodies' answer.** `build` answers from
 the support grid and the struts, which knows nothing of pocket fills or absorbed
 pieces, so what it leaves bare is asked again of the bodies as finished
@@ -3013,6 +3050,20 @@ harness's 0.5 mm samples find all 125,777 backed.
 | stage | ceiling points | grid | staircase | trim | backing check | pocket search | overlap check |
 |---|---|---|---|---|---|---|---|
 | `support` 1,131 s, `pockets` 3,405 s | 335.1 s | 344.4 s | 63.4 s | 307.4 s | 1.1 s | 1,284.2 s | ~2,121 s |
+
+**Neither warning of that run was real.** One unbacked point was a keel lying
+in a strut, which the lattice probe at 0.1 mm alone did not see, the other a
+clipped point on a roof crease of two faces under the bar (S1); each of the four
+refused regions was open free space the kernel could not cut against supports
+sharing the body's faces (S7). **With both fixed, the run of the same day takes
+1 h 43 m** and passes every check with no support warning: 48 support bodies of
+31,618 mm³, all 225,547 ceiling points backed, 24 pockets filled, four envelopes
+widened, no region left unsearched. The 400 mm³ less support is what the
+crease points drew in.
+
+| stage | ceiling points | grid | staircase | trim | backing check | pocket search | overlap check |
+|---|---|---|---|---|---|---|---|
+| `support` 1,120 s, `pockets` 3,309 s | 333.6 s | 339.3 s | 63.2 s | 296.8 s | 5.4 s | 1,178.6 s | ~2,131 s |
 
 **Still to come:** the free-standing thickness gate; the overlap check and S6
 dispatched across the worker pool (specification.md §4.6's parallelisation),

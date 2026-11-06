@@ -101,6 +101,53 @@ def test_a_refused_combined_cut_is_redone_in_two_steps(cup, monkeypatch):
     assert sum(occ.volume(f) for f in got.fills) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
 
 
+def _refusing_the_supports(voids, monkeypatch):
+    """``voids._free`` refusing both cuts by the trimmed supports, as the kernel
+    did on the rehearsal part where a support's faces lie on the body's."""
+    real = voids._free
+    refused = []
+
+    def free(region, tools, removes, what, one_by_one=True):
+        if what in ("the lattice and the supports", "the supports"):
+            refused.append(what)
+            raise voids.CutRefused("refused")
+        return real(region, tools, removes, what, one_by_one)
+
+    monkeypatch.setattr(voids, "_free", free)
+    return refused
+
+
+def test_a_slab_the_supports_cannot_cut_is_cut_by_their_cores(cup, monkeypatch):
+    """Both cuts by the lid refused, the lid before its trim -- reaching past the
+    roof, with no face on it -- cuts the same free space, and the cup is filled
+    exactly. Inside the body the core is the lid, which is checked first."""
+    from latticegen2 import occ
+    from latticegen2.support import voids
+
+    body, mesh, lp = cup
+    refused = _refusing_the_supports(voids, monkeypatch)
+    lid, core = _cyl(R2, H - TOP, TOP), _cyl(R2, H - TOP + 2.0, TOP)
+    got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5, cores=[core])
+    assert set(refused) == {"the lattice and the supports", "the supports"}
+    assert not got.unsearched
+    assert len(got.fills) == 1
+    assert occ.volume(got.fills[0]) == pytest.approx(np.pi * R1 ** 2 * TOP, rel=1e-6)
+
+
+def test_a_core_that_is_not_the_support_inside_the_body_is_not_used(cup, monkeypatch):
+    """A core narrower than the lid would leave free space where the lid is: its
+    volume in the region disagrees with the lid's, and the slab stays open, as
+    without cores."""
+    from latticegen2.support import voids
+
+    body, mesh, lp = cup
+    _refusing_the_supports(voids, monkeypatch)
+    lid, core = _cyl(R2, H - TOP, TOP), _cyl(R2 - 1.0, H - TOP + 2.0, TOP)
+    for cores in ([core], []):
+        got = voids.find_pockets(body, mesh, [lid], lambda box: [], 1.5, cores=cores)
+        assert got.unsearched and not got.fills
+
+
 def _refusing(voids, monkeypatch, refuse):
     """``voids._slab_free`` refusing every box ``refuse(lo, hi)`` names; the
     x extents of the boxes asked for are recorded."""

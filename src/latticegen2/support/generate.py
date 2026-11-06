@@ -62,7 +62,8 @@ def _touching(a, b, gap: float = 1e-3) -> bool:
     return bool(np.all(a[0] <= b[1] + gap) and np.all(b[0] <= a[1] + gap))
 
 
-def absorb_lost(solids: list, lost, bare: np.ndarray) -> tuple[list, int]:
+def absorb_lost(solids: list, lost, bare: np.ndarray, added: list | None = None
+                ) -> tuple[list, int]:
     """``(solids, n)``: ``solids`` with the ``n`` lost junction pieces that hold a
     ``bare`` point made part of them.
 
@@ -73,7 +74,7 @@ def absorb_lost(solids: list, lost, bare: np.ndarray) -> tuple[list, int]:
     lies in the body, leaves the kept lattice along faces, and its faces lie on
     rod planes and the body's surface. What the supports do not already hold of
     it joins them. A piece that would make a body non-manifold is left out, for
-    the count at the end to report.
+    the count at the end to report. What joins is appended to ``added``.
     """
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
 
@@ -96,6 +97,8 @@ def absorb_lost(solids: list, lost, bare: np.ndarray) -> tuple[list, int]:
             continue
         keep = [s for s in solids if not any(s is o for o in near)]
         solids = keep + joined
+        if added is not None:
+            added += rest
         n += 1
     return solids, n
 
@@ -139,9 +142,12 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     covered = got.covered.copy()
     shallow = got.points - frustum.SHALLOW_DEPTH * got.normals
     bodies = list(got.solids)
+    # Inside the body these are the bodies, with no face on its surface: what
+    # the pocket search cuts with where the bodies themselves are refused.
+    cores = list(got.cores)
     if lost and not covered.all():
         bodies, stats["support_lost_pieces_absorbed"] = absorb_lost(bodies, lost,
-                                                                    shallow[~covered])
+                                                                    shallow[~covered], cores)
     if not bodies:
         # Nothing to search pockets in or to ask again, but what the grid left
         # bare -- every piece dropped, say -- is still reported.
@@ -165,7 +171,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                                      thickness,
                                      others=[s for i, s in enumerate(bodies) if i not in mine],
                                      pool=pool, staged=staged, report=report,
-                                     reach=local.reach)
+                                     reach=local.reach, cores=cores)
         fills += [f for f in pockets.fills if not voids.found_before(f, fills)]
         unsearched += pockets.unsearched
         refusals += pockets.refusals

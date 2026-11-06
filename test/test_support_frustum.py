@@ -598,6 +598,74 @@ def test_a_ceiling_clipping_a_node_corner_gets_a_ceiling_point():
     assert not len(_clipped_ceiling(g, verts, up, tris, held, on_strut, b, 0.866)[0])
 
 
+def test_a_crease_of_faces_under_the_bar_gets_no_clipped_ceiling_point():
+    """The vertex normals are averaged across a crease, and two faces each under
+    the bar can average to a flat ceiling: the rehearsal part's roof apex of 13
+    and 30 deg faces averaged to 8.5 deg from flat, and a ceiling point there was
+    reported unbacked. The face's own normal decides."""
+    from latticegen2.support.frustum import _clipped_ceiling, _Grid
+
+    lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+    g = _Grid(lp, 2)
+    corner = np.array([1, 1, 1]) * g.q + g.o
+    tri = corner + np.array([[0.2, -0.1, -0.05], [-0.1, 0.2, -0.05], [-0.05, -0.1, 0.2]])
+    verts = g.world(tri)
+    tris = np.array([[0, 1, 2]])
+    b = np.asarray(lp.b, dtype=float)
+    averaged = np.broadcast_to(b, (3, 3))
+    nowhere = lambda P: np.zeros(len(P), dtype=bool)                    # noqa: E731
+    held = {tuple(x) for x in g.node_of(verts).tolist()}
+    side = np.cross(b, [1.0, 0.0, 0.0])
+    side /= np.linalg.norm(side)
+    # 30 deg from vertical: n . b = sin 30.
+    roof = np.sin(np.radians(30.0)) * b + np.cos(np.radians(30.0)) * side
+
+    def face(n):
+        return lambda t, w: (None, np.broadcast_to(n, (len(w), 3)))
+
+    assert not len(_clipped_ceiling(g, verts, averaged, tris, held, nowhere, b, 0.866,
+                                    surface=face(roof))[0])
+    p, n = _clipped_ceiling(g, verts, averaged, tris, held, nowhere, b, 0.866,
+                            surface=face(b))
+    assert len(p) and np.allclose(n, b)
+
+
+def test_a_core_is_the_staircase_less_what_its_trim_did_not_keep():
+    """The core the pocket search falls back on: the staircase less the debris
+    and dropped pieces inside it; empty where the cut does not take out exactly
+    those, rather than a core that is not the support."""
+    from latticegen2 import occ
+    from latticegen2.support.frustum import _core
+
+    piece = _box((0.0, 0.0, 0.0), (10.0, 10.0, 10.0))
+    chip = _box((1.0, 1.0, 1.0), (2.0, 2.0, 2.0))
+    assert _core(piece, []) == [piece]
+    got = _core(piece, [chip])
+    assert sum(occ.volume(s) for s in got) == pytest.approx(999.0, rel=1e-9)
+    elsewhere = _box((20.0, 0.0, 0.0), (21.0, 1.0, 1.0))
+    assert _core(piece, [elsewhere]) == []
+
+
+def test_a_point_resting_on_a_strut_face_is_backed_by_it():
+    """A ceiling point in a strut a hair below it is backed though the strut's
+    face is nearer than PROBE_DEPTH: on the rehearsal part a keel lay in a strut
+    to 0.08 mm, and was reported unbacked. One just outside the strut is not."""
+    from latticegen2.support.assemble import _LocalLattice
+    from latticegen2.support.frustum import PROBE_DEPTH, lattice_backs
+
+    lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+    local = _LocalLattice(lp, np.zeros((1, 3), dtype=np.int64))
+    e0, e1 = (np.asarray(lp.e[k], dtype=float) for k in (0, 1))
+    # On the +e0 half-strut, 0.05 mm inside its +e1 face; outward normal -e1, so
+    # the probe moves towards the face and leaves the strut at PROBE_DEPTH.
+    inside = 0.3 * lp.a * e0 + (lp.t / 2.0 - 0.05) * e1
+    outside = 0.3 * lp.a * e0 + (lp.t / 2.0 + 0.05) * e1
+    N = np.array([-e1, -e1])
+    P = np.array([inside, outside])
+    assert not local.contains(P - PROBE_DEPTH * N).any()
+    assert lattice_backs(local.contains, P, N).tolist() == [True, False]
+
+
 def test_a_lost_piece_holding_a_bare_point_joins_the_support_it_touches():
     from latticegen2 import occ
     from latticegen2.support.frustum import exact_inside

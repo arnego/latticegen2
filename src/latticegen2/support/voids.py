@@ -357,11 +357,16 @@ def _touches(shape, lo, hi) -> bool:
     return bool(np.all(slo <= hi + 1e-6) and np.all(lo <= shi + 1e-6))
 
 
-def _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice: list, tools: list) -> _Slab:
+def _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice: list, tools: list,
+               cores: list = ()) -> _Slab:
     """The free space of the body within the box ``[lo, hi]``, before and after
     ``tools``: the region cut by the lattice, and by the lattice and the tools
     together, every cut checked to remove what it should. Each piece after is
-    placed by a witness point in the piece before it came from."""
+    placed by a witness point in the piece before it came from.
+
+    ``cores`` are the tools before they were trimmed to the body, less what the
+    trim discarded (``frustum.Frustums.cores``): the third route, taken only
+    where both cuts by the tools are refused."""
     region = occ.solids(_boolean(_box(lo, hi), body))
     if not region:
         return _Slab([], [], [], [], [])
@@ -387,7 +392,11 @@ def _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice: list, tools: list) 
         freed = _free(region, list(lattice) + list(tools), lattice_in + tools_in,
                       "the lattice and the supports", one_by_one=False)
     except CutRefused:
-        freed = _free(before, tools, tools_in, "the supports")
+        try:
+            freed = _free(before, tools, tools_in, "the supports")
+        except CutRefused as refused:
+            freed = _free_by_cores(region, lattice, lattice_in, tools, tools_in, cores,
+                                   lo, hi, refused)
     after, home = [], []
     homes = _Inside(before)
     for p in freed:
@@ -422,6 +431,42 @@ def _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice: list, tools: list) 
                  [_envelope_faces(p, env_lo, env_hi) for p in after])
 
 
+def _free_by_cores(region: list, lattice: list, lattice_in: float, tools: list,
+                   tools_in: float, cores: list, lo, hi, refused: CutRefused) -> list:
+    """``region`` less the lattice and the supports, cut by the supports'
+    ``cores`` instead -- or ``refused`` raised again.
+
+    A support is trimmed to the body, so its faces lie on the body's faces, and
+    the free space, cut from the body, has those faces too: two shapes sharing
+    the body's own curved faces, which the kernel can get wrong. Measured on the
+    rehearsal part: a 243.3 mm³ support wholly inside the body intersected with
+    the body at -0.0035 mm³ -- raising a vertex tolerance of it to 1.17 mm on
+    the way -- and four regions of the envelope went unsearched, none of them
+    holding a pocket. A core has no face on the body. Inside the body it is the
+    support, which its volume in this region is checked to be, to the bar of
+    the cut itself."""
+    from .build import _boolean as run
+
+    mine = [c for c in cores if _touches(c, lo, hi)]
+    if not mine:
+        raise refused
+    cores_in = 0.0
+    for c in mine:
+        got = run(BRepAlgoAPI_Common, c, list(region))
+        if got is None:
+            raise refused
+        cores_in += sum(occ.volume(x) for x in occ.solids(got))
+    total = sum(occ.volume(s) for s in region)
+    bar = max(CUT_VOLUME_REL_TOL * total, CUT_PER_TOOL_TOL * max(len(tools), 1))
+    if abs(cores_in - tools_in) > bar:
+        raise refused
+    try:
+        return _free(region, list(lattice) + mine, lattice_in + cores_in,
+                     "the lattice and the support cores", one_by_one=False)
+    except CutRefused:
+        raise refused from None
+
+
 def _slab_worker(job):
     """One slab in a worker process: everything is read from the paths and
     plain arrays the job carries, and the pieces go back as ``.brep`` files."""
@@ -431,8 +476,8 @@ def _slab_worker(job):
     from ..runlog import peak_rss_bytes
     from .assemble import _LocalLattice
 
-    (body_path, mesh_path, lp_args, kept, lost_path, tools_path, lo, hi, env_lo, env_hi,
-     out) = job
+    (body_path, mesh_path, lp_args, kept, lost_path, tools_path, cores_path, lo, hi,
+     env_lo, env_hi, out) = job
     body = read_brep(body_path)
     mesh = load_mesh(mesh_path)
     probe = OutsideProbe(mesh, 2.0 * mesh.deviation)
@@ -440,8 +485,10 @@ def _slab_worker(job):
     local = _LocalLattice(lattice_params(*lp_args), kept, lost)
     lattice = list(local.near((lo, hi))) if len(kept) else []
     tools = [s for s in compound_children(read_brep(tools_path)) if _touches(s, lo, hi)]
+    cores = ([s for s in compound_children(read_brep(cores_path)) if _touches(s, lo, hi)]
+             if cores_path else [])
     try:
-        got = _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice, tools)
+        got = _slab_free(body, probe, lo, hi, env_lo, env_hi, lattice, tools, cores)
     except CutRefused as exc:
         return ("refused", str(exc), peak_rss_bytes())
     write_brep(_compound(got.before), out + "-before.brep")
@@ -523,7 +570,7 @@ def _components(n: int, pairs) -> list:
 
 def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float, *,
                  others=(), pool=None, staged=None, report=None,
-                 reach: float = 0.0) -> Pockets:
+                 reach: float = 0.0, cores=()) -> Pockets:
     """S7 for a group of support ``cells``, which overlap nothing: the fill of
     every pocket.
 
@@ -549,7 +596,9 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float, *
     neighbouring slabs whose faces overlap on the plane between them are one
     piece of free space, so pockets are judged on the whole envelope exactly
     as before. ``staged`` -- ``{"body_path", "mesh_path", "lp_args",
-    "kept_nodes", "tmpdir"}`` -- is what the workers read.
+    "kept_nodes", "tmpdir"}`` -- is what the workers read. ``cores`` are every
+    support body before its trim (``frustum.Frustums.cores``), for a slab whose
+    cuts by the supports themselves the kernel refuses.
     """
     from ..classify import OutsideProbe
     from ..parallel import compound_children, read_brep, write_brep
@@ -591,7 +640,8 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float, *
                     try:
                         out.append(_slab_free(body, probe, slo, shi, lo, hi,
                                               list(lattice_near((slo, shi))),
-                                              [t for t in tools if _touches(t, slo, shi)]))
+                                              [t for t in tools if _touches(t, slo, shi)],
+                                              [c for c in cores if _touches(c, slo, shi)]))
                     except CutRefused as exc:
                         out.append(str(exc))
                 tick(len(spans), len(spans))
@@ -601,9 +651,13 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float, *
 
             tag = os.path.join(staged["tmpdir"], f"pockets-{uuid.uuid4().hex[:8]}")
             write_brep(_compound(tools), tag + "-tools.brep")
+            near = [c for c in cores if _touches(c, lo, hi)]
+            if near:
+                write_brep(_compound(near), tag + "-cores.brep")
             lp_args = staged["lp_args"]
             jobs = [(staged["body_path"], staged["mesh_path"], lp_args, staged["kept_nodes"],
-                     staged.get("lost_path"), tag + "-tools.brep", *box(span), lo, hi,
+                     staged.get("lost_path"), tag + "-tools.brep",
+                     tag + "-cores.brep" if near else None, *box(span), lo, hi,
                      f"{tag}-{s}")
                     for s, span in enumerate(spans)]
             tick(0, len(spans))

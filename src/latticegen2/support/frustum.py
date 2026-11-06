@@ -86,6 +86,20 @@ past the sag of a 0.02 mm tessellation of a curved ceiling face."""
 SHALLOW_DEPTH = 2e-3
 """mm. The depth the harness's exact check asks at (`SUPPORT_EXACT_STEP`)."""
 
+def lattice_backs(contains, P: np.ndarray, N: np.ndarray) -> np.ndarray:
+    """Which ceiling points ``P``, outward normals ``N``, a strut backs: asked
+    at both depths a support is asked at, :data:`PROBE_DEPTH` and
+    :data:`SHALLOW_DEPTH`. A ceiling point resting on a strut's face lies in the
+    strut a hair below it and can be past it at ``PROBE_DEPTH``: on the rehearsal
+    part a keel lay in a strut to 0.08 mm, and was reported unbacked."""
+    P = np.asarray(P, dtype=float)
+    N = np.asarray(N, dtype=float)
+    if not len(P):
+        return np.zeros(0, dtype=bool)
+    return (np.asarray(contains(P - PROBE_DEPTH * N), dtype=bool)
+            | np.asarray(contains(P - SHALLOW_DEPTH * N), dtype=bool))
+
+
 ESTIMATE_SAMPLES = 200_000
 """Points sampled in a support body's box to estimate its intersection with the
 body, which every trim is held to."""
@@ -129,6 +143,11 @@ class Frustums:
     lines: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     """Lines for the console regardless of ``-v``: the pieces dropped."""
+    cores: list = field(default_factory=list)
+    """The staircase solids the trims were cut from, less the debris and the
+    pieces dropped: inside the body exactly :attr:`solids`, with no face on the
+    body's surface. What the pocket search cuts with where a cut by the
+    trimmed solids is refused (§14.3 S7)."""
 
 
 class _Grid:
@@ -482,6 +501,26 @@ def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True, refused=
     return None, lines, (est, sig)
 
 
+def _core(piece, left: list) -> list:
+    """``piece`` less ``left``, what its trim did not keep: inside the body, the
+    support the trim produced. Empty where the cut does not take out exactly
+    ``left``'s volume, which leaves the pocket search without this route there
+    rather than with a wrong one."""
+    if not left:
+        return [piece]
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+
+    from .build import _boolean
+
+    got = _boolean(BRepAlgoAPI_Cut, piece, left)
+    if got is None:
+        return []
+    out = occ.solids(got)
+    gone = occ.volume(piece) - sum(occ.volume(s) for s in out)
+    want = sum(occ.volume(s) for s in left)
+    return out if abs(gone - want) <= max(1e-6 * occ.volume(piece), 1e-4) else []
+
+
 def _split(piece, g: _Grid):
     """The two halves of ``piece`` either side of a support grid plane near its
     middle, across its longest extent in the lattice frame that a grid plane
@@ -683,7 +722,7 @@ def _clip_to_node(tri: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray
 
 
 def _clipped_ceiling(g: _Grid, verts: np.ndarray, normals: np.ndarray, tris: np.ndarray,
-                     held: set, backed, b: np.ndarray, bar: float):
+                     held: set, backed, b: np.ndarray, bar: float, surface=None):
     """``(points, normals)``: a ceiling point in every support node the ceiling
     passes through and that holds none yet.
 
@@ -693,8 +732,16 @@ def _clipped_ceiling(g: _Grid, verts: np.ndarray, normals: np.ndarray, tris: np.
     cylinders just past the bar, leaving ceiling bare 0.02 to 0.07 mm from the
     support beside it. So the triangles are walked across the grid, each clipped
     to the nodes it spans that hold no ceiling point; the point taken is the
-    polygon's corner or centre that overhangs most, normals interpolated, and it
-    must itself be over the bar and not on a strut."""
+    polygon's corner or centre that overhangs most, and it must itself be over
+    the bar and not on a strut.
+
+    ``surface(t, bary)`` -- ``(points, normals)`` on the true surface of triangle
+    ``t``'s own face -- gives the normal there; without it the vertex normals
+    are interpolated. Those are averaged where a vertex lies on a crease, and a
+    crease between two faces each well under the bar can average to a ceiling:
+    on the rehearsal part a roof apex of 13 and 30 deg faces read as 8.5 deg
+    from flat, and its ceiling point was reported unbacked, there being nothing
+    to support. A crease that does overhang is a keel, which §14.1 samples."""
     C = g.cube(verts)
     node = np.floor((C - g.o) / g.q).astype(np.int64)
     tn = node[tris]
@@ -716,7 +763,10 @@ def _clipped_ceiling(g: _Grid, verts: np.ndarray, normals: np.ndarray, tris: np.
             # Barycentric weights of each candidate, for the normal there.
             A = np.vstack([tri.T, np.ones(3)])
             w = np.linalg.lstsq(A, np.vstack([cands.T, np.ones(len(cands))]), rcond=None)[0].T
-            n = w @ normals[tris[t]]
+            if surface is not None:
+                n = np.array(surface(t, np.clip(w, 0.0, 1.0))[1], dtype=float)
+            else:
+                n = w @ normals[tris[t]]
             n /= np.linalg.norm(n, axis=1, keepdims=True)
             dots = n @ b
             pick = int(np.argmax(dots))
@@ -743,7 +793,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     need = rmesh.verts[rmesh.vert_required]
     need_n = rmesh.normals[rmesh.vert_required]
     if extra is not None and len(extra[0]):
-        unbacked = ~local.contains(extra[0] - PROBE_DEPTH * extra[1])
+        unbacked = ~lattice_backs(local.contains, extra[0], extra[1])
         need = np.vstack([need, extra[0][unbacked]])
         need_n = np.vstack([need_n, extra[1][unbacked]])
     m = grid_divisions(lp, thickness)
@@ -751,10 +801,15 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     bar = SIN_START + REQUIRED_SLACK
     over = rmesh.normals @ np.asarray(lp.b, dtype=float) > bar
     near_bar = over[rmesh.tris].any(axis=1) if len(rmesh.tris) else np.zeros(0, dtype=bool)
+    near_ids = np.nonzero(near_bar)[0]
+    exact = None
+    if len(rmesh.tri_uv) == len(rmesh.tris) and rmesh.faces:
+        def exact(t, w):
+            return rmesh.surface_points(np.full(len(w), near_ids[t]), w)
     clipped, clipped_n = _clipped_ceiling(
         g, rmesh.verts, rmesh.normals, rmesh.tris[near_bar],
         {tuple(x) for x in g.node_of(need).tolist()}, local.contains,
-        np.asarray(lp.b, dtype=float), bar)
+        np.asarray(lp.b, dtype=float), bar, surface=exact)
     need = np.vstack([need, clipped])
     need_n = np.vstack([need_n, clipped_n])
     stats = {"support_ceiling_points": int(len(need)), "support_grid_divisions": m,
@@ -840,6 +895,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     # a probe is deep, so debris is also asked of the point just inside the ceiling.
     shallow = need - SHALLOW_DEPTH * need_n
     dropped = []      # (tag, centroid, mm^3 inside the body, ceiling points it held)
+    dropped_pieces = []
 
     def trim_or_split(piece, tag: str, depth: int = 0):
         # One rung while the piece can still be split; the full ladder on a
@@ -867,6 +923,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
             # report, and on a 10,000-face piece the classifier would take hours.
             held = _tessellated_inside(piece)(probes) & gates.inside_body(probes)
             dropped.append((tag, where, est[0], held))
+            dropped_pieces.append(piece)
             trim_lines.append(f"  {tag}: no trim passed and no split is left; dropped")
             return [], trim_lines
         from .join import join
@@ -881,16 +938,20 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
         joined, _js = join(out, overlaps=False)
         return joined, trim_lines
 
+    cores = []
     for i, piece in enumerate(pieces):
         if report is not None:
             report("trimming support bodies", i, len(pieces))
         ta = time.perf_counter()
+        n_debris, n_dropped = len(debris), len(dropped_pieces)
         got, trim_lines = trim_or_split(piece, f"body-{i}")
         tb = time.perf_counter()
         trim_s += tb - ta
         lines += trim_lines
         for s in got:
             (solids if backs_any(s, probes) or backs_any(s, shallow) else debris).append(s)
+        if got:
+            cores += _core(piece, debris[n_debris:] + dropped_pieces[n_dropped:])
         backed_s += time.perf_counter() - tb
     if debris:
         lines.append(f"support debris discarded (backs no ceiling point): {len(debris)} "
@@ -900,7 +961,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     # strut. Classifying every ceiling point against the exact solids instead
     # took over half an hour on the rehearsal part: 6 ms a point on a
     # 5,000-face body, and 125,000 points.
-    covered = _on_grid(g, coords, S, probes) | in_lattice(probes)
+    covered = _on_grid(g, coords, S, probes) | lattice_backs(in_lattice, need, need_n)
     # A probe outside the body is a ceiling point on the ceiling's own rim,
     # where a wall continues it: nothing below it can back it, and the wall does.
     covered |= ~gates.inside_body(probes)
@@ -929,4 +990,4 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
                   "support_ceiling_points_uncovered": int((~covered).sum()),
                   "support_grid_s": round(t1 - t0, 2), "support_staircase_s": round(t2 - t1, 2),
                   "support_trim_s": round(trim_s, 2), "support_backed_s": round(backed_s, 2)})
-    return Frustums(solids, covered, need, need_n, stats, lines, notes)
+    return Frustums(solids, covered, need, need_n, stats, lines, notes, cores)

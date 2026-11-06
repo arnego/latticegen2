@@ -1,9 +1,9 @@
 """Overhang detection on the input body (docs/algorithm.md §14.1).
 
-A point of the body's surface is an inner overhang when its outward normal
-``n`` satisfies ``n . b > sin(phi)``: the surface acts as a ceiling of the
-volume, and the shell beyond it overhangs the lattice core more flatly than the
-limit ``phi`` (measured from the build direction ``b``). A flat ceiling has
+A point of the body's surface needs support when its outward normal ``n``
+satisfies ``n . b > sin 60 deg`` (:data:`.params.SIN_START`): the surface acts
+as a ceiling of the volume, and the shell beyond it overhangs the lattice core
+more flatly than 60 deg from the build direction ``b``. A flat ceiling has
 ``n = b`` and always qualifies; a vertical wall never does. The underside of
 the body is an *outside* overhang and is never examined
 (specification.md §4.6).
@@ -19,10 +19,8 @@ face-normal test alone would find:
   than the limit: a keel hanging in mid-air;
 * **vertices** — a down-pointing tip, the lowest point of a stalactite.
 
-Everything flatter than ``phi - margin`` is reported. The margin is
-conservative by design (more support, never less) and it keeps a support face
-from meeting the wall tangentially at the border of an overhang region, which
-is the grazing-trim regime docs/algorithm.md §7 documents.
+Everything detected is supported: there is no margin band and no separate
+sample pitch. Samples are spaced at the support step :data:`.params.STEP`.
 """
 
 from __future__ import annotations
@@ -42,13 +40,9 @@ from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 from OCP.gp import gp_Pnt, gp_Vec
 
 from .. import occ
-from ..cli import OVERHANG_MARGIN as MARGIN_DEG
+from .params import REQUIRED_SLACK, SIN_START, STEP
 
 FACE, EDGE, VERTEX = 0, 1, 2
-
-REQUIRED_SLACK = 1e-6
-"""How far past ``sin(phi)`` a sample's ``n . b`` must be to count as over the
-limit rather than at it."""
 
 PREFILTER_SLACK = 0.25
 """How far below the threshold a mesh node's ``n . b`` may sit while its
@@ -72,25 +66,6 @@ class OverhangSamples:
     area: float
     """Surface area the face samples stand for, in mm²."""
     pitch: float
-    required: np.ndarray = None  # type: ignore[assignment]
-    """``(N,)`` bool: does this sample exceed the limit itself?
-
-    Everything within the margin of the limit is *sampled*, so that supports are
-    placed to run past the border of an overhang region instead of ending on
-    it. Only what actually exceeds the limit is *required*, and only that is
-    proven covered (docs/algorithm.md §14.6).
-
-    The two were one set until `TD_HX_rehearsal_test` was run turned over. Its
-    drill points are 120° cones, tilted exactly 60° — at the default limit, not
-    over it. A capital under one has faces at 58°, so what the margin asked to
-    be proven there was a film a tenth of a millimetre thick wrapped round the
-    cone, two degrees from tangent: the grazing regime of docs/algorithm.md §7,
-    where the kernel dropped part of it and the run was refused for an overhang
-    that does not exist."""
-
-    def __post_init__(self):
-        if self.required is None:
-            self.required = np.ones(len(self.points), dtype=bool)
 
     def __len__(self) -> int:
         return len(self.points)
@@ -101,16 +76,6 @@ class OverhangSamples:
             "edge": int(np.count_nonzero(self.kind == EDGE)),
             "vertex": int(np.count_nonzero(self.kind == VERTEX)),
         }
-
-
-def sample_pitch(t: float, thickness: float) -> float:
-    """Spacing of the surface samples, in mm (docs/algorithm.md §14.1)."""
-    return float(min(max(min(t, thickness) / 2.0, 0.25), 1.0))
-
-
-def threshold(overhang_deg: float, margin_deg: float = MARGIN_DEG) -> float:
-    """``sin(phi - margin)``: the bar ``n . b`` is compared against."""
-    return float(np.sin(np.radians(overhang_deg - margin_deg)))
 
 
 class _SurfaceNormals:
@@ -342,21 +307,20 @@ def _vertex_samples(body, b: np.ndarray) -> list:
     return out
 
 
-def detect(body, b: np.ndarray, overhang_deg: float, pitch: float,
-           margin_deg: float = MARGIN_DEG, report=None) -> OverhangSamples:
-    """Every inner overhang of ``body`` for build direction ``b``.
+def detect(body, b: np.ndarray, pitch: float = STEP,
+           report=None) -> OverhangSamples:
+    """Every inner overhang of ``body`` that needs support, for build direction ``b``.
 
     ``body`` must already carry the classification triangulation
     (:func:`latticegen2.classify.tessellate_surface`), whose UV nodes are what
     the face samples are refined from.
     """
     b = np.asarray(b, dtype=float)
-    bar = threshold(overhang_deg, margin_deg)
-    # Strictly over the limit, with a hair of slack so that a surface tilted at
-    # exactly the limit -- a 120 degree drill point at 60 -- is not "over" it
-    # by a rounding error.
-    limit = float(np.sin(np.radians(overhang_deg))) + REQUIRED_SLACK
-    points, inward, kinds, required = [], [], [], []
+    # Strictly over the bar, with a hair of slack so that a surface tilted at
+    # exactly 60 deg -- a 120 degree drill point, a 30 degree roof facet -- is
+    # not "over" it by a rounding error.
+    bar = SIN_START + REQUIRED_SLACK
+    points, inward, kinds = [], [], []
     area = 0.0
     faces = occ.faces(body)
     for fi, face in enumerate(faces):
@@ -369,7 +333,6 @@ def detect(body, b: np.ndarray, overhang_deg: float, pitch: float,
         points.append(p)
         inward.append(-n)
         kinds.append(np.full(len(p), FACE))
-        required.append(n @ b > limit)
         area += a
 
     edges = _edge_samples(body, b, bar, pitch)
@@ -378,19 +341,16 @@ def detect(body, b: np.ndarray, overhang_deg: float, pitch: float,
         points.append(arr[:, :3])
         inward.append(np.broadcast_to(-b, (len(arr), 3)).copy())
         kinds.append(np.full(len(arr), EDGE))
-        required.append(arr[:, 3] > limit)
     tips = _vertex_samples(body, b)
     if tips:
         arr = np.array(tips, dtype=float)
         points.append(arr)
         inward.append(np.broadcast_to(-b, arr.shape).copy())
-        kinds.append(np.full(len(arr), VERTEX))
         # A down-pointing tip has nothing beneath it whatever its faces' tilt.
-        required.append(np.ones(len(arr), dtype=bool))
+        kinds.append(np.full(len(arr), VERTEX))
 
     if not points:
         return OverhangSamples(np.empty((0, 3)), np.empty((0, 3)),
                                np.empty(0, dtype=np.int64), 0.0, pitch)
     return OverhangSamples(np.vstack(points), np.vstack(inward),
-                           np.concatenate(kinds).astype(np.int64), area, pitch,
-                           np.concatenate(required).astype(bool))
+                           np.concatenate(kinds).astype(np.int64), area, pitch)

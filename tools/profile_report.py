@@ -34,10 +34,17 @@ def _walk_clock(stamps: list[str], origin: _dt.datetime) -> list[_dt.datetime]:
     started in the evening crosses midnight -- the 2026-08-12 rehearsal ran
     19:21 to 00:21 -- so a naive parse puts most of the run *before* its own
     start and every stage window comes out negative.
+
+    The first stamp may also come slightly *before* ``origin``: the profiler
+    starts sampling before the run writes its start line (2 s on the
+    2026-11-06 rehearsal), and reading that as a rollover put every sample a
+    day after the stages, so every stage reported 0 % CPU. So the first stamp
+    takes whichever day puts it nearer ``origin``, and only a later stamp going
+    backwards is a rollover.
     """
     out: list[_dt.datetime] = []
     day = origin.date()
-    previous = origin
+    previous = origin - _dt.timedelta(hours=12)
     for stamp in stamps:
         clock = _dt.datetime.strptime(stamp, "%H:%M:%S").time()
         moment = _dt.datetime.combine(day, clock)

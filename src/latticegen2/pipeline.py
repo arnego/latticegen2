@@ -32,6 +32,7 @@ from OCP.TopoDS import TopoDS_Shape
 from . import occ, weld
 from .boundary import (
     CAP_AREA_REL_TOL,
+    _rebuild_solid,
     finalize_pieces,
     fuse_disagreeing_pairs,
     resolve_interfaces,
@@ -48,7 +49,7 @@ from .lattice import node as lattice_node
 from .parallel import WorkerPool, set_thread_budget
 from .parallel import read_brep as _read_brep
 from .parallel import write_brep as _write_brep
-from .runlog import RunLog, Timer, format_bytes
+from .runlog import RunLog, Timer, box_text, format_bytes, point_text, warning_text
 from .stepout import generation_params_text, rewrite_step_header
 
 INTERFACE_REPAIR_ROUNDS = 8
@@ -327,14 +328,16 @@ def _run_with_pool(
     if boundary.n_dropped_junctions:
         # Loud rather than quiet: this is the one place the tool knowingly
         # leaves lattice out, and specification.md §1's containment is why.
-        rl.always(
-            f"note: {boundary.n_dropped_junctions} junction(s) were discarded "
-            f"because no intersection available to this stage kept them inside "
-            f"the input body; the worst reached {boundary.worst_outside_mm:.4f} mm "
-            f"outside at {boundary.worst_outside_node} (docs/algorithm.md §7.2). "
-            f"The output is that much smaller and stays within the boundary, "
-            f"which specification.md §1 requires and material outside would not."
-        )
+        rl.always(warning_text(
+            "lattice junctions left out",
+            f"no intersection kept {boundary.n_dropped_junctions} junction(s) inside "
+            f"the input body, the worst reaching {boundary.worst_outside_mm:.4f} mm "
+            f"outside it, so they were discarded (docs/algorithm.md §7.2)",
+            "The lattice has a gap at each, and stays within the boundary as "
+            "specification.md §1 requires",
+            [f"junction {node} at {point_text(lattice_node(lp, node))}"
+             for node in boundary.dropped_nodes],
+        ))
         stats["dropped_junctions"] = boundary.n_dropped_junctions
         stats["worst_outside_mm"] = round(boundary.worst_outside_mm, 6)
     stats["workers"] = args.workers
@@ -474,6 +477,9 @@ def _run_with_pool(
         )
 
     kept = _partition_kept(comps, keep_labels, boundary.pieces)
+    lost_lattice = _lost_lattice(comps, dropped, boundary.pieces, kept) if args.support else []
+    if lost_lattice:
+        stats["lattice_pieces_lost"] = len(lost_lattice)
     want_rings = _rings_needed(kept.interior_groups, iface.interfaces)
 
     # The boundary layer is sewn to itself first, because it is the only part
@@ -553,16 +559,20 @@ def _run_with_pool(
                     f"{[p.tolist() for p in where]}"
                     + (" ..." if got_split > len(where) else "")
                 )
-    if sew_stats.retoleranced_faces or sew_stats.still_invalid_faces:
+    if sew_stats.retoleranced_faces:
         rl.always(
-            f"vertex tolerances corrected on {sew_stats.retoleranced_faces} sewn "
+            f"note: vertex tolerances corrected on {sew_stats.retoleranced_faces} sewn "
             f"boundary face(s) (docs/algorithm.md §8); no geometry moved"
-            + (
-                f". {sew_stats.still_invalid_faces} face(s) remain invalid for "
-                f"some other reason and will be reported by the validity gate"
-                if sew_stats.still_invalid_faces else ""
-            )
         )
+    if sew_stats.still_invalid_faces:
+        rl.always(warning_text(
+            "boundary faces left invalid",
+            f"{sew_stats.still_invalid_faces} sewn boundary face(s) are invalid and "
+            f"correcting their vertex tolerances does not repair them "
+            f"(docs/algorithm.md §8)",
+            "The validity gate will refuse the run unless a later repair clears them",
+            [point_text(p) for p in sew_stats.still_invalid_at],
+        ))
     stats["interior_interfaces"] = len(rings)
     stats["stitch_tiles"] = sew_stats.tiles
     stats["stitch_tiled_components"] = sew_stats.tiled_components
@@ -618,22 +628,29 @@ def _run_with_pool(
         )
     )
     if simplify_stats["unmerged_solids"]:
-        rl.always(
-            f"note: the geometry kernel declined to unify "
-            f"{simplify_stats['unmerged_solids']} of {len(result_solids)} solid(s); "
-            f"they are exported as built. The output is larger, not different."
-        )
+        rl.always(warning_text(
+            "solids exported without merging their faces",
+            f"the geometry kernel declined to unify {simplify_stats['unmerged_solids']} "
+            f"of {len(result_solids)} solid(s) (docs/algorithm.md §9)",
+            "Their geometry is unchanged, but each carries more faces and makes the "
+            "file larger and slower to open",
+            [box_text(*occ.bounding_box(result_solids[i]))
+             for i in simplify_stats["unmerged_at"]],
+        ))
     if simplify_stats["invalid_merges"]:
-        # Unconditional, like the "declined to unify" note above it: a run whose
-        # output is larger than it should be has to say why, and this one says
-        # the kernel produced something the validity gate would have refused.
-        rl.always(
-            f"note: unifying {simplify_stats['invalid_merges']} of "
-            f"{len(result_solids)} solid(s) produced an invalid result, so the "
-            f"un-unified solid was kept instead (docs/algorithm.md S9). The "
-            f"output is larger, not different -- and this is the one guard on "
-            f"that step the volume bars cannot stand in for."
-        )
+        # Unconditional, like the warning above it: a run whose output is larger
+        # than it should be has to say why, and this one says the kernel produced
+        # something the validity gate would have refused.
+        rl.always(warning_text(
+            "solids exported without merging their faces",
+            f"unifying {simplify_stats['invalid_merges']} of {len(result_solids)} "
+            f"solid(s) produced an invalid result, so the solid as built was kept "
+            f"(docs/algorithm.md §9)",
+            "Their geometry is unchanged, but each carries more faces and makes the "
+            "file larger and slower to open",
+            [box_text(*occ.bounding_box(result_solids[i]))
+             for i in simplify_stats["invalid_at"]],
+        ))
     if simplify_stats["max_worker_rss"]:
         rl.note_worker_rss(simplify_stats["max_worker_rss"])
         rl.line(f"peak simplify worker memory: {format_bytes(simplify_stats['max_worker_rss'])}")
@@ -649,21 +666,19 @@ def _run_with_pool(
         # its code is imported (specification.md §4.6): a run without
         # `--support` never loads `latticegen2.support` at all. It runs on the
         # completed lattice, unified just above, and hands back the final
-        # product -- supports merged into the lattice and unified again -- so
-        # `validate` gates the two together in one pass (docs/algorithm.md
-        # §14.2).
+        # product -- the lattice unchanged, and the supports beside it as
+        # separate bodies -- so `validate` gates the two together in one pass
+        # (docs/algorithm.md §14.2).
         from .support import run_support
 
         outcome = run_support(
             args, rl, lp, body, body_path, mesh, mesh_path, result_solids,
-            _kept_nodes(kept), pool, tmpdir, stats,
-            unify=lambda solids: _unify(
-                solids, pool=pool, tmpdir=tmpdir, report=rl.substage),
+            _kept_nodes(kept), pool, tmpdir, stats, lost=lost_lattice,
         )
         result_solids, lattice_volume = outcome.solids, outcome.lattice_volume
         if lattice_volume is not None:
-            # The merge changed the product, so the counts `simplify` recorded
-            # describe the lattice alone and are retaken on what ships.
+            # Supports were added, so the counts `simplify` recorded describe
+            # the lattice alone and are retaken on what ships.
             counts = [occ.count_subshapes(s) for s in result_solids]
             stats["output_faces"] = sum(f for f, _ in counts)
             stats["output_edges"] = sum(e for _, e in counts)
@@ -688,9 +703,8 @@ def _run_with_pool(
         _check_export_truth(rl, result_solids, tmpdir, stats, seam_gap, args.t)
     rl.line(f"validity: all {len(result_solids)} solid(s) pass BRepCheck_Analyzer")
     stats["solids_written"] = len(result_solids)
-    # What reaches the end product, split by origin. The support figure is the
-    # volume supports *add*, net of where they overlap the lattice they were
-    # merged into -- not the volume the generator built.
+    # What reaches the end product, split by origin. Supports never overlap
+    # the lattice, so the support figure is the support bodies' own volume.
     if lattice_volume is None:
         lattice_volume = total_volume
     stats["lattice_volume_mm3"] = round(lattice_volume, 4)
@@ -698,7 +712,7 @@ def _run_with_pool(
         stats["support_volume_mm3"] = round(total_volume - lattice_volume, 4)
     stats["output_volume_mm3"] = round(total_volume, 4)
 
-    name = part_name(args.input, args.cc, args.t, args.orient, args.name_overhang)
+    name = part_name(args.input, args.cc, args.t, args.orient, args.support)
     with Timer(rl, "export"):
         # One opaque `STEPControl_Writer` call over the whole result, so there is
         # nothing to count — 10.7 % of the rehearsal's clock with no fraction to
@@ -828,22 +842,20 @@ def _check_component_tolerance(rl: RunLog, comps, keep_labels, pieces, stats: di
     stats["tolerance_flagged_components"] = len(flagged)
     if not flagged:
         return
-    rl.always(
-        f"note: {len(flagged)} output body/bodies contain junctions whose trim "
-        f"needed a tolerance comparable to the feature it bounds "
-        f"(docs/algorithm.md §7.3). Read the percentage, not the worst reading: "
-        f"a large body will contain one, a body largely made of them is where an "
-        f"unwritable output comes from. The export-truth gate at `validate` "
-        f"decides:"
-    )
-    for cid, volume, above, total, ratio, node, (tol, face_area, where) in flagged:
-        rl.always(
-            f"  body {cid}: {volume:.4f} mm^3, {above} of {total} boundary "
-            f"junction(s) above the bar ({100.0 * above / max(total, 1):.1f}% of "
-            f"the body); worst {ratio:.3e} at {node} ({tol:.4e} mm on a "
-            f"{face_area:.6f} mm^2 face at [{where[0]:.3f}, {where[1]:.3f}, "
-            f"{where[2]:.3f}])"
-        )
+    rl.always(warning_text(
+        "trims resting on their own tolerance",
+        f"{len(flagged)} output body/bodies contain junctions whose trim needed a "
+        f"tolerance comparable to the feature it bounds (docs/algorithm.md §7.3)",
+        "Such a body may not survive being written to STEP, and a body largely made "
+        "of them is where an unwritable output comes from; the export-truth gate at "
+        "`validate` refuses the run if so. Read the percentage, not the worst "
+        "reading: a large body will contain one",
+        [f"body {cid}: {volume:.4f} mm^3, {above} of {total} boundary junction(s) "
+         f"above the bar ({100.0 * above / max(total, 1):.1f}% of the body); worst "
+         f"{ratio:.3e} at {node} ({tol:.4e} mm on a {face_area:.6f} mm^2 face) at "
+         f"{point_text(where)}"
+         for cid, volume, above, total, ratio, node, (tol, face_area, where) in flagged],
+    ))
 
 
 SEAM_GAP_WARN_FRACTION = 1e-3
@@ -872,8 +884,8 @@ def _report_seam_gaps(rl: RunLog, gap, t: float, stats: dict) -> None:
     region, and it is the reason no re-fitting of a pcurve repairs that body:
     there is no curve on either surface that closes a gap between the surfaces.
 
-    **Reported to the console, and never gated on.** The warning goes out with
-    ``console=True`` rather than under ``-v``, because it is the one line in the
+    **Reported to the console, and never gated on.** The warning goes out through
+    ``rl.always`` rather than under ``-v``, because it is the one line in the
     run that is about the user's *file* rather than about this tool's progress,
     and because the failure it predicts arrives minutes later carrying an output
     coordinate that nobody can act on. Both places name a point in the input's
@@ -894,16 +906,16 @@ def _report_seam_gaps(rl: RunLog, gap, t: float, stats: dict) -> None:
             f"edge(s) -- negligible against t={t:g} mm"
         )
         return
-    rl.line(
-        f"input seam gaps: the two faces meeting at one of this body's own edges "
-        f"are {gap.worst:.4e} mm apart at [{gap.where[0]:.3f}, {gap.where[1]:.3f}, "
-        f"{gap.where[2]:.3f}] -- {gap.worst / t:.2e} of t={t:g} mm, on {gap.over} "
-        f"of {gap.edges} shared edge(s). That is a property of the input file, "
-        f"not of this run: its own tolerance covers it, and the trim is about to "
-        f"cut that region into features smaller than the gap. If this run fails "
-        f"at `export truth`, that coordinate is the geometry to fix",
-        console=True,
-    )
+    rl.always(warning_text(
+        "faces of the input do not meet",
+        f"two faces meeting at an edge of the input body are {gap.worst:.4e} mm apart, "
+        f"{gap.worst / t:.2e} of t={t:g} mm, and {gap.over} of {gap.edges} shared "
+        f"edge(s) are over the bar. That is a property of the input file, covered by "
+        f"its own tolerance",
+        "The trim will cut that region into features smaller than the gap, and the "
+        "run may fail at `export truth`; if it does, this is the geometry to fix",
+        [f"worst at {point_text(gap.where)}"],
+    ))
 
 
 def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
@@ -1356,8 +1368,8 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
     faces_before = edges_before = 0
     faces_after = edges_after = 0
     worst_drift = 0.0
-    skipped = 0
-    invalid_merges = 0
+    unmerged_at: list[int] = []
+    invalid_at: list[int] = []
     out: list[TopoDS_Shape] = []
     for done, solid in enumerate(solids):
         if report is not None:
@@ -1369,9 +1381,9 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
 
         merged, ran, degraded = _unify_one(solid)
         if not ran:
-            skipped += 1
+            unmerged_at.append(len(out))
         if degraded:
-            invalid_merges += 1
+            invalid_at.append(len(out))
         produced = occ.solids(merged)
         post_volume = occ.volume(produced[0]) if len(produced) == 1 else float("nan")
         worst_drift = max(worst_drift, _check_unify_result(
@@ -1390,8 +1402,10 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
         "output_faces": faces_after,
         "output_edges": edges_after,
         "volume_drift": worst_drift,
-        "unmerged_solids": skipped,
-        "invalid_merges": invalid_merges,
+        "unmerged_solids": len(unmerged_at),
+        "unmerged_at": unmerged_at,
+        "invalid_merges": len(invalid_at),
+        "invalid_at": invalid_at,
         "max_worker_rss": 0,
     }
 
@@ -1464,17 +1478,17 @@ def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str, r
     faces_before = edges_before = 0
     faces_after = edges_after = 0
     worst_drift = 0.0
-    skipped = 0
-    invalid_merges = 0
+    unmerged_at: list[int] = []
+    invalid_at: list[int] = []
     out: list[TopoDS_Shape] = []
     for (out_path, fb, eb, fa, ea, pre_volume, post_volume, n_produced, ran,
          degraded, _rss) in results:
         faces_before += fb
         edges_before += eb
         if not ran:
-            skipped += 1
+            unmerged_at.append(len(out))
         if degraded:
-            invalid_merges += 1
+            invalid_at.append(len(out))
         # Read back only if the pre-filter trips: the shape is loaded a few
         # lines below anyway on the path that does not, so this costs a second
         # read solely on the path that is already about to fail.
@@ -1492,8 +1506,10 @@ def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str, r
         "output_faces": faces_after,
         "output_edges": edges_after,
         "volume_drift": worst_drift,
-        "unmerged_solids": skipped,
-        "invalid_merges": invalid_merges,
+        "unmerged_solids": len(unmerged_at),
+        "unmerged_at": unmerged_at,
+        "invalid_merges": len(invalid_at),
+        "invalid_at": invalid_at,
         "max_worker_rss": max_rss,
     }
 
@@ -1600,6 +1616,27 @@ def _partition_kept(comps, keep_labels: set[int], boundary_pieces) -> _Kept:
     return _Kept(nodes_arr, interior_groups, keep_pieces, piece_groups)
 
 
+def _lost_lattice(comps, dropped: set[int], boundary_pieces, kept: _Kept) -> list:
+    """The dropped pieces of junctions whose node is still kept, as solids.
+
+    The print supports read the lattice's material off the kept nodes, and a
+    tip the floating-body rule dropped is not in it (docs/algorithm.md §14.3
+    S1). :func:`boundary._rebuild_solid` holds for a finalized piece as well:
+    finalizing only moves faces between ``cap_faces`` and ``faces``.
+    """
+    kept_nodes = {tuple(int(x) for x in row) for row in _kept_nodes(kept)}
+    out = []
+    for i, v in enumerate(comps.vertices):
+        if int(comps.labels[i]) not in dropped or v.is_interior:
+            continue
+        piece = boundary_pieces[v.piece_index]
+        if kept_nodes.isdisjoint(tuple(int(x) for x in n)
+                                 for n in (piece.spans or (piece.node,))):
+            continue
+        out.append(_rebuild_solid(piece))
+    return out
+
+
 def _kept_nodes(kept: _Kept) -> np.ndarray:
     """``(N, 3)`` index of every lattice node whose junction is in the output.
 
@@ -1648,39 +1685,38 @@ def _log_interfaces(rl: RunLog, lp, iface) -> None:
     """
     rl.line(f"interfaces: {iface.n_pairs} cap(s) stitched across")
     if iface.unpaired:
-        sample = ", ".join(
-            f"{node}h{h}@{np.round(lattice_node(lp, node), 3).tolist()}"
-            for node, h in iface.unpaired[:10]
-        )
-        rl.always(
-            f"note: {len(iface.unpaired)} cap(s) face a junction that produced no "
-            f"matching cap, so they are kept as exterior surface rather than opened "
-            f"as an interface. This is a boolean disagreeing with itself across a "
-            f"shared face; the output stays watertight. Samples: {sample}"
-            + (" ..." if len(iface.unpaired) > 10 else "")
-        )
+        rl.always(warning_text(
+            "struts closed off where they should join",
+            f"{len(iface.unpaired)} cap(s) face a junction that produced no matching "
+            f"cap, a boolean disagreeing with itself across a shared face, so they "
+            f"are kept as surface instead of being opened (docs/algorithm.md §7.1)",
+            "The output stays watertight, but the lattice is not joined across those "
+            "caps and a strut may end there",
+            [f"junction {node} half-strut {h}, near {point_text(lattice_node(lp, node))}"
+             for node, h in iface.unpaired],
+        ))
     if iface.mismatched:
-        sample = ", ".join(
-            f"{node}h{h} {a:.6g} vs {b:.6g} mm^2" for node, h, a, b in iface.mismatched[:10]
-        )
-        rl.always(
-            f"note: {len(iface.mismatched)} cap(s) were presented by both sides but "
-            f"with regions that disagree beyond {CAP_AREA_REL_TOL:g} relative, so they "
-            f"are not stitched across. Each leaves an extra solid in the output rather "
-            f"than a hole. Samples: {sample}"
-            + (" ..." if len(iface.mismatched) > 10 else "")
-        )
+        rl.always(warning_text(
+            "struts not joined where two trims disagree",
+            f"{len(iface.mismatched)} cap(s) were presented by both sides with regions "
+            f"that disagree beyond {CAP_AREA_REL_TOL:g} relative, so they are not "
+            f"stitched across (docs/algorithm.md §7.1)",
+            "Each may leave an extra solid in the output rather than a hole, with the "
+            "lattice not joined there",
+            [f"junction {node} half-strut {h}, {a:.6g} vs {b:.6g} mm^2, near "
+             f"{point_text(lattice_node(lp, node))}"
+             for node, h, a, b in iface.mismatched],
+        ))
     if iface.unweldable:
-        sample = ", ".join(
-            f"{node}h{h}@{np.round(lattice_node(lp, node), 3).tolist()}"
-            for node, h in iface.unweldable[:10]
-        )
-        rl.always(
-            f"note: {len(iface.unweldable)} cap(s) have holes on the two sides that "
-            f"do not correspond edge for edge, so they are not welded. Each leaves an "
-            f"extra solid in the output rather than a hole. Samples: {sample}"
-            + (" ..." if len(iface.unweldable) > 10 else "")
-        )
+        rl.always(warning_text(
+            "struts not welded where two trims disagree",
+            f"{len(iface.unweldable)} cap(s) have holes on the two sides that do not "
+            f"correspond edge for edge, so they are not welded (docs/algorithm.md §8)",
+            "Each may leave an extra solid in the output rather than a hole, with the "
+            "lattice not joined there",
+            [f"junction {node} half-strut {h}, near {point_text(lattice_node(lp, node))}"
+             for node, h in iface.unweldable],
+        ))
 
 
 def _log_dropped(rl: RunLog, comps, dropped: set[int], threshold: float) -> None:

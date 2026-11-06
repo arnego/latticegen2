@@ -82,6 +82,48 @@ def test_a_solid_sticking_out_is_reported_not_swallowed(outer, tmp_path):
         assert result["unmeasured"][0]["containment"]["contained"] is False
 
 
+def test_a_negative_cut_remainder_is_not_believed(outer, tmp_path, monkeypatch):
+    """A cut can come back with a small negative volume -- measured on a
+    support body of the rehearsal part. That is no measurement of material
+    outside, so it goes to the containment check like any other non-zero
+    remainder, instead of failing a contained solid by its absolute value."""
+    inner = box(10.0, 10.0, 10.0, at=(20.0, 20.0, 20.0))
+    cand, body = tmp_path / "cand.step", tmp_path / "body.step"
+    occ.write_step(inner, str(cand), "cand")
+    occ.write_step(outer, str(body), "body")
+    monkeypatch.setattr(vg, "_cut_volume", lambda a, b: -1.5e-3)
+
+    result = vg.material_outside(str(cand), str(body))
+
+    assert result["exact"] is False
+    assert len(result["unmeasured"]) == 1
+    assert result["unmeasured"][0]["containment"]["contained"] is True
+
+
+def test_a_bare_sliver_is_told_from_a_bare_ceiling(tmp_path):
+    """Coverage of a flat roof: material stopping just short of it is a sliver
+    and does not fail, stopping well short does, and a sample that probes out of
+    the body is never counted against the output."""
+    body = box(20.0, 20.0, 20.0)
+    body_path = tmp_path / "body.step"
+    occ.write_step(body, str(body_path), "body")
+
+    def coverage(gap):
+        cand = tmp_path / f"cand-{gap}.step"
+        occ.write_step(box(20.0 - gap, 20.0, 20.0), str(cand), "cand")
+        return vg.overhang_coverage(str(cand), str(body_path), 10.0, 1.5, (0.0, 0.0, 0.0), 1.5,
+                                    pitch=0.5)
+
+    whole = coverage(0.0)
+    assert whole["uncovered"] == 0 and whole["slivers"] == 0
+
+    near = coverage(vg.COVERAGE_SLIVER_TOL / 2.0)
+    assert near["uncovered"] == 0 and near["slivers"] > 0
+
+    far = coverage(2.0)
+    assert far["uncovered"] > 0
+
+
 def test_containment_is_boolean_free_and_agrees_with_construction(outer):
     """`surface_points_outside` is the arbiter, so it has to be right on its own."""
     inside = vg.surface_points_outside(box(10.0, 10.0, 10.0, at=(20.0, 20.0, 20.0)), outer)
@@ -142,3 +184,161 @@ def test_the_distance_contradiction_exonerates_only_points_actually_on_the_body(
     ev = vg.surface_points_outside(flush, outer)
     assert ev["contained"] is True
     assert ev["worst_distance_mm"] <= vg.PROTRUSION_MIN_MM
+
+
+# --- the final print's free overhangs (tools/verify_geometry.py) -------------
+#
+# A support node is a cube standing on its corner: its faces lean 35.26 deg
+# from vertical and its edges exactly the rod angle, so the only thing about it
+# that can hang is its lowest corner. Each case below is one detector's true
+# positive in free space and the same solid rooted on a floor, the lattice or
+# another support, which must pass.
+
+import numpy as np  # noqa: E402
+
+UP = np.array([0.0, 0.0, 1.0])
+
+
+def _moved(shape, rotate=None, to=(0.0, 0.0, 0.0)):
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt, gp_Trsf, gp_Vec
+
+    if rotate is not None:
+        axis, angle = rotate
+        r = gp_Trsf()
+        r.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(*axis)), angle)
+        shape = BRepBuilderAPI_Transform(shape, r, True).Shape()
+    m = gp_Trsf()
+    m.SetTranslation(gp_Vec(*to))
+    return occ.solids(BRepBuilderAPI_Transform(shape, m, True).Shape())[0]
+
+
+def _node(at):
+    """A 2 mm cube with its (1,1,1) diagonal vertical, lowest corner at ``at``."""
+    axis = np.cross([1.0, 1.0, 1.0], UP)
+    return _moved(box(2.0, 2.0, 2.0), (axis, float(np.arccos(1.0 / np.sqrt(3.0)))), at)
+
+
+def _keel(at):
+    """A 2 mm cube rolled 45 deg about x: a horizontal edge at the bottom, its
+    two faces 45 deg from vertical, inside the rod angle."""
+    return _moved(box(2.0, 2.0, 2.0), ((1.0, 0.0, 0.0), np.pi / 4.0), at)
+
+
+def _free(supports, lattice=(), body=None):
+    got = vg.free_support_overhangs(list(supports), list(lattice),
+                                    body if body is not None else box(100.0, 100.0, 100.0), UP)
+    return got["candidates"], got["free"]
+
+
+def test_a_support_node_hanging_in_free_space_is_a_free_tip():
+    cand, free = _free([_node((50.0, 50.0, 50.0))])
+    assert cand == {"face": 0, "edge": 0, "vertex": 1}
+    assert free == {"face": 0, "edge": 0, "vertex": 1}
+
+
+def test_a_support_node_standing_on_a_floor_the_lattice_or_a_support_is_rooted():
+    on_floor = _node((50.0, 50.0, 0.0))
+    assert _free([on_floor])[1] == {"face": 0, "edge": 0, "vertex": 0}
+    strut = box(4.0, 4.0, 4.0, at=(48.0, 48.0, 46.0))          # top at z = 50
+    assert _free([_node((50.0, 50.0, 50.0))], [strut])[1]["vertex"] == 0
+    below = box(4.0, 4.0, 4.0, at=(20.0, 20.0, 26.0))
+    cand, free = _free([_node((22.0, 22.0, 30.0)), below])
+    assert cand["vertex"] == 1 and free["vertex"] == 0         # the slab's own corners rise flat
+
+
+def test_a_horizontal_edge_in_free_space_is_a_free_keel_and_rooted_on_a_floor():
+    cand, free = _free([_keel((50.0, 50.0, 50.0))])
+    assert free["face"] == 0 and free["vertex"] == 0
+    assert cand["edge"] >= 5 and free["edge"] == cand["edge"]   # 2 mm at 0.5 mm
+    assert _free([_keel((50.0, 50.0, 0.0))])[1] == {"face": 0, "edge": 0, "vertex": 0}
+
+
+def test_a_flat_underside_hangs_unless_it_rests_on_something():
+    cand, free = _free([box(4.0, 4.0, 1.0, at=(50.0, 50.0, 50.0))])
+    assert cand["face"] > 0 and free["face"] == cand["face"]
+    assert free["edge"] == 0 and free["vertex"] == 0
+    cand, free = _free([box(4.0, 4.0, 1.0, at=(50.0, 50.0, 0.0))])
+    assert cand["face"] > 0 and free == {"face": 0, "edge": 0, "vertex": 0}
+    strut = box(10.0, 10.0, 2.0, at=(47.0, 47.0, 48.0))
+    cand, free = _free([box(4.0, 4.0, 1.0, at=(50.0, 50.0, 50.0))], [strut])
+    assert free == {"face": 0, "edge": 0, "vertex": 0}
+
+
+def test_a_support_against_a_tilted_wall_is_rooted_on_it():
+    """Where a support's rod-plane face meets the wall, their edge can run
+    flatter than the rod angle; it lies on the wall and is rooted there. The
+    floor here is tilted 30 deg and cuts the node's lowest corner off, so the
+    trimmed node rests on it with a face, keels and corners, none of them
+    free."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+
+    body = _moved(box(100.0, 100.0, 100.0), ((0.0, 1.0, 0.0), np.radians(30.0)), (0, 0, 0))
+    node = _moved(box(20.0, 20.0, 20.0), (np.cross([1.0, 1.0, 1.0], UP),
+                                          float(np.arccos(1.0 / np.sqrt(3.0)))), (30.0, 50.0, -20.0))
+    trimmed = occ.solids(BRepAlgoAPI_Common(node, body).Shape())[0]
+    cand, free = _free([trimmed], body=body)
+    assert cand["face"] > 0
+    assert free == {"face": 0, "edge": 0, "vertex": 0}
+    # The control: the same solid with the floor somewhere else hangs whole.
+    assert _free([trimmed])[1] == cand
+
+
+def test_a_saddle_whose_edges_all_rise_is_not_a_tip():
+    """Three unit boxes in the octants (+,-,-), (+,-,+) and (+,+,-) round a
+    point, with up along (1,1,1): every edge at that point runs along a +e_k,
+    yet the faces there hold material below it. The one tip is the union's
+    lowest corner, (0,-1,-1) from it."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    from OCP.TopTools import TopTools_ListOfShape
+
+    o = np.array([50.0, 50.0, 50.0])
+    parts = [box(1.0, 1.0, 1.0, at=tuple(o + d)) for d in
+             ((0, -1, -1), (0, -1, 0), (0, 0, -1))]
+    fuse = BRepAlgoAPI_Fuse()
+    args, tools = TopTools_ListOfShape(), TopTools_ListOfShape()
+    args.Append(parts[0])
+    for p in parts[1:]:
+        tools.Append(p)
+    fuse.SetArguments(args)
+    fuse.SetTools(tools)
+    fuse.Build()
+    # Unified, as the generator's staircases are: split coplanar faces would
+    # leave edges running down from the saddle, and the edge test alone would
+    # pass.
+    solid = occ.unify_same_domain(occ.solids(fuse.Shape())[0])
+    up = np.ones(3) / np.sqrt(3.0)
+    occ.mesh_shape(solid, vg.SUPPORT_MESH_DEFLECTION)
+    tips = vg._material_tip_samples(solid, -up)
+    assert len(tips) == 1
+    assert np.allclose(tips[0], o + (0.0, -1.0, -1.0))
+
+
+def test_a_tip_a_hair_off_the_floor_is_near_and_one_clear_of_it_is_free():
+    """The sliver coverage already allows, from the support's side: a corner
+    0.02 mm above a floor is counted as near and passes; 0.2 mm is free."""
+    got = vg.free_support_overhangs([_node((50.0, 50.0, 0.02))], [], box(100.0, 100.0, 100.0), UP)
+    assert got["free"]["vertex"] == 0 and got["near"]["vertex"] == 1
+    got = vg.free_support_overhangs([_node((50.0, 50.0, 0.2))], [], box(100.0, 100.0, 100.0), UP)
+    assert got["free"]["vertex"] == 1 and got["near"]["vertex"] == 0
+
+
+def test_a_point_where_two_empty_octants_touch_is_not_a_tip():
+    """A staircase of six support nodes round a point, all but (-,-,-) and
+    (+,+,+), sewn as the generator sews them: the two empty octants touch only
+    at the point, so one of the vertices there has only rising edges and faces,
+    yet the full octants reach below it. Measured on the cylinder's supports.
+    The staircase's tips are its three lowest corners."""
+    from latticegen2.lattice import lattice_params
+    from latticegen2.support.frustum import _Grid, _staircase
+
+    lp = lattice_params(10.0, 1.5)
+    g = _Grid(lp, 2)
+    S = np.ones((2, 2, 2), dtype=bool)
+    S[0, 0, 0] = S[1, 1, 1] = False
+    coords = [np.arange(3, dtype=float) + 5.0 for _ in range(3)]
+    (solid,) = _staircase(S, coords, g)
+    occ.mesh_shape(solid, vg.SUPPORT_MESH_DEFLECTION)
+    tips = sorted(tuple(np.round(g.cube(np.asarray(t)) - 5.0, 6))
+                  for t in vg._material_tip_samples(solid, -lp.b))
+    assert tips == [(0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)]

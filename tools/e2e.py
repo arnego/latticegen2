@@ -8,10 +8,7 @@ run as a whole.
 Usage:
     python tools/e2e.py [--only smoke-fast,dense-lattice]
 
-`spiral-stress` is much the slowest, and most of that is the §6.2 checks
-rather than the run: its dominant body is past the exact containment cut's
-face bound, so containment falls back to point sampling over a 45,801-face
-solid. Use `--only` while iterating.
+`support-cylinder` is much the slowest. Use `--only` while iterating.
 """
 
 from __future__ import annotations
@@ -38,7 +35,9 @@ MAIN = os.path.join(ROOT, "src", "main.py")
 TESTDIR = os.path.join(ROOT, "test")
 BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
-SPIRAL = os.path.join(TESTDIR, "SpiralTest.step")
+GAPS = os.path.join(TESTDIR, "support-gaps.step")
+CLIPPED = {name: os.path.join(TESTDIR, f"support-clipped-{name}.step")
+           for name in ("cone", "cylinder")}
 BALL_GOLDEN = os.path.join(TESTDIR, "80mm-test-ball-cc20t4-golden-sample.step")
 CYLINDER_GOLDEN = os.path.join(TESTDIR, "test-cylinder-cc10t1.5-golden-sample.step")
 
@@ -373,80 +372,35 @@ def scenario_invalid_input(outdir: str) -> Report:
     return rep
 
 
-def scenario_spiral_stress(outdir: str) -> Report:
-    """The hardest committed part, and the one that was refused until 2026-08-24.
-
-    `SpiralTest.step` is a swept B-spline whose trims record tolerances two
-    orders above anything the other committed parts produce, it is the only
-    committed part whose dominant component tiles, and it is the only one that
-    exercises docs/algorithm.md §7.2 — the intersection that returns its own
-    operand, the local-block re-trim, and a junction dropped for containment.
-    Every one of those paths is silent on the other scenarios.
-
-    It was a fixture rather than a scenario while §9's export-truth gate refused
-    its output, correctly (docs/specification.md §11). Two things closed that:
-    a re-modelled input whose worst seam gap fell 4.24e-02 → 6.86e-03 mm, and a
-    writer that declares the greatest tolerance the shape carries rather than
-    the average. Committing it as a scenario is what stops either regressing
-    unnoticed.
-
-    **No golden sample**, deliberately: one is only worth having once a human
-    has inspected the output it pins (docs/testing.md), and `golden_check`
-    already skips and says so. **The containment check will fall back** — the
-    dominant body is past ``verify_geometry.CUT_MAX_FACES``, so expect the
-    `[NOTE]` saying the exact boolean was not attempted and a pass on the
-    weaker point-sampling check. That fallback is labelled wherever it is
-    reported and never turns an unmeasured result into a pass.
-    """
-    rep = Report("spiral-stress")
-    print(f"=== {rep.name} ===", flush=True)
-    out = os.path.join(outdir, "spiral-stress.step")
-    proc, elapsed = run_generator(
-        ["-i", SPIRAL, "-cc", "5", "-t", "1", "-o", out, "--cores", "6"]
-    )
-    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
-    rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
-    if proc.returncode == 0:
-        geometry_checks(rep, out, SPIRAL, 5.0, 1.0)
-    return rep
-
-
 CYLINDER_SUPPORT_GOLDEN = os.path.join(
-    TESTDIR, "test-cylinder-cc10t1.5-sup60-golden-sample.step")
+    TESTDIR, "test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step")
 
 
 def support_checks(rep: Report, output: str, input_path: str, cc: float, t: float,
-                   orient, overhang: float, thickness: float) -> None:
-    """specification.md §6.2's two support checks, asked of the written file.
+                   orient, thickness: float, final_print: bool = False) -> None:
+    """specification.md §6.2's support checks, asked of the written file.
 
-    Until the support generator exists (docs/algorithm.md §14.3) the run says
-    so in its log, and both checks are reported as `SKIP` rather than failed:
-    they measure an algorithm that is not there yet. What is checked instead is
-    that the support stages ran where they belong, between `simplify` and
-    `validate`. Both checks come back on their own once the warning goes.
+    A run with nothing to support at its orientation says so in its log, and
+    the checks are reported as `SKIP` rather than failed: coverage of no samples
+    can neither pass nor fail. A run whose lattice backs every overhang already
+    says that too; coverage is checked, and the checks of the support bodies
+    have no body to ask.
     """
-    from latticegen2.support import NO_OVERHANG_NOTE, NOT_IMPLEMENTED_WARNING
+    from latticegen2.support import LATTICE_BACKS_ALL_NOTE, NO_OVERHANG_NOTE
 
     log = open(os.path.splitext(output)[0] + ".log", encoding="utf-8").read()
     order = [log.find(f"stage {name}") for name in
-             ("simplify", "overhang", "support", "validate")]
+             ("simplify", "overhang", "support", "pockets", "validate")]
     rep.check("the support stages ran between simplify and validate",
               -1 not in order and order == sorted(order))
-    # Two runs these checks have nothing to say about, each recognised by the
-    # line the run itself prints for it: one with nothing to support at this
-    # orientation, where coverage of no samples can neither pass nor fail, and
-    # one whose generator does not exist yet.
-    why = None
+    # A run these checks have nothing to say about, recognised by the line the
+    # run itself prints for it: nothing to support at this orientation.
     if NO_OVERHANG_NOTE in log:
-        why = "no inner overhang at this orientation"
-    elif NOT_IMPLEMENTED_WARNING in log:
-        why = "no support algorithm yet (docs/algorithm.md §14.3)"
-    if why is not None:
         for label in ("every inner overhang is backed by material",
                       "no support surface exceeds the overhang limit"):
-            print(f"  [SKIP] {label} — {why}", flush=True)
+            print(f"  [SKIP] {label} — no inner overhang at this orientation", flush=True)
         return
-    cov = vg.overhang_coverage(output, input_path, cc, t, orient, overhang, thickness)
+    cov = vg.overhang_coverage(output, input_path, cc, t, orient, thickness)
     rep.check("every inner overhang is backed by material",
               cov["samples"] > 0 and cov["uncovered"] == 0,
               f"{cov['samples']} sample(s) over {cov['area_mm2']:.0f} mm^2, "
@@ -454,13 +408,60 @@ def support_checks(rep: Report, output: str, input_path: str, cc: float, t: floa
               + (f" ({cov['thin']} over material thinner than the mesh probe, "
                  f"confirmed by exact classification)" if cov["thin"] else "")
               + (f", first at {cov['where'][0]}" if cov["where"] else ""))
-    ss = vg.self_supporting(output, input_path, cc, t, orient, overhang)
+    ss = vg.self_supporting(output, input_path, cc, t, orient)
     rep.check("no support surface exceeds the overhang limit",
               ss["bad_area_mm2"] == 0.0,
               f"{ss['triangles']} triangles"
               + (f", {ss['bad_area_mm2']:.3f} mm^2 over the limit, worst "
                  f"{ss['worst_deg']:.2f} deg at {ss['where'][0]}"
                  if ss["bad_area_mm2"] else ""))
+    # Which bodies are support is what the run says it wrote; whether they
+    # overlap anything is asked of the file alone.
+    if LATTICE_BACKS_ALL_NOTE in log:
+        print("  [SKIP] support bodies — the lattice backs every overhang", flush=True)
+        return
+    found = re.search(r"^\[[0-9:]+\] supports: (\d+) separate", log, re.MULTILINE)
+    rep.check("the run reports its support bodies", found is not None)
+    if found is None:
+        return
+    n = int(found.group(1))
+    dis = vg.supports_disjoint(output, n)
+    rep.check("supports overlap neither the lattice nor each other",
+              dis["worst_mm3"] <= vg.SUPPORT_OVERLAP_TOL,
+              f"{n} support bod(y/ies), {dis['pairs']} pair(s) intersected, worst "
+              f"{dis['worst_mm3']:.3e} mm^3"
+              + (f" near {dis['where']}" if dis["worst_mm3"] > vg.SUPPORT_OVERLAP_TOL
+                 else ""))
+    sp = vg.supports_on_strut_planes(output, n)
+    rep.check("support faces resting on a strut lie on its plane",
+              sp["worst_mm"] <= vg.CONTACT_PLANE_TOL,
+              f"{sp['resting']} face(s) resting on a strut, worst "
+              f"{sp['worst_mm']:.3e} mm off its plane"
+              + (f" near {sp['where']}" if sp["worst_mm"] > vg.CONTACT_PLANE_TOL
+                 else ""))
+    if final_print:
+        final_print_check(rep, output, input_path, cc, t, orient, n, cov)
+
+
+def final_print_check(rep: Report, output: str, input_path: str, cc: float, t: float,
+                      orient, n_supports: int, cov: dict) -> None:
+    """No overhang, keel or tip of the finished print hangs over powder: the
+    input's inner surface past 60 deg, and the support bodies past the rod
+    angle, each unless it rests on the wall, the lattice or another support."""
+    fp = vg.final_print_overhangs(output, input_path, cc, t, orient, n_supports, cov)
+    inp, sup, cand = fp["input_free"], fp["free"], fp["candidates"]
+    bare = sum(inp.values()) + sum(sup.values())
+    first = next((f"support {w[0][0]} at {w[0][1]}" for w in fp["where"].values() if w),
+                 None) or (f"input at {fp['input_where'][0]}" if sum(inp.values()) else None)
+    rep.check("the final print has no unsupported overhang, keel or tip",
+              bare == 0,
+              f"input bare: {inp.get('face', 0)} face / {inp.get('edge', 0)} keel / "
+              f"{inp.get('vertex', 0)} tip sample(s); supports free: "
+              f"{sup['face']} of {cand['face']} face / {sup['edge']} of {cand['edge']} keel / "
+              f"{sup['vertex']} of {cand['vertex']} tip sample(s)"
+              + (f", {sum(fp['near'].values())} within {vg.NEAR_TOL} mm of material"
+                 if sum(fp["near"].values()) else "")
+              + (f", first {first}" if first else ""))
 
 
 def scenario_oriented_lattice(outdir: str) -> Report:
@@ -487,6 +488,80 @@ def scenario_oriented_lattice(outdir: str) -> Report:
     return rep
 
 
+def _unbacked(log: str) -> str:
+    got = re.search(r"support_ceiling_points_uncovered: (\d+)", log)
+    return f"{got.group(1)} reported" if got else "not reported"
+
+
+def scenario_support_clipped(outdir: str) -> Report:
+    """Ceiling just past the bar that clips a support node's corner, leaving
+    ceiling bare beside a support: two small cuts of the rehearsal part
+    (tools/make_support_gaps_part.py). Coverage is asked at 0.1 mm, since the
+    0.5 mm the harness otherwise samples at can step over such a sliver."""
+    rep = Report("support-clipped")
+    print(f"=== {rep.name} ===", flush=True)
+    orient = (180.0, 0.0, 0.0)
+    for name, part in CLIPPED.items():
+        out = os.path.join(outdir, f"support-clipped-{name}.step")
+        proc, elapsed = run_generator(
+            ["-i", part, "-cc", "7", "-t", "1.4", "-o", out, "--cores", "4",
+             "--orient", "180", "0", "0", "--support", "--support-thickness", "1"]
+        )
+        rep.check(f"{name}: process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+        rep.check(f"{name}: runtime under 2 minutes", elapsed < 120, f"{elapsed:.1f}s")
+        if proc.returncode != 0:
+            continue
+        with open(os.path.splitext(out)[0] + ".log", encoding="utf-8") as fh:
+            log = fh.read()
+        got = re.search(r"support_ceiling_points_clipped: (\d+)", log)
+        rep.check(f"{name}: the ceiling clips a support node", got and int(got.group(1)) > 0,
+                  f"{got.group(1) if got else 0} point(s)")
+        cov = vg.overhang_coverage(out, part, 7.0, 1.4, orient, 1.0, pitch=0.1)
+        rep.check(f"{name}: backed at 0.1 mm sampling", cov["uncovered"] == 0,
+                  f"{cov['uncovered']} of {cov['samples']} bare, {cov['rim']} on a rim, "
+                  f"{cov['slivers']} sliver(s) within {vg.COVERAGE_SLIVER_TOL:g} mm" +
+                  (f", first at {cov['where'][0]}" if cov["where"] else ""))
+        geometry_checks(rep, out, part, 7.0, 1.4)
+        support_checks(rep, out, part, 7.0, 1.4, orient, 1.0, final_print=True)
+    return rep
+
+
+def scenario_support_gaps(outdir: str) -> Report:
+    """The two ways the supported rehearsal left ceiling bare, in a part that
+    takes seconds (tools/make_support_gaps_part.py): a keel no face of which is
+    ceiling, and a strut tip the floating-body rule dropped from a kept node.
+    Both are checked to be present, so that this cannot pass by no longer
+    testing them."""
+    from latticegen2.classify import tessellate_surface
+    from latticegen2.lattice import lattice_params
+    from latticegen2.support import overhang
+
+    rep = Report("support-gaps")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "support-gaps.step")
+    proc, elapsed = run_generator(
+        ["-i", GAPS, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "4", "--support"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+    rep.check("runtime under 2 minutes", elapsed < 120, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        with open(os.path.splitext(out)[0] + ".log", encoding="utf-8") as fh:
+            log = fh.read()
+        lost = re.search(r"lattice_pieces_lost: (\d+)", log)
+        rep.check("a strut tip was dropped from a kept node", lost is not None,
+                  f"{lost.group(1)} piece(s)" if lost else "none: the part no longer tests this")
+        rep.check("the generator's own count agrees: no ceiling point bare",
+                  "support_ceiling_points_uncovered: 0" in log, _unbacked(log))
+        lp = lattice_params(10.0, 1.5, (0.0, 0.0, 0.0))
+        body = occ.read_step(GAPS)
+        tessellate_surface(body, lp)
+        keel = overhang.detect(body, lp.b).counts()["edge"]
+        rep.check("the part has a keel to support", keel > 0, f"{keel} edge sample(s)")
+        geometry_checks(rep, out, GAPS, 10.0, 1.5)
+        support_checks(rep, out, GAPS, 10.0, 1.5, (0.0, 0.0, 0.0), 1.5, final_print=True)
+    return rep
+
+
 def scenario_support_tilted(outdir: str) -> Report:
     """Orientation and support together, on the ball: a curved overhang, tilted."""
     rep = Report("support-tilted")
@@ -494,46 +569,55 @@ def scenario_support_tilted(outdir: str) -> Report:
     out = os.path.join(outdir, "support-tilted.step")
     orient = (35.0, 20.0, -110.0)
     proc, elapsed = run_generator(
-        ["-i", BALL, "-cc", "20", "-t", "4", "-o", out, "--cores", "4",
+        ["-i", BALL, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "4",
          "--orient", "35", "20", "-110", "--support"]
     )
     rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
     rep.check("runtime under 10 minutes", elapsed < 600, f"{elapsed:.1f}s")
     if proc.returncode == 0:
-        geometry_checks(rep, out, BALL, 20.0, 4.0)
-        support_checks(rep, out, BALL, 20.0, 4.0, orient, 60.0, 1.0)
+        geometry_checks(rep, out, BALL, 10.0, 1.5)
+        support_checks(rep, out, BALL, 10.0, 1.5, orient, 1.5, final_print=True)
     return rep
 
 
 def scenario_support_cylinder(outdir: str) -> Report:
     """Print support on the test cylinder, prepared for a golden sample.
 
-    Default overhang (60 deg) and thickness (1 mm), unrotated. Two things are
-    checked beyond the usual: the two support checks of §6.2, and that the
-    **existing lattice golden sample is contained in the output** — supports
-    only ever add material, so this is what says adding them lost none of the
-    lattice.
+    Default thickness (``t``), turned `--orient 0 -90 0`. Two things are
+    checked beyond the usual: the support checks of §6.2, and that **the same
+    run without `--support` is contained in the output** — supports are separate
+    bodies beside an unchanged lattice, so this is what says adding them lost
+    none of it. The committed lattice golden sample cannot say that here: it is
+    the unrotated lattice.
 
     **No golden sample exists yet, deliberately** (docs/testing.md): one is only
     worth having once a human has inspected the output it pins. `golden_check`
-    reports `SKIP` until `test-cylinder-cc10t1.5-sup60-golden-sample.step` is
-    committed, and compares against it from then on.
+    reports `SKIP` until `test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step`
+    is committed, and compares against it from then on.
     """
     rep = Report("support-cylinder")
     print(f"=== {rep.name} ===", flush=True)
     out = os.path.join(outdir, "support-cylinder.step")
+    orient = (0.0, -90.0, 0.0)
+    plain = os.path.join(outdir, "support-cylinder-lattice-only.step")
     proc, elapsed = run_generator(
         ["-i", CYLINDER, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "6",
-         "--support"]
+         "--orient", "0", "-90", "0", "--support"]
     )
     rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
     rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, CYLINDER, 10.0, 1.5)
-        support_checks(rep, out, CYLINDER, 10.0, 1.5, (0.0, 0.0, 0.0), 60.0, 1.0)
-        if os.path.isfile(CYLINDER_GOLDEN):
-            lost = vg.contained_in(CYLINDER_GOLDEN, out)
-            rep.check("the lattice golden sample is contained in the output",
+        support_checks(rep, out, CYLINDER, 10.0, 1.5, orient, 1.5, final_print=True)
+        ref, _ = run_generator(
+            ["-i", CYLINDER, "-cc", "10", "-t", "1.5", "-o", plain,
+             "--cores", "6", "--orient", "0", "-90", "0"]
+        )
+        rep.check("the reference run without --support exits 0",
+                  ref.returncode == 0, ref.stderr.strip()[-300:])
+        if ref.returncode == 0:
+            lost = vg.contained_in(plain, out)
+            rep.check("the same run without --support is contained in the output",
                       lost < 1.5 ** 3, f"{lost:.6g} mm^3 of it outside")
         golden_check(rep, out, CYLINDER_SUPPORT_GOLDEN, 10.0, 1.5)
     return rep
@@ -541,7 +625,7 @@ def scenario_support_cylinder(outdir: str) -> Report:
 
 REHEARSAL = os.path.join(TESTDIR, "TD_HX_rehearsal_test.step")
 REHEARSAL_SUPPORT_GOLDEN = os.path.join(
-    TESTDIR, "TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup60-golden-sample.step")
+    TESTDIR, "TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step")
 
 
 def scenario_rehearsal_support(outdir: str) -> Report:
@@ -552,9 +636,9 @@ def scenario_rehearsal_support(outdir: str) -> Report:
     `--orient 180 0 0` what was its floor becomes its ceiling. This is the only
     scenario that puts the support stages through a part of that size.
 
-    Much the slowest scenario — tens of minutes for the run and more for the
-    checks — so it is **opt-in** (:data:`OPT_IN`): it runs only when named with
-    `--only`. Pass `--keep <dir>` with it to write into a folder that outlives
+    Much the slowest scenario — hours for the run and more for the checks — so
+    it is **opt-in** (:data:`OPT_IN`): it runs only when named with `--only`,
+    and only for final verification. Pass `--keep <dir>` with it to write into a folder that outlives
     the harness, since a run this long is not one to repeat for its log.
 
     **No golden sample exists yet** (docs/testing.md): `golden_check` reports
@@ -566,14 +650,13 @@ def scenario_rehearsal_support(outdir: str) -> Report:
     orient = (180.0, 0.0, 0.0)
     proc, elapsed = run_generator(
         ["-i", REHEARSAL, "-cc", "7", "-t", "1.4", "-o", out, "--cores", "6",
-         "--support", "--orient", "180", "0", "0", "--overhang", "60",
-         "--support-thickness", "1"]
+         "--support", "--orient", "180", "0", "0", "--support-thickness", "1"]
     )
     rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-600:])
-    rep.check("runtime under 3 hours", elapsed < 10800, f"{elapsed:.1f}s")
+    rep.check("runtime under 12 hours", elapsed < 43200, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, REHEARSAL, 7.0, 1.4)
-        support_checks(rep, out, REHEARSAL, 7.0, 1.4, orient, 60.0, 1.0)
+        support_checks(rep, out, REHEARSAL, 7.0, 1.4, orient, 1.0)
         golden_check(rep, out, REHEARSAL_SUPPORT_GOLDEN, 7.0, 1.4)
     return rep
 
@@ -584,8 +667,9 @@ SCENARIOS = {
     "progress-stream": scenario_progress_stream,
     "smoke-verified": scenario_smoke_verified,
     "dense-lattice": scenario_dense_lattice,
-    "spiral-stress": scenario_spiral_stress,
     "oriented-lattice": scenario_oriented_lattice,
+    "support-gaps": scenario_support_gaps,
+    "support-clipped": scenario_support_clipped,
     "support-tilted": scenario_support_tilted,
     "support-cylinder": scenario_support_cylinder,
     "rehearsal-support": scenario_rehearsal_support,

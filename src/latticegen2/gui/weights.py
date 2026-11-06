@@ -5,22 +5,21 @@ one step per stage would sit still for the ten minutes ``boundary`` takes and
 then jump. The shares here come from measured runs instead.
 
 **There are two layouts, and which one a run gets is decided by the stages it
-announces.** A run with print supports goes through two more stages than one
-without — ``overhang`` and ``support``, between ``simplify`` and ``validate``
-(docs/algorithm.md §14.2) — and they get bands of their own.
+announces.** A run with print supports goes through three more stages than one
+without — ``overhang``, ``support`` and ``pockets``, between ``simplify`` and
+``validate`` (docs/algorithm.md §14.2) — and they get bands of their own.
 
-**Provenance.** :data:`SECONDS_PLAIN` is the run without ``--support`` of one
-controlled pair on the 6-core development workstation, on 2026-10-11:
-`TD_HX_rehearsal_test` at ``cc=7, t=1.4``, ``--orient 180 0 0``, six cores.
-:data:`SECONDS_SUPPORT` is that same run plus the ``overhang`` stage measured
-in its supported twin, where detection was the same code it is now.
-**``support`` has no measurement**, because the generator it runs is not
-written yet (docs/algorithm.md §14.3), so it is worth the floor until it is:
-the supported run is the ``rehearsal-support`` e2e scenario
-(docs/specification.md §6.1), and re-measuring it once the algorithm exists is
-one command. The supported half of the 2026-10-11 pair measured v4.0.0's
-first, cell-by-cell algorithm, which ran between ``boundary`` and ``connect``
-and has been removed, so none of it carries over.
+**Provenance.** Both tables are `TD_HX_rehearsal_test` at ``cc=7, t=1.4``,
+``--orient 180 0 0``, on the 6-core development workstation, six cores.
+:data:`SECONDS_PLAIN` is the run without ``--support`` of the 2026-10-11
+controlled pair. :data:`SECONDS_SUPPORT` is the ``rehearsal-support`` e2e
+scenario (docs/specification.md §6.1, ``--support-thickness 1``) of
+2026-11-06, every stage of it, with the support grid through the rods' centre
+axes (docs/algorithm.md §14.3 S4): 1 h 46 m end to end, of which ``pockets``
+-- the pocket search across the pool, then the overlap check on the master --
+is 54 % and ``support`` 18 % of the time. Its lattice stages agree with the plain run's to
+within a few per cent except ``validate``, which checks the 52 support bodies
+too.
 
 **What these tables are not.** They are one part's shape, on one machine. A
 small part is boundary- and export-dominated — on ``80mm-test-ball``
@@ -29,7 +28,8 @@ little overhanging surface will run through the support stages almost at
 once. ``validate`` is dominated by the export-truth gate (docs/algorithm.md
 §9), which writes, re-reads and tessellates every output solid; at
 ``cc=5, t=1`` on this same part that gate alone is half an hour and
-``validate`` is the largest stage of the run, where here it is a sixth of it.
+``validate`` is the largest stage of the run, where here it is a quarter of
+the plain run and a twelfth of the supported one.
 That is the accepted trade: a fixed weighting is monotone and never lies about
 what has finished, where a time-based estimate would sit at 100 % of a stage
 that had not ended. Read the bar as "how far through the work", never as an
@@ -60,10 +60,24 @@ SECONDS_PLAIN: dict[str, float] = {
     "export": 90.3,
 }  # 29 m 00 s end to end
 
-#: Wall-clock seconds per stage of a run **with** ``--support``. The lattice
-#: stages are the plain run's; ``support`` is not measured yet (see above) and
-#: so is worth the floor of :func:`_permille`.
-SECONDS_SUPPORT: dict[str, float] = {**SECONDS_PLAIN, "overhang": 7.0}
+#: Wall-clock seconds per stage of a run **with** ``--support``.
+SECONDS_SUPPORT: dict[str, float] = {
+    "template": 0.09,
+    "import": 1.2,
+    "tessellate": 2.5,
+    "classify": 13.8,
+    "boundary": 574.1,
+    "connect": 10.4,
+    "stitch": 256.0,
+    "instance": 13.4,
+    "assemble": 8.2,
+    "simplify": 240.5,
+    "overhang": 6.9,
+    "support": 1130.6,
+    "pockets": 3404.9,
+    "validate": 558.1,
+    "export": 106.2,
+}  # 1 h 45 m 35 s end to end
 
 
 def _permille(seconds: dict[str, float], stages: tuple) -> dict[str, int]:
@@ -148,7 +162,7 @@ def overall_permille(stage: str | None, fraction: float | None,
     """Where the top bar should sit while ``stage`` is ``fraction`` complete.
 
     ``stages`` is the list the run announced in its ``hello``, and it is what
-    selects the layout: the plain pipeline's twelve, or the fourteen of a run
+    selects the layout: the plain pipeline's twelve, or the fifteen of a run
     with print supports. Omitted, it is the plain pipeline.
 
     ``fraction`` is ``None`` for a stage with no countable work — ``export``'s

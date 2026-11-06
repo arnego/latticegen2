@@ -37,23 +37,39 @@ def mesh_of(path: str, cc: float, t: float, refine: float = 1.0) -> TriMesh:
     ``refine`` divides the chordal deflection. It exists for one caller: a
     crossing found at the default deflection is re-asked at a finer one before
     it is believed (:func:`tools.e2e.geometry_checks`).
+
+    **Each solid is welded on its own.** Support bodies share faces with the
+    lattice and with each other (specification.md §4.6), and welded together
+    the edges of a shared face would be used four times — two closed bodies
+    read as one non-manifold one. Kept apart, every body has to close by
+    itself, which is the property the manifold check asks for.
     """
     shape = occ.read_step(path)
     lp = lattice_params(cc, t)
     occ.mesh_shape(shape, chordal_target(lp) / refine)
-    verts, tris, offset = [], [], 0
-    for face in occ.faces(shape):
-        got = occ.face_triangulation(face)
-        if got is None:
+    verts, tris, owner, offset = [], [], [], 0
+    for solid in occ.solids(shape):
+        sv, sf, soff = [], [], 0
+        for face in occ.faces(solid):
+            got = occ.face_triangulation(face)
+            if got is None:
+                continue
+            v, f = got
+            sv.append(v)
+            sf.append(f + soff)
+            soff += len(v)
+        if not sf:
             continue
-        v, f = got
+        v, f = _weld(np.vstack(sv), np.vstack(sf))
         verts.append(v)
         tris.append(f + offset)
+        owner.append(np.full(len(f), len(owner), dtype=np.int64))
         offset += len(v)
     if not tris:
         raise RuntimeError(f"No triangles produced for {path}")
-    v, f = _weld(np.vstack(verts), np.vstack(tris))
-    return TriMesh(verts=v, tris=f)
+    mesh = TriMesh(verts=np.vstack(verts), tris=np.vstack(tris))
+    mesh.solid_of = np.concatenate(owner)
+    return mesh
 
 
 def manifold_check(mesh: TriMesh):
@@ -102,7 +118,16 @@ def self_intersection_check(mesh: TriMesh, limit: int = 50):
     same pairs while touching each cell's contents once. Adjacent triangles are
     *expected* to touch along shared edges, so pairs sharing any vertex are
     skipped.
+
+    **Within one solid only, where the mesh says which solid a triangle is of**
+    (``mesh.solid_of``, :func:`mesh_of`). A self-intersection is a property of a
+    solid. Support bodies share faces with the lattice by design, and where the
+    two meet on a curved ceiling their independent tessellations cross --
+    measured on the supported ball: 316 pairs, every one between the lattice
+    and the support, none within either. Whether two bodies overlap is asked
+    exactly, of the B-rep, by :func:`supports_disjoint`.
     """
+    solid_of = getattr(mesh, "solid_of", None)
     sh = SpatialHash(mesh)
     A, B, C = mesh.triangle_points
     bad: list[tuple[int, int]] = []
@@ -116,6 +141,8 @@ def self_intersection_check(mesh: TriMesh, limit: int = 50):
                 if pair in seen:
                     continue
                 seen.add(pair)
+                if solid_of is not None and solid_of[pair[0]] != solid_of[pair[1]]:
+                    continue
                 if set(mesh.tris[pair[0]]) & set(mesh.tris[pair[1]]):
                     continue
                 t1 = np.array([A[pair[0]], B[pair[0]], C[pair[0]]])
@@ -632,7 +659,11 @@ def material_outside(candidate_path: str, input_path: str) -> dict:
             reason = "not attempted"
         else:
             cut = _cut_volume(solid, body)
-            trustworthy = cut == cut and cut <= own * 1e-9  # exactly zero, in effect
+            # Exactly zero, in effect -- either sign: a cut can come back
+            # negative (-1.5e-03 mm^3 on a 151 mm^3 support body of the
+            # rehearsal part, 0 of 273 surface points outside), and a negative
+            # remainder is no more a measurement than a positive one.
+            trustworthy = cut == cut and abs(cut) <= own * 1e-9
             reason = "contradicted"
         if not trustworthy:
             evidence = surface_points_outside(solid, body)
@@ -680,6 +711,13 @@ SUPPORT_EXACT_STEP = 2e-3
 """Millimetres. Probe depth for the exact re-check of a mesh miss — the depth
 the pipeline's own coverage proof uses."""
 
+COVERAGE_SLIVER_TOL = 0.05
+"""Millimetres. A bare sample this near an output solid is reported as a sliver
+and does not fail coverage. Where a ceiling only grazes a support node, trimming
+the node can leave a chip of about 1e-3 mm^3 on the far side of a grid plane,
+which the generator discards rather than ship a floating micro-solid: well under
+a powder grain, and no support could print it."""
+
 EXACT_RECHECK_MAX = 2000
 """Most mesh misses the exact classifier is asked about. Past this the misses
 are reported as they stand: that many is a real gap, not a thin wedge."""
@@ -711,14 +749,65 @@ def _oriented_mesh(shape, deflection: float):
     return v, f[keep], n[keep] / (2.0 * area[keep])[:, None], area[keep]
 
 
+EXACT_NORMAL_PREFILTER_DEG = 5.0
+"""Degrees. How much flatter than the limit a facet may read and still be
+re-read at the exact normal: far more than a chord at
+:data:`SUPPORT_MESH_DEFLECTION` tilts on any face a support carries."""
+
+
+def _oriented_mesh_exact(shape, deflection: float):
+    """:func:`_oriented_mesh` plus ``exact(i)``: the true outward normal of
+    triangle ``i``'s face at the triangle's centroid in the face's parameters,
+    ``None`` at a pole or where the face has no parameters. ``exact(i,
+    point=True)`` is the point there instead, on the face itself."""
+    from OCP.TopAbs import TopAbs_Orientation
+
+    from latticegen2.support.overhang import _SurfaceNormals
+
+    occ.mesh_shape(shape, deflection)
+    verts, tris, owner, uvc, faces, offset = [], [], [], [], [], 0
+    for face in occ.faces(shape):
+        got = occ.face_uv_triangulation(face)
+        if got is None:
+            continue
+        p, uv, f, _evaluate = got
+        if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+            f = f[:, ::-1]
+        verts.append(p)
+        tris.append(f + offset)
+        uvc.append(uv[f].mean(axis=1))
+        owner.append(np.full(len(f), len(faces), dtype=np.int64))
+        faces.append(face)
+        offset += len(p)
+    v = np.vstack(verts)
+    f = np.vstack(tris)
+    owner = np.concatenate(owner)
+    uvc = np.vstack(uvc)
+    nrm = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
+    area = 0.5 * np.linalg.norm(nrm, axis=1)
+    keep = area > 0.0
+    f, owner, uvc = f[keep], owner[keep], uvc[keep]
+    normals = {}
+
+    def exact(i: int, point: bool = False):
+        k = int(owner[i])
+        if k not in normals:
+            normals[k] = _SurfaceNormals(faces[k])
+        return normals[k].at(*uvc[i])[0 if point else 1]
+
+    return v, f, nrm[keep] / (2.0 * area[keep])[:, None], area[keep], exact
+
+
 def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
-                      orient, overhang: float, thickness: float) -> dict:
+                      orient, thickness: float, pitch: float | None = None) -> dict:
     """Is every inner overhang of the input backed by material in the output?
 
     Asked of the **written file**, and independently of how the supports were
     placed or built: the input's overhangs are sampled afresh, each sample is
     moved a hair into the body, and the output's own tessellation is asked
-    whether that point is inside it. Nothing here reads the plan.
+    whether that point is inside it. Nothing here reads the plan. ``pitch`` is
+    the sample spacing, the support step by default: a finer one finds ceiling
+    bare over less than that, which clipped corners of support nodes are.
     """
     from latticegen2.classify import PointInside, tessellate_surface
     from latticegen2.support import overhang as oh
@@ -726,14 +815,7 @@ def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
     lp = lattice_params(cc, t, orient)
     body = occ.read_step(input_path)
     tessellate_surface(body, lp)
-    samples = oh.detect(body, lp.b, overhang, oh.sample_pitch(t, thickness))
-    # Only what exceeds the limit itself has to be backed. The band inside it
-    # is sampled so supports run past a region's border, and there a support
-    # can be a film thinner than any probe (docs/algorithm.md §14.1).
-    keep = samples.required
-    samples = oh.OverhangSamples(
-        samples.points[keep], samples.inward[keep], samples.kind[keep],
-        samples.area, samples.pitch)
+    samples = oh.detect(body, lp.b) if pitch is None else oh.detect(body, lp.b, pitch)
     out = occ.read_step(candidate_path)
     v, f, _n, _a = _oriented_mesh(out, SUPPORT_MESH_DEFLECTION)
     v, f = _weld(v, f)
@@ -768,18 +850,55 @@ def overhang_coverage(candidate_path: str, input_path: str, cc: float, t: float,
                     covered[i] = True
                     thin += 1
                     break
+    # A sample within a hair of a body edge can probe out of the body: its rim
+    # is continued by a wall, and nothing inside the body can lie behind it.
+    # Bare samples are then measured against the output, which is exact.
+    rim = slivers = 0
+    if 0 < int((~covered).sum()) <= EXACT_RECHECK_MAX:
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
+        from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+        from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+        from OCP.TopAbs import TopAbs_State
+        from OCP.gp import gp_Pnt
+
+        in_body = BRepClass3d_SolidClassifier(body)
+        solids = occ.solids(out)
+        boxes = [occ.bounding_box(s) for s in solids]
+        for i in np.nonzero(~covered)[0]:
+            q = samples.points[i] + SUPPORT_EXACT_STEP * samples.inward[i]
+            in_body.Perform(gp_Pnt(*map(float, q)), 1e-7)
+            if in_body.State() == TopAbs_State.TopAbs_OUT:
+                covered[i] = True
+                rim += 1
+                continue
+            p = samples.points[i]
+            vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*map(float, p))).Vertex()
+            for s, (lo, hi) in zip(solids, boxes):
+                if (np.any(p < lo - COVERAGE_SLIVER_TOL) or np.any(p > hi + COVERAGE_SLIVER_TOL)):
+                    continue
+                d = BRepExtrema_DistShapeShape(vertex, s)
+                if d.IsDone() and d.Value() <= COVERAGE_SLIVER_TOL:
+                    covered[i] = True
+                    slivers += 1
+                    break
     missing = samples.points[~covered]
+    bare_kind = samples.kind[~covered]
     return {
         "samples": int(len(probe)),
         "uncovered": int(len(missing)),
+        "uncovered_kinds": {name: int(np.count_nonzero(bare_kind == k))
+                            for name, k in (("face", oh.FACE), ("edge", oh.EDGE),
+                                            ("vertex", oh.VERTEX))},
         "thin": thin,
+        "rim": rim,
+        "slivers": slivers,
         "area_mm2": float(samples.area),
         "where": [np.round(p, 3).tolist() for p in missing[:5]],
     }
 
 
 def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
-                    orient, overhang: float, tol_deg: float = 0.05) -> dict:
+                    orient, tol_deg: float = 0.05) -> dict:
     """Does any free surface of the output face down more flatly than the limit?
 
     A facet is exempt only for one of two reasons, both geometric: it lies on
@@ -789,15 +908,28 @@ def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
     lattice is not analysed). Everything else is support, and a single such
     facet over the limit is a failure.
     """
-    from latticegen2.classify import PointInside  # noqa: F401  (same import cost)
+    from latticegen2.cli import SUPPORT_OVERHANG_DEG
 
     lp = lattice_params(cc, t, orient)
     b = lp.b
     out = occ.read_step(candidate_path)
-    v, f, n, area = _oriented_mesh(out, SUPPORT_MESH_DEFLECTION)
-    bar = float(np.sin(np.radians(overhang + tol_deg)))
+    v, f, n, area, exact = _oriented_mesh_exact(out, SUPPORT_MESH_DEFLECTION)
+
+    # **Read at exact normals** (specification.md §6.2). A support face built at
+    # the limit is curved, and its chords tilt either side of the true surface,
+    # so a facet can read a hair past the bar where the face is not. The facet
+    # normals only pick candidates, against a bar loose enough to hold every
+    # chord the mesh can make; each candidate is then read on the face itself.
+    bar = float(np.sin(np.radians(SUPPORT_OVERHANG_DEG + tol_deg)))
+    loose = float(np.sin(np.radians(SUPPORT_OVERHANG_DEG - EXACT_NORMAL_PREFILTER_DEG)))
+    suspect = np.nonzero(-(n @ b) > loose)[0]
+    n = n.copy()
+    for i in suspect:
+        got = exact(int(i))
+        if got is not None:
+            n[i] = got
     down = -(n @ b)
-    suspect = np.nonzero(down > bar)[0]
+    suspect = suspect[down[suspect] > bar]
 
     strut = np.array([s * (su * lp.u[k] + sv * lp.v[k]) / np.sqrt(2.0)
                       for k in range(3) for su in (1, -1) for sv in (1, -1)
@@ -822,10 +954,27 @@ def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
     bad_area = 0.0
     where = []
     worst = 0.0
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
+    from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+    from OCP.gp import gp_Pnt
+
+    def on_body(i) -> bool:
+        # The facet's own point on its face, measured against the input exactly:
+        # a facet centre sits off a curved face by the chord's sag, and on
+        # `TD_HX_rehearsal_test` OCCT's real sag is a multiple of the deflection
+        # asked for (docs/algorithm.md §5.1) -- a support face lying on a
+        # countersink's 60 deg cone read 0.097 mm off the input's mesh.
+        q = exact(int(i), point=True)
+        d = BRepExtrema_DistShapeShape(BRepBuilderAPI_MakeVertex(gp_Pnt(*map(float, q))).Vertex(),
+                                       body)
+        return bool(d.IsDone() and d.Value() <= CONTAINMENT_TOL)
+
     for i in suspect:
         centre = v[f[i]].mean(axis=0)
         if _distance_to_mesh(wall, sh, centre) <= 3.0 * SUPPORT_MESH_DEFLECTION:
             continue                      # closed against the wall
+        if on_body(i):
+            continue
         bad_area += float(area[i])
         worst = max(worst, float(np.degrees(np.arcsin(min(1.0, down[i])))))
         if len(where) < 5:
@@ -836,6 +985,539 @@ def self_supporting(candidate_path: str, input_path: str, cc: float, t: float,
         "worst_deg": worst,
         "where": where,
     }
+
+
+# --- the final print: free overhangs, keels and tips ---------------------------
+#
+# What a printer would meet, asked of the written file: the input's inner
+# surface and the support bodies together, each sample judged by whether other
+# material holds it. The input side is `overhang_coverage`'s (it samples faces,
+# keels and tips of the input already); the support side is below. The three
+# detectors are copies of `latticegen2.support.overhang`'s, adapted from the
+# void `Ω` to a solid of material: the down direction is `-b` rather than `b`,
+# and a keel is a *convex* edge of the material where it was a concave one of
+# the void. They are copied rather than imported so that a change to the
+# pipeline's detection cannot change what this check asks.
+
+FREE_OVERHANG_TOL_DEG = 0.05
+"""Degrees past the rod angle a support face or edge may lean and still pass.
+Every downward face of a staircase lies on a plane at 35.26 deg from vertical,
+and every one of its edges runs along a rod direction at exactly the rod angle,
+so the bar sits a hair above that: what it lets through is rounding."""
+
+ROOT_TOL = CONTAINMENT_TOL
+"""Millimetres. A sample this near other material — the input's wall, the
+lattice, another support — is rooted on it. Contact, exactly measured: a support
+built onto a strut, a wall or a floor touches it at distance 0."""
+
+NEAR_TOL = COVERAGE_SLIVER_TOL
+"""Millimetres. A sample farther than :data:`ROOT_TOL` from other material but
+within this is a near contact: reported, and not failed. It is the sliver
+coverage already allows (:data:`COVERAGE_SLIVER_TOL`), seen from the support's
+side: where a trim cuts a support node against a curved wall, a grid corner can
+be left a few hundredths short of it -- 0.017 mm from a bore wall on the
+cylinder -- well under a powder grain."""
+
+
+def _material_face_samples(face, down: np.ndarray, bar: float, pitch: float):
+    """Points of ``face`` whose outward normal faces ``down`` past ``bar``.
+
+    A copy of `overhang._face_samples`, which asks the same question of the
+    void's normal and ``b``; a material's outward normal and ``-b`` is the
+    same test turned inside out."""
+    from OCP.GeomAbs import GeomAbs_SurfaceType
+
+    from latticegen2.support.overhang import _SurfaceNormals, _subdivide
+
+    tri = occ.face_uv_triangulation(face)
+    if tri is None:
+        return None
+    pts, uvs, tris, _evaluate = tri
+    normals = _SurfaceNormals(face)
+    planar = normals.surf.GetType() == GeomAbs_SurfaceType.GeomAbs_Plane
+    if planar:
+        _p, n = normals.at(*uvs[0])
+        if n is None or float(n @ down) < bar:
+            return None
+    A, B, C = pts[tris[:, 0]], pts[tris[:, 1]], pts[tris[:, 2]]
+    tri_area = 0.5 * np.linalg.norm(np.cross(B - A, C - A), axis=1)
+    sides = np.sqrt(np.stack([
+        np.einsum("ij,ij->i", B - A, B - A),
+        np.einsum("ij,ij->i", C - B, C - B),
+        np.einsum("ij,ij->i", A - C, A - C),
+    ], axis=1))
+    roll = np.argmax(sides, axis=1)
+    out = []
+    for ti in range(len(tris)):
+        if tri_area[ti] <= 0.0:
+            continue
+        corners = np.roll(tris[ti], -int(roll[ti]))
+        base = float(sides[ti, roll[ti]])
+        w, _share = _subdivide(max(1, int(np.ceil(base / pitch))),
+                               max(1, int(np.ceil(2.0 * tri_area[ti] / base / pitch))))
+        if planar:
+            out.append(w @ pts[corners])
+            continue
+        for u, v in w @ uvs[corners]:
+            p, nn = normals.at(u, v)
+            if nn is not None and float(nn @ down) >= bar:
+                out.append(p[None, :])
+    return np.vstack(out) if out else None
+
+
+def _material_keel_samples(solid, down: np.ndarray, bar: float, pitch: float) -> list:
+    """Points on convex edges of ``solid`` that hang flatter than ``bar``.
+
+    A copy of `overhang._edge_samples` with the convexity test reversed: the
+    material's outward normals between its two faces sweep the short arc from
+    one to the other, and the edge is a keel iff that arc holds a direction
+    facing ``down`` past the bar while neither face does on its own. A straight
+    edge between two planes has one answer along its length, so it is asked at
+    its middle first and sampled only if that answer is yes."""
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.GCPnts import GCPnts_AbscissaPoint
+    from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
+    from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp
+    from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+    from OCP.gp import gp_Pnt, gp_Vec
+
+    from latticegen2.support.overhang import _SurfaceNormals, _edge_orientation_in
+
+    owners = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(solid, TopAbs_ShapeEnum.TopAbs_EDGE,
+                                   TopAbs_ShapeEnum.TopAbs_FACE, owners)
+    out = []
+    p3, d3 = gp_Pnt(), gp_Vec()
+    for i in range(1, owners.Extent() + 1):
+        edge = TopoDS.Edge_s(owners.FindKey(i))
+        if BRep_Tool.Degenerated_s(edge):
+            continue
+        faces = [TopoDS.Face_s(f) for f in owners.FindFromIndex(i)]
+        if len(faces) != 2 or faces[0].IsSame(faces[1]):
+            continue
+        ori = _edge_orientation_in(faces[0], edge)
+        if ori is None:
+            continue
+        sign = -1.0 if ori == TopAbs_Orientation.TopAbs_REVERSED else 1.0
+        curve = BRepAdaptor_Curve(edge)
+        first, last = curve.FirstParameter(), curve.LastParameter()
+        pcurves = [BRep_Tool.CurveOnSurface_s(edge, f, 0.0, 0.0) for f in faces]
+        if any(c is None for c in pcurves):
+            continue
+        normals = [_SurfaceNormals(f) for f in faces]
+
+        def keel_at(s: float):
+            uv1, uv2 = pcurves[0].Value(s), pcurves[1].Value(s)
+            _p1, n1 = normals[0].at(uv1.X(), uv1.Y())
+            _p2, n2 = normals[1].at(uv2.X(), uv2.Y())
+            if n1 is None or n2 is None:
+                return None
+            if float(n1 @ down) >= bar or float(n2 @ down) >= bar:
+                return None                   # sampled as a face already
+            curve.D1(s, p3, d3)
+            if d3.Magnitude() < 1e-12:
+                return None
+            tangent = sign * np.array([d3.X(), d3.Y(), d3.Z()]) / d3.Magnitude()
+            into = np.cross(n1, tangent)      # across face 0, away from the edge
+            if float(into @ n2) >= -1e-6:
+                return None                   # concave or flat: not a keel
+            axis = np.cross(n1, n2)
+            mag = float(np.linalg.norm(axis))
+            if mag < 1e-9:
+                return None
+            axis /= mag
+            proj = down - float(down @ axis) * axis
+            reach = float(np.linalg.norm(proj))
+            if reach < bar:
+                return None
+            proj /= reach
+            if float(np.cross(n1, proj) @ axis) < 0.0 or float(np.cross(proj, n2) @ axis) < 0.0:
+                return None
+            return (p3.X(), p3.Y(), p3.Z())
+
+        straight = (curve.GetType() == GeomAbs_CurveType.GeomAbs_Line
+                    and all(n.surf.GetType() == GeomAbs_SurfaceType.GeomAbs_Plane
+                            for n in normals))
+        if straight and keel_at(0.5 * (first + last)) is None:
+            continue
+        try:
+            length = GCPnts_AbscissaPoint.Length_s(curve)
+        except Exception:                                      # noqa: BLE001
+            continue
+        if not np.isfinite(length) or length <= 0.0:
+            continue
+        for s in np.linspace(first, last, max(2, int(np.ceil(length / pitch)) + 1)):
+            got = keel_at(float(s))
+            if got is not None:
+                out.append(got)
+    return out
+
+
+def _faces_rise_from(faces, v: np.ndarray, up: np.ndarray, eps: float) -> bool:
+    """Does every one of ``faces`` rise away from vertex ``v``?
+
+    Read off each face's triangulation: every triangle with a node at ``v``
+    must have its other nodes no lower. Rising edges alone do not make a tip.
+    Where three of the eight octants round a staircase vertex hold material --
+    (+,-,-), (+,-,+) and (+,+,-) -- every edge there runs along a ``+e_k``, yet
+    the planar faces carry material lower than the vertex: a saddle, not a
+    tip. Measured on the ball's supports, 1 of 34 readings."""
+    for face in faces:
+        got = occ.face_triangulation(face)
+        if got is None:
+            continue
+        pts, tris = got
+        d = np.linalg.norm(pts - v, axis=1)
+        at = np.nonzero(d <= 1e-6)[0]
+        if not len(at):
+            continue
+        inc = tris[np.isin(tris, at).any(axis=1)]
+        if len(inc) and float(((pts[inc.ravel()] - v) @ up).min()) < -eps:
+            return False
+    return True
+
+
+def _material_tip_samples(solid, down: np.ndarray) -> list:
+    """Vertices of ``solid`` lower than everything attached to them, with the
+    solid not directly beneath: the tip of a stalactite. A copy of
+    `overhang._vertex_samples`, asking of the material what it asks of the
+    void, with one test added: the faces at the vertex must rise from it too
+    (:func:`_faces_rise_from`). ``solid`` must be meshed."""
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.TopAbs import TopAbs_ShapeEnum, TopAbs_State
+    from OCP.TopExp import TopExp
+    from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+    from OCP.gp import gp_Pnt
+
+    up = -down
+    owners = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(solid, TopAbs_ShapeEnum.TopAbs_VERTEX,
+                                   TopAbs_ShapeEnum.TopAbs_EDGE, owners)
+    face_owners = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(solid, TopAbs_ShapeEnum.TopAbs_VERTEX,
+                                   TopAbs_ShapeEnum.TopAbs_FACE, face_owners)
+    lo, hi = occ.bounding_box(solid)
+    eps = 1e-4 * float(np.linalg.norm(hi - lo))
+    out, classifier = [], None
+    for i in range(1, owners.Extent() + 1):
+        pv = BRep_Tool.Pnt_s(TopoDS.Vertex_s(owners.FindKey(i)))
+        v = np.array([pv.X(), pv.Y(), pv.Z()])
+        rises, tip = 0, True
+        for e in owners.FindFromIndex(i):
+            edge = TopoDS.Edge_s(e)
+            if BRep_Tool.Degenerated_s(edge):
+                continue
+            curve = BRepAdaptor_Curve(edge)
+            first, last = curve.FirstParameter(), curve.LastParameter()
+            ends = [curve.Value(first), curve.Value(last)]
+            near = min((0, 1), key=lambda k: ends[k].Distance(pv))
+            s = first + 0.05 * (last - first) if near == 0 else last - 0.05 * (last - first)
+            q = curve.Value(float(s))
+            if float((np.array([q.X(), q.Y(), q.Z()]) - v) @ up) <= eps * 1e-3:
+                tip = False
+                break
+            rises += 1
+        if not tip or rises == 0:
+            continue
+        key = owners.FindKey(i)
+        faces = [TopoDS.Face_s(f) for f in face_owners.FindFromKey(key)]
+        if not _faces_rise_from(faces, v, up, eps * 1e-3):
+            continue
+        if classifier is None:
+            classifier = BRepClass3d_SolidClassifier(solid)
+        classifier.Perform(gp_Pnt(*(v + eps * down)), 1e-7)
+        if classifier.State() != TopAbs_State.TopAbs_OUT:
+            continue
+        # Nothing of the solid may lie below the vertex near it, in any
+        # direction. One B-rep vertex need not see all the material at its
+        # point: where two empty octants of a staircase touch only there,
+        # (-,-,-) and (+,+,+), the solid's boundary is two cones meeting at a
+        # point, and the vertex of the upper one has only rising edges and
+        # faces while the six full octants reach well below it.
+        if any(_inside(classifier, v + TIP_PROBE_RADIUS * d) for d in _down_directions(up)):
+            continue
+        out.append(tuple(v))
+    return out
+
+
+TIP_PROBE_RADIUS = 0.02
+"""Millimetres. How near a tip the solid is asked for material below it: well
+inside the smallest support feature, a fine node 0.75 mm wide at ``t = 1.5``."""
+
+
+def _down_directions(up: np.ndarray, n: int = 96) -> np.ndarray:
+    """Unit directions spread over the sphere, those pointing down by more than
+    a hair. A tip's own material lies in a cone opening upward, which none of
+    them enters."""
+    k = np.arange(n) + 0.5
+    z = 1.0 - 2.0 * k / n
+    phi = np.pi * (1.0 + 5.0 ** 0.5) * k
+    rr = np.sqrt(1.0 - z * z)
+    d = np.stack([rr * np.cos(phi), rr * np.sin(phi), z], axis=1)
+    return d[d @ up < -0.05]
+
+
+def _inside(classifier, p) -> bool:
+    from OCP.TopAbs import TopAbs_State
+    from OCP.gp import gp_Pnt
+
+    classifier.Perform(gp_Pnt(*map(float, p)), 1e-7)
+    return classifier.State() == TopAbs_State.TopAbs_IN
+
+
+class _Contact:
+    """Is a point on material other than one given solid?
+
+    The shapes' tessellations find the faces near a point; each is then asked
+    exactly (`BRepExtrema`), since a chord sags off a curved face by up to the
+    deflection and a support trimmed to a curved wall lies on the face, not on
+    its chords."""
+
+    def __init__(self, shapes: list, deflection: float):
+        verts, tris, owner, face_of, faces, offset = [], [], [], [], [], 0
+        for k, shape in enumerate(shapes):
+            occ.mesh_shape(shape, deflection)
+            for face in occ.faces(shape):
+                got = occ.face_triangulation(face)
+                if got is None:
+                    continue
+                v, f = got
+                verts.append(v)
+                tris.append(f + offset)
+                owner.append(np.full(len(f), k, dtype=np.int64))
+                face_of.append(np.full(len(f), len(faces), dtype=np.int64))
+                faces.append(face)
+                offset += len(v)
+        self.mesh = TriMesh(verts=np.vstack(verts), tris=np.vstack(tris))
+        self.owner = np.concatenate(owner)
+        self.face_of = np.concatenate(face_of)
+        self.faces = faces
+        self.reach = NEAR_TOL + deflection
+        self.sh = SpatialHash(self.mesh, min_cell=1.0)
+
+    def gap(self, p: np.ndarray, own: int) -> float:
+        """Exact distance from ``p`` to material other than shape ``own``, or
+        infinity past :data:`NEAR_TOL`."""
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
+        from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+        from OCP.gp import gp_Pnt
+
+        from latticegen2.classify import segment_triangle_dist
+
+        cand = self.sh.query(p - self.reach, p + self.reach)
+        cand = cand[self.owner[cand] != own]
+        if len(cand) == 0:
+            return float("inf")
+        A, B, C = self.mesh.triangle_points
+        d = segment_triangle_dist(p, p, A[cand], B[cand], C[cand])
+        near = d <= self.reach
+        if not near.any():
+            return float("inf")
+        order = np.argsort(d[near])
+        seen = set()
+        best = float("inf")
+        vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*map(float, p))).Vertex()
+        for fi in self.face_of[cand[near][order]]:
+            if fi in seen:
+                continue
+            seen.add(fi)
+            ext = BRepExtrema_DistShapeShape(vertex, self.faces[int(fi)])
+            if ext.IsDone():
+                best = min(best, ext.Value())
+                if best <= ROOT_TOL:
+                    break
+        return best if best <= NEAR_TOL else float("inf")
+
+
+def free_support_overhangs(supports: list, lattice: list, body, b: np.ndarray,
+                           pitch: float = 0.5,
+                           tol_deg: float = FREE_OVERHANG_TOL_DEG) -> dict:
+    """Faces, keels and tips of the support bodies that hang in free space.
+
+    Every support face facing down more flatly than the rod angle, every convex
+    edge running flatter than it with both its faces steep enough, and every
+    vertex lower than everything attached to it is a candidate; one touching
+    the input's wall (``body``), the lattice or another support is rooted on it
+    and passes, and one within :data:`NEAR_TOL` of them is counted as near and
+    passes. What is left would be printed onto powder.
+    """
+    from latticegen2.cli import SUPPORT_OVERHANG_DEG
+
+    down = -np.asarray(b, dtype=float)
+    bar = float(np.sin(np.radians(SUPPORT_OVERHANG_DEG + tol_deg)))
+    # Owners: 0 the input body, 1 the lattice, 2 + i support i.
+    contact = _Contact([body, occ.compound(lattice) if lattice else occ.compound([]),
+                        *supports], SUPPORT_MESH_DEFLECTION)
+    found = {"face": [], "edge": [], "vertex": []}
+    candidates = {"face": 0, "edge": 0, "vertex": 0}
+    near = {"face": 0, "edge": 0, "vertex": 0}
+    for i, solid in enumerate(supports):
+        own = 2 + i
+        pts = {"face": [], "edge": _material_keel_samples(solid, down, bar, pitch),
+               "vertex": _material_tip_samples(solid, down)}
+        for face in occ.faces(solid):
+            got = _material_face_samples(face, down, bar, pitch)
+            if got is not None:
+                pts["face"].extend(map(tuple, got))
+        for kind, ps in pts.items():
+            candidates[kind] += len(ps)
+            for p in ps:
+                p = np.asarray(p, dtype=float)
+                gap = contact.gap(p, own)
+                if gap > NEAR_TOL:
+                    found[kind].append((i, np.round(p, 3).tolist()))
+                elif gap > ROOT_TOL:
+                    near[kind] += 1
+    return {
+        "candidates": candidates,
+        "near": near,
+        "free": {k: len(v) for k, v in found.items()},
+        "where": {k: v[:5] for k, v in found.items()},
+    }
+
+
+def final_print_overhangs(candidate_path: str, input_path: str, cc: float, t: float,
+                          orient, n_supports: int, coverage: dict) -> dict:
+    """The finished print's unsupported overhangs, keels and tips.
+
+    The input's side is ``coverage`` — :func:`overhang_coverage`'s answer, whose
+    samples are the input's faces past 60 deg, keels and tips, and whose bare
+    ones are reported here by kind. The supports' side is
+    :func:`free_support_overhangs` on the written file. The lattice is not
+    analysed (specification.md §4.6)."""
+    lp = lattice_params(cc, t, orient)
+    lattice, supports = _split_supports(candidate_path, n_supports)
+    body = occ.read_step(input_path)
+    got = free_support_overhangs(supports, lattice, body, lp.b)
+    got["input_free"] = dict(coverage.get("uncovered_kinds", {}))
+    got["input_where"] = coverage.get("where", [])
+    return got
+
+
+SUPPORT_OVERLAP_TOL = 1e-6
+"""mm³. Volume a support may share with the lattice or another support: the
+stage's own bar (docs/algorithm.md §14.2)."""
+
+CONTACT_PLANE_GAP = 1e-2
+"""mm. A planar support face parallel to a strut face and nearer to its plane
+than this is taken to rest on it, and must then lie on it."""
+
+CONTACT_PLANE_TOL = 1e-6
+"""mm. How far off a strut's plane a support face resting on it may lie."""
+
+
+def _split_supports(candidate_path: str, n_supports: int):
+    """``(lattice, supports)`` solids of a written file: the generator writes the
+    lattice first and the supports after it (docs/algorithm.md §14.2)."""
+    solids = occ.solids(occ.read_step(candidate_path))
+    if not 0 < n_supports <= len(solids):
+        raise RuntimeError(f"{candidate_path} holds {len(solids)} solid(s), "
+                           f"not the {n_supports} support(s) its log reports")
+    return solids[:-n_supports], solids[-n_supports:]
+
+
+def _common(a, b) -> float:
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+
+    alg = BRepAlgoAPI_Common(a, b)
+    if not alg.IsDone():
+        return float("nan")
+    return occ.volume(alg.Shape())
+
+
+def supports_disjoint(candidate_path: str, n_supports: int) -> dict:
+    """Do the supports overlap the lattice or each other? Exact, one boolean
+    per pair whose boxes touch."""
+    lattice, supports = _split_supports(candidate_path, n_supports)
+    gap = 1e-3
+
+    def box(s):
+        lo, hi = occ.bounding_box(s)
+        return np.asarray(lo) - gap, np.asarray(hi) + gap
+
+    def touch(p, q):
+        return bool(np.all(p[0] <= q[1]) and np.all(q[0] <= p[1]))
+
+    lb = [box(s) for s in lattice]
+    sb = [box(s) for s in supports]
+    worst, pairs, where = 0.0, 0, None
+    for i, s in enumerate(supports):
+        others = [(lattice[j], lb[j]) for j in range(len(lattice))]
+        others += [(supports[j], sb[j]) for j in range(i + 1, len(supports))]
+        for o, ob in others:
+            if not touch(sb[i], ob):
+                continue
+            pairs += 1
+            v = _common(s, o)
+            # NaN counts as the worst, and stays the worst: a failed boolean is
+            # an unverified pair, which no later reading can vouch for.
+            if worst == worst and not v <= worst:
+                worst = v
+                where = np.round((sb[i][0] + sb[i][1]) / 2.0, 3).tolist()
+    return {"pairs": pairs, "worst_mm3": worst, "where": where}
+
+
+def supports_on_strut_planes(candidate_path: str, n_supports: int) -> dict:
+    """Does every support face resting on a strut lie on that strut's plane?
+
+    Planar faces only, since a strut face is planar: a support face parallel to
+    a lattice face, overlapping it and nearer than :data:`CONTACT_PLANE_GAP`,
+    rests on it, and must lie within :data:`CONTACT_PLANE_TOL` of its plane, so
+    the downstream merge finds one shared face rather than a sliver.
+    """
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_SurfaceType
+    from OCP.TopAbs import TopAbs_Orientation
+
+    def planes(solids):
+        out = []
+        for s in solids:
+            for face in occ.faces(s):
+                surf = BRepAdaptor_Surface(face)
+                if surf.GetType() != GeomAbs_SurfaceType.GeomAbs_Plane:
+                    continue
+                pl = surf.Plane()
+                d, o = pl.Axis().Direction(), pl.Location()
+                n = np.array([d.X(), d.Y(), d.Z()])
+                if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+                    n = -n
+                lo, hi = occ.bounding_box(face)
+                out.append((n, float(n @ np.array([o.X(), o.Y(), o.Z()])),
+                            np.asarray(lo), np.asarray(hi)))
+        return out
+
+    lattice, supports = _split_supports(candidate_path, n_supports)
+    lat = planes(lattice)
+    if not lat:
+        return {"resting": 0, "worst_mm": 0.0, "where": None}
+    ln = np.array([p[0] for p in lat])
+    lo_ = np.array([p[1] for p in lat])
+    llo = np.array([p[2] for p in lat])
+    lhi = np.array([p[3] for p in lat])
+    resting, worst, where = 0, 0.0, None
+    for n, off, lo, hi in planes(supports):
+        # Resting means facing the strut: outward normals opposite.
+        near = ((ln @ n) < -1.0 + 1e-9) \
+            & np.all(llo <= hi + CONTACT_PLANE_GAP, axis=1) \
+            & np.all(lo <= lhi + CONTACT_PLANE_GAP, axis=1)
+        if not near.any():
+            continue
+        gaps = np.abs(off + lo_[near])             # opposite normals: offsets cancel
+        hit = gaps < CONTACT_PLANE_GAP
+        if not hit.any():
+            continue
+        resting += 1
+        g = float(gaps[hit].max())
+        if g > worst:
+            worst = g
+            where = np.round((lo + hi) / 2.0, 3).tolist()
+    return {"resting": resting, "worst_mm": worst, "where": where}
 
 
 def contained_in(inner_path: str, outer_path: str) -> float:

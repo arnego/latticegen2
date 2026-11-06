@@ -676,3 +676,385 @@ in the other rows as noise.
 columns as `SECONDS_PLAIN` and `SECONDS_SUPPORT` and derives the progress
 bar's two layouts from them. If either run is re-measured, those two tables
 have to be updated with it.
+
+## What changed between the previous entry and the next
+
+The support generator was replaced. v4.0.0's cell-by-cell algorithm, which ran
+`plan` and `support` between `boundary` and `connect`, is gone; the frustum
+generator (docs/algorithm.md §14.3) runs against the completed lattice, after
+`simplify`, in three stages — `overhang`, `support` and `pockets`. Nothing
+upstream of `simplify` knows supports exist any more, so `connect` no longer
+repairs 375 disagreeing interfaces. `--overhang` is gone; the 60° bar is fixed.
+
+## 2026-10-31 — frustum supports, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, single run
+
+The `rehearsal-support` e2e scenario, on `db8bd0f` plus the uncommitted pocket
+changes committed with this entry (slabs of 150 junctions, a refused slab split
+and at last left open), profiled at 5 s:
+
+```
+python tools/profile_run.py --out run.csv --interval 5 -- python tools/e2e.py --only rehearsal-support --keep <dir>
+```
+
+```
+-cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1
+```
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| tessellate | 3.0s | 0% | 0% | 0.00 | 471 MB | 471 MB | 2 | 0 MB | 0 MB |
+| classify | 14.0s | 524% | 530% | 5.24 | 1,929 MB | 1,954 MB | 8 | 81 MB | 1 MB |
+| boundary | 581.0s | 526% | 584% | 5.26 | 2,212 MB | 2,259 MB | 8 | 43 MB | 81 MB |
+| connect | 10.0s | 99% | 99% | 0.99 | 2,443 MB | 2,443 MB | 8 | 0 MB | 0 MB |
+| stitch | 260.0s | 118% | 568% | 1.18 | 3,011 MB | 3,600 MB | 8 | 209 MB | 178 MB |
+| instance | 13.0s | 99% | 100% | 0.99 | 3,155 MB | 3,207 MB | 8 | 0 MB | 0 MB |
+| assemble | 9.0s | 100% | 100% | 1.00 | 3,233 MB | 3,233 MB | 8 | 0 MB | 0 MB |
+| simplify | 237.0s | 100% | 118% | 1.00 | 4,771 MB | 7,332 MB | 8 | 349 MB | 333 MB |
+| overhang | 7.0s | 96% | 96% | 0.96 | 3,623 MB | 3,623 MB | 8 | 0 MB | 0 MB |
+| support | 490.0s | 101% | 153% | 1.01 | 4,441 MB | 5,115 MB | 8 | 0 MB | 0 MB |
+| pockets | 3,743.0s | 313% | 582% | 3.13 | 7,050 MB | 15,060 MB | 8 | 853 MB | 456 MB |
+| validate | 531.0s | 114% | 446% | 1.14 | 6,204 MB | 8,428 MB | 8 | 753 MB | 753 MB |
+| export | 105.0s | 99% | 100% | 0.99 | 5,587 MB | 8,270 MB | 8 | 763 MB | 763 MB |
+
+```
+total to last stage : 6,004.0s (100.1 min)
+peak tree RSS       : 15,060 MB
+min system available: 7,979 MB
+```
+
+**Run 1 h 40 m 09 s**, 817 MB written, 28 support bodies of 35,281 mm³ beside
+331,441 mm³ of lattice; 225,971 of 225,984 ceiling points backed, 59 pockets
+filled. The run's own `support timing` line splits the generator:
+
+| part | seconds |
+|---|---|
+| ceiling points | 136.4 |
+| grid and both manifold repairs | 22.9 |
+| staircase solids | 56.4 |
+| trim (S6) | 269.2 |
+| backing check | 0.7 |
+| pocket search and fill join (S7) | 2,380.2 |
+
+**`pockets` is 62 % of the run, in two halves of different kinds.** The search
+is 40 min across the pool — 106 slabs, about 3 cores on average because slabs
+are very unequal and the retries run after the first pass. The rest, about
+**23 min at one core**, is `assemble.assemble`'s overlap check on the master:
+one `Common` per support body against every lattice junction near it, which
+the construction already makes zero (docs/algorithm.md §14.3 S4). It is the
+largest serial piece of the run and the obvious next lever.
+
+**One slab of the 106 was refused** by both cut routes and by both halves of
+both splits: `z 932.832 to 940.139`, the supports' cut removing 98.69 mm³ of
+the 764.98 expected. It was left open and reported (docs/algorithm.md §14.3
+S7); the previous attempt, on the same code without that rule, failed the run
+after 68 minutes on a refused slab.
+
+Against the 2026-10-11 supported run of the removed algorithm (50 m 16 s) this
+is twice as long, the difference more than accounted for by `pockets`; the lattice stages agree with that
+entry's plain column to within the 7 % noise it measured (`boundary` 581 s
+against 668 s), except `validate`, which checks the support bodies too.
+
+**Downstream consumer.** `src/latticegen2/gui/weights.py` holds this run's
+Duration column as `SECONDS_SUPPORT`; `SECONDS_PLAIN` is still the plain
+column of the 2026-10-11 pair.
+
+## What changed between the previous entry and the next
+
+Coverage and overlap fixes in the support generator (docs/algorithm.md §14.3):
+concave edges and stalactite tips are ceiling points; strut tips dropped from
+kept nodes no longer read as lattice; support nodes a ceiling only clips get a
+ceiling point. A first re-run on 2026-11-02, on `bfbcef0`, which carried those,
+failed at exit 4 after 8 h 22 m on an overlap (docs/algorithm.md §14.4). Three
+more fixes followed: a rod fine node is freed only when an exact cut against the
+body shows it holds no kept lattice, contacts stuck beside rod fine nodes are
+resolved, and the overlap check ignores what is left of a lost piece. This entry
+is the run after them.
+
+## 2026-11-02 — frustum supports, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, single run
+
+The `rehearsal-support` e2e scenario, on `bfbcef0` plus the uncommitted support
+fixes committed with this entry, profiled at the default 2 s:
+
+```
+python tools/profile_run.py --out run.csv -- python tools/e2e.py --only rehearsal-support --keep <dir>
+```
+
+```
+-cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1
+```
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 85% | 85% | 0.85 | 436 MB | 436 MB | 2 | 0 MB | 0 MB |
+| tessellate | 3.0s | 107% | 107% | 1.07 | 512 MB | 512 MB | 2 | 0 MB | 0 MB |
+| classify | 14.0s | 527% | 568% | 5.27 | 1,812 MB | 1,907 MB | 8 | 99 MB | 1 MB |
+| boundary | 663.0s | 471% | 569% | 4.71 | 2,208 MB | 2,410 MB | 8 | 103 MB | 81 MB |
+| connect | 10.0s | 99% | 100% | 0.99 | 2,446 MB | 2,450 MB | 8 | 0 MB | 0 MB |
+| stitch | 272.0s | 115% | 554% | 1.15 | 3,003 MB | 3,655 MB | 8 | 209 MB | 183 MB |
+| instance | 14.0s | 99% | 101% | 0.99 | 3,166 MB | 3,244 MB | 8 | 0 MB | 0 MB |
+| assemble | 8.0s | 99% | 100% | 0.99 | 3,220 MB | 3,220 MB | 8 | 0 MB | 0 MB |
+| simplify | 241.0s | 100% | 159% | 1.00 | 4,748 MB | 7,348 MB | 8 | 372 MB | 382 MB |
+| overhang | 7.0s | 96% | 100% | 0.96 | 3,608 MB | 3,611 MB | 8 | 0 MB | 0 MB |
+| support | 1,184.0s | 100% | 213% | 1.00 | 4,247 MB | 5,046 MB | 8 | 1 MB | 1 MB |
+| pockets | 4,656.0s | 274% | 590% | 2.74 | 6,192 MB | 14,423 MB | 8 | 1,048 MB | 503 MB |
+| validate | 497.0s | 115% | 576% | 1.15 | 5,686 MB | 8,360 MB | 8 | 760 MB | 760 MB |
+| export | 106.0s | 98% | 102% | 0.98 | 5,177 MB | 7,912 MB | 8 | 768 MB | 768 MB |
+
+```
+total to last stage : 7,676.0s (127.9 min)
+peak tree RSS       : 14,423 MB
+min system available: 6,431 MB
+```
+
+**Run 2 h 08 m 01 s, and every check of specification.md §6.2 passes**: 822 MB
+written, 60 solids — 33 of lattice, 331,441 mm³, and 27 support bodies,
+40,136 mm³ — with all 225,582 ceiling points backed, no piece dropped and 30
+pockets filled; the harness finds all 125,777 overhang samples backed, no
+overlap, and every solid valid and written faithfully. The harness's own checks
+took a further 2 h 48 m, 4 h 56 m in all. The `support timing` line:
+
+| part | seconds |
+|---|---|
+| ceiling points | 339.1 |
+| grid, both manifold repairs and the exact rod-node cuts | 292.8 |
+| staircase solids | 62.4 |
+| trim (S6) | 380.2 |
+| backing check | 1.1 |
+| pocket search and fill join (S7) | 2,578.0 |
+
+**`support` grew from 490 s to 1,184 s**, all of it what the coverage and
+overlap fixes ask: the grid rises from 23 s to 293 s with the exact cut of each
+rod fine node the samples call free, ceiling points from 136 s to 339 s with the
+keels, tips and clipped nodes, the trim from 269 s to 380 s.
+
+**`pockets` is 61 % of the run.** The search is 43 min across the pool, at about
+three cores; the rest, about **35 min at one core**, is the overlap check of
+docs/algorithm.md §14.2, nearly all of it the one 32,697 mm³ support body
+against the junctions near it. It is still the largest serial piece of the run.
+
+**Three slabs were refused** and left open, each reported in a `WARNING:` with
+its region (docs/algorithm.md §14.3 S7); one is the slab the 2026-10-31 run left
+open. **Two support bodies are chips**, 2.8e-03 mm³ near
+`[1954.8, 32.4, 911.4]` and 1.0e-05 mm³ near `[2065.2, 90.5, 973.3]`, four faces
+each; both pass validity and export truth.
+
+**Downstream consumer.** `src/latticegen2/gui/weights.py` held this run's
+log stage times as `SECONDS_SUPPORT` until the 2026-11-05 entry below replaced
+them.
+
+## What changed between the previous entry and the next
+
+The pocket search (docs/algorithm.md §14.3 S7) searches each group of support
+bodies whose envelopes touch, in that group's box inflated by `t_s`, rather
+than in a box swept down to the body's lowest point; other groups' supports in
+the envelope are cut out as support. The envelope is widened only where the
+supports split one piece of free space into several that each reach its faces.
+On the five small support parts this gave the same pockets, fills and bodies
+with no widening, and cut the pocket search 2.5–2.7× on the ball and cylinder.
+
+## 2026-11-05 — local pocket search, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, single run
+
+The `rehearsal-support` e2e scenario on `96378a9`, profiled at the default 2 s,
+the same command and parameters as the previous entry. Output kept in
+`inspection/rehearsal-support-2026-11-05/` (not committed).
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| tessellate | 3.0s | 366% | 614% | 3.66 | 586 MB | 728 MB | 8 | 27 MB | 5 MB |
+| classify | 14.0s | 520% | 565% | 5.20 | 1,918 MB | 1,921 MB | 8 | 66 MB | 1 MB |
+| boundary | 599.0s | 515% | 591% | 5.15 | 2,223 MB | 2,347 MB | 8 | 75 MB | 81 MB |
+| connect | 11.0s | 100% | 101% | 1.00 | 2,472 MB | 2,486 MB | 8 | 0 MB | 3 MB |
+| stitch | 256.0s | 119% | 589% | 1.19 | 2,994 MB | 3,616 MB | 8 | 209 MB | 174 MB |
+| instance | 14.0s | 100% | 101% | 1.00 | 3,153 MB | 3,225 MB | 8 | 0 MB | 0 MB |
+| assemble | 8.0s | 100% | 100% | 1.00 | 3,209 MB | 3,209 MB | 8 | 0 MB | 0 MB |
+| simplify | 236.0s | 100% | 150% | 1.00 | 4,757 MB | 7,336 MB | 8 | 376 MB | 364 MB |
+| overhang | 7.0s | 97% | 100% | 0.97 | 3,612 MB | 3,622 MB | 8 | 0 MB | 2 MB |
+| support | 1,183.0s | 100% | 216% | 1.00 | 4,253 MB | 5,231 MB | 8 | 1 MB | 1 MB |
+| pockets | 3,165.0s | 190% | 592% | 1.90 | 5,407 MB | 10,002 MB | 8 | 667 MB | 180 MB |
+| validate | 497.0s | 115% | 584% | 1.15 | 5,638 MB | 8,365 MB | 8 | 762 MB | 762 MB |
+| export | 106.0s | 98% | 101% | 0.98 | 5,061 MB | 8,001 MB | 8 | 768 MB | 768 MB |
+
+```
+total to last stage : 6,100.0s (101.7 min)
+peak tree RSS       : 10,002 MB
+min system available: 10,298 MB
+```
+
+**Run 1 h 41 m 46 s, and every check of specification.md §6.2 passes**: 784 MB
+written, 60 solids, 331,441 mm³ of lattice and the same 27 support bodies of
+40,136 mm³ as the previous entry, all 225,582 ceiling points backed, no piece
+dropped and the same 30 pockets filled; the harness finds all 125,777 overhang
+samples backed and no overlap. The harness's own checks took a further 2 h 49 m,
+4 h 31 m in all. The `support timing` line:
+
+| part | seconds |
+|---|---|
+| ceiling points | 339.5 |
+| grid, both manifold repairs and the exact rod-node cuts | 291.8 |
+| staircase solids | 62.1 |
+| trim (S6) | 380.5 |
+| backing check | 1.1 |
+| pocket search and fill join (S7) | 1,102.6 |
+
+**The pocket search fell from 2,578 s to 1,103 s** (2.3×), with one envelope
+widened. **`pockets` fell from 4,656 s to 3,165 s**, and is now 52 % of the run
+rather than 61 %. Its peak tree RSS fell from 14,423 MB to 10,002 MB. The rest
+of the stage, about **2,062 s at one core**, is the overlap check of
+docs/algorithm.md §14.2. It is now two thirds of `pockets` and the largest
+serial piece of the run. Every other stage is within a few per cent of the
+previous entry, except `boundary`, 663 s → 599 s, which this change does not
+touch.
+
+**Two slabs were refused** rather than three, each reported in a `WARNING:` with
+its region: `x 1999.3 to 2007.0, y 49.8 to 71.0, z 969.5 to 983.6` and
+`x 2068.6 to 2076.2, y -71.0 to -49.8, z 969.8 to 983.6` mm.
+
+**Downstream consumer.** `src/latticegen2/gui/weights.py` held this run's
+log stage times as `SECONDS_SUPPORT` until the next entry.
+
+## What changed between the previous entry and the next
+
+The support grid's planes run through the rods' centre axes rather than their
+`−t/2` faces (docs/algorithm.md §14.3 S4), so two support boxes passing a rod
+on its lower sides meet inside the rod and the fine-grid manifold repair has
+nothing to fill beside it. On the ball and the cylinder that removed every free
+support tip and cut the support volume 14 % and 20 %. The lattice is untouched.
+
+`tools/profile_report.py` also changed: its first sample is taken a moment
+before the run writes its start line, and the report read that as a midnight
+rollover, putting every sample a day late and every stage at 0 % CPU. The first
+stamp now takes the day nearer the start (`test/test_profile_report.py`).
+
+## 2026-11-06 — support grid through the rod axes, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, single run
+
+The `rehearsal-support` e2e scenario on `c8dc0eb`, profiled at the default
+2 s, the same command and parameters as the previous entry. Output kept in
+`inspection/rehearsal-support-2026-11-06/` (not committed).
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 87% | 87% | 0.87 | 440 MB | 440 MB | 2 | 0 MB | 0 MB |
+| tessellate | 2.0s | 114% | 114% | 1.14 | 473 MB | 473 MB | 2 | 0 MB | 0 MB |
+| classify | 14.0s | 560% | 596% | 5.60 | 1,848 MB | 1,919 MB | 8 | 99 MB | 1 MB |
+| boundary | 575.0s | 528% | 589% | 5.28 | 2,225 MB | 2,467 MB | 8 | 106 MB | 81 MB |
+| connect | 10.0s | 99% | 100% | 0.99 | 2,484 MB | 2,495 MB | 8 | 0 MB | 0 MB |
+| stitch | 256.0s | 118% | 576% | 1.18 | 3,002 MB | 3,650 MB | 8 | 209 MB | 181 MB |
+| instance | 13.0s | 100% | 100% | 1.00 | 3,145 MB | 3,253 MB | 8 | 0 MB | 0 MB |
+| assemble | 9.0s | 100% | 101% | 1.00 | 3,214 MB | 3,214 MB | 8 | 0 MB | 0 MB |
+| simplify | 240.0s | 100% | 150% | 1.00 | 4,756 MB | 7,348 MB | 8 | 383 MB | 378 MB |
+| overhang | 7.0s | 100% | 100% | 0.99 | 3,626 MB | 3,627 MB | 8 | 0 MB | 0 MB |
+| support | 1,131.0s | 101% | 229% | 1.01 | 4,042 MB | 5,035 MB | 8 | 0 MB | 0 MB |
+| pockets | 3,404.0s | 187% | 591% | 1.87 | 4,613 MB | 9,820 MB | 8 | 755 MB | 210 MB |
+| validate | 561.0s | 113% | 568% | 1.13 | 5,286 MB | 7,383 MB | 8 | 763 MB | 763 MB |
+| export | 106.0s | 98% | 101% | 0.98 | 5,000 MB | 7,801 MB | 8 | 770 MB | 1,555 MB |
+
+```
+total to last stage : 6,329.0s (105.5 min)
+peak tree RSS       : 10,179 MB
+min system available: 9,784 MB
+```
+
+**Run 1 h 45 m 35 s, and every check of specification.md §6.2 passes**:
+824 MB written, 85 solids, 331,441 mm³ of lattice and **52 support bodies of
+32,018 mm³** — against 27 of 40,136 mm³, 20 % less support; the harness finds
+all 125,777 overhang samples backed and no overlap. Its own checks took a
+further 3 h 00 m, 4 h 45 m in all. The `support timing` line:
+
+| part | seconds |
+|---|---|
+| ceiling points | 335.1 |
+| grid, both manifold repairs and the exact rod-node cuts | 344.4 |
+| staircase solids | 63.4 |
+| trim (S6) | 307.4 |
+| backing check | 1.1 |
+| pocket search and fill join (S7) | 1,284.2 |
+
+**`support` fell 1,183 s → 1,131 s and `pockets` rose 3,165 s → 3,405 s**,
+the run 1 h 41 m 46 s → 1 h 45 m 35 s. The grid takes 53 s longer and the trim
+73 s less; the pocket search takes 182 s longer, with five envelopes widened
+rather than one, and the overlap check, ~2,121 s at one core, is again the
+largest serial piece. The fine-grid repair filled 2 nodes beside the rods,
+against 1,397. Every lattice stage is within a few per cent of the previous
+entry; peak tree RSS 10,179 MB against 10,002 MB.
+
+**Four slabs were refused** rather than two, each reported in a `WARNING:`,
+and **2 of 225,637 ceiling points are reported unbacked**, at
+`[1948.928, -65.635, 974.088]` and `[2078.919, 91.939, 978.785]` mm, where the
+previous entry backed all of them; the harness's 0.5 mm samples find none bare.
+
+**Downstream consumer.** `src/latticegen2/gui/weights.py` holds this run's
+log stage times as `SECONDS_SUPPORT`; `SECONDS_PLAIN` is still the plain column
+of the 2026-10-11 pair.
+
+## What changed between the previous entry and the next
+
+Both support warnings of the previous entry were traced and neither was real
+(docs/algorithm.md §14.3 S1, S7). The lattice is asked at the shallow depth as
+well as the probe, so a keel resting in a strut counts as backed; a clipped
+ceiling point is judged by its face's own normal rather than the vertex normals
+averaged across a crease; and a pocket slab the kernel refuses to cut against
+the supports is cut against their untrimmed cores, checked by volume to be the
+supports inside the slab. The lattice is untouched.
+
+## 2026-11-06 — support warnings fixed, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, single run
+
+The `rehearsal-support` e2e scenario, profiled at the default 2 s, the same
+command and parameters as the previous entry. Output kept in
+`inspection/rehearsal-support-2026-11-06b/` (not committed).
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| tessellate | 3.0s | 359% | 603% | 3.59 | 702 MB | 960 MB | 8 | 27 MB | 5 MB |
+| classify | 13.0s | 568% | 586% | 5.68 | 1,921 MB | 1,922 MB | 8 | 67 MB | 1 MB |
+| boundary | 570.0s | 530% | 590% | 5.30 | 2,221 MB | 2,434 MB | 8 | 101 MB | 81 MB |
+| connect | 10.0s | 99% | 100% | 0.99 | 2,476 MB | 2,476 MB | 8 | 0 MB | 0 MB |
+| stitch | 257.0s | 118% | 580% | 1.18 | 3,014 MB | 3,698 MB | 8 | 209 MB | 187 MB |
+| instance | 14.0s | 99% | 100% | 0.99 | 3,132 MB | 3,267 MB | 8 | 0 MB | 0 MB |
+| assemble | 8.0s | 100% | 101% | 1.00 | 3,230 MB | 3,230 MB | 8 | 0 MB | 0 MB |
+| simplify | 240.0s | 100% | 146% | 1.00 | 4,774 MB | 7,360 MB | 8 | 365 MB | 381 MB |
+| overhang | 7.0s | 96% | 100% | 0.96 | 3,652 MB | 3,654 MB | 8 | 0 MB | 0 MB |
+| support | 1,120.0s | 100% | 246% | 1.00 | 4,000 MB | 4,677 MB | 8 | 0 MB | 0 MB |
+| pockets | 3,309.0s | 187% | 591% | 1.87 | 4,789 MB | 9,930 MB | 8 | 1,077 MB | 218 MB |
+| validate | 498.0s | 115% | 569% | 1.15 | 5,117 MB | 7,511 MB | 8 | 761 MB | 761 MB |
+| export | 106.0s | 98% | 101% | 0.98 | 4,957 MB | 7,795 MB | 8 | 768 MB | 1,552 MB |
+
+```
+total to last stage : 6,156.0s (102.6 min)
+peak tree RSS       : 10,270 MB
+min system available: 8,112 MB
+```
+
+**Run 1 h 42 m 41 s, and every check of specification.md §6.2 passes with no
+support warning**: 822 MB written, 81 solids, 331,441 mm³ of lattice and
+**48 support bodies of 31,618 mm³**; the generator backs all 225,547 ceiling
+points and the harness all 125,777 overhang samples, no overlap, and
+`support_pocket_slabs_unsearched` is 0. The harness's own checks took a further
+2 h 56 m, 4 h 39 m in all. The `support timing` line:
+
+| part | seconds |
+|---|---|
+| ceiling points | 333.6 |
+| grid, both manifold repairs and the exact rod-node cuts | 339.3 |
+| staircase solids | 63.2 |
+| trim (S6) | 296.8 |
+| backing check | 5.4 |
+| pocket search and fill join (S7) | 1,178.6 |
+
+**`support` 1,131 s → 1,120 s, `pockets` 3,405 s → 3,309 s**, the run
+1 h 45 m 35 s → 1 h 42 m 41 s. The pocket search is 106 s shorter: the slabs
+the kernel used to refuse were split and retried before being left open, and
+the core route cuts them at once. The overlap check, ~2,131 s at one core, is
+still the largest serial piece. Every lattice stage is within a few per cent of
+the previous entry; peak tree RSS 10,270 MB against 10,179 MB.
+
+**Downstream consumer.** Every stage's share of the run is within 3 % of the
+previous entry's, so `src/latticegen2/gui/weights.py` keeps that entry's
+`SECONDS_SUPPORT`.

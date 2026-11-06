@@ -30,14 +30,18 @@ header rewrite.
 | File | Covers | Needs the geometry kernel |
 |---|---|---|
 | `test_lattice.py` | docs/algorithm.md §2.3's verified identities, including the mutual orthogonality the architecture rests on; index ranges; naming | no |
-| `test_cli.py` | Flags, ranges, the `t < a` cross-constraint, path resolution, preflight checks. Also print orientation and support: that `--orient` stands on its own, that `--overhang` and `--support-thickness` are refused without `--support`, the `-rotx…y…z…` and `-sup…` name tags, and the three bands of the lattice-angle warning | no |
+| `test_cli.py` | Flags, ranges, the `t < a` cross-constraint, path resolution, preflight checks. Also print orientation and support: that `--orient` stands on its own, that `--support-thickness` is refused without `--support` and defaults to `t`, that the removed `--overhang` is refused by name, the two fixed support angles, and the `-rotx…y…z…` and `-sup` name tags | no |
 | `test_orient.py` | Print orientation (docs/algorithm.md §14.0). First **the property the missing bypass rests on**: zero angles give *exactly* the identity, and the unrotated lattice frame equals the canonical expressions element for element — there is no identity special case in the pipeline, so this and the golden samples are what guarantee the unrotated lattice. Then the convention (extrinsic X, Y, Z about the bed), the Euler round trip the window's drag depends on including both gimbal poles, §2.3's identities re-asserted about the build direction, and that bounding candidates by surface points drops only nodes that cannot reach the body and keeps the rest in order | no |
-| `test_support.py` | Print supports (docs/algorithm.md §14), in three layers. *Detection, against closed forms*: a box's lid and nothing else, a sphere's cap area to 3 %, a keel edge whose two faces are each steep enough, the tip of a hanging cone, and a surface at the limit sampled but not required. *The stage's contract and merge*: a result must be support solids and never a lattice solid; supports are fused into the lattice they touch while untouched lattice passes through as the same object and a lone support stays its own body; a fuse that returns less than the lattice fails rather than ships, and the volume bounds refuse both loss and invented material. *Whole runs on a small box*: through the stub generator, the stages land between `simplify` and `validate`, the run warns, the lattice is written unchanged and the summary reports zero support volume; with a stand-in generator run in process, it receives the unified lattice, the samples, the orientation and parameters, its cube is merged into the lattice, and the summary's lattice and support volumes add up to the written file's, with face counts retaken on the product. And a run without `--support` never imports the package | yes |
+| `test_support.py` | Print supports (docs/algorithm.md §14), in three layers. *Detection, against closed forms*: a box's lid and nothing else, a sphere's cap area to 3 %, a keel edge whose two faces are each steep enough, the tip of a hanging cone, and a surface at exactly 60° left out by the strict bar. *The stage's contract and assembly*: a result must be support solids and never a lattice solid; supports ship beside the lattice as separate bodies, the lattice passing through as the same objects, with additive volumes; a support overlapping another support, or the lattice, fails rather than ships. *Whole runs on a small box*: through the real generator, the stages land between `simplify` and `validate`, support bodies are written after a lattice identical to the run without supports, and the summary's lattice and support volumes add up to the output's; with a stand-in generator run in process, it receives the unified lattice, the samples, the orientation and parameters, its slab ships as a body of its own, and the summary's lattice and support volumes add up to the written file's, with face counts retaken on the product. And a run without `--support` never imports the package | yes |
+| `test_support_frustum.py` | The support algorithm (docs/algorithm.md §14.3). *The grid*: the division rule against its definition. *Both manifold repairs*, against a brute-force search of every 2×2 and 2×2×2 window: a diagonal pair, the rod-corner pattern that broke the cylinder's top support, a corner contact round a rod, and random support nodes with random rods — nothing a fill could resolve is left, and no rod's node is ever filled. *The fine grid*: every fine support node's corners agree with its centre about the lattice, so rods are whole nodes; a staircase's faces all lie on lattice planes and its volume is its nodes'. *Whole supports* in a box chamber with its lattice: valid, manifold, no overlap with any junction, every face on the body or a lattice plane, the gates passed, every ceiling point backed, assembled beside the lattice. *Trims the kernel refuses*: a body whose whole trim is refused is trimmed in halves and joined again, to the same volume, and a piece refused at every size is dropped, named, and its unbacked ceiling points counted | yes |
+| `test_support_regions.py` | Ceiling points against closed forms: a box lid refined to the step, well-shaped refinement on the hole-block roof, a sphere cap ending on the exact 60° isocline, a tube's underside within 30° of its bottom, and the chamfered hole-block's 30° facet left out by the strict bar | yes |
+| `test_support_voids.py` | Pockets (docs/algorithm.md §14.3 S7) on a cup under a lid: the fill is exactly the cup, a pocket the lattice sealed is left alone, a support sealing nothing fills nothing, a witness the cut disagrees with fails loudly, and the generator's own supports on the cup leave nothing sealed | yes |
+| `test_support_join.py` | Joining support bodies: face-sharing supports become one body with merged faces, overlapping ones their union, edge-only contacts stay apart, and a fuse that loses volume is redone one at a time or, where it cannot be, kept as it was or fails | yes |
 | `test_connect.py` | The junction graph and the floating-body rule's three outcomes | no |
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
 | `test_junction.py` | Cap integrity across the parameter range, the inradius argument behind it, and the exact `N x volume(J)` identity for instanced grids | yes |
 | `test_weld.py` | Ring matching, adoption of boundary topology by the instancing index, the every-edge-twice-and-once-each-way proof, and that tiling the boundary sew (docs/specification.md §11) produces the same watertight result as sewing in one call. Also both rungs of the sew's vertex-tolerance repair (docs/algorithm.md §8), against the **real** rehearsal faces rather than synthetic stand-ins — including that neither rung replaces a topology object, which is what makes it safe on an already-proven-watertight shell, and `SpiralTest`'s own fat-tolerance face, where a *fixed* absolute cap disabled rung 2 outright. Also that a boundary layer still short of its expected free edges after the unsplit sew fails in `stitch` rather than in `assemble`, and the two properties the round-2 check rests on: that the batch validity scan behind the repair returns exactly what the per-face predicate does, and that `free_edges` does not count a degenerate edge as a hole | yes |
-| `test_boundary.py` | The per-half-strut re-trim behind docs/algorithm.md §7.2, against the four real `SpiralTest.step` junctions whose intersection returns them untrimmed — including that a correctly trimmed junction is left bit-for-bit alone and that a junction wholly inside is checked and kept. Also the symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7) and the two guards on it, tested against the **real** failing junctions in `TD_HX_rehearsal_test.step` rather than synthetic stand-ins — both the `cc=5, t=1` junction the repair was built for and the `cc=12, t=2.5` one whose repair a relative-volume bar wrongly refused (G19) — see the note below | yes |
+| `test_boundary.py` | That a junction wholly inside the body is checked by docs/algorithm.md §7.2's detector and kept (its real-junction tests went with `SpiralTest.step`). Also the symmetric interface rule (docs/algorithm.md §7.1): caps are tagged not dropped, an interface needs both sides to present agreeing material, and what `resolve_interfaces` produces never trips `connect`'s invariant. Also pinhole-wire removal (§7) and the two guards on it, tested against the **real** failing junctions in `TD_HX_rehearsal_test.step` rather than synthetic stand-ins — both the `cc=5, t=1` junction the repair was built for and the `cc=12, t=2.5` one whose repair a relative-volume bar wrongly refused (G19) — see the note below | yes |
 | `test_classify.py` | Distance primitives, spatial indices, ray parity, node classes, and both mesh gates — including the pole-degeneracy regression from issue #6. Also that the strided parallel sweep (docs/algorithm.md §5.4) returns *identical* classes to the serial one, across a real process boundary — identical rather than equivalent, because stride arithmetic invites off-by-ones that a tolerance would hide | yes |
 | `test_main.py` | Exit codes and the "exactly one reason line" rule, before and after the log file opens | yes |
 | `test_pipeline.py` | Same-domain unification's fallback ladder — a kernel that refuses to merge must yield a larger file, never a failed run | yes |
@@ -45,7 +49,7 @@ header rewrite.
 | `test_runlog_events.py` | **The guarantee that watching a run does not change it.** The same sequence of writes with and without an emitter produces an identical `.log`; `stage_begin` emits without logging; `substage` rate-limits without ever dropping a stage's final count | no |
 | `test_gui.py` | Print orientation and support in the window: the orientation panel is gridded from the start, the two support fields are greyed rather than hidden until the box is ticked, the derived filename and the child's arguments follow, the lattice-angle warning appears without disabling `Start!`, a drag writes angles into the boxes that reproduce the rotation, the view rests the part on the bed and marks what overhangs at three orientations, and a supported run's bar is laid out over the stages it announced. And the front-end's testable half (specification.md §3.1): the stage weights, the reduction from an event stream to what the window shows — fed deliberately hostile input — the argv handed to the child, the cancel sentinel, and the **verbose** tick box: that unticked the pane holds only what the child wrote outside the event stream and is hidden when that is empty, that ticking it reveals the run's whole log, and that it stays enabled while a run is in flight. Several tests build widgets in one shared withdrawn Tk root, guarded by `importorskip` | no |
 | `test_export_truth.py` | What `BRepCheck_Analyzer` structurally cannot ask (docs/algorithm.md §7.3, §9). First **the premise**, pinned against the kernel: a 6.573e-02 mm vertex tolerance does not survive a STEP round trip, and AP214 declares exactly one tolerance per file — if a future OCCT ever carried per-subshape tolerance, that test is what would say so. Then the gate, against `spiral-island-unwritable.brep`, the one body this project has produced that cannot be written: **§8's rung-2 repair makes it `BRepCheck`-valid and it still tessellates into 11 broken edges**, which is the whole case for the check. Plus the control (a box survives), a test that the three disproved proxies stay out of the deciding seat, and — the reason that body stays refused — that the 42.4 micron gap between two of `SpiralTest.step`'s **own** surfaces is where it comes from (docs/algorithm.md §7.4). Plus the degenerate-triangle skip: that a cone's apex and a sphere's poles are not defects, that a cone with its base removed still reports all 63 segments of that hole, that the island carries 0 degenerate triangles so its pins cannot move — and that the gate does **not** refuse `TD_HX_rehearsal_test.step`'s own accepted input, which read 86 non-manifold edges before the skip and 0 after, one per apex of its 54 apex-touching cones (G24). Then **the second pass**, which is what turns a reading into a verdict: that a clean body is never re-measured at all (`refinement is None`, so the cost rides the failing path alone), that every reading is attributed to a face, that the neighbourhood is the core plus one ring, that the island's count *rises* under refinement and is refused — and, the control the whole rule rests on, that a **genuine hole never resolves at any rung**, because refining subdivides its boundary rather than closing it. Plus the oracle: the cut-out neighbourhood must reproduce the whole solid's **per-rung counts**, not merely its verdict; a second attribution through `PolygonOnTriangulation` must agree with the one through interned points; and no way of failing to measure may read as clean. Two of them drive `pipeline._check_export_truth` with a canned reading, because the reporting path around a body the refinement *cleared* is otherwise reachable only through a 93-minute run | yes |
-| `test_verify_geometry.py` | The one part of the harness whose failure mode is a plausible number rather than an exception: `material_outside`'s per-solid cut, the contradiction against a boolean-free containment check, and that a face lying *on* the input surface is a tie rather than a protrusion. The only test file that reaches into `tools/` — see the note below | yes |
+| `test_verify_geometry.py` | The one part of the harness whose failure mode is a plausible number rather than an exception: `material_outside`'s per-solid cut, the contradiction against a boolean-free containment check, and that a face lying *on* the input surface is a tie rather than a protrusion. Also the final-print check's three detectors, each with a true positive in free space and the same solid rooted on a floor, the lattice, another support or a tilted wall that trims it, a saddle whose edges all rise and is not a tip, a point where two empty octants of a sewn staircase touch, and the line between near and free. The only test file that reaches into `tools/` — see the note below | yes |
 
 ## E2E verification
 
@@ -58,7 +62,7 @@ and applies every applicable §6.2 check. Scenarios are independent — one fail
 scenario does not prevent the others from running — and the exit code reflects the
 run as a whole. `--only smoke-fast,invalid-input` restricts the set.
 
-`rehearsal-support` is **opt-in**: it is tens of minutes, so a plain
+`rehearsal-support` is **opt-in**: it is about five hours with its checks, so a plain
 `python tools/e2e.py` leaves it out and it runs only when named with `--only`.
 `--keep <dir>` writes a run's output, log and (on failure) temp folder into a
 folder of your choosing instead of a temporary one, which is what makes a
@@ -83,15 +87,17 @@ python src/main.py -i test/80mm-test-ball.step -cc 20 -t 4 -o /tmp/smoke.step -v
 | Parses back successfully | `STEPControl_Reader` round trip |
 | **Exact B-rep validity** | `BRepCheck_Analyzer` on every solid |
 | **Export fidelity, reported not gated** | `vg.curve_on_surface` re-reads the written STEP and measures, per edge/face pair, the exact pcurve-to-3D-curve distance (`GeomLib_CheckCurveOnSurface`). Printed as a `[NOTE]`, never as a pass or fail: three quantities of this kind were tried as bars and two false-positive on sound rehearsal solids (docs/algorithm.md §9). What decides is the manifold check above, which is the same question asked directly |
-| Closed manifold | every mesh edge used by exactly 2 triangles |
-| No self-intersections | `triangles_properly_cross` — plane-straddle pre-check, then edge piercing |
+| Closed manifold | every mesh edge used by exactly 2 triangles, each solid welded on its own — support bodies share faces with the lattice and each other |
+| No self-intersections | `triangles_properly_cross` — plane-straddle pre-check, then edge piercing — between triangles of one solid. Support bodies share faces with the lattice by design and their tessellations cross where both meet a curved ceiling; overlap between bodies is asked exactly by `vg.supports_disjoint` |
 | No material outside the input body | boolean cut of output against input **per solid**, volume ≈ 0; a non-zero remainder is contradicted against a boolean-free containment check and reported as unmeasured if the two disagree (see below). Where that fallback cannot clear a point either, it is contradicted **again** by its exact distance to the body (`BRepExtrema`, no tolerance, no boolean) — the classifier returns OUT for points lying exactly on the boundary, which a trimmed lattice's faces all do, and the tolerance sweep stops at 2e-03 mm so a 1e-09 mm tie and a 1 mm protrusion read identically there. Measured on `spiral-stress`: 37 points the sweep could not clear, 6.3e-08 mm from the input at worst, against protrusions of 0.239–0.771 mm when §7.2's repair was missing |
 | Bounding box within input + (cc+t) | direct comparison |
 | Runtime budget | wall clock: 10 min for `smoke-fast` and `dense-lattice`, 20 min for `smoke-verified` |
 | Golden-sample match | symmetric-difference volume both ways, tolerance `t³` |
-| **Every inner overhang is supported** (with `--support`) | `vg.overhang_coverage` samples the input's overhangs afresh, moves each a hair into the body and asks the written file's own tessellation whether that point is inside it. Independent of how supports were placed or built. Its negative control: a lattice-only output leaves 13,947 of 16,714 samples uncovered on the ball |
-| **No support exceeds the limit** (with `--support`) | `vg.self_supporting` — every facet of the written file that is neither on the input's own surface nor a lattice strut face must be inside the maximum overhang angle. Its negative control: asked at 50° of supports built for 60°, it flags 1,759 mm² at 58.00°, which is exactly `atan(tan 60°·cos(π/8))`, the face angle of an eight-sided capital whose ridges sit at the limit |
-| **Support stages in place** (with `--support`) | `stage overhang` and `stage support` appear in the log between `simplify` and `validate`. While the generator is a stub (docs/algorithm.md §14.3) the run's own `WARNING` line makes the two support checks above report `SKIP` rather than fail, and so does the note a run prints when the body has no overhang at its orientation; they come back on their own once the warning is gone |
+| **Every inner overhang is supported** (with `--support`) | `vg.overhang_coverage` samples the input's surface overhanging more than 60° afresh, moves each a hair into the body and asks the written file's own tessellation whether that point is inside it. Independent of how supports were placed or built. A miss on the mesh is re-asked of the exact solid a hair deeper, a point on its boundary counting |
+| **No support exceeds the limit** (with `--support`) | `vg.self_supporting` — every facet of the written file that is neither on the input's own surface nor a lattice strut face must be inside the lattice rod angle, 54.74° |
+| **Support stages in place** (with `--support`) | `stage overhang`, `stage support` and `stage pockets` appear in the log, in that order, between `simplify` and `validate`. A run whose body has no overhang at its orientation prints a note, and the support checks above report `SKIP`; one whose lattice backs every overhang prints another, and only the checks of the support bodies are skipped |
+| **The final print hangs nowhere** (with `--support`) | `vg.final_print_overhangs`: the input's side is `overhang_coverage`'s bare samples, broken down into faces, keels and tips; the supports' side samples every support body afresh with copies of the pipeline's own three detectors (`support/overhang.py`), turned from the void to the material — faces facing down past the rod angle, convex edges running flatter than it, and vertices lower than everything attached to them — edges *and faces* rising from them, since a staircase saddle has every edge rising and is not a tip, and no material within 0.02 mm below them in any direction, since where two empty octants of a staircase touch at a point one B-rep vertex there sees only rising edges and faces. A sample within `ROOT_TOL` (2e-3 mm, exact) of the input's wall, the lattice or another support is rooted there and passes; one within `NEAR_TOL` (0.05 mm, coverage's sliver bar) is counted as near and passes; one farther would be printed onto powder. The lattice is not analysed. Found 143 free tips on the ball and the cylinder on 2026-11-05, nodes the fine-grid manifold repair filled under rods; the support grid now runs through the rod axes and there are none (docs/algorithm.md §14.3 S4) |
+| **Support bodies** (with `--support`) | `vg.supports_disjoint`: no support overlaps the lattice or another support, exactly, one boolean per pair whose boxes touch. `vg.supports_on_strut_planes`: a support face resting on a strut lies on its plane within 1e-6 mm. And the manifold check above, welded per solid, holds every support body to edges used by exactly two faces |
 | **Watching a run does not change it** | the `progress-stream` scenario runs `smoke-fast` twice, with and without `--progress-stream`, and requires an identical `.step` and an identical `.log` |
 
 The `progress-stream` scenario is the gate the whole front-end rests on, and it
@@ -136,26 +142,18 @@ and, on the ninth, 1 of 55,513 surface points outside at 1e-06 mm and none at
 1e-05 mm — so nothing was actually wrong with the geometry; the check simply
 could not say so.
 
-**`SpiralTest.step` is both a unit-test fixture and the `spiral-stress` e2e
-scenario.** It is the only committed part whose dominant component tiles, and
-the only *scenario* exercising docs/algorithm.md §7.2 — 8 junctions whose
-intersection returns its own operand, 10 re-trimmed against a local block, 1
-dropped for containment. §7.2 is not peculiar to it:
-`TD_HX_rehearsal_test.step` at `cc=5, t=1` re-trims **35** junctions per
-half-strut, and that part is far too slow to be a scenario, so the automated
-coverage §7.2 has is this one part's. It is much the slowest scenario, and
-most of that is the §6.2 checks rather than the 11-minute run: its dominant body
-is past `verify_geometry.CUT_MAX_FACES`, so containment falls back to point
-sampling over 45,801 faces. Use `--only` while iterating.
-
-It was a fixture alone while §9's export-truth gate refused its output, and
-correctly. Two changes closed that, and both are worth knowing before touching
-either: the part was re-modelled (worst input seam gap 4.24e-02 → 6.86e-03 mm,
-which took its island from 11 non-manifold edges to 0), and the writer now
-declares the greatest tolerance a shape carries rather than the average (which
-took the dominant body from 2 to 0). `test/spiral-island-unwritable.brep`, cut
-from the *old* file, is still refused and still committed — it is the case
-neither change reaches.
+**`SpiralTest.step` was removed on 2026-10-30, with its `spiral-stress`
+scenario and the unit tests that read it.** It was the only committed part whose
+dominant component tiled and the only scenario exercising §7.2 — the
+intersection that returns its own operand, the local-block re-trim, and a
+junction dropped for containment — so **§7.2 now has no automated coverage**
+beyond the box-only unit test that a junction wholly inside is checked and kept.
+`TD_HX_rehearsal_test.step` at `cc=5, t=1` re-trims 35 junctions per
+half-strut, but it is far too slow to be a scenario. The measurements made on
+`SpiralTest` stay in docs/algorithm.md as the record they are.
+`test/spiral-island-unwritable.brep`, cut from an older version of that part,
+stays: it is the export-truth gate's one body that cannot be written, and reads
+no `SpiralTest.step`.
 
 Two things follow for anyone extending this file. A boolean-based check needs a
 scale at which it is known to work, and `dense-lattice`'s 15,966 faces is not
@@ -171,6 +169,39 @@ reading a passing run's output, so the contradiction logic is pinned directly.
 It uses boxes rather than the real part: "contained", "sticking out" and "flush
 with the boundary" are known there by construction, and the real part is covered
 by this harness and by specification.md §11.
+
+**The supported rehearsal of 2026-10-31 found two more of this kind**, both
+failing a sound file:
+
+* a cut came back at **−1.5e-03 mm³** for a 151 mm³ support body, 0 of 273 of
+  whose surface points lie outside. "Exactly zero" was tested one-sidedly, so
+  the negative remainder was believed and its absolute value failed the run;
+  it now goes to the containment check like any other non-zero remainder
+  (`test_a_negative_cut_remainder_is_not_believed`).
+* `self_supporting` exempted a facet as "on the input's surface" by its
+  centre's distance to the input's *mesh*, within three deflections. On that
+  part OCCT's real sag is several times the deflection asked for, and a support
+  face lying on a countersink's 60° cone read 0.097 mm off it: 1.57 mm² past
+  the limit, worst 60.00°. A facet that misses the mesh test is now asked again
+  at its exact point on its own face, against the input exactly, to
+  `CONTAINMENT_TOL`; on that file the over-limit area is 0.
+
+### A small part for what only the rehearsal can show
+
+`test/support-gaps.step` and `test/support-clipped-*.step` exist because the
+rehearsal takes five hours to say that a ceiling is bare. Between them they hold
+all three ways that happened, and `support-gaps` and `support-clipped` run in
+about a minute: use them first for anything touching S1, the anchors or the
+support grid. `tools/make_support_gaps_part.py` writes them, against the lattice
+at `cc=10, t=1.5` and `cc=7, t=1.4` respectively, so a change to either has to
+keep the scenarios' "present" checks green. The clipped parts are cut from the
+rehearsal part rather than drawn: 120 placements of an idealised cone never
+produced the grazing contact they hold.
+
+The generator's own `support_ceiling_points_uncovered` is a report and **not** the
+check. It read 0 on `support-gaps` while 48 samples were bare, because the
+question it asked was the wrong one, and it asks only its own ceiling points,
+which a sliver can fall between. Ask the written file, as `overhang_coverage` does.
 
 ### Testing against real geometry, not a reproduction of it
 
@@ -267,12 +298,11 @@ summary including peak memory. To iterate:
    that stage.
 4. Re-run and compare the same stage.
 
-For reference, the two committed scenarios on a 6-core / 32 GB workstation:
+For reference, the committed parts on a 6-core / 32 GB workstation:
 
 | Scenario | Total | Dominant stages |
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
-| `SpiralTest`, `cc=5 t=1` | 11 min | boundary trim (6 min), validate (1 m 53 s, mostly export truth) |
 | test cylinder, `cc=10 t=1.5` | ~40 s | simplify, boundary trim, stitch |
 | `TD_HX_rehearsal_test`, `cc=5 t=1` | **91 min, 18.65 GB peak, 2.15 GB written** — 14 solids, 584,114 faces (specification.md §11) | validate (35 m 05 s, 95 % of it export truth), boundary trim, simplify, stitch |
 | `TD_HX_rehearsal_test`, `cc=7 t=1.4` | **~20 min, 8.76 GB peak, 990 MB written** — 33 solids, 280,612 faces. The cheapest real part for anything touching `validate` | validate (11 m 24 s), boundary trim, simplify |

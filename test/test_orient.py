@@ -135,6 +135,6 @@ def test_names_carry_rotation_and_support_only_when_they_apply():
     assert part_name("/x/ball.step", 20, 4, (0.0, 0.0, 0.0)) == "ball+lattice+cc20+t4"
     assert (part_name("/x/ball.step", 20, 4, (30.0, 0.0, -22.5))
             == "ball+lattice+cc20+t4+rotx30y0z-22.5")
-    assert (part_name("/x/ball.step", 20, 4, (30.0, 0.0, 0.0), 60.0)
-            == "ball+lattice+cc20+t4+rotx30y0z0+sup60")
-    assert part_name("/x/ball.step", 20, 4, overhang=45.0) == "ball+lattice+cc20+t4+sup45"
+    assert (part_name("/x/ball.step", 20, 4, (30.0, 0.0, 0.0), True)
+            == "ball+lattice+cc20+t4+rotx30y0z0+sup")
+    assert part_name("/x/ball.step", 20, 4, support=True) == "ball+lattice+cc20+t4+sup"

@@ -63,8 +63,13 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | --cores | int | optional | count | 1 - 128 | logical cores on the machine | Maximum CPU cores this run may use. One worker process per core, honoured exactly — the master needs none reserved for it, being blocked waiting on results for effectively the whole boundary stage. Since workers always run at below-normal priority, this exists to further protect the response time of the system for other tasks. |
 | --orient | 3 × float | optional | degrees | -360 - 360 each | 0 0 0 | Print orientation `<rx> <ry> <rz>` of the input geometry relative to the print bed (§4.5). Orients the lattice to the bed. Usable with or without `--support`. |
 | --support | flag | optional | NA | NA | disabled | Generate print supports for inner overhangs (§4.6). |
-| --overhang | float | optional | degrees | 15 - 80 | 60 | Maximum overhang angle, measured from the vertical axis (the print bed's normal). Requires `--support`. |
-| --support-thickness | float | optional | mm | 0.2 - 20 | 1 | Minimum support thickness. Requires `--support`. |
+| --support-thickness | float | optional | mm | 0.2 - 20 | `t` | Minimum support thickness. Requires `--support`. |
+
+**The overhang limit is not a parameter.** Support faces never overhang more
+than the lattice rod angle `arcsin(sqrt(2/3))` ≈ 54.74° from vertical, and the
+input's surface is supported where it overhangs more than 60° (§4.6). Both are
+fixed; `--overhang` existed through the support skeleton and was removed with
+the support algorithm, and passing it is refused (exit 2).
 
 `--cores` is an optional **budget** and resolves to a concrete figure either
 way: an explicit value is honoured exactly, and an omitted one is taken from
@@ -90,11 +95,13 @@ Upon success the script shall produce an end of run summary report in the .log f
  - Date and time of run start
  - Duration from start to completion
  - Run characteristics (node classification counts, boundary pieces, worker count, connected components, face/vertex/edge counts of the assembled shell, etc)
- - Volume of the end product, split by origin: the lattice's (`lattice_volume_mm3`), what supports add to it with `--support` (`support_volume_mm3`, net of overlap with the lattice), and the total written (`output_volume_mm3`)
+ - Volume of the end product, split by origin: the lattice's (`lattice_volume_mm3`), what supports add to it with `--support` (`support_volume_mm3`, the sum of the support bodies, which never overlap the lattice), and the total written (`output_volume_mm3`)
  - Maximum memory usage
  - Path to output .step file 
 
 Upon failure, the script shall output a human readable reason for the failure, e.g.: parameter bounds exceeded, issues with input geometry, issues with resarouces from the run-time system, write or read access issues, etc.
+
+A run that succeeds with an output that may be wrong, incomplete or degraded says so in a warning, on the console and in the `.log` regardless of `-v`: one message starting `WARNING: `, stating what went wrong, what it may cause, and where to inspect in the part's coordinates. A repair that left the output as intended is a `note:`.
 
 Upon cancellation by the user (Ctrl+C), the script shall shut down gracefully rather than terminate abruptly: worker processes are stopped in an orderly way (force-stopped only if they do not respond within a short grace period), a single human readable `CANCELLED` line is written to console and `.log` file, the temporary folder is left in place for analysis, and the exit code is 130. See docs/algorithm.md §10.
   
@@ -136,14 +143,15 @@ can sit in a corner of the screen.
   itself standing on the bed** the way the three angles say it will. Dragging
   the view turns the part and the three boxes follow; editing the boxes turns
   the part.
-* **Generate support** — a tick box, with **Max overhang** (1° steps, default
-  60) and **Min thickness** (0.1 mm steps, default 1) beside it. Both fields are
-  always visible and are **greyed out while the box is unticked**; unticked, no
-  support argument reaches the run, which then loads no support code (§4.6).
-  With the box ticked, every part of the previewed surface that overhangs at
-  the current orientation and limit is **tinted**, and the tint is recomputed on
-  every change of either — boxes, steppers and mouse drag alike — so what will
-  be supported can be checked before an hour-long run is started.
+* **Generate support** — a tick box, with **Min thickness** (0.1 mm steps)
+  beside it. The field follows `t` until it is edited, which is the command
+  line's default made visible; it is always shown and is **greyed out while
+  the box is unticked**; unticked, no support argument reaches the run, which
+  then loads no support code (§4.6). With the box ticked, every part of the
+  previewed surface that overhangs more than 60° at the current orientation —
+  what will be supported — is **tinted**, and the tint is recomputed on every
+  change of orientation — boxes, steppers and mouse drag alike — so it can be
+  checked before an hour-long run is started.
 * **verbose** — a tick box beside `cores`, controlling the log pane described
   below. It is the window's equivalent of `-v`, and like `-v` it changes only
   what is *shown*: the `.log` is written in full either way, and so is the
@@ -157,11 +165,6 @@ Every field is validated by calling `cli.parse_args` and `cli.preflight_checks`
 on the command line the window is about to run — not by a second copy of those
 rules. `Start!` is disabled while anything is invalid and the parser's own
 message is shown, so `t < cc/√2` is a greyed-out button rather than a failed run.
-
-**A warning is not an error.** When the maximum overhang angle is stricter than
-the lattice's own angles (§4.6) the window shows the same sentence the command
-line prints, from the same function, in amber under the fields — and `Start!`
-stays enabled.
 
 **How the input gets drawn.** The window loads no geometry kernel, so it cannot
 read a STEP file. It starts a short-lived helper — `src/main.py --preview-mesh
@@ -179,12 +182,12 @@ becomes `Stop!`, and two bars appear:
 * the **top** bar names the running stage and fills according to a fixed share
   per stage, declared in [`gui/weights.py`](../src/latticegen2/gui/weights.py).
   **There are two layouts, chosen by whether the run generates supports.** A
-  supported run goes through two more stages — `overhang` and `support`,
-  between `simplify` and `validate` — and each gets a band of its own. The
-  plain layout and the `overhang` band come from the 2026-10-11 controlled
-  pair in docs/profiling-reports.md; the `support` band is worth the floor
-  until the generator exists to be measured (docs/algorithm.md §14.3). Both
-  are computed once when the window starts. A run announces its stages when it
+  supported run goes through three more stages — `overhang`, `support` and
+  `pockets`, between `simplify` and `validate` — and each gets a band of its
+  own. The plain layout comes from the plain run of the 2026-10-11 controlled
+  pair in docs/profiling-reports.md, the supported layout from the 2026-11-06
+  `rehearsal-support` run, every stage of it; there `pockets` alone is 53 % of
+  the bar. Both are computed once when the window starts. A run announces its stages when it
   begins, and that list is what selects the layout;
 * the **second** bar shows work within the stage — `boundary trim: 9,776 /
   19,552` — with the text drawn over it.
@@ -196,11 +199,18 @@ the line says only that rather than padding itself out.
 Beneath *that*, with **verbose** ticked, the run's own output in a scrolling
 pane — every line of it, which is what the `.log` gets.
 
-**Unticked, the pane holds only what the child wrote outside the event stream:**
-kernel chatter on stdout, and anything at all on stderr, which is where a
-failure's one reason line lands (§7). It is hidden entirely when that is empty,
-so an ordinary run does not carry a blank box around for the hour it takes —
-and the box appearing is itself the signal that something spoke up.
+**Unticked, the pane holds only what the user has to know about:** the run's
+warnings (below), kernel chatter on stdout, and anything at all on stderr, which
+is where a failure's one reason line lands (§7). It is hidden entirely when that
+is empty, so an ordinary run does not carry a blank box around for the hour it
+takes — and the box appearing is itself the signal that something spoke up.
+
+**A warning is any line starting `WARNING: `, and it always gets through.** It
+means the output may be wrong, incomplete or degraded, and no widget says so. A
+warning opens the pane whichever way the box is set, and the backlog the window
+keeps never drops one, so an early warning is still there at the end of an hour.
+Every warning takes one form (docs/algorithm.md §10): what went wrong, what it
+may cause, and where to inspect in the part's coordinates.
 
 **Nothing else is shown unticked, deliberately.** The window is not a terminal,
 and everything a clean run logs is either already on screen in a widget — the
@@ -338,45 +348,77 @@ An opt-in stage that creates support structures, as used for
 
 - **Bypassed entirely unless enabled.** No support code is loaded by a run
   without `--support`.
-- **Detection.** The input geometry is analysed where the maximum overhang
-  angle of a surface **or edge** is exceeded *on the inside of the input body* —
+- **Process.** Metal powder-bed fusion.
+- **Detection.** The input geometry is analysed where a surface **or edge**
+  overhangs more than **60° from vertical** *on the inside of the input body* —
   the regions of its surface acting as a ceiling of the volume, where the
   enveloping shell overhangs the lattice core. Outside overhangs are neither
   detected nor supported. The lattice itself is not analysed.
-- **Coverage is full.** After generation no inner surface exceeds the limit;
-  there is no "maximum unsupported span" parameter.
-- **Anchoring.** Supports may attach to the wall of the input geometry or to the
-  generated lattice, so the lattice is generated first.
-- **Pipeline position.** Supports are added to the **completed lattice**:
-  after `simplify` and before `validate`. The lattice's faces are merged
-  before the support stage; the generator receives the lattice solids, the
-  input geometry, `--orient`, `--overhang`, `--support-thickness` and the
-  inner overhangs already detected, and returns support solids only; when it
-  is finished the support stage merges them with the lattice into the final
-  product and merges that product's faces again. One validity pass — including
-  the export-truth gate — then judges it (docs/algorithm.md §14.2).
-- **No lattice lost.** The merge is checked by volume: the final product holds
-  at least the lattice's volume and at most the lattice's plus the supports',
-  and a run that breaks either bound fails rather than ships.
-- **Algorithm.** [TODO: needs decision] — docs/algorithm.md §14.3. Until it
-  exists a run with `--support` detects and logs the overhangs, writes the
-  lattice unchanged, and says so in a `WARNING` line on the console and in the
-  log.
-- **Self-supporting.** No support surface or edge exceeds the maximum overhang
-  angle.
+- **Two angles, both fixed.** Support surfaces never overhang more than the
+  lattice rod angle, `arcsin(sqrt(2/3))` ≈ 54.74°. The input's walls and roofs
+  are supported only past 60°, so surface between 54.74° and 60° is left bare
+  by decision: a support ending on a ceiling at the rod angle would meet it
+  tangentially, and ending at 60° keeps it at least 5.26° off the ceiling. A
+  planar face tilted 55–60° is left unsupported entirely, and a curved one
+  keeps a bare band (3.7 mm wide on the 80 mm ball). Neither angle is a
+  parameter.
+- **Full coverage.** Every point overhanging more than 60° is backed by support
+  or lattice material, all the way to the edge of each overhang: every ceiling
+  point lies in a support or a strut. **The one exception is a support piece
+  the geometry kernel cannot trim to the input** at any fuzzy value, after a
+  STEP round trip, or in halves down to a single support node: it is dropped,
+  as a lattice junction no trim produces is (docs/algorithm.md §7.2), and the
+  run reports it regardless of `-v` — by name and position, the support
+  volume lost, and the ceiling points it leaves unbacked
+  (docs/algorithm.md §14.3). A run also warns, with coordinates, of any ceiling
+  point nothing in its output backs. Chips of about 1e-3 mm³ that trimming leaves
+  where a ceiling grazes a support node are discarded rather than shipped as
+  floating micro-solids; the harness reports the bare samples beside them as
+  slivers, within 0.05 mm of a support (§6.2).
+- **Anchoring and design depth.** A support runs from the ceiling down to the
+  nearest lattice rod below it, or, where no rod is reached, to the enveloping
+  wall — the nearest anchor by drop, searched down the three rod directions —
+  so the lattice is generated first.
+- **Pipeline position.** Supports are generated against the **completed
+  lattice**: after `simplify` and before `validate`. The generator receives the
+  lattice solids, the input geometry, `--orient`, `--support-thickness` and the
+  inner overhangs already detected, and returns support solids only. One
+  validity pass — including the export-truth gate — then judges the lattice and
+  the supports together (docs/algorithm.md §14.2).
+- **Separate from the lattice, manifold bodies.** Supports are **not** merged
+  with the lattice. They share faces with the lattice and with the input's
+  walls, floors and roofs, so that the merge into the enveloping part in the
+  downstream CAD tool succeeds. Supports that would touch are **one body**, and
+  a pocket fill is one body with the supports that seal it. Every support body
+  is a manifold solid: no edge is shared by more than two of its faces, beside
+  a strut as anywhere else, since a CAD kernel reads such a body as no solid.
+  Support bodies never overlap the lattice or each other, and a run in which
+  one would, or in which a body is not manifold, fails rather than ships.
+- **Enclosed voids are filled.** Powder must not be trapped: a pocket of free
+  space that supports seal off is filled with support material. Where the
+  geometry kernel cannot cut a part of the support envelope even after splitting
+  it, that part is left unsearched rather than the run failing, and the run
+  warns regardless of `-v` that enclosed pockets may remain there, giving each
+  region's x, y and z range (docs/algorithm.md §14.3 S7).
+- **Self-supporting.** No support surface or edge exceeds the rod angle.
 - **Thickness.** No free-standing support member is thinner than the minimum
-  support thickness.
-- **Volume.** Supports take as little volume as possible and nearby supports
-  combine.
-- **Integral.** Supports are a permanent part of the produced body, with solid
-  interfaces and no feature designed to ease removal.
-- **Shape.** Faceted, 8-sided, all-planar like the lattice.
-- **Warning, not rejection.** When the configured maximum overhang angle is
-  stricter than the lattice's own angles — strut ridge edges at
-  `arcsin(sqrt(2/3))` ≈ 54.74° and strut faces at ≈ 35.26° from the build
-  direction — the command line and the window warn, and the run proceeds.
-- **File and part name:** `-sup<overhang>` (part name `+sup<overhang>`) is added
-  last when support is enabled.
+  support thickness, which defaults to the strut size `t`. The support grid divides the lattice cube as finely as still leaves at least that thickness
+  between parallel rod faces.
+- **Volume.** Each support is the box of support nodes between its anchor and
+  the ceiling point it backs: it reaches only as far as its nearest anchor, and no
+  higher than the ceiling it serves.
+- **Integral.** Once merged downstream, supports are a permanent part of the
+  produced body, with solid interfaces and no feature designed to ease removal.
+- **Shape.** Supports are staircases of support nodes on a grid of the lattice's
+  own frame: every face lies on a plane of that frame — the grid's planes run
+  through the rods' centre axes, so a support standing on a rod has its lowest
+  edge on the rod's axis, and a face meeting a rod lies on the rod's own face —
+  except where it lies on the input's own surface, and coplanar faces are
+  merged.
+- **Rooted.** Every support stands on a rod, a wall or another support: no
+  corner of it hangs over powder.
+- **File and part name:** `-sup` (part name `+sup`) is added last when support
+  is enabled.
 - **Parallelisation** is used wherever a run-time reduction above 5 % is likely.
 
 The normative algorithm is docs/algorithm.md §14.
@@ -398,11 +440,13 @@ The normative algorithm is docs/algorithm.md §14.
   genuinely *connected* material, and reading the rule as an unconditional
   "volume < t³ → delete" would punch holes in the output.
 
-  **A wall-attached support is not a floating body.** A
-  body carrying print support (§4.6) is attached to the wall of the input
-  geometry by design, so it is exempt from this rule. Supports are added after
-  the lattice's own floating-body rule has run (§4.6), so the support stage is
-  what keeps this rule for the bodies it produces.
+  **A support body is not a floating body.** Supports are separate bodies
+  by design (§4.6), each attached to the ceiling it supports and to its
+  anchor, so every support body is exempt from this rule, whether it is
+  anchored on a wall or on the lattice. Supports are generated after the
+  lattice's own floating-body rule has run. A fragment the support generator
+  cuts off while building a body is construction debris, discarded inside the
+  generator; it is never an output body, so the rule below is unaffected.
   
 - **No body is ever dropped to make an export succeed, and the run fails
   instead.** A body the generator cannot write faithfully is a hard failure
@@ -455,29 +499,18 @@ case for invalid input).
 
 All are implemented in [`tools/e2e.py`](../tools/e2e.py).
 
-**`SpiralTest.step` is the hardest committed part.** At 2,073 boundary
-junctions it is a fraction of `dense-lattice`, but its swept B-spline surface
-makes the boolean fit trim curves carrying recorded tolerances an order above
-anything the other committed parts produce, and it is the only committed part
-whose dominant component tiles. It is also the only *scenario* that exercises
-§7.2 — the intersection that returns its own operand (8 junctions), the
-local-block re-trim (10), and a junction dropped for containment (1) — which is
-why the unit suite uses it heavily (`test_boundary.py`, `test_export_truth.py`)
-as well.
-
-**§7.2 is not peculiar to it, though, and reading it that way understates
-where that repair matters.** `TD_HX_rehearsal_test.step` at `cc=5, t=1` returns
-**35** junctions untrimmed and re-trims every one of them per half-strut. That
-part is not an e2e scenario — it is far too slow — so the committed scenarios
-are the only automated coverage §7.2 has, and they carry one part's worth of it.
-
-Two properties of the toolchain are what let this part complete, and both are
-load-bearing rather than incidental to it. Its worst **input seam gap** — the
-distance between the two faces meeting at one of its own edges — is
-6.8602e-03 mm, low enough that trimming does not cut the region into features
-smaller than the gap. And the STEP writer declares the *greatest* tolerance a
-shape carries rather than the average of them (§11), without which its dominant
-body loses 2 edges to the file under-declaring what the geometry needs.
+**`SpiralTest.step` was removed on 2026-10-30, with its `spiral-stress`
+scenario and the unit tests that read it.** It was the only committed part whose
+dominant component tiled and the only scenario exercising §7.2 — the
+intersection that returns its own operand, the local-block re-trim, and a
+junction dropped for containment — so **§7.2 now has no automated coverage**
+beyond the box-only unit test that a junction wholly inside is checked and kept.
+`TD_HX_rehearsal_test.step` at `cc=5, t=1` re-trims 35 junctions per
+half-strut, but it is far too slow to be a scenario. The measurements made on
+`SpiralTest` stay in docs/algorithm.md as the record they are.
+`test/spiral-island-unwritable.brep`, cut from an older version of that part,
+stays: it is the export-truth gate's one body that cannot be written, and reads
+no `SpiralTest.step`.
 
 | Scenario | Parameters | Expected result |
 |----------|-----------|------------------|
@@ -485,11 +518,20 @@ body loses 2 edges to the file under-declaring what the geometry needs.
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
 | dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | oriented-lattice | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 | valid STEP through every §6.2 check with the lattice turned to the bed; the orientation recorded in the log and no support stage run. No golden sample. |
-| support-tilted | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 --support | as above, plus the support stages running between `simplify` and `validate` and the two support checks of §6.2: a curved overhang, tilted. No golden sample. |
-| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --support | valid STEP, both support checks, the existing lattice golden sample contained in the output, generation < 20 minutes. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-sup60-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
-| rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --overhang 60 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, being tens of minutes. Print support at production scale, the part turned over: valid STEP through every §6.2 check including both support checks, generation < 3 hours. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup60-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
-| spiral-stress | -i test/SpiralTest.step -cc 5 -t 1 --cores 6 | valid STEP, no golden sample, generation < 20 minutes. **Measured: 11 m 01 s**, both solids `BRepCheck_Analyzer`-valid with 0 non-manifold edges after a round trip. Containment falls back to point sampling — the dominant body is past `verify_geometry.CUT_MAX_FACES` — and is reported as the weaker check, never as an unmeasured pass. |
+| support-gaps | -i test/support-gaps.step -cc 10 -t 1.5 --cores 4 --support | valid STEP through every §6.2 check, on a small part (`tools/make_support_gaps_part.py`) holding the two ways `rehearsal-support` left ceiling bare: a keel no face of which overhangs past 60°, and a strut tip dropped as a floating body from a node still kept. Both are checked to be present, so it cannot pass by no longer testing them. Before the fix: 16 of 1,836 face samples and 32 of 33 keel samples unbacked. **Measured: 21 s, none unbacked**, and none at 0.1 mm sampling either (42,690). |
+| support-clipped | -i test/support-clipped-{cone,cylinder}.step -cc 7 -t 1.4 --cores 4 --orient 180 0 0 --support --support-thickness 1 | valid STEP through every §6.2 check on two small cuts of `TD_HX_rehearsal_test.step`, kept in its coordinates, where a ceiling just past the bar clips support nodes no refined mesh vertex lands in. Coverage is also asked at 0.1 mm, since 0.5 mm can step over such a sliver. Before the fix: 16 and 481 samples bare at 0.1 mm. **Measured: 13 s and 21 s; none bare, 1 sliver within 0.05 mm** beside the discarded chips, 11 samples on a rim. |
+| support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 107 s**, one support body of 5,296 mm³, 12,524 of 12,524 overhang samples backed, no support corner hanging free. |
+| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 235 s**, three support bodies of 15,206 mm³, 33,065 of 33,065 overhang samples backed, no support corner hanging free, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+| rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Measured 2026-10-31: 1 h 40 m, and coverage failed** — 630 of 125,777 overhang samples unbacked. The causes are fixed and verified on `support-gaps`. **Re-run 2026-11-02: failed at exit 4 after 8 h 22 m**, a support body overlapping the lattice by 1.475e-02 mm³; no file written. **Run again 2026-11-02 after those fixes: passes every §6.2 check. Measured: 2 h 08 m**, 4 h 56 m with the harness's checks; 27 support bodies of 40,136 mm³, 125,777 of 125,777 overhang samples backed, no overlap, 3 pocket regions left unsearched and reported. **Run 2026-11-05 with the local pocket search: passes every §6.2 check. Measured: 1 h 42 m**, 4 h 31 m with the harness's checks; the same 27 support bodies and 40,136 mm³, all overhang samples backed, no overlap, 2 pocket regions left unsearched and reported. **Run 2026-11-06 with the support grid through the rod axes: passes every §6.2 check. Measured: 1 h 46 m**, 4 h 45 m with the harness's checks; 52 support bodies of 32,018 mm³, all 125,777 overhang samples backed, no overlap; the generator warns of 2 of 225,637 ceiling points unbacked and 4 pocket regions unsearched. **Run again 2026-11-06 with those warnings traced to detection and to the kernel, and fixed: passes every §6.2 check with no support warning. Measured: 1 h 43 m**, 4 h 39 m with the harness's checks; 48 support bodies of 31,618 mm³, all 225,547 ceiling points and all 125,777 overhang samples backed, no overlap, no pocket region left unsearched. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
+
+**The hole-block parts are not e2e scenarios.** `test/Hole-block-basic.STEP` and
+`test/Hole-block-chamfered.STEP`, at `--orient 90 0 0`, are the support
+generator's first test parts, run **without a lattice** — their only anchors are
+their own walls — through `tools/support_dev.py`; the `pytest` suite uses them
+for ceiling-point detection. The product cannot run them that way, since it
+always generates the lattice.
 
 ### 6.2 Automated pass/fail checks
 For every scenario the harness must verify, without human intervention:
@@ -512,17 +554,25 @@ For every scenario the harness must verify, without human intervention:
   distance between the two representations against the area of the face carrying
   it. This is asked of the *artefact* rather than of the process that wrote it,
   which is the only version the downstream tools see.
-- **With `--support`: every inner overhang of the input is backed by material
-  in the output.** The input's overhangs are sampled afresh, each sample is
-  moved a hair into the body, and the *written file's* own tessellation is asked
-  whether that point is inside it — independently of how the supports were
-  placed or built.
-- **With `--support`, while no support algorithm exists** (§4.6): the two
-  checks below report `SKIP`, recognised by the run's own `WARNING` line, and
-  come back on their own once it is gone.
-- **With `--support`: no support surface faces down more flatly than the
-  limit.** Every facet of the written file that is neither on the input's own
-  surface nor a lattice strut face must be inside the maximum overhang angle.
+- **With `--support`: every inner overhang of the input is backed by
+  material in the output.** The input's surface overhanging more than 60° is
+  sampled afresh at 0.5 mm, and every sample, moved a hair into the body, must
+  lie inside the *written file's* support or lattice material — independently
+  of how the supports were placed or built. A sample whose probe leaves the body
+  is on a rim a wall continues, and one within 0.05 mm of output material is a
+  sliver (§4.6); both are reported, and neither fails.
+- **With `--support`: supports overlap neither the lattice nor each other,**
+  and a support face resting on a strut lies on that strut's plane, so the
+  downstream merge finds shared faces.
+- **With `--support`: no support surface faces down more flatly than the rod
+  angle.** Every face of the written file that is neither on the input's own
+  surface nor a lattice strut face must be inside 54.74°, read at exact surface
+  normals, since a tessellated curved face built at the limit can read a hair
+  past it.
+- **With `--support`: nothing in the finished print hangs over powder.** The input's inner surface past 60° and every
+  support body are searched for faces facing down past their limit, keels and
+  down-pointing tips; one touching the input's wall, the lattice or another
+  support is rooted there and passes. The lattice is not analysed.
 - Bounding box of output matches requested `--input` within tolerance.
 - Runtime stays under an agreed performance budget: `smoke-fast` and
   `dense-lattice` < 10 minutes, `smoke-verified` < 20 minutes.
@@ -573,16 +623,19 @@ that found them. Each item should carry enough context (what's broken, where, wh
 how to verify the fix) that a later session can act on it without re-deriving the
 diagnosis. Remove an item once it's fixed and verified.*
 
-* **Implement the print support algorithm** (§4.6, docs/algorithm.md §14.3).
-  The stage, its contract, the merge with the lattice and the overhang
-  detection it starts from are in place: `src/latticegen2/support/generate.py`
-  is a stub returning no supports. **Start from docs/algorithm.md §14.4**,
-  which gives the directions step by step: what to read from the contract,
-  what to return, the helpers to reuse, how to parallelise and how to test.
-  Done means the stub's `WARNING` is gone and `support-tilted`,
-  `support-cylinder` and `rehearsal-support` pass both support checks of §6.2
-  rather than skipping them; then re-measure `rehearsal-support` and fill in
-  `SECONDS_SUPPORT["support"]` in `gui/weights.py`.
+* **Finish the print support generator** (§4.6, docs/algorithm.md §14.3–§14.4).
+  The frustum algorithm is implemented on branch
+  `custom-designed-support-feature`; every support scenario passes, and
+  `rehearsal-support` passes at production scale since 2026-11-02, and since
+  the second run of 2026-11-06 with no support warning (1 h 43 m;
+  docs/algorithm.md §14.4), its stage times in `gui/weights.py`. What remains:
+  the overlap check of docs/algorithm.md §14.2 dispatched across the worker
+  pool — ~35 min at one core on that run, its largest serial piece — and the
+  trims likewise if a measurement shows more than 5 %; and the free-standing
+  thickness gate. `rehearsal-support` does not run the final-print
+  check (§6.2's "hangs over powder"), so the axis grid's freedom from free tips
+  is verified on the four small support scenarios only.
+  Golden samples for the three support scenarios wait for an inspected output.
 * **The window has not been looked at on a screen in this session.** Its widget
   states and the orientation view's drawing were checked programmatically (the
   canvas was rasterised to an image), not by eye in a running window.

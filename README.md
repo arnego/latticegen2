@@ -149,14 +149,12 @@ axes and the input geometry standing on it. Drag the view to turn the part and
 the boxes follow; edit the boxes and the part turns. The lattice is oriented to
 the bed, with or without support.
 
-Tick **Generate support** to back every inner overhang with permanent supports.
-**Max overhang** (1° steps, default 60°, measured from vertical) and **Min
-thickness** (0.1 mm steps, default 1 mm) are greyed out until it is ticked. With
-it ticked, the parts of the surface that overhang at the current orientation and
-limit are tinted in the view, and the tint follows every change — so the
-orientation can be checked before a long run is started. If the limit is
-stricter than the lattice's own strut angles the window says so in amber and
-still lets the run start.
+Tick **Generate support** to carry every inner overhang down to the nearest
+strut or wall. **Min thickness** (0.1 mm steps) follows `t` until you edit it,
+and is greyed out until the box is ticked. With it ticked, the parts of the
+surface that overhang more than 60° from vertical at the current orientation —
+what will be supported — are tinted in the view, and the tint follows every
+change, so the orientation can be checked before a long run is started.
 
 The window is deliberately small and plain, so it can sit in a corner of the
 screen for the hour a large part takes. It adds nothing the command line cannot
@@ -207,8 +205,7 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `--cores` | int | no | count | 1 – 128 | logical cores on the machine | Maximum cores this run may use — one worker process per core, honoured exactly, in the shared pool used across every process-parallel stage (classification, boundary trim, boundary sew, same-domain unification). It also caps OCCT's *own* native thread pool, which the validity check uses instead of the process pool, so the total stays within the budget either way |
 | `--orient` | 3 × float | no | degrees | −360 – 360 each | `0 0 0` | Print orientation `<rx> <ry> <rz>` of the input relative to the print bed: rotations about the bed's X, then Y, then Z axis. The lattice is oriented to the bed. Works with or without `--support` |
 | `--support` | flag | no | — | — | off | Generate print supports for inner overhangs |
-| `--overhang` | float | no | degrees | 15 – 80 | 60 | Maximum overhang angle, measured from vertical (the bed's normal). Requires `--support` |
-| `--support-thickness` | float | no | mm | 0.2 – 20 | 1 | Minimum support thickness. Requires `--support` |
+| `--support-thickness` | float | no | mm | 0.2 – 20 | `t` | Minimum support thickness. Requires `--support` |
 | `-v`, `--verbose` | flag | no | — | — | off | Verbose console output (a full `.log` is always written) |
 | `-h`, `--help` | flag | no | — | — | — | Usage |
 
@@ -221,23 +218,24 @@ tips the part 30° about the bed's X axis; the lattice turns with the bed and
 the output stays in the input's own coordinate system. A rotated run adds
 `-rotx<rx>y<ry>z<rz>` to the default file name.
 
-**Print support.** With `--support`, every part of the input's inner surface
-that acts as a ceiling flatter than `--overhang` is to be backed by solid,
-permanent, self-supporting supports, added to the completed lattice just before
-it is validated and written ([docs/algorithm.md](docs/algorithm.md) §14).
-**The support algorithm itself is not implemented yet:** a run with
-`--support` detects and logs the inner overhangs, writes the lattice unchanged
-and prints a `WARNING` saying so. A supported run adds `-sup<overhang>` to the
-default file name:
+**Print support** (metal powder-bed fusion). With `--support`, every part of
+the input's inner surface that acts as a ceiling more than 60° from vertical is
+carried down to the nearest lattice rod below it — or, where no rod is
+reached, to the enveloping wall — by solid supports built from support nodes of
+a grid in the lattice's own frame ([docs/algorithm.md](docs/algorithm.md) §14). Every
+support face lies on a plane of that frame or on the input's own surface, so no
+face overhangs more than the rod angle (54.74°). Neither angle is a parameter;
+`--support-thickness` sets how finely the grid divides the lattice cube.
+Supports are written as **separate bodies** beside the unchanged lattice,
+sharing faces with the struts and the walls so that they merge into the
+enveloping part in your CAD tool; every support body is a manifold solid, and
+pockets of powder they would trap are filled and joined to them. A supported
+run adds `-sup` to the default file name:
 
 ```bash
-python src/main.py -i part.step -cc 10 -t 1.5 --orient 30 0 0 --support --overhang 60
-# -> part-lattice-cc10t1.5-rotx30y0z0-sup60.step
+python src/main.py -i part.step -cc 10 -t 1.5 --orient 30 0 0 --support
+# -> part-lattice-cc10t1.5-rotx30y0z0-sup.step
 ```
-
-The lattice itself is left as it is. Its strut edges recline 54.74° and its
-strut faces 35.26° from vertical, so an `--overhang` below those is stricter
-than the lattice; the run then prints a warning and carries on.
 
 `--cores` is an optional budget; it resolves to a concrete figure from the
 machine when omitted. There used to be a second budget, `--ram`, but it was
@@ -293,6 +291,40 @@ where an unwritable description would do the most damage.
 | 130 | Cancelled by the user with Ctrl+C |
 
 Every non-zero exit prints one human-readable reason line.
+
+---
+
+## Output warnings reference
+
+These are the situations a run can detect and warn about. **Each one is a
+possibility rather than something to expect**: most runs print none of them. A
+warning means the run finished or carried on, but what it wrote may be wrong,
+incomplete or degraded in a way you should look at. A problem it cannot
+tolerate stops the run with a non-zero exit code instead, and a repair that left
+the output as intended is logged as a `note:`, not a warning.
+
+A warning always reaches the console and the `.log`, whatever `-v` says. In the
+window it opens the text pane, with **verbose** ticked or not. Each has the same
+form: `WARNING: `, its title, what went wrong, what it may cause, then one line
+per place to inspect, in the input's coordinate system and in millimetres. At
+most 20 places are listed, followed by how many more there are.
+
+| Warning | What was detected | What it may cause | Where it points |
+|---|---|---|---|
+| **faces of the input do not meet** | Two faces sharing an edge of the input body sit apart by more than a thousandth of `t`, held together only by the file's own tolerance. | The trim cuts that region into features smaller than the gap, and the run may fail at the export-truth check. Fix the input model there if it does. | The worst gap |
+| **lattice junctions left out** | No intersection could keep a junction inside the input body, so it was discarded. | A gap in the lattice at each one. The lattice still stays within the boundary. | Each junction |
+| **trims resting on their own tolerance** | Junctions in an output body needed a tolerance comparable to the feature they bound. | The body may not survive being written to STEP. The export-truth check refuses the run if so, so this can also appear on a run that then succeeds. | Each body's worst face |
+| **struts closed off where they should join** | A cap faces a junction that produced no matching cap. | The output stays watertight, but the lattice is not joined across that cap and a strut may end there. | Each junction |
+| **struts not joined where two trims disagree** | The two sides of a cap present regions that differ. | An extra solid in the output rather than a hole, with the lattice not joined there. | Each junction |
+| **struts not welded where two trims disagree** | The holes on the two sides of a cap do not correspond edge for edge. | An extra solid in the output rather than a hole, with the lattice not joined there. | Each junction |
+| **boundary faces left invalid** | A sewn boundary face is invalid, and correcting its vertex tolerances does not repair it. | The validity check refuses the run (exit 4) unless a later repair clears the face. | Each face |
+| **solids exported without merging their faces** | The geometry kernel declined to unify a solid, or unifying it gave an invalid result, so the solid as built was kept. | The geometry is unchanged, but the solid carries more faces, making the file larger and slower to open. | Each solid's bounding box |
+| **support pieces dropped** *(`--support`)* | The geometry kernel could not trim a piece of support to the input at any setting, so it was left out. | That support volume is missing, and the overhang it backed may print unsupported. | Each piece |
+| **enclosed pockets may remain unfilled** *(`--support`)* | The geometry kernel could not cut a region of the support envelope, so it was not searched for pockets. | Powder may be trapped in enclosed pockets there. | Each region's x, y and z range |
+| **ceiling left without support** *(`--support`)* | Points of an inner overhang are backed by nothing in the output. | Those overhangs may print unsupported. | Each point |
+
+docs/algorithm.md §10 gives the form and links each warning to the section of
+the algorithm it comes from.
 
 ---
 
@@ -352,7 +384,8 @@ halving the face count and the file size.
 | Measured, not assumed, mesh deviation | The classification margin is an upper bound on the mesher's real error |
 | Lattice oriented to the print bed | The frame is rotated into the part's coordinates and the body is never transformed, so the output stays where the input is. One code path: the rotation is applied even at `0 0 0`, where it is exactly the identity, and both golden samples still compare at 0 mm³ through it |
 | Candidates bounded by the surface, not its box | The body's own mesh vertices are bounded in lattice index space instead of the corners of its axis-aligned box — 23,064 → 10,608 candidates on the test cylinder, the same interior and boundary nodes |
-| Supports added to the completed lattice | The support stage runs after `simplify`: the generator sees the unified lattice and returns supports only, which the stage fuses into the lattice they touch, unifies again and checks by volume so no lattice can be lost. One validation pass then judges the product, and nothing upstream knows supports exist ([docs/algorithm.md](docs/algorithm.md) §14.2) |
+| Supports added to the completed lattice | The support stage runs after `simplify`: the generator sees the unified lattice and returns supports only, which the stage checks overlap nothing and appends beside the lattice as separate bodies. One validation pass then judges the product, and nothing upstream knows supports exist ([docs/algorithm.md](docs/algorithm.md) §14.2) |
+| Supports on the lattice grid | Each support is a box of support nodes from its anchor to the ceiling it backs, the grid being the lattice's own frame divided to rod resolution, so self-support and shared strut faces hold by construction and the only booleans are one trim per support body against the input, each checked by a sampled estimate ([docs/algorithm.md](docs/algorithm.md) §14.3) |
 
 ### Memory
 

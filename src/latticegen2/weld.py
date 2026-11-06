@@ -879,6 +879,8 @@ class SewStats:
     One ``BRepCheck_Analyzer`` per boundary face, measured at 0.215 ms on real
     trimmed faces — ~1.1 min across the rehearsal's 301,505 (specification.md
     §10)."""
+    still_invalid_at: list = field(default_factory=list)
+    """Where the faces of :attr:`still_invalid_faces` are."""
     still_invalid_faces: int = 0
     """Faces the analyzer rejects that this repair did **not** account for.
 
@@ -1004,7 +1006,8 @@ def sew_boundary(
     if report is not None:
         report("correcting vertex tolerances", 0, None)
     for group_faces in out.values():
-        fixed, residual = occ.fix_vertex_tolerances(group_faces, max_vertex_tol)
+        fixed, residual = occ.fix_vertex_tolerances(group_faces, max_vertex_tol,
+                                                  stats.still_invalid_at)
         stats.retoleranced_faces += fixed
         stats.still_invalid_faces += residual
     stats.t_retolerance = time.perf_counter() - t0

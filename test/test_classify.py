@@ -443,3 +443,33 @@ def test_deviation_search_matches_an_exhaustive_nearest_triangle_scan():
     assert _max_distance_to_mesh(subset, mesh) == pytest.approx(brute)
     # And the full measurement is at least as large, since it sees every sample.
     assert measure_mesh_deviation(shape, mesh) >= brute - 1e-12
+
+
+def test_the_outside_probe_skips_only_what_cannot_be_its_answer():
+    """The probe lets a rejected point go once a nearby triangle is within the
+    margin; the answer must be exactly the one measuring every point against
+    every triangle gives."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeSphere
+
+    from latticegen2.classify import OutsideProbe, _point_triangle_dist
+
+    lp = lattice_params(10.0, 1.5)
+    ball = BRepPrimAPI_MakeSphere(20.0).Shape()
+    mesh = classify_mod.tessellate_surface(ball, lp)
+    probe = OutsideProbe(mesh, 0.05)
+    rng = np.random.default_rng(7)
+    a, b, c = mesh.triangle_points
+
+    def brute(P):
+        out = ~probe._inside(P)
+        d = [float(_point_triangle_dist(p, a, b, c).min()) for p in P[out]]
+        worst = max(d, default=0.0)
+        return worst if worst > probe.margin else 0.0
+
+    on = mesh.verts[rng.choice(len(mesh.verts), 300, replace=False)]
+    for P in (on,                                       # on the surface: parity a coin flip
+              on * 0.5,                                 # well inside
+              np.vstack([on, on[:5] * 1.01]),           # five points 0.2 mm outside
+              np.vstack([on, on[:1] * 1.002])):         # one point 0.04 mm out, under the margin
+        assert probe.worst_outside(P) == brute(P)
+    assert probe.worst_outside(np.vstack([on, on[:5] * 1.01])) > 0.0

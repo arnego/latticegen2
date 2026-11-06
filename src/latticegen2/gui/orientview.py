@@ -4,7 +4,7 @@ A small canvas showing the print bed, the part's coordinate axes and — once th
 preview mesh has arrived — the input geometry standing on the bed the way the
 three angles say it will. Dragging turns the part; the boxes beside it follow,
 and editing the boxes turns the part. With support enabled, every triangle that
-overhangs at the current orientation and limit is tinted, and the tint is
+overhangs more than 60 deg at the current orientation is tinted, and the tint is
 recomputed on each change so the user sees what will be supported *before*
 starting an hour-long run.
 
@@ -47,7 +47,7 @@ class OrientationView(tk.Canvas):
         self._normals = None
         self._extent = 1.0
         self._orient = _orient.IDENTITY
-        self._overhang: float | None = None
+        self._tint = False
         self._enabled = True
         self._last = None
         self._R_drag = None
@@ -73,13 +73,14 @@ class OrientationView(tk.Canvas):
             self._extent = float(np.linalg.norm(self._verts - centre, axis=1).max())
         self.redraw()
 
-    def set_state(self, orient, overhang: float | None) -> None:
-        """The orientation to show, and the overhang limit or ``None`` for no tint."""
+    def set_state(self, orient, tint: bool) -> None:
+        """The orientation to show, and whether to tint what will be supported."""
         orient = tuple(float(a) for a in orient)
-        if orient == self._orient and overhang == self._overhang:
+        tint = bool(tint)
+        if orient == self._orient and tint == self._tint:
             return
         self._orient = orient
-        self._overhang = overhang
+        self._tint = tint
         self.redraw()
 
     def set_enabled(self, enabled: bool) -> None:
@@ -154,11 +155,10 @@ class OrientationView(tk.Canvas):
             tris = self._tris[keep]
             normals_bed = self._normals[keep] @ R.T
             light = view3d.shade(normals_bed)
-            if self._overhang is not None:
+            if self._tint:
                 tint = view3d.overhang_mask(self._normals[keep],
                                             _orient.euler_from_matrix(R)
-                                            if self._R_drag is not None else self._orient,
-                                            self._overhang)
+                                            if self._R_drag is not None else self._orient)
             else:
                 tint = np.zeros(len(tris), dtype=bool)
             screen, depth = to_screen(verts)

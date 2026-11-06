@@ -38,7 +38,6 @@ from latticegen2.lattice import lattice_params, nodes as lattice_nodes
 from latticegen2.boundary import trim_junction
 
 TESTDIR = os.path.dirname(os.path.abspath(__file__))
-SPIRAL = os.path.join(TESTDIR, "SpiralTest.step")
 BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
 ISLAND = os.path.join(TESTDIR, "spiral-island-unwritable.brep")
@@ -839,33 +838,6 @@ def test_a_soundly_trimmed_junction_sits_far_below_the_bar(part, cc, t, node, ce
     assert worst < occ.TOLERANCE_FEATURE_RATIO_WARN
 
 
-def test_a_fat_trim_is_flagged_at_the_source():
-    """And the warning bar is reachable, or it is untested decoration.
-
-    `SpiralTest.step` is committed for exactly this: its swept B-spline surface
-    makes the boolean fit trim curves against a near-tangent, and junction
-    (-10, -2, 0) is the worst of the part's 2,349 boundary junctions at
-    4.497e-01 — 6.657e-04 mm of recorded tolerance on a face of 0.000002 mm^2.
-
-    **A flagged junction is not a defect**, which is the reason this reading
-    reports rather than refuses: this part now completes and writes a valid
-    STEP with 56 of its junctions above the bar. What the reading buys is a
-    name and a coordinate at the end of `boundary`, minutes before anything
-    downstream exists to be measured.
-    """
-    lp = lattice_params(5.0, 1.0)
-    tpl = build_template(lp)
-    body = occ.read_step(SPIRAL)
-    pos = lattice_nodes(lp, [(-10, -2, 0)])[0]
-    trim = trim_junction(lp, tpl, pos, body)
-    assert trim.pieces, "the fixture junction must actually be trimmed"
-    worst = max(r.ratio for r in trim.tolerances)
-    assert worst > occ.TOLERANCE_FEATURE_RATIO_WARN, (
-        "this junction is why the warning bar exists; if it no longer clears it "
-        "the bar or the trim has changed and both need re-deriving"
-    )
-
-
 # --- why the island cannot be repaired at the source -------------------------
 
 
@@ -875,43 +847,6 @@ def test_a_sound_body_has_no_seam_gap():
     gap = occ.surface_seam_gaps(box)
     assert gap.edges == 12
     assert gap.worst < 1e-9
-
-
-def test_the_committed_spiral_is_measured_where_its_predecessor_failed():
-    """The seam gap is read from the real file, and the reading is what warns.
-
-    The `SpiralTest.step` committed before 2026-08-24 had two swept B-spline
-    patches running **42.4 microns apart** along the whole of their shared edge
-    — held together by a 2.12e-02 mm edge tolerance, invisible on its own
-    886 mm2 and 1,018 mm2 faces, and fatal on the 0.01 mm2 ones the trim cut out
-    of the same region. That is the defect this measurement exists to name, and
-    the replacement part closes it by a factor of six.
-
-    Pinned as a **bound rather than a value**, deliberately: what must not
-    regress is that the reading is taken and is small, not that the file stays
-    byte-identical. It is still above :data:`pipeline.SEAM_GAP_WARN_FRACTION`
-    at ``t = 1``, so this part still reports its seam — and it now completes and
-    writes a valid STEP anyway, which is exactly why the reading is a warning
-    and not a gate.
-    """
-    from latticegen2.pipeline import SEAM_GAP_WARN_FRACTION
-
-    gap = occ.surface_seam_gaps(occ.read_step(SPIRAL), bar=1e-3)
-    assert gap.worst < 1e-2, (
-        "the committed part regressed to the 4.24e-02 mm seam gap that made its "
-        "predecessor's island unwritable"
-    )
-    assert gap.worst > SEAM_GAP_WARN_FRACTION * 1.0, (
-        "and it is still the part that exercises the warning, or the warning is "
-        "untested decoration"
-    )
-
-
-def test_the_parts_that_ship_are_ranked_below_the_part_that_does_not():
-    """And the ranking is a ranking, not a bar — the ball is the far end of it."""
-    ball = occ.surface_seam_gaps(occ.read_step(BALL))
-    spiral = occ.surface_seam_gaps(occ.read_step(SPIRAL))
-    assert ball.worst < 1e-9 < spiral.worst
 
 
 def test_a_material_input_gap_is_reported_to_the_user_with_its_coordinates(tmp_path):

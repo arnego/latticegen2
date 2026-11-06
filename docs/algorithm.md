@@ -3001,6 +3001,19 @@ largest serial piece of the run.
 |---|---|---|---|---|---|---|---|
 | `support` 1,183 s, `pockets` 3,165 s | 339.5 s | 291.8 s | 62.1 s | 380.5 s | 1.1 s | 1,102.6 s | ~2,062 s |
 
+**With the support grid through the rod axes (S4), 2026-11-06, the run
+takes 1 h 46 m** and passes every check, writing **52 support bodies of
+32,018 mm³** — 20 % less support than the 27 bodies of 40,136 mm³ before —
+beside the same 331,441 mm³ of lattice. The fine-grid repair fills 2 nodes
+beside the rods, against 1,397; 23 pockets are filled, five envelopes widened,
+and four regions refused rather than two. The generator reports 2 of 225,637
+ceiling points unbacked, where the previous run backed all of them; the
+harness's 0.5 mm samples find all 125,777 backed.
+
+| stage | ceiling points | grid | staircase | trim | backing check | pocket search | overlap check |
+|---|---|---|---|---|---|---|---|
+| `support` 1,131 s, `pockets` 3,405 s | 335.1 s | 344.4 s | 63.4 s | 307.4 s | 1.1 s | 1,284.2 s | ~2,121 s |
+
 **Still to come:** the free-standing thickness gate; the overlap check and S6
 dispatched across the worker pool (specification.md §4.6's parallelisation),
 the first of them the largest serial piece of the supported rehearsal.

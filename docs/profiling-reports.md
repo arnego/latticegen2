@@ -914,6 +914,80 @@ touch.
 its region: `x 1999.3 to 2007.0, y 49.8 to 71.0, z 969.5 to 983.6` and
 `x 2068.6 to 2076.2, y -71.0 to -49.8, z 969.8 to 983.6` mm.
 
+**Downstream consumer.** `src/latticegen2/gui/weights.py` held this run's
+log stage times as `SECONDS_SUPPORT` until the next entry.
+
+## What changed between the previous entry and the next
+
+The support grid's planes run through the rods' centre axes rather than their
+`−t/2` faces (docs/algorithm.md §14.3 S4), so two support boxes passing a rod
+on its lower sides meet inside the rod and the fine-grid manifold repair has
+nothing to fill beside it. On the ball and the cylinder that removed every free
+support tip and cut the support volume 14 % and 20 %. The lattice is untouched.
+
+`tools/profile_report.py` also changed: its first sample is taken a moment
+before the run writes its start line, and the report read that as a midnight
+rollover, putting every sample a day late and every stage at 0 % CPU. The first
+stamp now takes the day nearer the start (`test/test_profile_report.py`).
+
+## 2026-11-06 — support grid through the rod axes, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, single run
+
+The `rehearsal-support` e2e scenario on `c8dc0eb`, profiled at the default
+2 s, the same command and parameters as the previous entry. Output kept in
+`inspection/rehearsal-support-2026-11-06/` (not committed).
+
+| Stage | Duration | CPU mean | CPU peak | Cores used | RSS mean | RSS peak | Procs | Read | Written |
+|---|---|---|---|---|---|---|---|---|---|
+| template | 0.0s | 0% | 0% | 0.00 | 0 MB | 0 MB | 0 | 0 MB | 0 MB |
+| import | 1.0s | 87% | 87% | 0.87 | 440 MB | 440 MB | 2 | 0 MB | 0 MB |
+| tessellate | 2.0s | 114% | 114% | 1.14 | 473 MB | 473 MB | 2 | 0 MB | 0 MB |
+| classify | 14.0s | 560% | 596% | 5.60 | 1,848 MB | 1,919 MB | 8 | 99 MB | 1 MB |
+| boundary | 575.0s | 528% | 589% | 5.28 | 2,225 MB | 2,467 MB | 8 | 106 MB | 81 MB |
+| connect | 10.0s | 99% | 100% | 0.99 | 2,484 MB | 2,495 MB | 8 | 0 MB | 0 MB |
+| stitch | 256.0s | 118% | 576% | 1.18 | 3,002 MB | 3,650 MB | 8 | 209 MB | 181 MB |
+| instance | 13.0s | 100% | 100% | 1.00 | 3,145 MB | 3,253 MB | 8 | 0 MB | 0 MB |
+| assemble | 9.0s | 100% | 101% | 1.00 | 3,214 MB | 3,214 MB | 8 | 0 MB | 0 MB |
+| simplify | 240.0s | 100% | 150% | 1.00 | 4,756 MB | 7,348 MB | 8 | 383 MB | 378 MB |
+| overhang | 7.0s | 100% | 100% | 0.99 | 3,626 MB | 3,627 MB | 8 | 0 MB | 0 MB |
+| support | 1,131.0s | 101% | 229% | 1.01 | 4,042 MB | 5,035 MB | 8 | 0 MB | 0 MB |
+| pockets | 3,404.0s | 187% | 591% | 1.87 | 4,613 MB | 9,820 MB | 8 | 755 MB | 210 MB |
+| validate | 561.0s | 113% | 568% | 1.13 | 5,286 MB | 7,383 MB | 8 | 763 MB | 763 MB |
+| export | 106.0s | 98% | 101% | 0.98 | 5,000 MB | 7,801 MB | 8 | 770 MB | 1,555 MB |
+
+```
+total to last stage : 6,329.0s (105.5 min)
+peak tree RSS       : 10,179 MB
+min system available: 9,784 MB
+```
+
+**Run 1 h 45 m 35 s, and every check of specification.md §6.2 passes**:
+824 MB written, 85 solids, 331,441 mm³ of lattice and **52 support bodies of
+32,018 mm³** — against 27 of 40,136 mm³, 20 % less support; the harness finds
+all 125,777 overhang samples backed and no overlap. Its own checks took a
+further 3 h 00 m, 4 h 45 m in all. The `support timing` line:
+
+| part | seconds |
+|---|---|
+| ceiling points | 335.1 |
+| grid, both manifold repairs and the exact rod-node cuts | 344.4 |
+| staircase solids | 63.4 |
+| trim (S6) | 307.4 |
+| backing check | 1.1 |
+| pocket search and fill join (S7) | 1,284.2 |
+
+**`support` fell 1,183 s → 1,131 s and `pockets` rose 3,165 s → 3,405 s**,
+the run 1 h 41 m 46 s → 1 h 45 m 35 s. The grid takes 53 s longer and the trim
+73 s less; the pocket search takes 182 s longer, with five envelopes widened
+rather than one, and the overlap check, ~2,121 s at one core, is again the
+largest serial piece. The fine-grid repair filled 2 nodes beside the rods,
+against 1,397. Every lattice stage is within a few per cent of the previous
+entry; peak tree RSS 10,179 MB against 10,002 MB.
+
+**Four slabs were refused** rather than two, each reported in a `WARNING:`,
+and **2 of 225,637 ceiling points are reported unbacked**, at
+`[1948.928, -65.635, 974.088]` and `[2078.919, 91.939, 978.785]` mm, where the
+previous entry backed all of them; the harness's 0.5 mm samples find none bare.
+
 **Downstream consumer.** `src/latticegen2/gui/weights.py` holds this run's
 log stage times as `SECONDS_SUPPORT`; `SECONDS_PLAIN` is still the plain column
 of the 2026-10-11 pair.

@@ -14,11 +14,11 @@ without — ``overhang``, ``support`` and ``pockets``, between ``simplify`` and
 :data:`SECONDS_PLAIN` is the run without ``--support`` of the 2026-10-11
 controlled pair. :data:`SECONDS_SUPPORT` is the ``rehearsal-support`` e2e
 scenario (docs/specification.md §6.1, ``--support-thickness 1``) of
-2026-11-05, every stage of it, with the frustum support generator and the
-local pocket search (docs/algorithm.md §14.3): 1 h 42 m end to end, of which
-``pockets`` -- the pocket search across the pool, then the overlap check on
-the master -- is 52 % and ``support`` 19 %. Its lattice stages agree with the plain run's to
-within a few per cent except ``validate``, which checks the 27 support bodies
+2026-11-06, every stage of it, with the support grid through the rods' centre
+axes (docs/algorithm.md §14.3 S4): 1 h 46 m end to end, of which ``pockets``
+-- the pocket search across the pool, then the overlap check on the master --
+is 54 % and ``support`` 18 % of the time. Its lattice stages agree with the plain run's to
+within a few per cent except ``validate``, which checks the 52 support bodies
 too.
 
 **What these tables are not.** They are one part's shape, on one machine. A
@@ -62,22 +62,22 @@ SECONDS_PLAIN: dict[str, float] = {
 
 #: Wall-clock seconds per stage of a run **with** ``--support``.
 SECONDS_SUPPORT: dict[str, float] = {
-    "template": 0.05,
+    "template": 0.09,
     "import": 1.2,
-    "tessellate": 2.4,
-    "classify": 14.6,
-    "boundary": 598.9,
+    "tessellate": 2.5,
+    "classify": 13.8,
+    "boundary": 574.1,
     "connect": 10.4,
-    "stitch": 256.5,
-    "instance": 13.6,
-    "assemble": 8.6,
-    "simplify": 235.6,
-    "overhang": 6.8,
-    "support": 1183.0,
-    "pockets": 3164.6,
-    "validate": 494.7,
-    "export": 106.4,
-}  # 1 h 41 m 46 s end to end
+    "stitch": 256.0,
+    "instance": 13.4,
+    "assemble": 8.2,
+    "simplify": 240.5,
+    "overhang": 6.9,
+    "support": 1130.6,
+    "pockets": 3404.9,
+    "validate": 558.1,
+    "export": 106.2,
+}  # 1 h 45 m 35 s end to end
 
 
 def _permille(seconds: dict[str, float], stages: tuple) -> dict[str, int]:

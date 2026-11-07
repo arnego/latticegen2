@@ -473,6 +473,39 @@ def test_the_window_builds_and_validates_with_the_parser(tmp_path, tk_root):
     assert str(app.message.cget("foreground")) == "#a11"
 
 
+def test_start_is_greyed_out_while_the_output_folder_is_too_deep(tmp_path, tk_root):
+    """The path limit is checked on the file the run will write, in the
+    chosen folder, and named as the folder to change."""
+    import os
+
+    from latticegen2 import cli
+    from latticegen2.gui.app import App
+
+    step = tmp_path / "part.step"
+    step.write_text("dummy")
+    app = App(tk_root)
+    app.cc_var.set("20")
+    app.t_var.set("4")
+    app.input_var.set(str(step))
+    tk_root.update()
+    assert "disabled" not in app.start.state()
+
+    limit = cli.WINDOWS_PATH_MAX if os.name == "nt" else cli.POSIX_PATH_MAX
+    deep = os.path.abspath(str(tmp_path))
+    while len(deep) + 1 + cli.TEMP_PATH_RESERVE <= limit:
+        deep = os.path.join(deep, "d" * 200)
+    app.outdir_var.set(deep)
+    tk_root.update()
+    assert app.message_var.get().startswith(
+        "To start, choose an output folder with a path ")
+    assert "disabled" in app.start.state()
+
+    app.outdir_var.set(str(tmp_path))
+    tk_root.update()
+    assert app.message_var.get() == ""
+    assert "disabled" not in app.start.state()
+
+
 # --- the cancel channel (docs/algorithm.md §10) ------------------------------
 
 

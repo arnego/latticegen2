@@ -31,6 +31,7 @@ from ..cli import (
     SUPPORT_THICKNESS_RANGE,
     T_RANGE,
     USAGE,
+    check_path_lengths,
     parse_args,
     resolve_output_paths,
 )
@@ -154,7 +155,7 @@ class Bar(tk.Canvas):
 FIELD_LABELS = {
     "cc": "cc", "t": "t", "cores": "cores", "thickness": "Min thickness",
     "rx": "rot X", "ry": "rot Y", "rz": "rot Z", "orient": "the rotation",
-    "input": "input file",
+    "input": "input file", "output": "output folder",
 }
 
 
@@ -516,6 +517,16 @@ class App:
         if not chosen:
             self.derived_var.set("—")
             self.message_var.set("To start, choose an input file.")
+            self.start.state(["disabled"])
+            return
+        output = self._resolved_output()
+        try:
+            # On the file the run will write — in the chosen folder, which the
+            # parse above, given no -o, placed beside the input instead.
+            check_path_lengths(output)
+        except LatticeGenError as exc:
+            self.derived_var.set(f"→ {os.path.basename(output)}")
+            self.message_var.set(start_hint(exc))
             self.start.state(["disabled"])
             return
 

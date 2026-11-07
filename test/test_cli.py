@@ -257,6 +257,88 @@ def test_preflight_accepts_a_writable_target(tmp_path):
     preflight_checks(args)
 
 
+# --- name and path lengths (specification.md §3, -o) -----------------------
+
+PATH_LIMIT = cli.WINDOWS_PATH_MAX if os.name == "nt" else cli.POSIX_PATH_MAX
+
+
+def folder_of_length(base, n):
+    """An absolute folder path exactly ``n`` characters long, below ``base``.
+
+    Nothing is created: the check is pure syntax, so the folders need not
+    exist. Segments stay well inside a component's 255.
+    """
+    folder = os.path.abspath(str(base))
+    assert len(folder) + 2 <= n
+    while len(folder) < n:
+        room = n - len(folder) - 1                 # one separator per segment
+        seg = min(room, 200)
+        if room - seg in (1,):                     # never leave a gap of one
+            seg -= 1
+        folder = os.path.join(folder, "d" * seg)
+    assert len(folder) == n
+    return folder
+
+
+def test_a_file_name_one_past_the_limit_is_refused_naming_the_excess():
+    # The cancel sentinel `<stem>.cancel` is the longest name a run writes.
+    stem = "p" * (cli.NAME_MAX - len(cli.LONGEST_SIBLING_SUFFIX) + 1)
+    with pytest.raises(ParamError, match="1 character") as err:
+        cli.check_path_lengths(stem + ".step")
+    assert err.value.fix_text({"input": "input file"}) == (
+        "shorten the input file name by 1 character(s)")
+
+
+def test_a_file_name_at_the_limit_is_not_refused_for_its_name():
+    stem = "p" * (cli.NAME_MAX - len(cli.LONGEST_SIBLING_SUFFIX))
+    try:
+        cli.check_path_lengths(stem + ".step")
+    except ParamError as exc:  # the folder can still make the *path* too long
+        assert "file name" not in str(exc)
+
+
+def test_a_folder_too_deep_for_the_temp_files_is_refused(tmp_path):
+    # Short stem: the files staged under temp/<stamp>/ are the longest paths.
+    n = PATH_LIMIT - cli.TEMP_PATH_RESERVE - 1 + 5
+    step = os.path.join(folder_of_length(tmp_path, n), "p.step")
+    with pytest.raises(ParamError, match="5 character") as err:
+        cli.check_path_lengths(step)
+    assert err.value.fix_text({"input": "input file", "output": "output folder"}) == (
+        "choose an output folder with a path 5 character(s) shorter")
+
+
+def test_a_folder_exactly_deep_enough_is_accepted(tmp_path):
+    n = PATH_LIMIT - cli.TEMP_PATH_RESERVE - 1
+    cli.check_path_lengths(os.path.join(folder_of_length(tmp_path, n), "p.step"))
+
+
+def test_a_long_input_name_making_the_path_too_long_names_the_input(tmp_path):
+    stem = "p" * 100        # longer than the temp reserve, so it decides
+    name_len = len(stem) + len(cli.LONGEST_SIBLING_SUFFIX)
+    n = PATH_LIMIT - name_len - 1 + 3
+    step = os.path.join(folder_of_length(tmp_path, n), stem + ".step")
+    with pytest.raises(ParamError, match="3 character") as err:
+        cli.check_path_lengths(step)
+    assert err.value.fix_text({"input": "input file", "output": "output folder"}) == (
+        "choose an output folder with a path 3 character(s) shorter, "
+        "or shorten the input file name")
+
+
+def test_path_length_is_counted_the_way_the_platform_counts_it():
+    # One UTF-16 unit on Windows; two UTF-8 bytes on Linux.
+    assert cli._path_units("é") == (1 if os.name == "nt" else 2)
+
+
+def test_preflight_refuses_a_path_too_long_before_touching_the_disk(tmp_path):
+    n = PATH_LIMIT - cli.TEMP_PATH_RESERVE + 10
+    out = os.path.join(folder_of_length(tmp_path, n), "p.step")
+    args = parse_args(["-i", "in.step", "-cc", "10", "-t", "1.5", "-o", out])
+    # The input does not exist either: the length is refused first, as a
+    # parameter (exit 2), not as a missing input.
+    with pytest.raises(ParamError, match="longer than"):
+        preflight_checks(args)
+
+
 # --- print orientation and support (specification.md §4.5, §4.6) -----------
 
 

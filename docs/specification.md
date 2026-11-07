@@ -55,7 +55,7 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | Flag | Type | Required | Units | Range | Default | Description |
 |------|------|----------|-------|-------|---------|-------------|
 | -i --input | path | required | NA | NA | NA | Path to STEP file defining the lattice bounds |
-| -o --output | path | optional | NA | NA | `<input_stem>-lattice-cc<cc>t<t>.step` | Path and name of the output .step file. Must name a **file**, not a directory: `-o .\` and friends are rejected (exit 2) rather than turned into `.\.step`. `.step` is appended if absent. In the default name every value is rounded to at most 2 decimals, so the tags add at most 64 characters to the stem; the `.log` and the STEP header keep the exact values. |
+| -o --output | path | optional | NA | NA | `<input_stem>-lattice-cc<cc>t<t>.step` | Path and name of the output .step file. Must name a **file**, not a directory: `-o .\` and friends are rejected (exit 2) rather than turned into `.\.step`. `.step` is appended if absent. In the default name every value is rounded to at most 2 decimals, so the tags add at most 64 characters to the stem; the `.log` and the STEP header keep the exact values. A name or path the platform cannot hold is refused before anything is written (exit 2): a file name over 255 characters — counted on the longest the run writes, `<stem>.cancel` — or a path over 259 characters on Windows (4,095 bytes on Linux), counted on the run's own `temp/<stamp>/` files beside the output. |
 | -cc | float | required | mm | 0.4 - 50 | NA | Distance between the bottom nodes of two adjacent cells |
 | -t | float | required  | mm | 0.4 - 20 | NA | Side length of the diamond rod profile. Must be smaller than the cell edge `a = cc/âˆš2`; that is the only cross-constraint. |
 | -v --verbose | flag | optional | NA | NA | disabled | Enable verbose console diagnostics while always writing a full `.log` file. |
@@ -180,7 +180,10 @@ the window fills in its own labels â€” `Min thickness`, `rot Y` â€” and every bo
 in it is rounded so that the value it names is itself accepted. A refusal with
 no fix shows the parser's reason instead. Before an input file is chosen the
 parameters are still checked, against a stand-in name, and the line asks for
-the file only once nothing else is wrong. The command line's messages are
+the file only once nothing else is wrong. Once it is chosen, the length of
+the file the run will write, in the chosen output folder, is checked too
+(§3, `-o`): `To start, choose an output folder with a path 12 character(s)
+shorter.` The command line's messages are
 unchanged.
 
 **How the input gets drawn.** The window loads no geometry kernel, so it cannot

@@ -532,8 +532,75 @@ def parse_args(argv: list[str]) -> Args:
     )
 
 
+#: Longest name a component of a path may have: 255 UTF-16 units on NTFS,
+#: 255 bytes on ext4 and the other common Linux file systems.
+NAME_MAX = 255
+#: Longest path a Windows program can open without long-path support: MAX_PATH
+#: is 260 including the terminating NUL. OCCT's STEP writer and much of the
+#: downstream tooling do not opt in, so this is the limit, not 32,767.
+WINDOWS_PATH_MAX = 259
+#: Linux PATH_MAX, 4096 bytes including the NUL.
+POSIX_PATH_MAX = 4095
+#: Longest suffix the run adds to the output's stem: the cancel sentinel.
+LONGEST_SIBLING_SUFFIX = ".cancel"
+#: What a run writes beneath the output's folder at most: ``temp``, a
+#: ``YYYYMMDD-HHMMSS`` stamp and a staged file. The longest staged names
+#: measured are about 35 characters (``disagree_<node>_<half>.brep``,
+#: ``support-body-<i>.<split>....step``, ``pockets-<uuid>-<slab>-before.brep``).
+TEMP_PATH_RESERVE = len(os.path.join("temp", "20261107-153000", "")) + 48
+
+
+def _path_units(s: str) -> int:
+    """How the platform counts a path's length: UTF-16 units on Windows,
+    encoded bytes elsewhere."""
+    if os.name == "nt":
+        return len(s.encode("utf-16-le")) // 2
+    return len(os.fsencode(s))
+
+
+def check_path_lengths(step_path: str) -> None:
+    """:class:`ParamError` if a file the run writes would exceed a name or path
+    limit of the platform (specification.md §3, ``-o``).
+
+    Checked before anything is written, because the limit is otherwise met as
+    an exit 6 after an hour of work, or as a run that cannot write its own
+    ``.log``. Pure syntax, like the rest of parsing apart from making the path
+    absolute: nothing on disk is consulted.
+
+    The longest name is the cancel sentinel ``<stem>.cancel``; the longest
+    path is a file staged under ``temp/<stamp>/`` beside the output, or that
+    sentinel, whichever is longer.
+    """
+    stem = os.path.splitext(os.path.basename(step_path))[0]
+    name = stem + LONGEST_SIBLING_SUFFIX
+    excess_name = _path_units(name) - NAME_MAX
+    if excess_name > 0:
+        raise ParamError(
+            f"The output file name is {excess_name} character(s) longer than "
+            f"the {NAME_MAX} a file name may have: {name}",
+            fix=f"shorten the {{input}} name by {excess_name} character(s)",
+        )
+    folder = os.path.dirname(os.path.abspath(step_path))
+    sentinel = _path_units(os.path.join(folder, name))
+    staged = _path_units(os.path.join(folder, "")) + TEMP_PATH_RESERVE
+    limit = WINDOWS_PATH_MAX if os.name == "nt" else POSIX_PATH_MAX
+    excess_path = max(sentinel, staged) - limit
+    if excess_path > 0:
+        # Naming the input only where its name is what makes the path long:
+        # below that, the temp folder's files are the longest and only a
+        # shorter folder helps.
+        also = ", or shorten the {input} name" if sentinel > staged else ""
+        raise ParamError(
+            f"Paths the run writes would be {excess_path} character(s) longer "
+            f"than the {limit} this platform allows, in {folder}",
+            fix=f"choose an {{output}} with a path {excess_path} character(s) "
+                f"shorter{also}",
+        )
+
+
 def preflight_checks(args: Args) -> None:
     """Filesystem checks that must pass before any geometry work begins."""
+    check_path_lengths(args.output)
     if os.path.isdir(args.output):
         raise ParamError(
             f"-o/--output must name the output .step file, but {args.output} is "

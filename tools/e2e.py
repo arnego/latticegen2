@@ -558,7 +558,7 @@ def scenario_support_gaps(outdir: str) -> Report:
         keel = overhang.detect(body, lp.b).counts()["edge"]
         rep.check("the part has a keel to support", keel > 0, f"{keel} edge sample(s)")
         geometry_checks(rep, out, GAPS, 10.0, 1.5)
-        support_checks(rep, out, GAPS, 10.0, 1.5, (0.0, 0.0, 0.0), 1.5, final_print=True)
+        support_checks(rep, out, GAPS, 10.0, 1.5, (0.0, 0.0, 0.0), 1.0, final_print=True)
     return rep
 
 
@@ -576,14 +576,14 @@ def scenario_support_tilted(outdir: str) -> Report:
     rep.check("runtime under 10 minutes", elapsed < 600, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, BALL, 10.0, 1.5)
-        support_checks(rep, out, BALL, 10.0, 1.5, orient, 1.5, final_print=True)
+        support_checks(rep, out, BALL, 10.0, 1.5, orient, 1.0, final_print=True)
     return rep
 
 
 def scenario_support_cylinder(outdir: str) -> Report:
     """Print support on the test cylinder, prepared for a golden sample.
 
-    Default thickness (``t``), turned `--orient 0 -90 0`. Two things are
+    Default thickness (1 mm), turned `--orient 0 -90 0`. Two things are
     checked beyond the usual: the support checks of §6.2, and that **the same
     run without `--support` is contained in the output** — supports are separate
     bodies beside an unchanged lattice, so this is what says adding them lost
@@ -608,7 +608,7 @@ def scenario_support_cylinder(outdir: str) -> Report:
     rep.check("runtime under 20 minutes", elapsed < 1200, f"{elapsed:.1f}s")
     if proc.returncode == 0:
         geometry_checks(rep, out, CYLINDER, 10.0, 1.5)
-        support_checks(rep, out, CYLINDER, 10.0, 1.5, orient, 1.5, final_print=True)
+        support_checks(rep, out, CYLINDER, 10.0, 1.5, orient, 1.0, final_print=True)
         ref, _ = run_generator(
             ["-i", CYLINDER, "-cc", "10", "-t", "1.5", "-o", plain,
              "--cores", "6", "--orient", "0", "-90", "0"]

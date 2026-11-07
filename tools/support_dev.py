@@ -19,7 +19,7 @@ Usage::
         -o out/hole-block-basic [-t 1.5] [--support-thickness 1.5]
 
 Without ``--lattice``, ``-t`` sets only the classification mesh's deflection
-(``min(t, a)/10``), the grid and the default thickness; there are no struts,
+(``min(t, a)/10``) and the grid; the thickness defaults to the command line's 1 mm; there are no struts,
 and every anchor is on a wall.
 """
 
@@ -36,6 +36,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))
 
 from latticegen2 import occ  # noqa: E402
+from latticegen2.cli import SUPPORT_THICKNESS_DEFAULT  # noqa: E402
 from latticegen2.classify import tessellate_surface  # noqa: E402
 from latticegen2.lattice import lattice_params  # noqa: E402
 from latticegen2.support import overhang  # noqa: E402
@@ -112,7 +113,7 @@ def main(argv=None) -> int:
         lattice, kept = _lattice(args)
         say(f"lattice: {len(lattice)} solid(s), {len(kept)} kept node(s) "
             f"({time.time() - t2:.1f} s)")
-    thickness = args.support_thickness or args.t
+    thickness = args.support_thickness or SUPPORT_THICKNESS_DEFAULT
     t5 = time.time()
     from latticegen2.support.generate import supports_for
 

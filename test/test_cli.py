@@ -286,10 +286,11 @@ def test_orientation_is_accepted_without_support_and_named():
 
 def test_support_defaults_and_names():
     args = _args("--support")
-    # The thickness follows the strut size unless set.
-    assert args.support and args.support_thickness == 1.5
+    # A fixed 1 mm unless set, whatever the strut size.
+    assert args.support and args.support_thickness == 1.0
+    assert _args_at("20", "4", "--support").support_thickness == 1.0
     assert os.path.basename(args.output) == "part-lattice-cc10t1.5-sup.step"
-    assert args.as_dict()["support_thickness"] == "1.5 mm"
+    assert args.as_dict()["support_thickness"] == "1 mm"
     both = _args("--orient", "30", "0", "0", "--support", "--support-thickness", "2")
     assert both.support_thickness == 2.0
     assert os.path.basename(both.output) == "part-lattice-cc10t1.5-rotx30y0z0-sup.step"
@@ -336,8 +337,8 @@ def test_a_support_thickness_beyond_a_minus_t_is_refused_naming_the_largest():
     assert args.support_thickness == 2.535
     with pytest.raises(ParamError, match=r"at most a - t = 2\.535 mm"):
         _args_at("5", "1", "--support", "--support-thickness", "2.536")
-    # Asked only of a supported run: without --support the default t reaches
-    # nothing, so a legal lattice whose a - t is under t is not refused.
+    # Asked only of a supported run: without --support the default reaches
+    # nothing, so a legal lattice whose a - t is under 1 mm is not refused.
     assert _args_at("5", "3").support is False
     with pytest.raises(ParamError, match="at most a - t"):
         _args_at("5", "3", "--support")

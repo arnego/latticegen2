@@ -27,6 +27,7 @@ from ..cli import (
     CC_RANGE,
     CORES_RANGE,
     ORIENT_RANGE,
+    SUPPORT_THICKNESS_DEFAULT,
     SUPPORT_THICKNESS_RANGE,
     T_RANGE,
     USAGE,
@@ -163,7 +164,7 @@ def start_hint(exc: LatticeGenError) -> str:
     no fix."""
     fix = getattr(exc, "fix_text", lambda labels: None)(FIELD_LABELS)
     if fix:
-        return f"To enable Start!, {fix}."
+        return f"To start, {fix}."
     return str(exc).split("\n", 1)[0]
 
 
@@ -196,11 +197,8 @@ class App:
         self.ry_var = tk.StringVar(value="0")
         self.rz_var = tk.StringVar(value="0")
         self.support_var = tk.BooleanVar(value=False)
-        #: Follows ``t`` until the user edits it -- the command line's default,
-        #: made visible. `_thickness_edited` records that it no longer does.
-        self.thickness_var = tk.StringVar(value=self.t_var.get())
-        self._thickness_edited = False
-        self._following_t = False
+        #: Starts at the command line's own default and is always passed.
+        self.thickness_var = tk.StringVar(value=f"{SUPPORT_THICKNESS_DEFAULT:g}")
         self.derived_var = tk.StringVar(value="—")
         self.message_var = tk.StringVar(value="")
         #: The helper tessellating the current input for the orientation view,
@@ -218,8 +216,6 @@ class App:
                     self.outdir_var, self.rx_var, self.ry_var, self.rz_var,
                     self.support_var, self.thickness_var):
             var.trace_add("write", lambda *_a: self._revalidate())
-        self.t_var.trace_add("write", lambda *_a: self._follow_t())
-        self.thickness_var.trace_add("write", lambda *_a: self._thickness_written())
         self.input_var.trace_add("write", lambda *_a: self._request_preview())
         self.support_var.trace_add("write", lambda *_a: self._sync_support_fields())
         self._sync_support_fields()
@@ -400,31 +396,12 @@ class App:
 
         The support arguments are passed only when the box is ticked, so an
         unticked run is a run without `--support` and loads none of that code.
-        The thickness is passed only once edited: until then it is the command
-        line's own default, ``t``, and saying so twice could only disagree.
         """
         extra = ["--orient", self.rx_var.get().strip(), self.ry_var.get().strip(),
                  self.rz_var.get().strip()]
         if self.support_var.get():
-            extra.append("--support")
-            if self._thickness_edited:
-                extra += ["--support-thickness", self.thickness_var.get().strip()]
+            extra += ["--support", "--support-thickness", self.thickness_var.get().strip()]
         return extra
-
-    def _follow_t(self) -> None:
-        """Copy ``t`` into the thickness field while the user has not edited it."""
-        if self._thickness_edited:
-            return
-        self._following_t = True
-        try:
-            self.thickness_var.set(self.t_var.get())
-        finally:
-            self._following_t = False
-
-    def _thickness_written(self) -> None:
-        """A write that did not come from `_follow_t` is the user's edit."""
-        if not self._following_t:
-            self._thickness_edited = True
 
     def _pending_argv(self) -> list[str]:
         """The command line the current field values describe."""
@@ -538,7 +515,7 @@ class App:
             return
         if not chosen:
             self.derived_var.set("—")
-            self.message_var.set("To enable Start!, choose an input file.")
+            self.message_var.set("To start, choose an input file.")
             self.start.state(["disabled"])
             return
 

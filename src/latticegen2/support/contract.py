@@ -62,7 +62,7 @@ class SupportInput:
 
     thickness_mm: float
     """``--support-thickness``: the thinnest free-standing support member, mm
-    (default ``t``). It selects the support grid division ``m``
+    (default :data:`latticegen2.cli.SUPPORT_THICKNESS_DEFAULT`). It selects the support grid division ``m``
     (:func:`latticegen2.cli.support_grid`), which makes it true by
     construction. It is also the margin the pocket search inflates its
     envelope by and that groups nearby supports (``voids.envelope``,

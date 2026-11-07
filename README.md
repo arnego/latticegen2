@@ -150,10 +150,11 @@ the boxes follow; edit the boxes and the part turns. The lattice is oriented to
 the bed, with or without support.
 
 Tick **Generate support** to carry every inner overhang down to the nearest
-strut or wall. **Min thickness** (0.1 mm steps) follows `t` until you edit it,
+strut or wall. **Min thickness** (0.1 mm steps) starts at 1 mm, the command
+line's default,
 and is greyed out until the box is ticked; Start! is greyed out for a value no
 support grid can hold (above `a − t`). Whenever Start! is greyed out, a red
-line beneath the fields says what to change, e.g. `To enable Start!, lower Min
+line beneath the fields says what to change, e.g. `To start, lower Min
 thickness to at most 5.57 mm, or raise cc to at least 10.61 mm.` With it
 ticked, the parts of the
 surface that overhang more than 60° from vertical at the current orientation —
@@ -209,7 +210,7 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `--cores` | int | no | count | 1 – 128 | logical cores on the machine | Maximum cores this run may use — one worker process per core, honoured exactly, in the shared pool used across every process-parallel stage (classification, boundary trim, boundary sew, same-domain unification). It also caps OCCT's *own* native thread pool, which the validity check uses instead of the process pool, so the total stays within the budget either way |
 | `--orient` | 3 × float | no | degrees | −360 – 360 each | `0 0 0` | Print orientation `<rx> <ry> <rz>` of the input relative to the print bed: rotations about the bed's X, then Y, then Z axis. The lattice is oriented to the bed. Works with or without `--support` |
 | `--support` | flag | no | — | — | off | Generate print supports for inner overhangs |
-| `--support-thickness` | float | no | mm | 0.2 – 20, at most `a − t` | `t` | Thinnest free-standing support member; sets how finely the support grid divides the lattice cube. Requires `--support` |
+| `--support-thickness` | float | no | mm | 0.2 – 20, at most `a − t` | 1 | Thinnest free-standing support member; sets how finely the support grid divides the lattice cube. Requires `--support` |
 | `-v`, `--verbose` | flag | no | — | — | off | Verbose console output (a full `.log` is always written) |
 | `-h`, `--help` | flag | no | — | — | — | Usage |
 
@@ -232,7 +233,7 @@ face overhangs more than the rod angle (54.74°). Neither angle is a parameter.
 `--support-thickness` is the thinnest free-standing support member, and it is
 met by construction: the grid divides the lattice cube `m` times, its thinnest
 member is `a/m − t/2` (`a − t` at `m = 1`), and `m` is the finest division
-still that thick — 3 at `cc 10, t 1.5` and the default, giving 1.61 mm. A value
+still that thick — 4 at `cc 10, t 1.5` and the default 1 mm, giving 1.02 mm. A value
 above `a − t` is held by no division and is refused.
 Supports are written as **separate bodies** beside the unchanged lattice,
 sharing faces with the struts and the walls so that they merge into the

@@ -48,6 +48,10 @@ T_RANGE = (0.4, 20.0)
 CORES_RANGE = (1, 128)
 ORIENT_RANGE = (-360.0, 360.0)
 SUPPORT_THICKNESS_RANGE = (0.2, 20.0)
+#: `--support-thickness` when it is not given, mm: the thinnest free-standing
+#: support member a run is held to (specification.md §4.6). Fixed rather than
+#: derived from `t`, so the window can show it before anything is entered.
+SUPPORT_THICKNESS_DEFAULT = 1.0
 
 #: The steepest a support face may overhang, from vertical, in degrees: the
 #: lattice rod angle ``THETA`` itself (specification.md §4.6), an expression
@@ -126,7 +130,7 @@ Optional:
                         with supports no steeper than the lattice rod angle
   --support-thickness <mm>
                         Thinnest free-standing support member (0.2-20, at
-                        most a - t, default -t). Sets how finely the support
+                        most a - t, default 1). Sets how finely the support
                         grid divides the lattice cube. Requires --support.
   -v, --verbose         Verbose console output (a full .log is always written)
   -h, --help            Show this message and exit
@@ -494,11 +498,11 @@ def parse_args(argv: list[str]) -> Args:
         # nothing would leave the user believing supports had been generated.
         raise ParamError("--support-thickness requires --support.")
     if thickness is None:
-        thickness = t
+        thickness = SUPPORT_THICKNESS_DEFAULT
     _in_range("--support-thickness", thickness, *SUPPORT_THICKNESS_RANGE)
     if support and support_grid(a_edge, t, thickness) is None:
         # Asked only of a supported run: without `--support` the value is the
-        # default `t` and reaches nothing, so it must not refuse a lattice.
+        # default and reaches nothing, so it must not refuse a lattice.
         raise ParamError(
             f"--support-thickness {format_param(thickness)} mm cannot be met at "
             f"cc={format_param(cc)}, t={format_param(t)}: the thinnest support "

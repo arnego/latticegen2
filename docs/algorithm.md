@@ -2393,7 +2393,7 @@ Extra symbols: `b` build direction, `θ = arcsin(sqrt(2/3))` the lattice rod
 angle, which is also the steepest a support face may overhang,
 `φ_s = 60°` the angle past which the input's surface is supported
 (`SUPPORT_START_DEG`), `h = 0.5 mm` the support step, `t_s` the thinnest
-free-standing support member (`--support-thickness`, default `t`, at most
+free-standing support member (`--support-thickness`, default 1 mm, at most
 `a − t`), `Ω` the input body, `n` its outward normal.
 
 ### 14.0 Orientation
@@ -3014,7 +3014,9 @@ member 1.607 mm, and pass every check of specification.md §6.2:
 | `80mm-test-ball.step` | 35 20 −110 | 1 | 4,727 mm³ (−11 %) | 0 | 0 mm³ |
 | `test-cylinder.STEP` | 0 −90 0 | 3 | 12,672 mm³ (−17 %) | 0 | 0 mm³ |
 
-The finer grid fills no fine node beside a rod on either part. The figures
+The finer grid fills no fine node beside a rod on either part. At the 1 mm
+default, `m = 4` (thinnest member 1.018 mm): the ball's support is one body
+of 4,481 mm³, the cylinder's three of 11,487 mm³, every check passing. The figures
 below were measured at `m = 2`.
 
 Coverage on the cylinder: 179 ceiling points read as unbacked by a probe moved

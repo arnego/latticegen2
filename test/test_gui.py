@@ -433,11 +433,11 @@ def test_the_window_builds_and_validates_with_the_parser(tmp_path, tk_root):
     app.cc_var.set("20")
     app.t_var.set("4")
     root.update()
-    assert app.message_var.get() == "To enable Start!, choose an input file."
+    assert app.message_var.get() == "To start, choose an input file."
     assert "disabled" in app.start.state()
     app.t_var.set("18")
     root.update()
-    assert app.message_var.get() == ("To enable Start!, make t smaller than 14.14 mm, "
+    assert app.message_var.get() == ("To start, make t smaller than 14.14 mm, "
                                      "or cc larger than 25.46 mm.")
     app.t_var.set("4")
     app.input_var.set(str(step))
@@ -450,7 +450,7 @@ def test_the_window_builds_and_validates_with_the_parser(tmp_path, tk_root):
     # a copy of it living here.
     app.t_var.set("18")
     root.update()
-    assert app.message_var.get().startswith("To enable Start!, make t smaller than")
+    assert app.message_var.get().startswith("To start, make t smaller than")
     assert "disabled" in app.start.state()
     # The line is red: it is shown only while Start! is greyed out.
     assert str(app.message.cget("foreground")) == "#a11"
@@ -908,21 +908,18 @@ def test_the_orientation_panel_is_always_there_and_support_fields_grey_out(tmp_p
         app.support_var.set(True)
         tk_root.update()
         assert app.thickness_spin.instate(["!disabled"])
-        # The thickness follows t, and is the command line's default, so it is
-        # not passed until edited.
-        assert app.thickness_var.get() == "1.5"
+        # The thickness starts at the command line's 1 mm default, stays put
+        # when t changes, and is always passed with --support.
+        assert app.thickness_var.get() == "1"
+        assert app._pending_argv()[-3:] == ["--support", "--support-thickness", "1"]
         app.t_var.set("1.2")
         tk_root.update()
-        assert app.thickness_var.get() == "1.2"
-        assert app._pending_argv()[-1] == "--support"
+        assert app.thickness_var.get() == "1"
         assert app.derived_var.get().endswith("-rotx30y0z0-sup.step")
         assert app.start.instate(["!disabled"])
-
-        # Once edited it stays put, and is passed.
         app.thickness_var.set("0.8")
         app.t_var.set("1.5")
         tk_root.update()
-        assert app.thickness_var.get() == "0.8"
         assert app._pending_argv()[-3:] == ["--support", "--support-thickness", "0.8"]
 
         # Beyond a - t no support grid can hold it: the parser refuses it, its
@@ -931,7 +928,7 @@ def test_the_orientation_panel_is_always_there_and_support_fields_grey_out(tmp_p
         app.thickness_var.set("6")
         tk_root.update()
         assert app.start.instate(["disabled"])
-        assert app.message_var.get() == ("To enable Start!, lower Min thickness to at "
+        assert app.message_var.get() == ("To start, lower Min thickness to at "
                                          "most 5.57 mm, or raise cc to at least 10.61 mm.")
         app.thickness_var.set("1.5")
         tk_root.update()

@@ -16,10 +16,16 @@ controlled pair. :data:`SECONDS_SUPPORT` is the ``rehearsal-support`` e2e
 scenario (docs/specification.md §6.1, ``--support-thickness 1``) of
 2026-11-06, every stage of it, with the support grid through the rods' centre
 axes (docs/algorithm.md §14.3 S4): 1 h 46 m end to end, of which ``pockets``
--- the pocket search across the pool, then the overlap check on the master --
-is 54 % and ``support`` 18 % of the time. Its lattice stages agree with the plain run's to
-within a few per cent except ``validate``, which checks the 52 support bodies
-too.
+-- the pocket search across the pool, then the overlap check -- was 54 %.
+Its lattice stages agree with the plain run's to within a few per cent except
+``validate``, which checks the 52 support bodies too.
+
+**``pockets`` is projected, not measured.** That run's overlap check took
+~2,121 s on the master; it now runs across the worker pool
+(docs/algorithm.md §14.2), and ``pockets`` carries ~400 s for it instead —
+the six workers' share of the same work, with dispatch overhead. That makes
+``pockets`` 1,684 s, 37 % of a projected 1 h 17 m, and ``support`` 25 %.
+Replace it with the measured figure at the next ``rehearsal-support`` run.
 
 **What these tables are not.** They are one part's shape, on one machine. A
 small part is boundary- and export-dominated — on ``80mm-test-ball``
@@ -74,10 +80,11 @@ SECONDS_SUPPORT: dict[str, float] = {
     "simplify": 240.5,
     "overhang": 6.9,
     "support": 1130.6,
-    "pockets": 3404.9,
+    "pockets": 1683.9,  # projected: 3,404.9 measured, less ~2,121 serial
+                        # overlap check, plus ~400 across the pool
     "validate": 558.1,
     "export": 106.2,
-}  # 1 h 45 m 35 s end to end
+}  # 1 h 16 m 46 s projected end to end (1 h 45 m 35 s measured)
 
 
 def _permille(seconds: dict[str, float], stages: tuple) -> dict[str, int]:

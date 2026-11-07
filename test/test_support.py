@@ -218,6 +218,97 @@ def test_a_support_overlapping_the_lattice_fails_rather_than_shipping():
         assemble.assemble([junction], [into], lp, kept)
 
 
+def test_overlap_with_the_lattice_sums_over_junction_groups():
+    """The junctions share no volume, so a support's overlap with all of them
+    is the sum over any grouping of them: the check can be split into jobs."""
+    from latticegen2.lattice import nodes
+    from latticegen2.support.assemble import _LocalLattice, _Overlaps
+
+    lp = lattice_params(10.0, 1.5)
+    kept = np.array([[i, j, k] for i in range(3) for j in range(3) for k in range(3)],
+                    dtype=np.int64)
+    pos = nodes(lp, kept)
+    lo = pos.min(axis=0) - 1.0
+    support = _box(tuple(lo), tuple((pos.mean(axis=0) - lo).tolist()))
+    local = _LocalLattice(lp, kept)
+    idx = local.near_solid(support)
+    groups = local.groups(idx, 2)
+    chk = _Overlaps([support], local)
+    whole = chk.run(("lattice", 0, idx))[0]
+    parts = sum(chk.run(("lattice", 0, g))[0] for g in groups)
+    assert len(groups) > 1 and sum(len(g) for g in groups) == len(idx)
+    assert whole > 1.0
+    assert parts == pytest.approx(whole, rel=1e-9)
+
+
+def _fused(a, b):
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+
+    from latticegen2 import occ
+
+    return occ.solids(BRepAlgoAPI_Fuse(a, b).Shape())[0]
+
+
+def test_a_junction_only_in_a_supports_box_is_not_asked():
+    """An L-shaped support's box holds a junction no face of it comes near: it
+    lies outside the support, and only the support's own faces decide that."""
+    from latticegen2.support.assemble import _LocalLattice
+
+    lp = lattice_params(10.0, 1.5)
+    kept = np.zeros((1, 3), dtype=np.int64)          # one junction, at the origin
+    ell = _fused(_box((-20.0, -20.0, -2.0), (10.0, 40.0, 4.0)),
+                 _box((-20.0, 10.0, -2.0), (40.0, 10.0, 4.0)))
+    local = _LocalLattice(lp, kept)
+    assert len(local.near((np.array([-20.0, -20.0, -2.0]), np.array([20.0, 20.0, 2.0])))) == 1
+    assert len(local.near_solid(ell)) == 0
+
+
+def test_a_junction_wholly_inside_a_support_is_still_caught():
+    """No face of the support comes near it, and it is asked anyway: its node
+    lies inside the support."""
+    from latticegen2.errors import ProcessingError
+    from latticegen2.junction import build_template
+    from latticegen2.support import assemble
+    from latticegen2.support.assemble import _LocalLattice
+
+    lp = lattice_params(10.0, 1.5)
+    kept = np.zeros((1, 3), dtype=np.int64)
+    around = _box((-10.0, -10.0, -10.0), (20.0, 20.0, 20.0))
+    assert _LocalLattice(lp, kept).near_solid(around).tolist() == [0]
+    with pytest.raises(ProcessingError, match="overlaps the lattice"):
+        assemble.assemble([build_template(lp).solid], [around], lp, kept)
+
+
+def test_the_overlap_check_reads_alike_across_the_worker_pool(tmp_path):
+    """The same jobs in workers as in this process: the same refusal, word for
+    word, for the lattice and for two supports."""
+    from latticegen2 import occ
+    from latticegen2.errors import ProcessingError
+    from latticegen2.junction import build_template
+    from latticegen2.lattice import nodes
+    from latticegen2.parallel import WorkerPool
+    from latticegen2.support import assemble
+
+    lp = lattice_params(10.0, 1.5)
+    kept = np.array([[i, j, 0] for i in range(3) for j in range(3)], dtype=np.int64)
+    template = build_template(lp).solid
+    lattice = [template.Moved(occ.translation(p)) for p in nodes(lp, kept)]
+    into = _box((-0.5, -0.5, -0.5), (1.0, 1.0, 1.0))
+    a = _box((40.0, 0.0, 5.0), (5.0, 5.0, 2.0))
+    b = _box((44.0, 0.0, 5.0), (2.0, 5.0, 2.0))      # 1 mm into `a`
+
+    def refusal(supports, pool=None):
+        with pytest.raises(ProcessingError) as got:
+            assemble.assemble(lattice, supports, lp, kept, pool=pool, tmpdir=str(tmp_path))
+        return str(got.value)
+
+    here = [refusal([into, a]), refusal([a, b])]
+    with WorkerPool(2) as pool:
+        there = [refusal([into, a], pool), refusal([a, b], pool)]
+    assert "overlaps the lattice" in here[0] and "overlap by" in here[1]
+    assert there == here
+
+
 # --- the whole pipeline -------------------------------------------------------
 
 

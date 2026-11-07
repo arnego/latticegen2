@@ -13,6 +13,7 @@ are then additive by construction, which is what the run summary reports.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -39,6 +40,19 @@ origin -- 0.4 mm cells reach 400 m."""
 CONTACT_GAP = 1e-3
 """mm. Bounding boxes closer than this are treated as touching when choosing
 which pairs to intersect. Over-selecting costs a boolean, never a wrong answer."""
+
+OVERLAP_GROUP_JUNCTIONS = 32
+"""Junction instances per intersection in the overlap check. The junctions do
+not overlap each other (docs/algorithm.md §3.2), so a support's overlap with
+all of them is the sum of its overlaps with any partition of them, and each
+group is one job for the worker pool. Measured on the ball's and the
+cylinder's supports: an intersection costs ~45 ms per junction in it, and the
+same in groups of 8 to 160 to within 10 %, so small groups cost nothing and
+let one large support spread over every worker."""
+
+OVERLAP_GROUP_MIN = 8
+"""The smallest group used to give every worker several jobs on a small part:
+the bottom of the range measured flat."""
 
 
 @dataclass
@@ -167,6 +181,58 @@ class _LocalLattice:
             self._template = build_template(self.lp).solid
         return [self._instance(int(i)) for i in np.nonzero(hit)[0]]
 
+    def near_solid(self, solid) -> np.ndarray:
+        """Indices of the junctions that can share volume with ``solid``, sorted.
+
+        Tighter than :meth:`near` on its box, and exact: a junction lies within
+        ``reach`` of its node along every axis, so one whose box meets the box
+        of no face of ``solid`` has none of ``solid``'s boundary in it, and is
+        wholly inside or wholly outside; its node says which. Inside it is
+        kept, and reports its whole volume as overlap."""
+        if not len(self.positions):
+            return np.zeros(0, dtype=np.int64)
+        lo, hi = _boxes([solid])[0]
+        R = self.reach
+        idx = np.nonzero(np.all((self.positions >= lo - R)
+                                & (self.positions <= hi + R), axis=1))[0]
+        if not len(idx):
+            return idx
+        fb = np.array([np.concatenate(occ.bounding_box(f)) for f in occ.faces(solid)])
+        flo, fhi = fb[:, :3] - CONTACT_GAP, fb[:, 3:] + CONTACT_GAP
+        P = self.positions[idx]
+        meets = np.zeros(len(P), dtype=bool)
+        for a in range(0, len(P), 512):
+            p = P[a:a + 512, None, :]
+            meets[a:a + 512] = np.all((p - R <= fhi[None]) & (p + R >= flo[None]),
+                                      axis=2).any(axis=1)
+        inside = []
+        rest = idx[~meets]
+        if len(rest):
+            cls = BRepClass3d_SolidClassifier(solid)
+            for j in rest:
+                cls.Perform(gp_Pnt(*map(float, self.positions[j])), 1e-7)
+                if cls.State() != TopAbs_State.TopAbs_OUT:
+                    inside.append(j)
+        return np.sort(np.concatenate([idx[meets], np.asarray(inside, dtype=np.int64)]))
+
+    def groups(self, idx: np.ndarray, size: int = OVERLAP_GROUP_JUNCTIONS) -> list:
+        """``idx`` split into groups of about ``size`` junctions near each
+        other: sorted by 4-cell block of the lattice index, then cut in runs."""
+        if not len(idx):
+            return []
+        b = self._nodes[idx] // 4
+        order = np.lexsort((b[:, 2], b[:, 1], b[:, 0]))
+        k = max(1, int(np.ceil(len(idx) / size)))
+        return [g for g in np.array_split(idx[order], k) if len(g)]
+
+    def instances(self, idx) -> list:
+        """Junction instances ``idx``, less their lost pieces."""
+        if self._template is None:
+            from ..junction import build_template
+
+            self._template = build_template(self.lp).solid
+        return [self._instance(int(i)) for i in idx]
+
     def _instance(self, i: int):
         """Junction ``i``'s template, less any lost piece of it.
 
@@ -290,29 +356,146 @@ class _LocalLattice:
         return (n[:, 0] * KEY_SPAN + n[:, 1]) * KEY_SPAN + n[:, 2]
 
 
+class _Overlaps:
+    """The overlap check's jobs, run alike in this process or in a worker.
+
+    A job is ``("lattice", i, junction indices)`` -- support ``i`` against a
+    group of junction instances -- or ``("pair", i, j)``, two supports. Each
+    answers ``(volume, (largest piece's volume, its centroid) or None)``."""
+
+    def __init__(self, supports: list, local: _LocalLattice):
+        self.supports = supports
+        self.local = local
+
+    def run(self, job) -> tuple:
+        kind, i, other = job
+        if kind == "lattice":
+            # Cutting a lost piece out of an instance can fail, so what is left
+            # of one here is not an overlap: on the rehearsal part, two tips of
+            # 0.008 and 0.002 mm³, which would send a 9,000-face support body to
+            # the dominant lattice solid for nothing.
+            common = [c for c in _common_solids(self.supports[i],
+                                                self.local.instances(other))
+                      if not self.local.is_lost(c)]
+        else:
+            common = _common_solids(self.supports[i], [self.supports[other]])
+        vols = [occ.volume(c) for c in common]
+        if not common:
+            return 0.0, None
+        k = int(np.argmax(vols))
+        return float(sum(vols)), (float(vols[k]), np.round(occ.centroid(common[k]), 3).tolist())
+
+
+_WORKER_OVERLAPS: dict = {}
+"""Per worker process: the staged supports and lattice, read once per run."""
+
+
+def _overlap_worker(job):
+    from ..lattice import lattice_params
+    from ..parallel import compound_children, read_brep
+    from ..runlog import peak_rss_bytes
+
+    (supports_path, kept_path, lost_path, lp_args), task, _cost = job
+    chk = _WORKER_OVERLAPS.get(supports_path)
+    if chk is None:
+        _WORKER_OVERLAPS.clear()
+        lost = compound_children(read_brep(lost_path)) if lost_path else ()
+        local = _LocalLattice(lattice_params(*lp_args), np.load(kept_path), lost)
+        chk = _WORKER_OVERLAPS[supports_path] = _Overlaps(
+            compound_children(read_brep(supports_path)), local)
+    return chk.run(task) + (peak_rss_bytes(),)
+
+
 def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
-             report=None, lost=()) -> AssembleResult:
-    """Check ``supports`` overlap nothing, then return lattice + supports."""
+             report=None, lost=(), pool=None, tmpdir: "str | None" = None) -> AssembleResult:
+    """Check ``supports`` overlap nothing, then return lattice + supports.
+
+    Every support is intersected with the junction instances that can reach it
+    (:meth:`_LocalLattice.near_solid`), in groups, and with every support whose
+    box touches its own. The groups and pairs are independent jobs, run across
+    ``pool`` when it is active and ``tmpdir`` is given to stage the shapes in,
+    and in this process otherwise, by the same code."""
     if not supports:
         # Nothing to add and nothing to measure: the lattice passes through as
         # the same objects, and `validate` measures its volume anyway.
         return AssembleResult(list(lattice), None, 0.0, {})
     check_supports(supports, lattice)
+    t0 = time.perf_counter()
 
-    local = _LocalLattice(lp, np.asarray(kept_nodes), lost)
+    kept_nodes = np.asarray(kept_nodes)
+    local = _LocalLattice(lp, kept_nodes, lost)
     boxes = _boxes(supports)
-    lattice_boxes = None
     n = len(supports)
+    parallel = pool is not None and pool.active and tmpdir is not None
+    near = [local.near_solid(s) for s in supports]
+    n_tools = int(sum(len(x) for x in near))
+    # Four jobs a worker where the part is small, within the range measured
+    # flat (OVERLAP_GROUP_JUNCTIONS), so no worker waits on one long job.
+    workers = pool.workers if parallel else 1
+    size = int(np.clip(np.ceil(n_tools / (4 * workers)),
+                       OVERLAP_GROUP_MIN, OVERLAP_GROUP_JUNCTIONS))
+    jobs, cost = [], []
     for i, s in enumerate(supports):
-        if report is not None:
-            report("checking supports against the lattice", i, n)
-        # Cutting a lost piece out of an instance can fail, so what is left of
-        # one here is not an overlap: on the rehearsal part, two tips of 0.008
-        # and 0.002 mm³, which would send a 9,000-face support body to the
-        # dominant lattice solid for nothing.
-        overlap = float(sum(occ.volume(c) for c in _common_solids(s, local.near(boxes[i]))
-                            if not local.is_lost(c)))
-        if overlap > SUPPORT_OVERLAP_TOL:
+        faces = len(occ.faces(s))
+        for g in local.groups(near[i], size):
+            jobs.append(("lattice", i, g))
+            cost.append(len(g) * faces)
+    pairs = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _touch(boxes[i], boxes[j]):
+                jobs.append(("pair", i, j))
+                cost.append(len(occ.faces(supports[i])) + len(occ.faces(supports[j])))
+                pairs += 1
+    select_s = time.perf_counter() - t0
+
+    label = "checking supports for overlap"
+    if report is not None:
+        report(label, 0, len(jobs))
+    if parallel and len(jobs) > 1:
+        import os
+        import uuid
+
+        from ..parallel import write_brep
+
+        tag = os.path.join(tmpdir, f"overlap-{uuid.uuid4().hex[:8]}")
+        write_brep(occ.compound(list(supports)), tag + "-supports.brep")
+        np.save(tag + "-kept.npy", kept_nodes)
+        lost_path = None
+        if lost:
+            lost_path = tag + "-lost.brep"
+            write_brep(occ.compound(list(lost)), lost_path)
+        stage = (tag + "-supports.brep", tag + "-kept.npy", lost_path,
+                 (lp.cc, lp.t, tuple(map(float, lp.orient))))
+        # Largest first, so the one large support's groups start at once and
+        # the small jobs fill in behind them.
+        got, _rss = pool.run(
+            _overlap_worker, [(stage, job, c) for job, c in zip(jobs, cost)],
+            sort_by=lambda w: w[2],
+            on_result=(lambda done, total: report(label, done, total)) if report else None)
+        results = [r[:2] for r in got]
+    else:
+        chk = _Overlaps(supports, local)
+        results = []
+        for k, job in enumerate(jobs):
+            results.append(chk.run(job))
+            if report is not None:
+                report(label, k + 1, len(jobs))
+
+    # Junction overlaps sum per support over its groups: the junctions share no
+    # volume, so the groups' answers add up to the whole.
+    against_lattice = np.zeros(n)
+    where: list = [None] * n
+    for job, (vol, at) in zip(jobs, results):
+        if job[0] != "lattice":
+            continue
+        i = job[1]
+        against_lattice[i] += vol
+        if at is not None and (where[i] is None or at[0] > where[i][0]):
+            where[i] = at
+    lattice_boxes = None
+    for i, s in enumerate(supports):
+        if against_lattice[i] > SUPPORT_OVERLAP_TOL:
             # A junction instance is the template, untrimmed, so a reading here
             # is confirmed against the lattice solids themselves before it is
             # believed.
@@ -327,24 +510,13 @@ def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
                     f"{_overlap_at(common)}; supports must share faces with the "
                     f"lattice, never volume (docs/algorithm.md §14.2)."
                 )
-    pairs = 0
-    for i in range(n):
-        if report is not None:
-            report("checking supports against each other", i, n)
-        for j in range(i + 1, n):
-            if not _touch(boxes[i], boxes[j]):
-                continue
-            pairs += 1
-            common = _common_solids(supports[i], [supports[j]])
-            overlap = float(sum(occ.volume(c) for c in common))
-            if overlap > SUPPORT_OVERLAP_TOL:
-                raise ProcessingError(
-                    f"Two support bodies overlap by {overlap:.3e} mm^3 near "
-                    f"{_overlap_at(common)}; neighbouring supports must share faces, "
-                    f"never volume (docs/algorithm.md §14.2)."
-                )
-    if report is not None:
-        report("checking supports against each other", n, n)
+    for job, (vol, at) in zip(jobs, results):
+        if job[0] == "pair" and vol > SUPPORT_OVERLAP_TOL:
+            raise ProcessingError(
+                f"Two support bodies overlap by {vol:.3e} mm^3 near "
+                f"{at[1]}; neighbouring supports must share faces, "
+                f"never volume (docs/algorithm.md §14.2)."
+            )
 
     lattice_volume = float(sum(occ.volume(s) for s in lattice))
     support_volume = float(sum(occ.volume(s) for s in supports))
@@ -352,4 +524,8 @@ def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
                           support_volume, {
                               "support_bodies": n,
                               "support_pairs_checked": pairs,
+                              "support_overlap_jobs": len(jobs),
+                              "support_overlap_junctions": n_tools,
+                              "support_overlap_select_s": round(select_s, 2),
+                              "support_overlap_s": round(time.perf_counter() - t0, 2),
                           })

@@ -186,8 +186,9 @@ becomes `Stop!`, and two bars appear:
   `pockets`, between `simplify` and `validate` — and each gets a band of its
   own. The plain layout comes from the plain run of the 2026-10-11 controlled
   pair in docs/profiling-reports.md, the supported layout from the 2026-11-06
-  `rehearsal-support` run, every stage of it; there `pockets` alone is 53 % of
-  the bar. Both are computed once when the window starts. A run announces its stages when it
+  `rehearsal-support` run, every stage of it but `pockets`, which is projected
+  for the overlap check running across the worker pool (§10): 37 % of the
+  bar, against 53 % as measured. Both are computed once when the window starts. A run announces its stages when it
   begins, and that list is what selects the layout;
 * the **second** bar shows work within the stage — `boundary trim: 9,776 /
   19,552` — with the text drawn over it.
@@ -628,11 +629,14 @@ diagnosis. Remove an item once it's fixed and verified.*
   `custom-designed-support-feature`; every support scenario passes, and
   `rehearsal-support` passes at production scale since 2026-11-02, and since
   the second run of 2026-11-06 with no support warning (1 h 43 m;
-  docs/algorithm.md §14.4), its stage times in `gui/weights.py`. What remains:
-  the overlap check of docs/algorithm.md §14.2 dispatched across the worker
-  pool — ~35 min at one core on that run, its largest serial piece — and the
-  trims likewise if a measurement shows more than 5 %; and the free-standing
-  thickness gate. `rehearsal-support` does not run the final-print
+  docs/algorithm.md §14.4), its stage times in `gui/weights.py`. The overlap
+  check of docs/algorithm.md §14.2 — ~35 min at one core on that run, its
+  largest serial piece — now runs across the worker pool, measured 3× faster
+  on the ball and cylinder supports; **`rehearsal-support` has not been re-run
+  with it**, so its saving there is projected (~2,121 s → ~400 s) and
+  `gui/weights.py`'s `pockets` share is that projection, to be replaced with
+  the measured figure at the next final verification. What remains: the trims across the pool if
+  a measurement shows more than 5 %, and the free-standing thickness gate. `rehearsal-support` does not run the final-print
   check (§6.2's "hangs over powder"), so the axis grid's freedom from free tips
   is verified on the four small support scenarios only.
   Golden samples for the three support scenarios wait for an inspected output.

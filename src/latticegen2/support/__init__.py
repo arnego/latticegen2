@@ -109,7 +109,8 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
             rl.always(note)
         stats.update(result.stats)
         assembled = assemble.assemble(lattice, list(result.supports), lp,
-                                      kept_nodes, report=rl.substage, lost=lost)
+                                      kept_nodes, report=rl.substage, lost=lost,
+                                      pool=pool, tmpdir=tmpdir)
     finally:
         timer[0].__exit__(None, None, None)
 

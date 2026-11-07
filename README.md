@@ -206,7 +206,7 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `-i`, `--input` | path | yes | — | — | — | STEP file whose solid defines the lattice bounds |
 | `-cc` | float | yes | mm | 0.4 – 50 | — | XY distance between the bottom nodes of adjacent cells |
 | `-t` | float | yes | mm | 0.4 – 20 | — | Side length of the diamond strut profile |
-| `-o`, `--output` | path | no | — | — | `<input_stem>-lattice-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing |
+| `-o`, `--output` | path | no | — | — | `<input_stem>-lattice-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing. Values in the default name are rounded to at most 2 decimals |
 | `--cores` | int | no | count | 1 – 128 | logical cores on the machine | Maximum cores this run may use — one worker process per core, honoured exactly, in the shared pool used across every process-parallel stage (classification, boundary trim, boundary sew, same-domain unification). It also caps OCCT's *own* native thread pool, which the validity check uses instead of the process pool, so the total stays within the budget either way |
 | `--orient` | 3 × float | no | degrees | −360 – 360 each | `0 0 0` | Print orientation `<rx> <ry> <rz>` of the input relative to the print bed: rotations about the bed's X, then Y, then Z axis. The lattice is oriented to the bed. Works with or without `--support` |
 | `--support` | flag | no | — | — | off | Generate print supports for inner overhangs |
@@ -239,11 +239,11 @@ Supports are written as **separate bodies** beside the unchanged lattice,
 sharing faces with the struts and the walls so that they merge into the
 enveloping part in your CAD tool; every support body is a manifold solid, and
 pockets of powder they would trap are filled and joined to them. A supported
-run adds `-sup` to the default file name:
+run adds `-sup` and the support thickness to the default file name:
 
 ```bash
 python src/main.py -i part.step -cc 10 -t 1.5 --orient 30 0 0 --support
-# -> part-lattice-cc10t1.5-rotx30y0z0-sup.step
+# -> part-lattice-cc10t1.5-rotx30y0z0-sup1.step
 ```
 
 `--cores` is an optional budget; it resolves to a concrete figure from the

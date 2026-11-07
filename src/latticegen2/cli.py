@@ -34,7 +34,7 @@ import math
 from . import orient as _orient
 from . import sysinfo
 from .errors import InputGeometryError, OutputError, ParamError
-from .lattice import THETA, format_param, variant_suffix
+from .lattice import THETA, format_name_param, format_param, variant_suffix
 
 #: The ranges specification.md §3's flag table declares, as data.
 #:
@@ -327,11 +327,12 @@ def default_workers(cores: int | None) -> int:
 
 
 def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: float,
-                         orient=_orient.IDENTITY, support: bool = False):
+                         orient=_orient.IDENTITY, support: bool = False,
+                         thickness: float | None = None):
     """``(step_path, log_path)`` per specification.md §3.
 
-    ``orient`` and ``support`` add ``-rotx<rx>y<ry>z<rz>`` and ``-sup`` to the
-    default name, each only when it applies
+    ``orient`` and ``support`` add ``-rotx<rx>y<ry>z<rz>`` and ``-sup<thickness>``
+    to the default name, each only when it applies
     (:func:`latticegen2.lattice.variant_suffix`).
 
     Default name is ``<input_stem>-lattice-cc<cc>t<t>.step`` beside the input.
@@ -352,8 +353,8 @@ def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: 
         directory = os.path.dirname(input_path) or "."
         step_path = os.path.join(
             directory,
-            f"{stem}-lattice-cc{format_param(cc)}t{format_param(t)}"
-            f"{variant_suffix(orient, support)}.step",
+            f"{stem}-lattice-cc{format_name_param(cc)}t{format_name_param(t)}"
+            f"{variant_suffix(orient, support, thickness=thickness)}.step",
         )
     else:
         # The validated string is the one used. Trailing space is stripped
@@ -513,7 +514,7 @@ def parse_args(argv: list[str]) -> Args:
         )
 
     step_path, log_path = resolve_output_paths(
-        input_path, output, cc, t, orient, support
+        input_path, output, cc, t, orient, support, thickness
     )
     return Args(
         orient=orient,

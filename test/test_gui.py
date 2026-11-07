@@ -932,7 +932,7 @@ def test_the_orientation_panel_is_always_there_and_support_fields_grey_out(tmp_p
         app.t_var.set("1.2")
         tk_root.update()
         assert app.thickness_var.get() == "1"
-        assert app.derived_var.get().endswith("-rotx30y0z0-sup.step")
+        assert app.derived_var.get().endswith("-rotx30y0z0-sup1.step")
         assert app.start.instate(["!disabled"])
         app.thickness_var.set("0.8")
         app.t_var.set("1.5")

@@ -373,7 +373,7 @@ def scenario_invalid_input(outdir: str) -> Report:
 
 
 CYLINDER_SUPPORT_GOLDEN = os.path.join(
-    TESTDIR, "test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step")
+    TESTDIR, "test-cylinder-cc10t1.5-rotx0y-90z0-sup1-golden-sample.step")
 
 
 def support_checks(rep: Report, output: str, input_path: str, cc: float, t: float,
@@ -592,7 +592,7 @@ def scenario_support_cylinder(outdir: str) -> Report:
 
     **No golden sample exists yet, deliberately** (docs/testing.md): one is only
     worth having once a human has inspected the output it pins. `golden_check`
-    reports `SKIP` until `test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step`
+    reports `SKIP` until `test-cylinder-cc10t1.5-rotx0y-90z0-sup1-golden-sample.step`
     is committed, and compares against it from then on.
     """
     rep = Report("support-cylinder")
@@ -625,7 +625,7 @@ def scenario_support_cylinder(outdir: str) -> Report:
 
 REHEARSAL = os.path.join(TESTDIR, "TD_HX_rehearsal_test.step")
 REHEARSAL_SUPPORT_GOLDEN = os.path.join(
-    TESTDIR, "TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step")
+    TESTDIR, "TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup1-golden-sample.step")
 
 
 def scenario_rehearsal_support(outdir: str) -> Report:

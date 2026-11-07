@@ -289,12 +289,14 @@ def test_support_defaults_and_names():
     # A fixed 1 mm unless set, whatever the strut size.
     assert args.support and args.support_thickness == 1.0
     assert _args_at("20", "4", "--support").support_thickness == 1.0
-    assert os.path.basename(args.output) == "part-lattice-cc10t1.5-sup.step"
+    assert os.path.basename(args.output) == "part-lattice-cc10t1.5-sup1.step"
     assert args.as_dict()["support_thickness"] == "1 mm"
     both = _args("--orient", "30", "0", "0", "--support", "--support-thickness", "2")
     assert both.support_thickness == 2.0
-    assert os.path.basename(both.output) == "part-lattice-cc10t1.5-rotx30y0z0-sup.step"
-    assert os.path.basename(both.log_path) == "part-lattice-cc10t1.5-rotx30y0z0-sup.log"
+    assert os.path.basename(both.output) == "part-lattice-cc10t1.5-rotx30y0z0-sup2.step"
+    assert os.path.basename(both.log_path) == "part-lattice-cc10t1.5-rotx30y0z0-sup2.log"
+    thin = _args("--support", "--support-thickness", "0.8")
+    assert os.path.basename(thin.output) == "part-lattice-cc10t1.5-sup0.8.step"
 
 
 @pytest.mark.parametrize("extra", [

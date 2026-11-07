@@ -533,7 +533,8 @@ class App:
         """
         args = parse_args(self._pending_argv())
         default_step, _log = resolve_output_paths(
-            args.input, None, args.cc, args.t, args.orient, args.support)
+            args.input, None, args.cc, args.t, args.orient, args.support,
+            args.support_thickness)
         folder = self.outdir_var.get().strip() or os.path.dirname(args.input)
         return os.path.join(os.path.abspath(folder), os.path.basename(default_step))
 

@@ -712,7 +712,8 @@ def _run_with_pool(
         stats["support_volume_mm3"] = round(total_volume - lattice_volume, 4)
     stats["output_volume_mm3"] = round(total_volume, 4)
 
-    name = part_name(args.input, args.cc, args.t, args.orient, args.support)
+    name = part_name(args.input, args.cc, args.t, args.orient, args.support,
+                     args.support_thickness)
     with Timer(rl, "export"):
         # One opaque `STEPControl_Writer` call over the whole result, so there is
         # nothing to count — 10.7 % of the rehearsal's clock with no fraction to

@@ -360,7 +360,24 @@ def test_a_cancelled_run_reports_where_its_temp_folder_is():
     ])
     assert state.status == progress.CANCELLED
     assert state.tmpdir.endswith("20260819-004500")
-    assert "Cancelled after" in state.result_text()
+    assert state.result_text() == "Cancelled after 0h 00m 12s"
+
+
+@pytest.mark.parametrize("seconds, text", [
+    (0.0, "0h 00m 00s"),
+    (12.99, "0h 00m 12s"),
+    (59.999, "0h 00m 59s"),
+    (60.0, "0h 01m 00s"),
+    (3725.4, "1h 02m 05s"),
+    (36000.0, "10h 00m 00s"),
+])
+def test_the_window_counts_in_whole_seconds_as_hours_minutes_seconds(seconds, text):
+    """Truncated, never rounded up: a counter shows no second that has not
+    passed. The .log keeps its finer figure (runlog.format_duration)."""
+    assert model.format_elapsed(seconds) == text
+    state = model.RunState()
+    state.elapsed = seconds
+    assert state.resource_text().endswith(f"elapsed {text}")
 
 
 def test_a_failure_reports_the_single_reason_line():

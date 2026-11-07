@@ -124,7 +124,7 @@ minutes later.
 
 While a run is going, two bars show which pipeline stage is running and how far
 into it — `boundary trim: 9,776 / 19,552` — with peak memory and elapsed time
-beneath them. **Stop!** cancels the run exactly as Ctrl+C would: workers are shut
+(`1h 02m 05s`) beneath them. **Stop!** cancels the run exactly as Ctrl+C would: workers are shut
 down in order, the temp folder is kept for analysis and the window says where it
 is. When the run finishes, **Open export folder** takes you to the result and the
 inputs re-enable for another run.

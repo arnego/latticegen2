@@ -212,7 +212,9 @@ becomes `Stop!`, and two bars appear:
 
 Beneath them, one line of resource data: peak memory and elapsed time. Peak
 memory is genuinely all that is measured continuously (§3's summary list), and
-the line says only that rather than padding itself out.
+the line says only that rather than padding itself out. Elapsed time is
+shown in whole seconds as hours, minutes and seconds — `1h 02m 05s` — as is
+the duration in the result banner; the `.log` keeps its finer figures.
 
 Beneath *that*, with **verbose** ticked, the run's own output in a scrolling
 pane — every line of it, which is what the `.log` gets.

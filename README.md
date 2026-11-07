@@ -124,7 +124,7 @@ minutes later.
 
 While a run is going, two bars show which pipeline stage is running and how far
 into it — `boundary trim: 9,776 / 19,552` — with peak memory and elapsed time
-beneath them. **Stop!** cancels the run exactly as Ctrl+C would: workers are shut
+(`1h 02m 05s`) beneath them. **Stop!** cancels the run exactly as Ctrl+C would: workers are shut
 down in order, the temp folder is kept for analysis and the window says where it
 is. When the run finishes, **Open export folder** takes you to the result and the
 inputs re-enable for another run.
@@ -150,8 +150,13 @@ the boxes follow; edit the boxes and the part turns. The lattice is oriented to
 the bed, with or without support.
 
 Tick **Generate support** to carry every inner overhang down to the nearest
-strut or wall. **Min thickness** (0.1 mm steps) follows `t` until you edit it,
-and is greyed out until the box is ticked. With it ticked, the parts of the
+strut or wall. **Min thickness** (0.1 mm steps) starts at 1 mm, the command
+line's default,
+and is greyed out until the box is ticked; Start! is greyed out for a value no
+support grid can hold (above `a − t`). Whenever Start! is greyed out, a red
+line beneath the fields says what to change, e.g. `To start, lower Min
+thickness to at most 5.57 mm, or raise cc to at least 10.61 mm.` With it
+ticked, the parts of the
 surface that overhang more than 60° from vertical at the current orientation —
 what will be supported — are tinted in the view, and the tint follows every
 change, so the orientation can be checked before a long run is started.
@@ -201,11 +206,11 @@ the usual cause, and it can fail inside MKL rather than as a clean
 | `-i`, `--input` | path | yes | — | — | — | STEP file whose solid defines the lattice bounds |
 | `-cc` | float | yes | mm | 0.4 – 50 | — | XY distance between the bottom nodes of adjacent cells |
 | `-t` | float | yes | mm | 0.4 – 20 | — | Side length of the diamond strut profile |
-| `-o`, `--output` | path | no | — | — | `<input_stem>-lattice-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing |
+| `-o`, `--output` | path | no | — | — | `<input_stem>-lattice-cc<cc>t<t>.step` | Output STEP **file** — a directory such as `-o .\` is rejected, not filled in. `.step` is appended if missing. Values in the default name are rounded to at most 2 decimals. A file name over 255 characters, or a path over 259 on Windows (4,095 bytes on Linux) counting the run's temp files, is refused before the run starts |
 | `--cores` | int | no | count | 1 – 128 | logical cores on the machine | Maximum cores this run may use — one worker process per core, honoured exactly, in the shared pool used across every process-parallel stage (classification, boundary trim, boundary sew, same-domain unification). It also caps OCCT's *own* native thread pool, which the validity check uses instead of the process pool, so the total stays within the budget either way |
 | `--orient` | 3 × float | no | degrees | −360 – 360 each | `0 0 0` | Print orientation `<rx> <ry> <rz>` of the input relative to the print bed: rotations about the bed's X, then Y, then Z axis. The lattice is oriented to the bed. Works with or without `--support` |
 | `--support` | flag | no | — | — | off | Generate print supports for inner overhangs |
-| `--support-thickness` | float | no | mm | 0.2 – 20 | `t` | Minimum support thickness. Requires `--support` |
+| `--support-thickness` | float | no | mm | 0.2 – 20, at most `a − t` | 1 | Thinnest free-standing support member; sets how finely the support grid divides the lattice cube. Requires `--support` |
 | `-v`, `--verbose` | flag | no | — | — | off | Verbose console output (a full `.log` is always written) |
 | `-h`, `--help` | flag | no | — | — | — | Usage |
 
@@ -224,17 +229,21 @@ carried down to the nearest lattice rod below it — or, where no rod is
 reached, to the enveloping wall — by solid supports built from support nodes of
 a grid in the lattice's own frame ([docs/algorithm.md](docs/algorithm.md) §14). Every
 support face lies on a plane of that frame or on the input's own surface, so no
-face overhangs more than the rod angle (54.74°). Neither angle is a parameter;
-`--support-thickness` sets how finely the grid divides the lattice cube.
+face overhangs more than the rod angle (54.74°). Neither angle is a parameter.
+`--support-thickness` is the thinnest free-standing support member, and it is
+met by construction: the grid divides the lattice cube `m` times, its thinnest
+member is `a/m − t/2` (`a − t` at `m = 1`), and `m` is the finest division
+still that thick — 4 at `cc 10, t 1.5` and the default 1 mm, giving 1.02 mm. A value
+above `a − t` is held by no division and is refused.
 Supports are written as **separate bodies** beside the unchanged lattice,
 sharing faces with the struts and the walls so that they merge into the
 enveloping part in your CAD tool; every support body is a manifold solid, and
 pockets of powder they would trap are filled and joined to them. A supported
-run adds `-sup` to the default file name:
+run adds `-sup` and the support thickness to the default file name:
 
 ```bash
 python src/main.py -i part.step -cc 10 -t 1.5 --orient 30 0 0 --support
-# -> part-lattice-cc10t1.5-rotx30y0z0-sup.step
+# -> part-lattice-cc10t1.5-rotx30y0z0-sup1.step
 ```
 
 `--cores` is an optional budget; it resolves to a concrete figure from the

@@ -263,26 +263,41 @@ def format_param(x: float) -> str:
     return repr(float(x)).rstrip("0").rstrip(".")
 
 
+#: Decimals a value keeps in a file or part name (specification.md §3).
+NAME_DECIMALS = 2
+
+
+def format_name_param(x: float) -> str:
+    """:func:`format_param` rounded to :data:`NAME_DECIMALS` decimals, for names.
+
+    Bounds what a name adds to the input's stem whatever is typed: ``1.5`` stays
+    ``1.5``, ``0.30000000000000004`` becomes ``0.3``. The ``.log`` and the STEP
+    header keep the exact values (:func:`format_param`).
+    """
+    return format_param(round(float(x), NAME_DECIMALS) + 0.0)
+
+
 def variant_suffix(orient=_orient.IDENTITY, support: bool = False,
-                   sep: str = "-") -> str:
+                   sep: str = "-", thickness: float | None = None) -> str:
     """The rotation and support tags a name carries, each only when it applies.
 
-    ``-rotx<rx>y<ry>z<rz>`` when any angle is non-zero, then ``-sup`` when
-    support is enabled (specification.md §4.5, §4.6). An unrotated, unsupported
-    run therefore keeps exactly the name it always had. The support tag carries
-    no angle: neither of the support angles is a parameter.
+    ``-rotx<rx>y<ry>z<rz>`` when any angle is non-zero, then ``-sup<ts>`` when
+    support is enabled, ``<ts>`` the support thickness, ``-sup1`` at the 1 mm
+    default (specification.md §4.5, §4.6). An unrotated, unsupported run
+    therefore keeps exactly the name it always had. The support tag carries no
+    angle: neither of the support angles is a parameter.
     """
     out = ""
     if _orient.is_rotated(orient):
-        out += (f"{sep}rotx{format_param(orient[0])}y{format_param(orient[1])}"
-                f"z{format_param(orient[2])}")
+        out += (f"{sep}rotx{format_name_param(orient[0])}y{format_name_param(orient[1])}"
+                f"z{format_name_param(orient[2])}")
     if support:
-        out += f"{sep}sup"
+        out += f"{sep}sup" + (format_name_param(thickness) if thickness is not None else "")
     return out
 
 
 def part_name(input_path: str, cc: float, t: float, orient=_orient.IDENTITY,
-              support: bool = False) -> str:
+              support: bool = False, thickness: float | None = None) -> str:
     """STEP part name ``<input_stem>+lattice+cc<cc>+t<t>`` (specification.md §5).
 
     It carries the same four components as the default output file name, in the
@@ -295,5 +310,5 @@ def part_name(input_path: str, cc: float, t: float, orient=_orient.IDENTITY,
     import os
 
     stem = os.path.splitext(os.path.basename(input_path))[0]
-    return (f"{stem}+lattice+cc{format_param(cc)}+t{format_param(t)}"
-            + variant_suffix(orient, support, "+"))
+    return (f"{stem}+lattice+cc{format_name_param(cc)}+t{format_name_param(t)}"
+            + variant_suffix(orient, support, "+", thickness))

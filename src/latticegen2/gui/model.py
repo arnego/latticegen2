@@ -18,7 +18,20 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from .. import progress
-from ..runlog import STAGES, WARNING_PREFIX, format_bytes, format_duration
+from ..runlog import STAGES, WARNING_PREFIX, format_bytes
+
+
+def format_elapsed(seconds: float) -> str:
+    """A clock for the window: hours, minutes and whole seconds, ``1h 02m 05s``.
+
+    Whole seconds, truncated rather than rounded, so a counter never shows a
+    second that has not passed. The `.log` keeps `runlog.format_duration`'s
+    finer figure; this is only what the window draws.
+    """
+    total = max(int(seconds), 0)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}h {minutes:02d}m {secs:02d}s"
 from .weights import overall_permille
 
 #: How many lines of the run's own output to keep for the failure panel. The
@@ -148,7 +161,7 @@ class RunState:
         honest about that rather than padding the line out.
         """
         rss = format_bytes(self.peak_rss) if self.peak_rss else "—"
-        return f"peak memory {rss}   ·   elapsed {format_duration(self.elapsed)}"
+        return f"peak memory {rss}   ·   elapsed {format_elapsed(self.elapsed)}"
 
     def result_text(self) -> str:
         if self.status == progress.OK:
@@ -156,10 +169,10 @@ class RunState:
             size = self.summary.get("output_size")
             detail = ", ".join(str(x) for x in (
                 f"{solids} solid(s)" if solids else None, size) if x)
-            return f"Completed in {format_duration(self.elapsed)}" + (
+            return f"Completed in {format_elapsed(self.elapsed)}" + (
                 f" — {detail}" if detail else "")
         if self.status == progress.CANCELLED:
-            return f"Cancelled after {format_duration(self.elapsed)}"
+            return f"Cancelled after {format_elapsed(self.elapsed)}"
         if self.status == progress.FAILED:
             return f"Failed: {self.reason or 'see the log'}"
         return ""

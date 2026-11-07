@@ -15,6 +15,7 @@ from latticegen2.lattice import (
     THETA,
     candidate_nodes,
     cube_edge,
+    format_name_param,
     format_param,
     half_strut_offset,
     index_range,
@@ -155,6 +156,29 @@ def test_candidate_nodes_matches_the_index_range():
 )
 def test_format_param_drops_trailing_zeros(value, expected):
     assert format_param(value) == expected
+
+
+@pytest.mark.parametrize("value, expected", [
+    (1.5, "1.5"), (20.0, "20"), (1.234, "1.23"), (0.30000000000000004, "0.3"),
+    (19.999, "20"), (-359.991, "-359.99"), (-0.001, "0"), (49.123456789012345, "49.12"),
+])
+def test_names_keep_at_most_two_decimals(value, expected):
+    assert format_name_param(value) == expected
+
+
+def test_the_longest_name_adds_at_most_64_characters_to_the_stem():
+    """Two decimals bound the tag whatever is typed (specification.md §3):
+    the longest value in each range, every tag present."""
+    from latticegen2.cli import parse_args
+
+    args = parse_args(["-i", "p.step", "-cc", "48.765432", "-t", "18.765432",
+                       "--orient", "-358.765432", "-358.765432", "-358.765432",
+                       "--support", "--support-thickness", "12.345678"])
+    name = os.path.basename(args.output)
+    assert name == "p-lattice-cc48.77t18.77-rotx-358.77y-358.77z-358.77-sup12.35.step"
+    assert len(name) - len("p") == 64
+    # The .log and the header keep the exact values.
+    assert args.as_dict()["t"] == "18.765432 mm"
 
 
 def test_part_name_uses_the_plus_convention():

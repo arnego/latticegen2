@@ -61,8 +61,13 @@ class SupportInput:
     build direction ``b`` in part coordinates (docs/algorithm.md §14.0)."""
 
     thickness_mm: float
-    """``--support-thickness``: minimum thickness of a free-standing member, mm
-    (default ``t``). The two support angles are not parameters: they are
+    """``--support-thickness``: the thinnest free-standing support member, mm
+    (default :data:`latticegen2.cli.SUPPORT_THICKNESS_DEFAULT`). It selects the support grid division ``m``
+    (:func:`latticegen2.cli.support_grid`), which makes it true by
+    construction. It is also the margin the pocket search inflates its
+    envelope by and that groups nearby supports (``voids.envelope``,
+    ``join.groups``), both search margins rather than geometry.
+    The two support angles are not parameters: they are
     :data:`.params.SUPPORT_OVERHANG_DEG` and :data:`.params.SUPPORT_START_DEG`."""
 
     samples: OverhangSamples

@@ -11,7 +11,10 @@ lean 35.26 deg from vertical, every edge leans at most the rod angle, and the
 lowest corner of every box is its anchor. The grid's planes run through the
 rods' centre axes, so a box anchored on a rod has its lowest edge on the rod's
 axis: it sits on the rod. Self-support is a property of the construction, not
-a check.
+a check, and so is the thinnest free-standing member: a support node beside a
+rod loses only a ``t/2`` square corner of its section, so no member is thinner
+than ``a/m - t/2`` (``a - t`` at ``m = 1``), which ``m`` is chosen to keep at
+least ``--support-thickness``.
 
 The union of the boxes is made **manifold** twice: once on the support grid,
 and once on a fine grid refined with every rod face and cap plane, on which
@@ -43,6 +46,7 @@ from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
 
 from .. import occ
 from ..errors import ProcessingError
+from ..cli import support_grid
 from ..runlog import point_text, warning_text
 from .params import REQUIRED_SLACK, SIN_START
 
@@ -118,10 +122,20 @@ four standard errors of the estimate, whichever is larger)."""
 
 
 def grid_divisions(lp, thickness: float) -> int:
-    """``m``: the largest division of the cube edge ``a`` whose gap between
-    parallel rod faces, ``a/m - t``, is still at least ``thickness``; 1 at the
-    least. ``a = 7.07``, ``t = thickness = 1.5`` gives 2."""
-    return max(1, int(math.floor(lp.a / (lp.t + thickness) + 1e-9)))
+    """``m``: the largest division of the cube edge ``a`` whose thinnest
+    free-standing support member is still at least ``thickness`` --
+    ``a/m - t/2`` at ``m >= 2``, ``a - t`` at ``m = 1``
+    (:func:`latticegen2.cli.support_grid`, the one copy of the rule).
+    ``a = 7.07``, ``t = thickness = 1.5`` gives 3."""
+    got = support_grid(lp.a, lp.t, thickness)
+    if got is None:
+        # `cli.parse_args` refuses such a value; reaching here is a caller that
+        # bypassed it, and falling back to m = 1 would ship thinner support
+        # than was asked for.
+        raise ProcessingError(
+            f"support thickness {thickness} mm cannot be met at a = {lp.a:.6f}, "
+            f"t = {lp.t} mm: at most a - t = {lp.a - lp.t:.6f} mm")
+    return got[0]
 
 
 @dataclass
@@ -813,6 +827,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     need = np.vstack([need, clipped])
     need_n = np.vstack([need_n, clipped_n])
     stats = {"support_ceiling_points": int(len(need)), "support_grid_divisions": m,
+             "support_min_member_mm": round(support_grid(lp.a, lp.t, thickness)[1], 4),
              "support_ceiling_points_clipped": int(len(clipped))}
     lines = []
     if not len(need):

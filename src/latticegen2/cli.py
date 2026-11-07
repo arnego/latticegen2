@@ -34,7 +34,7 @@ import math
 from . import orient as _orient
 from . import sysinfo
 from .errors import InputGeometryError, OutputError, ParamError
-from .lattice import THETA, format_param, variant_suffix
+from .lattice import THETA, format_name_param, format_param, variant_suffix
 
 #: The ranges specification.md §3's flag table declares, as data.
 #:
@@ -48,6 +48,10 @@ T_RANGE = (0.4, 20.0)
 CORES_RANGE = (1, 128)
 ORIENT_RANGE = (-360.0, 360.0)
 SUPPORT_THICKNESS_RANGE = (0.2, 20.0)
+#: `--support-thickness` when it is not given, mm: the thinnest free-standing
+#: support member a run is held to (specification.md §4.6). Fixed rather than
+#: derived from `t`, so the window can show it before anything is entered.
+SUPPORT_THICKNESS_DEFAULT = 1.0
 
 #: The steepest a support face may overhang, from vertical, in degrees: the
 #: lattice rod angle ``THETA`` itself (specification.md §4.6), an expression
@@ -58,6 +62,45 @@ SUPPORT_OVERHANG_DEG = math.degrees(THETA)
 #: with the detection code, which needs the geometry kernel, because the window
 #: tints its preview with the same bar and must not import one.
 SUPPORT_START_DEG = 60.0
+
+
+def support_grid(a: float, t: float, thickness: float) -> tuple[int, float] | None:
+    """``(m, thinnest)``: the support grid division and the thinnest
+    free-standing support member it produces, in mm, for cube edge ``a``, strut
+    size ``t`` and ``--support-thickness``; ``None`` when even ``m = 1`` is
+    thinner than asked (docs/algorithm.md §14.3).
+
+    The rod faces are perpendicular to the other two cube axes and the grid's
+    planes run through the rod axes, so a support node beside a rod loses only a
+    ``t/2 × t/2`` corner square. At ``m >= 2`` a support node carries a rod on
+    at most one side per axis and its thinnest arm is ``q - t/2``, ``q = a/m``;
+    at ``m = 1`` it is a whole cube cell with a rod on all twelve edges, and the
+    thinnest member is ``a - t``. ``m`` is the largest division still at least
+    ``thickness`` thick.
+
+    Here rather than with the generator for the reason the two angles above
+    are: the window shows the result before a run, and must not import the
+    geometry kernel."""
+    m = int(math.floor(a / (t / 2.0 + thickness) + 1e-9))
+    if m >= 2:
+        return m, a / m - t / 2.0
+    if a - t >= thickness - 1e-9:
+        return 1, a - t
+    return None
+
+
+def support_thickness_max(a: float, t: float, decimals: int | None = None) -> float:
+    """The largest ``--support-thickness`` any division can deliver: ``a - t``,
+    at ``m = 1``, which is never less than ``m = 2``'s ``(a - t)/2``.
+
+    With ``decimals``, rounded *down*, so the figure a message names is itself
+    accepted: ``a - t`` at ``cc = 5, t = 1`` is 2.5355, and "at most 2.536"
+    would name a value the parser refuses."""
+    top = a - t
+    if decimals is None:
+        return top
+    scale = 10 ** decimals
+    return math.floor(top * scale + 1e-9) / scale
 
 
 USAGE = """\
@@ -86,8 +129,9 @@ Optional:
                         surface overhanging more than 60 deg from vertical,
                         with supports no steeper than the lattice rod angle
   --support-thickness <mm>
-                        Minimum support thickness (0.2-20, default -t).
-                        Requires --support.
+                        Thinnest free-standing support member (0.2-20, at
+                        most a - t, default 1). Sets how finely the support
+                        grid divides the lattice cube. Requires --support.
   -v, --verbose         Verbose console output (a full .log is always written)
   -h, --help            Show this message and exit
 
@@ -181,23 +225,72 @@ def _value(argv: list[str], i: int, flag: str) -> tuple[str, int]:
     return argv[i + 1], i + 2
 
 
+#: The ``ParamError.fix`` field naming each flag's parameter.
+_FIX_FIELD = {
+    "-cc": "cc", "-t": "t", "--cores": "cores", "--support-thickness": "thickness",
+    "--orient": "orient", "--orient rx": "rx", "--orient ry": "ry", "--orient rz": "rz",
+}
+#: The unit a range in a fix is given in.
+_FIX_UNIT = {"-cc": " mm", "-t": " mm", "--support-thickness": " mm",
+             "--orient rx": "°", "--orient ry": "°", "--orient rz": "°"}
+
+
+def _field(flag: str) -> str:
+    return "{" + _FIX_FIELD[flag] + "}" if flag in _FIX_FIELD else flag
+
+
+def _round_up(v: float, decimals: int = 2) -> float:
+    """``v`` rounded up, so a bound named as "at least" is itself enough."""
+    step = 10.0 ** decimals
+    return math.ceil(v * step - 1e-9) / step
+
+
+def _round_down(v: float, decimals: int = 2) -> float:
+    """``v`` rounded down, so a bound named as "smaller than" is never passed."""
+    step = 10.0 ** decimals
+    return math.floor(v * step + 1e-9) / step
+
+
+def _thickness_fix(cc: float, t: float, thickness: float, a: float) -> str:
+    """What makes a support thickness above ``a - t`` acceptable: a thinner
+    value, a larger cell, or a thinner strut -- each offered only where its
+    own range allows it."""
+    options = []
+    most = support_thickness_max(a, t, decimals=2)
+    if most >= SUPPORT_THICKNESS_RANGE[0]:
+        options.append(f"lower {{thickness}} to at most {most:.2f} mm")
+    cc_needed = _round_up((thickness + t) * 2.0 ** 0.5)
+    if cc_needed <= CC_RANGE[1]:
+        options.append(f"raise {{cc}} to at least {cc_needed:.2f} mm")
+    t_most = _round_down(a - thickness)
+    if not options and t_most >= T_RANGE[0]:
+        options.append(f"lower {{t}} to at most {t_most:.2f} mm")
+    if not options:
+        return "lower {thickness} or {t}, or raise {cc}"
+    return ", or ".join(options)
+
+
 def _as_float(flag: str, s: str) -> float:
     try:
         return float(s)
     except ValueError:
-        raise ParamError(f"Invalid numeric value for {flag}: '{s}'") from None
+        raise ParamError(f"Invalid numeric value for {flag}: '{s}'",
+                         fix=f"enter a number for {_field(flag)}") from None
 
 
 def _as_int(flag: str, s: str) -> int:
     try:
         return int(s)
     except ValueError:
-        raise ParamError(f"Invalid integer value for {flag}: '{s}'") from None
+        raise ParamError(f"Invalid integer value for {flag}: '{s}'",
+                         fix=f"enter a whole number for {_field(flag)}") from None
 
 
 def _in_range(flag: str, v: float, lo: float, hi: float) -> float:
     if v < lo or v > hi:
-        raise ParamError(f"{flag} = {v} is out of the valid range [{lo}, {hi}]")
+        raise ParamError(f"{flag} = {v} is out of the valid range [{lo}, {hi}]",
+                         fix=f"set {_field(flag)} between {format_param(lo)} and "
+                             f"{format_param(hi)}{_FIX_UNIT.get(flag, '')}")
     return v
 
 
@@ -234,11 +327,12 @@ def default_workers(cores: int | None) -> int:
 
 
 def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: float,
-                         orient=_orient.IDENTITY, support: bool = False):
+                         orient=_orient.IDENTITY, support: bool = False,
+                         thickness: float | None = None):
     """``(step_path, log_path)`` per specification.md §3.
 
-    ``orient`` and ``support`` add ``-rotx<rx>y<ry>z<rz>`` and ``-sup`` to the
-    default name, each only when it applies
+    ``orient`` and ``support`` add ``-rotx<rx>y<ry>z<rz>`` and ``-sup<thickness>``
+    to the default name, each only when it applies
     (:func:`latticegen2.lattice.variant_suffix`).
 
     Default name is ``<input_stem>-lattice-cc<cc>t<t>.step`` beside the input.
@@ -259,8 +353,8 @@ def resolve_output_paths(input_path: str, output_arg: str | None, cc: float, t: 
         directory = os.path.dirname(input_path) or "."
         step_path = os.path.join(
             directory,
-            f"{stem}-lattice-cc{format_param(cc)}t{format_param(t)}"
-            f"{variant_suffix(orient, support)}.step",
+            f"{stem}-lattice-cc{format_name_param(cc)}t{format_name_param(t)}"
+            f"{variant_suffix(orient, support, thickness=thickness)}.step",
         )
     else:
         # The validated string is the one used. Trailing space is stripped
@@ -372,11 +466,11 @@ def parse_args(argv: list[str]) -> Args:
             raise ParamError(f"Unknown argument: {a}. Run with --help for usage.")
 
     if input_path is None:
-        raise ParamError("-i/--input is required.\n\n" + USAGE)
+        raise ParamError("-i/--input is required.\n\n" + USAGE, fix="choose an {input}")
     if cc is None:
-        raise ParamError("-cc is required.\n\n" + USAGE)
+        raise ParamError("-cc is required.\n\n" + USAGE, fix="enter {cc}")
     if t is None:
-        raise ParamError("-t is required.\n\n" + USAGE)
+        raise ParamError("-t is required.\n\n" + USAGE, fix="enter {t}")
 
     _in_range("-cc", cc, *CC_RANGE)
     _in_range("-t", t, *T_RANGE)
@@ -388,7 +482,9 @@ def parse_args(argv: list[str]) -> Args:
         raise ParamError(
             f"-t = {t} mm must be smaller than the cube edge length "
             f"a = cc/sqrt(2) = {a_edge:.6f} mm (derived from -cc = {cc}); a strut "
-            f"this thick would not fit within one lattice cell."
+            f"this thick would not fit within one lattice cell.",
+            fix=f"make {{t}} smaller than {_round_down(a_edge):.2f} mm, or {{cc}} "
+                f"larger than {_round_up(t * 2.0 ** 0.5):.2f} mm",
         )
     # No further restriction applies. The mid-strut cap faces this generator
     # stitches junctions along stay intact for the whole of `t < a` — see
@@ -403,11 +499,22 @@ def parse_args(argv: list[str]) -> Args:
         # nothing would leave the user believing supports had been generated.
         raise ParamError("--support-thickness requires --support.")
     if thickness is None:
-        thickness = t
+        thickness = SUPPORT_THICKNESS_DEFAULT
     _in_range("--support-thickness", thickness, *SUPPORT_THICKNESS_RANGE)
+    if support and support_grid(a_edge, t, thickness) is None:
+        # Asked only of a supported run: without `--support` the value is the
+        # default and reaches nothing, so it must not refuse a lattice.
+        raise ParamError(
+            f"--support-thickness {format_param(thickness)} mm cannot be met at "
+            f"cc={format_param(cc)}, t={format_param(t)}: the thinnest support "
+            f"member is at most a - t = "
+            f"{format_param(support_thickness_max(a_edge, t, decimals=3))} mm "
+            f"(a = cc/sqrt(2)).",
+            fix=_thickness_fix(cc, t, thickness, a_edge),
+        )
 
     step_path, log_path = resolve_output_paths(
-        input_path, output, cc, t, orient, support
+        input_path, output, cc, t, orient, support, thickness
     )
     return Args(
         orient=orient,
@@ -425,8 +532,75 @@ def parse_args(argv: list[str]) -> Args:
     )
 
 
+#: Longest name a component of a path may have: 255 UTF-16 units on NTFS,
+#: 255 bytes on ext4 and the other common Linux file systems.
+NAME_MAX = 255
+#: Longest path a Windows program can open without long-path support: MAX_PATH
+#: is 260 including the terminating NUL. OCCT's STEP writer and much of the
+#: downstream tooling do not opt in, so this is the limit, not 32,767.
+WINDOWS_PATH_MAX = 259
+#: Linux PATH_MAX, 4096 bytes including the NUL.
+POSIX_PATH_MAX = 4095
+#: Longest suffix the run adds to the output's stem: the cancel sentinel.
+LONGEST_SIBLING_SUFFIX = ".cancel"
+#: What a run writes beneath the output's folder at most: ``temp``, a
+#: ``YYYYMMDD-HHMMSS`` stamp and a staged file. The longest staged names
+#: measured are about 35 characters (``disagree_<node>_<half>.brep``,
+#: ``support-body-<i>.<split>....step``, ``pockets-<uuid>-<slab>-before.brep``).
+TEMP_PATH_RESERVE = len(os.path.join("temp", "20261107-153000", "")) + 48
+
+
+def _path_units(s: str) -> int:
+    """How the platform counts a path's length: UTF-16 units on Windows,
+    encoded bytes elsewhere."""
+    if os.name == "nt":
+        return len(s.encode("utf-16-le")) // 2
+    return len(os.fsencode(s))
+
+
+def check_path_lengths(step_path: str) -> None:
+    """:class:`ParamError` if a file the run writes would exceed a name or path
+    limit of the platform (specification.md §3, ``-o``).
+
+    Checked before anything is written, because the limit is otherwise met as
+    an exit 6 after an hour of work, or as a run that cannot write its own
+    ``.log``. Pure syntax, like the rest of parsing apart from making the path
+    absolute: nothing on disk is consulted.
+
+    The longest name is the cancel sentinel ``<stem>.cancel``; the longest
+    path is a file staged under ``temp/<stamp>/`` beside the output, or that
+    sentinel, whichever is longer.
+    """
+    stem = os.path.splitext(os.path.basename(step_path))[0]
+    name = stem + LONGEST_SIBLING_SUFFIX
+    excess_name = _path_units(name) - NAME_MAX
+    if excess_name > 0:
+        raise ParamError(
+            f"The output file name is {excess_name} character(s) longer than "
+            f"the {NAME_MAX} a file name may have: {name}",
+            fix=f"shorten the {{input}} name by {excess_name} character(s)",
+        )
+    folder = os.path.dirname(os.path.abspath(step_path))
+    sentinel = _path_units(os.path.join(folder, name))
+    staged = _path_units(os.path.join(folder, "")) + TEMP_PATH_RESERVE
+    limit = WINDOWS_PATH_MAX if os.name == "nt" else POSIX_PATH_MAX
+    excess_path = max(sentinel, staged) - limit
+    if excess_path > 0:
+        # Naming the input only where its name is what makes the path long:
+        # below that, the temp folder's files are the longest and only a
+        # shorter folder helps.
+        also = ", or shorten the {input} name" if sentinel > staged else ""
+        raise ParamError(
+            f"Paths the run writes would be {excess_path} character(s) longer "
+            f"than the {limit} this platform allows, in {folder}",
+            fix=f"choose an {{output}} with a path {excess_path} character(s) "
+                f"shorter{also}",
+        )
+
+
 def preflight_checks(args: Args) -> None:
     """Filesystem checks that must pass before any geometry work begins."""
+    check_path_lengths(args.output)
     if os.path.isdir(args.output):
         raise ParamError(
             f"-o/--output must name the output .step file, but {args.output} is "

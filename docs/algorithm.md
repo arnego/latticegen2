@@ -2392,9 +2392,9 @@ loaded.
 Extra symbols: `b` build direction, `θ = arcsin(sqrt(2/3))` the lattice rod
 angle, which is also the steepest a support face may overhang,
 `φ_s = 60°` the angle past which the input's surface is supported
-(`SUPPORT_START_DEG`), `h = 0.5 mm` the support step, `t_s` minimum support
-thickness (`--support-thickness`,
-default `t`), `Ω` the input body, `n` its outward normal.
+(`SUPPORT_START_DEG`), `h = 0.5 mm` the support step, `t_s` the thinnest
+free-standing support member (`--support-thickness`, default 1 mm, at most
+`a − t`), `Ω` the input body, `n` its outward normal.
 
 ### 14.0 Orientation
 
@@ -2643,15 +2643,45 @@ Every `m`-th plane runs through rods' **centre axes** (`frustum.GRID_ORIGIN`),
 so a rod's cross-section is split in four by the grid, a quadrant in each of
 the four support nodes round it, and a support node whose lowest corner lies on
 a rod's axis has its lowest edge along that rod: it sits on the rod.
-`m` is the largest division whose gap between parallel rod faces,
-`q − t`, still holds the minimum support thickness — conservatively now, since
-a support node beside a rod loses only a quadrant of it, `q − t/2`:
+**The thinnest free-standing member is a property of the grid, not
+something measured.** A rod's faces are perpendicular to the other two cube
+axes (§3.3), so a rod is a square prism aligned with the grid, and a support
+node beside it loses exactly a `t/2 × t/2` quadrant of its section. Rods lie on
+every `m`-th plane, so at `m ≥ 2` a support node carries a rod on at most one
+side along any axis, and its section beside the rod is an L whose arms are
+`q − t/2` thick. At `m = 1` a support node is a whole cube cell with a rod on
+each of its twelve edges, and its section is a cross whose arms are `a − t`.
+No union of support nodes is thinner than one of them. `m` is the largest
+division whose thinnest member still holds `t_s`:
 
 ```python
-m = max(1, floor(a / (t + t_s)))        # frustum.grid_divisions
+m = floor(a / (t/2 + t_s))              # cli.support_grid, if m >= 2
+thinnest = a/m - t/2                    #   otherwise m = 1 when a - t >= t_s,
+                                        #   thinnest = a - t
 ```
 
-— 2 at `cc = 10, t = t_s = 1.5`, 1 at `cc = 20, t = 4`. The faces of any union
+— 3 at `cc = 10, t = t_s = 1.5` (thinnest 1.607 mm), 2 at `cc = 20, t = 4`
+(5.071 mm), 2 at `cc = 7, t = 1.4, t_s = 1` (1.775 mm). A `t_s` above `a − t`
+is held by no division and is refused as a parameter (exit 2), naming `a − t`,
+and the window greys out `Start!` for it (specification.md §3.1). The run log
+records `m` and the thinnest member as `support_grid_divisions` and
+`support_min_member_mm`. `test_support_frustum.py` builds a support node less
+its rods with the kernel and measures the chord across the arm against this
+figure at `m = 1, 2, 3`.
+
+Until 2026-11-07 the rule was `m = max(1, floor(a / (t + t_s)))`, holding the
+gap between parallel rod faces, `q − t`, to `t_s`. That is `t/2` stricter than
+the geometry needs, and it fell back to `m = 1` without saying so when even
+`a − t` was under `t_s`. The figures for the ball and cylinder below are
+labelled with the division they were measured at.
+
+**What is not a free-standing member.** A trimmed face lies on the input's
+surface; a pocket fill, an absorbed strut tip and a fine-grid manifold fill lie
+against the body, a rod or a support node on the faces that bound them. Each
+can be thinner than `t_s` and none stands free in the powder, so there is no
+thickness gate on the finished bodies.
+
+The faces of any union
 of support nodes have normals `±e_k`: a downward face overhangs `90° − θ` = 35.26°
 from vertical, every edge leans at most `θ`, and the lowest corner of a support node
 is the one nearest the bed.
@@ -2976,6 +3006,19 @@ Measured with the lattice, `cc = 10, t = t_s = 1.5`, `m = 2`:
 | `80mm-test-ball.step` | 35 20 −110 | 1 | 5,296 mm³ | 0 | 0 mm³ |
 | `test-cylinder.STEP` | 0 −90 0 | 3 | 15,206 mm³ | 0 | 0 mm³ |
 
+At the exact grid rule (S4), 2026-11-07, the same parts take `m = 3`, thinnest
+member 1.607 mm, and pass every check of specification.md §6.2:
+
+| part | orientation | bodies | support | non-manifold edges | lattice overlap |
+|---|---|---|---|---|---|
+| `80mm-test-ball.step` | 35 20 −110 | 1 | 4,727 mm³ (−11 %) | 0 | 0 mm³ |
+| `test-cylinder.STEP` | 0 −90 0 | 3 | 12,672 mm³ (−17 %) | 0 | 0 mm³ |
+
+The finer grid fills no fine node beside a rod on either part. At the 1 mm
+default, `m = 4` (thinnest member 1.018 mm): the ball's support is one body
+of 4,481 mm³, the cylinder's three of 11,487 mm³, every check passing. The figures
+below were measured at `m = 2`.
+
 Coverage on the cylinder: 179 ceiling points read as unbacked by a probe moved
 0.1 mm along their normal, and none of them is a gap — they lie on edges where
 the ceiling meets a wall (the end face at `y = 20`, the cross-bore meeting the
@@ -3093,6 +3136,7 @@ crease points drew in.
 **The overlap check now runs across the worker pool** (§14.2); the figure
 above is the serial check, and the rehearsal has not been re-run with it.
 
-**Still to come:** the free-standing thickness gate; S6 dispatched across the
-worker pool if a measurement shows more than 5 % (specification.md §4.6's
-parallelisation).
+**Still to come:** S6 dispatched across the worker pool if a measurement shows
+more than 5 % (specification.md §4.6's parallelisation). The free-standing
+thickness gate once planned is not needed: the thickness holds by construction
+(S4).

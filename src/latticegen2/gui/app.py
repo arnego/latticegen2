@@ -27,9 +27,11 @@ from ..cli import (
     CC_RANGE,
     CORES_RANGE,
     ORIENT_RANGE,
+    SUPPORT_THICKNESS_DEFAULT,
     SUPPORT_THICKNESS_RANGE,
     T_RANGE,
     USAGE,
+    check_path_lengths,
     parse_args,
     resolve_output_paths,
 )
@@ -60,7 +62,9 @@ oriented to the bed. With Generate support ticked, every part of the inner \
 surface that overhangs more than 60° from vertical is carried down to the \
 nearest strut or wall by solid supports no steeper than the lattice's own rods; \
 those surfaces are tinted in the preview. Supports are written as separate \
-bodies that share faces with the lattice and the walls, ready to be merged.
+bodies that share faces with the lattice and the walls, ready to be merged. \
+Min thickness is the thinnest free-standing support member; a value too thick \
+for the lattice cell to hold is refused.
 
 The output sits beside a .log recording the parameters, the per-stage timings, \
 the run's characteristics and its peak memory — written every run, whether or \
@@ -146,6 +150,25 @@ class Bar(tk.Canvas):
                              font=("TkDefaultFont", 8))
 
 
+#: The window's own name for each parameter a refusal's fix can name
+#: (:class:`latticegen2.errors.ParamError`).
+FIELD_LABELS = {
+    "cc": "cc", "t": "t", "cores": "cores", "thickness": "Min thickness",
+    "rx": "rot X", "ry": "rot Y", "rz": "rot Z", "orient": "the rotation",
+    "input": "input file", "output": "output folder",
+}
+
+
+def start_hint(exc: LatticeGenError) -> str:
+    """The red line beneath the fields while Start! is greyed out: what to
+    change, in the window's own terms, or the parser's reason where it gives
+    no fix."""
+    fix = getattr(exc, "fix_text", lambda labels: None)(FIELD_LABELS)
+    if fix:
+        return f"To start, {fix}."
+    return str(exc).split("\n", 1)[0]
+
+
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -175,11 +198,8 @@ class App:
         self.ry_var = tk.StringVar(value="0")
         self.rz_var = tk.StringVar(value="0")
         self.support_var = tk.BooleanVar(value=False)
-        #: Follows ``t`` until the user edits it -- the command line's default,
-        #: made visible. `_thickness_edited` records that it no longer does.
-        self.thickness_var = tk.StringVar(value=self.t_var.get())
-        self._thickness_edited = False
-        self._following_t = False
+        #: Starts at the command line's own default and is always passed.
+        self.thickness_var = tk.StringVar(value=f"{SUPPORT_THICKNESS_DEFAULT:g}")
         self.derived_var = tk.StringVar(value="—")
         self.message_var = tk.StringVar(value="")
         #: The helper tessellating the current input for the orientation view,
@@ -197,8 +217,6 @@ class App:
                     self.outdir_var, self.rx_var, self.ry_var, self.rz_var,
                     self.support_var, self.thickness_var):
             var.trace_add("write", lambda *_a: self._revalidate())
-        self.t_var.trace_add("write", lambda *_a: self._follow_t())
-        self.thickness_var.trace_add("write", lambda *_a: self._thickness_written())
         self.input_var.trace_add("write", lambda *_a: self._request_preview())
         self.support_var.trace_add("write", lambda *_a: self._sync_support_fields())
         self._sync_support_fields()
@@ -379,31 +397,12 @@ class App:
 
         The support arguments are passed only when the box is ticked, so an
         unticked run is a run without `--support` and loads none of that code.
-        The thickness is passed only once edited: until then it is the command
-        line's own default, ``t``, and saying so twice could only disagree.
         """
         extra = ["--orient", self.rx_var.get().strip(), self.ry_var.get().strip(),
                  self.rz_var.get().strip()]
         if self.support_var.get():
-            extra.append("--support")
-            if self._thickness_edited:
-                extra += ["--support-thickness", self.thickness_var.get().strip()]
+            extra += ["--support", "--support-thickness", self.thickness_var.get().strip()]
         return extra
-
-    def _follow_t(self) -> None:
-        """Copy ``t`` into the thickness field while the user has not edited it."""
-        if self._thickness_edited:
-            return
-        self._following_t = True
-        try:
-            self.thickness_var.set(self.t_var.get())
-        finally:
-            self._following_t = False
-
-    def _thickness_written(self) -> None:
-        """A write that did not come from `_follow_t` is the user's edit."""
-        if not self._following_t:
-            self._thickness_edited = True
 
     def _pending_argv(self) -> list[str]:
         """The command line the current field values describe."""
@@ -501,12 +500,33 @@ class App:
         if self.run is not None:
             return
         self.message_var.set("")
+        argv = self._pending_argv()
+        chosen = bool(self.input_var.get().strip())
+        if not chosen:
+            # The parameters are still checked before a file is chosen, so the
+            # line can say what else must change; the stand-in name reaches no
+            # file system check and nothing is run with it.
+            argv[argv.index("-i") + 1] = "input.step"
         try:
-            args = parse_args(self._pending_argv())
+            args = parse_args(argv)
         except LatticeGenError as exc:
             self.derived_var.set("—")
-            first = str(exc).split("\n", 1)[0]
-            self.message_var.set(first if self.input_var.get().strip() else "")
+            self.message_var.set(start_hint(exc))
+            self.start.state(["disabled"])
+            return
+        if not chosen:
+            self.derived_var.set("—")
+            self.message_var.set("To start, choose an input file.")
+            self.start.state(["disabled"])
+            return
+        output = self._resolved_output()
+        try:
+            # On the file the run will write — in the chosen folder, which the
+            # parse above, given no -o, placed beside the input instead.
+            check_path_lengths(output)
+        except LatticeGenError as exc:
+            self.derived_var.set(f"→ {os.path.basename(output)}")
+            self.message_var.set(start_hint(exc))
             self.start.state(["disabled"])
             return
 
@@ -524,7 +544,8 @@ class App:
         """
         args = parse_args(self._pending_argv())
         default_step, _log = resolve_output_paths(
-            args.input, None, args.cc, args.t, args.orient, args.support)
+            args.input, None, args.cc, args.t, args.orient, args.support,
+            args.support_thickness)
         folder = self.outdir_var.get().strip() or os.path.dirname(args.input)
         return os.path.join(os.path.abspath(folder), os.path.basename(default_step))
 

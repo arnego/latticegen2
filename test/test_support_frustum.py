@@ -42,16 +42,87 @@ def _plane(face):
 # --- the grid ----------------------------------------------------------------------
 
 
-def test_the_grid_is_the_finest_whose_rod_gap_holds_the_minimum_thickness():
+def test_the_grid_is_the_finest_whose_thinnest_member_holds_the_thickness():
+    from latticegen2.cli import support_grid
+    from latticegen2.errors import ProcessingError
     from latticegen2.support.frustum import grid_divisions
 
     lp = lattice_params(10.0, 1.5)
     m = grid_divisions(lp, 1.5)
-    assert m == 2
-    assert lp.a / m - lp.t >= 1.5 > lp.a / (m + 1) - lp.t
-    assert grid_divisions(lattice_params(20.0, 4.0), 4.0) == 1
-    # Never below one, even where no gap could hold the thickness.
-    assert grid_divisions(lattice_params(10.0, 6.0), 6.0) == 1
+    assert m == 3 == support_grid(lp.a, lp.t, 1.5)[0]
+    assert lp.a / m - lp.t / 2 >= 1.5 > lp.a / (m + 1) - lp.t / 2
+    assert grid_divisions(lattice_params(20.0, 4.0), 4.0) == 2
+    # m = 1 holds a - t; beyond that nothing does, and the generator refuses
+    # rather than shipping thinner support than was asked for.
+    lp = lattice_params(10.0, 6.0)
+    assert grid_divisions(lp, lp.a - lp.t) == 1
+    with pytest.raises(ProcessingError):
+        grid_divisions(lp, 6.0)
+
+
+@pytest.mark.parametrize("m", range(1, 7))
+def test_a_support_node_carries_a_rod_on_at_most_one_side_per_axis(m):
+    """The lemma the thinnest-member figure rests on (cli.support_grid). Rods
+    lie on every m-th grid plane, so at m >= 2 no support node has rod planes
+    on both of its sides along any axis; at m = 1 every node has both."""
+    for i in range(-2 * m, 2 * m):
+        sides = (i % m == 0) + ((i + 1) % m == 0)
+        assert sides == 2 if m == 1 else sides <= 1
+
+
+@pytest.mark.parametrize("cc, t, m", [(10.0, 1.5, 3), (7.0, 1.4, 2), (10.0, 1.5, 1)])
+def test_the_thinnest_member_beside_the_rods_is_what_the_rule_says(cc, t, m):
+    """A support node at a lattice node, less every rod through it, built and
+    measured rather than argued: its volume is the node less a t/2 quadrant
+    per rod, and the chord across its thinnest arm is the figure
+    ``cli.support_grid`` reports -- q - t/2 at m >= 2, a - t at m = 1."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.TopAbs import TopAbs_IN
+    from OCP.TopTools import TopTools_ListOfShape
+    from OCP.gp import gp_Pnt
+
+    from latticegen2 import occ
+    from latticegen2.cli import support_grid
+
+    a = cc / np.sqrt(2.0)
+    q, h = a / m, t / 2
+    planes = [c for c in (0.0, a) if c <= q + 1e-9]      # rod axes on the node
+    objs, tools = TopTools_ListOfShape(), TopTools_ListOfShape()
+    objs.Append(BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), q, q, q).Shape())
+    n_rods = 0
+    for ax in range(3):
+        o = [k for k in range(3) if k != ax]
+        for c0, c1 in itertools.product(planes, planes):
+            lo, size = [0.0] * 3, [t] * 3
+            lo[ax], size[ax] = -1.0, q + 2.0
+            lo[o[0]], lo[o[1]] = c0 - h, c1 - h
+            tools.Append(BRepPrimAPI_MakeBox(gp_Pnt(*lo), *size).Shape())
+            n_rods += 1
+    cut = BRepAlgoAPI_Cut()
+    cut.SetArguments(objs)
+    cut.SetTools(tools)
+    cut.Build()
+    support = cut.Shape()
+    assert n_rods == (12 if m == 1 else 3)
+    # Inclusion-exclusion at each corner where three rods meet: -3 h^3 + h^3.
+    corners = 8 if m == 1 else 1
+    assert occ.volume(support) == pytest.approx(
+        q ** 3 - n_rods * h * h * q + corners * 2 * h ** 3, rel=1e-9)
+
+    # The arm beside the rod along e_2, at mid-height: a chord along y at
+    # x = h/2, from the rod's face to the node's far face (or the next rod).
+    ys = np.linspace(0.0, q, 4001)
+    inside = [BRepClass3d_SolidClassifier(support, gp_Pnt(h / 2, float(y), q / 2), 1e-9)
+              .State() == TopAbs_IN for y in ys]
+    span = ys[np.nonzero(inside)[0]]
+    chord = span.max() - span.min()
+    want = a - t if m == 1 else q - h
+    assert chord == pytest.approx(want, abs=2 * q / 4000)
+    # And the rule, asked for exactly that thickness, picks this m and says so.
+    got_m, thinnest = support_grid(a, t, want)
+    assert got_m == m and thinnest == pytest.approx(want)
 
 
 # --- manifold repair -----------------------------------------------------------------
@@ -348,7 +419,7 @@ def chamber_supports(chamber, tmp_path_factory):
 def test_a_chamber_lid_is_carried_down_to_the_rods(chamber, chamber_supports):
     body, mesh, lp, kept, occ = chamber
     solids, stats, _lines = chamber_supports
-    assert solids and stats["support_grid_divisions"] == 2
+    assert solids and stats["support_grid_divisions"] == 3
     # The rods are near: few if any ceiling points need the wall.
     assert stats["support_wall_anchors"] < stats["support_ceiling_points"] / 2
     assert stats["support_ceiling_points_uncovered"] == 0

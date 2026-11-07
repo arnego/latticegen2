@@ -1058,3 +1058,10 @@ the previous entry; peak tree RSS 10,270 MB against 10,179 MB.
 **Downstream consumer.** Every stage's share of the run is within 3 % of the
 previous entry's, so `src/latticegen2/gui/weights.py` keeps that entry's
 `SECONDS_SUPPORT`.
+
+**Since then, projected rather than measured:** the overlap check runs across
+the worker pool (docs/algorithm.md §14.2), measured 3× faster on the ball's
+and the cylinder's supports. `SECONDS_SUPPORT`'s `pockets` now carries the
+2026-11-06 figure less its ~2,121 s serial overlap check plus ~400 s for it
+across six workers — 1,684 s, a projected 1 h 17 m run. The next
+`rehearsal-support` run replaces the projection with a measurement.

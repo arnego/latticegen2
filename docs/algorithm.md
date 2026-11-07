@@ -2523,6 +2523,31 @@ a hard failure (exit 4):
   lattice junctions near it is at most `SUPPORT_OVERLAP_TOL` (1e-6 mm³);
 * no two supports overlap, by the same bar.
 
+**The overlap check is divided into jobs across the worker pool**
+(`assemble._Overlaps`). Junction instances share no volume (§3.2), so a
+support's overlap with all the junctions near it is the sum of its overlaps
+with any grouping of them: the same predicate, not a weaker one. Each support
+is asked against groups of up to `OVERLAP_GROUP_JUNCTIONS` (32) junctions, near
+each other by lattice index, and against each support whose box touches its
+own; the jobs are queued largest first, and on a small part the groups shrink
+towards `OVERLAP_GROUP_MIN` (8) so every worker has several. Measured on the
+ball's and the cylinder's supports, an intersection costs about 45 ms per
+junction in it, and the same to within 10 % at 8 to 160 per call, so dividing
+costs nothing, and dispatching it lets the one large support of a production
+part spread over every worker. On the cylinder's captured inputs the check
+falls from 15.4 s to 4.5 s on six workers, the ball's from 12.1 s to 4.2 s,
+both with the pool started cold.
+
+The junctions asked are those that can share volume with the support
+(`_LocalLattice.near_solid`), not every one in its box: a junction whose box
+meets the box of no face of the support has none of the support's boundary in
+it, so it is wholly inside or wholly outside, and its node is classified to say
+which. Exact by construction; on those two parts it drops 47 of 643, since
+their supports are compact, and it is there for a support that wanders across
+a part, whose box holds far more lattice than the support comes near.
+OCCT's oriented-box prefilter (`SetUseOBB`) was tried on the intersection and
+changes nothing measurable (8.68 s against 8.49 s).
+
 So the volumes are additive by construction: `support_volume_mm3` is the sum of
 the support bodies, `lattice_volume_mm3` the lattice's, and
 `output_volume_mm3` — measured by `validate` — their sum. Without `--support`
@@ -3065,6 +3090,9 @@ crease points drew in.
 |---|---|---|---|---|---|---|---|
 | `support` 1,120 s, `pockets` 3,309 s | 333.6 s | 339.3 s | 63.2 s | 296.8 s | 5.4 s | 1,178.6 s | ~2,131 s |
 
-**Still to come:** the free-standing thickness gate; the overlap check and S6
-dispatched across the worker pool (specification.md §4.6's parallelisation),
-the first of them the largest serial piece of the supported rehearsal.
+**The overlap check now runs across the worker pool** (§14.2); the figure
+above is the serial check, and the rehearsal has not been re-run with it.
+
+**Still to come:** the free-standing thickness gate; S6 dispatched across the
+worker pool if a measurement shows more than 5 % (specification.md §4.6's
+parallelisation).

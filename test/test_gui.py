@@ -428,10 +428,21 @@ def test_the_window_builds_and_validates_with_the_parser(tmp_path, tk_root):
     step = tmp_path / "part.step"
     step.write_text("dummy")
     app = App(root)
-    app.input_var.set(str(step))
+    # Before a file is chosen the parameters are still checked, and the red
+    # line asks for the one thing missing.
     app.cc_var.set("20")
     app.t_var.set("4")
     root.update()
+    assert app.message_var.get() == "To enable Start!, choose an input file."
+    assert "disabled" in app.start.state()
+    app.t_var.set("18")
+    root.update()
+    assert app.message_var.get() == ("To enable Start!, make t smaller than 14.14 mm, "
+                                     "or cc larger than 25.46 mm.")
+    app.t_var.set("4")
+    app.input_var.set(str(step))
+    root.update()
+    assert app.message_var.get() == ""
     assert app.derived_var.get().endswith("part-lattice-cc20t4.step")
     assert "disabled" not in app.start.state()
 
@@ -439,8 +450,10 @@ def test_the_window_builds_and_validates_with_the_parser(tmp_path, tk_root):
     # a copy of it living here.
     app.t_var.set("18")
     root.update()
-    assert "must be smaller than the cube edge" in app.message_var.get()
+    assert app.message_var.get().startswith("To enable Start!, make t smaller than")
     assert "disabled" in app.start.state()
+    # The line is red: it is shown only while Start! is greyed out.
+    assert str(app.message.cget("foreground")) == "#a11"
 
 
 # --- the cancel channel (docs/algorithm.md §10) ------------------------------
@@ -911,6 +924,18 @@ def test_the_orientation_panel_is_always_there_and_support_fields_grey_out(tmp_p
         tk_root.update()
         assert app.thickness_var.get() == "0.8"
         assert app._pending_argv()[-3:] == ["--support", "--support-thickness", "0.8"]
+
+        # Beyond a - t no support grid can hold it: the parser refuses it, its
+        # message is shown, and Start! greys out.
+        app.cc_var.set("10")
+        app.thickness_var.set("6")
+        tk_root.update()
+        assert app.start.instate(["disabled"])
+        assert app.message_var.get() == ("To enable Start!, lower Min thickness to at "
+                                         "most 5.57 mm, or raise cc to at least 10.61 mm.")
+        app.thickness_var.set("1.5")
+        tk_root.update()
+        assert app.start.instate(["!disabled"])
 
         # A drag reports angles straight into the three boxes.
         app._dragged((12.5, -3.0, 90.0))

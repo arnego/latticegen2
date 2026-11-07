@@ -17,9 +17,23 @@ class ParamError(LatticeGenError):
     """Invalid, missing, out-of-range or conflicting parameter (exit 2).
 
     Raised before any computation starts (specification.md §7).
+
+    ``fix`` says what to change for the value to be accepted, as a template
+    whose ``{cc}``, ``{t}``, ``{cores}``, ``{thickness}``, ``{rx}``, ``{ry}``,
+    ``{rz}``, ``{orient}`` and ``{input}`` fields name the parameters; the
+    window fills them with its own labels (specification.md §3.1). ``None``
+    where no field of the window can cause the refusal.
     """
 
     exit_code = 2
+
+    def __init__(self, message: str, fix: str | None = None):
+        super().__init__(message)
+        self.fix = fix
+
+    def fix_text(self, labels: dict[str, str]) -> str | None:
+        """``fix`` with each parameter named by ``labels``."""
+        return self.fix.format(**labels) if self.fix else None
 
 
 class InputGeometryError(LatticeGenError):

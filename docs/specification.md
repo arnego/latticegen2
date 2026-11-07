@@ -63,7 +63,7 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | --cores | int | optional | count | 1 - 128 | logical cores on the machine | Maximum CPU cores this run may use. One worker process per core, honoured exactly — the master needs none reserved for it, being blocked waiting on results for effectively the whole boundary stage. Since workers always run at below-normal priority, this exists to further protect the response time of the system for other tasks. |
 | --orient | 3 × float | optional | degrees | -360 - 360 each | 0 0 0 | Print orientation `<rx> <ry> <rz>` of the input geometry relative to the print bed (§4.5). Orients the lattice to the bed. Usable with or without `--support`. |
 | --support | flag | optional | NA | NA | disabled | Generate print supports for inner overhangs (§4.6). |
-| --support-thickness | float | optional | mm | 0.2 - 20 | `t` | Minimum support thickness. Requires `--support`. |
+| --support-thickness | float | optional | mm | 0.2 - 20, at most `a − t` | `t` | Thinnest free-standing support member; it sets how finely the support grid divides the lattice cube (§4.6). Requires `--support`. |
 
 **The overhang limit is not a parameter.** Support faces never overhang more
 than the lattice rod angle `arcsin(sqrt(2/3))` ≈ 54.74° from vertical, and the
@@ -147,7 +147,13 @@ can sit in a corner of the screen.
   beside it. The field follows `t` until it is edited, which is the command
   line's default made visible; it is always shown and is **greyed out while
   the box is unticked**; unticked, no support argument reaches the run, which
-  then loads no support code (§4.6). With the box ticked, every part of the
+  then loads no support code (§4.6). Past `a − t` the parser refuses the
+  value and `Start!` is greyed out, with the red line naming the largest
+  value and the `cc` that would allow this one. The window does not
+  show the support grid division or the thinnest member it produces: that
+  readout was tried and removed as harder to read than it was worth; the run
+  log records both (`support_grid_divisions`, `support_min_member_mm`). With
+  the box ticked, every part of the
   previewed surface that overhangs more than 60° at the current orientation —
   what will be supported — is **tinted**, and the tint is recomputed on every
   change of orientation — boxes, steppers and mouse drag alike — so it can be
@@ -163,8 +169,19 @@ can sit in a corner of the screen.
 
 Every field is validated by calling `cli.parse_args` and `cli.preflight_checks`
 on the command line the window is about to run — not by a second copy of those
-rules. `Start!` is disabled while anything is invalid and the parser's own
-message is shown, so `t < cc/√2` is a greyed-out button rather than a failed run.
+rules. `Start!` is disabled while anything is invalid, so `t < cc/√2` is a
+greyed-out button rather than a failed run.
+
+**While `Start!` is greyed out, a red line beneath the fields says what to
+change for it to enable** — `To enable Start!, make t smaller than 7.07 mm, or
+cc larger than 25.46 mm.` It is the refusal's own fix: each refusal in
+`parse_args` carries one (`ParamError.fix`), naming parameters by template so
+the window fills in its own labels — `Min thickness`, `rot Y` — and every bound
+in it is rounded so that the value it names is itself accepted. A refusal with
+no fix shows the parser's reason instead. Before an input file is chosen the
+parameters are still checked, against a stand-in name, and the line asks for
+the file only once nothing else is wrong. The command line's messages are
+unchanged.
 
 **How the input gets drawn.** The window loads no geometry kernel, so it cannot
 read a STEP file. It starts a short-lived helper — `src/main.py --preview-mesh
@@ -402,9 +419,15 @@ An opt-in stage that creates support structures, as used for
   warns regardless of `-v` that enclosed pockets may remain there, giving each
   region's x, y and z range (docs/algorithm.md §14.3 S7).
 - **Self-supporting.** No support surface or edge exceeds the rod angle.
-- **Thickness.** No free-standing support member is thinner than the minimum
-  support thickness, which defaults to the strut size `t`. The support grid divides the lattice cube as finely as still leaves at least that thickness
-  between parallel rod faces.
+- **Thickness.** No free-standing support member is thinner than
+  `--support-thickness`, which defaults to the strut size `t`. This holds by
+  construction rather than by a check: the support grid divides the lattice
+  cube `m` times, and its thinnest member is `a/m − t/2` (`a − t` at `m = 1`),
+  so `m` is chosen as the finest division still at least that thick. A value
+  above `a − t` cannot be met by any division and is refused (exit 2), naming
+  the largest possible. Material on the input's surface, or against a rod or
+  another support — trimmed faces, pocket fills, absorbed strut tips — does not
+  stand free and is not bound by it (docs/algorithm.md §14.3).
 - **Volume.** Each support is the box of support nodes between its anchor and
   the ceiling point it backs: it reaches only as far as its nearest anchor, and no
   higher than the ceiling it serves.
@@ -519,10 +542,10 @@ no `SpiralTest.step`.
 | smoke-verified | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 | valid STEP, generation < 20 minutes, matching golden sample test/80mm-test-ball-cc20t4-golden-sample.step. **Measured: 6.3 s, symmetric-difference volume 0.0000 mm³.** |
 | dense-lattice | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 | valid STEP, no self-intersections, matching golden sample test/test-cylinder-cc10t1.5-golden-sample.step, generation < 10 minutes. **Measured: 47.5 s, symmetric-difference volume 0 mm³.** |
 | oriented-lattice | -i test/80mm-test-ball.step -cc 20 -t 4 --cores 4 --orient 35 20 -110 | valid STEP through every §6.2 check with the lattice turned to the bed; the orientation recorded in the log and no support stage run. No golden sample. |
-| support-gaps | -i test/support-gaps.step -cc 10 -t 1.5 --cores 4 --support | valid STEP through every §6.2 check, on a small part (`tools/make_support_gaps_part.py`) holding the two ways `rehearsal-support` left ceiling bare: a keel no face of which overhangs past 60°, and a strut tip dropped as a floating body from a node still kept. Both are checked to be present, so it cannot pass by no longer testing them. Before the fix: 16 of 1,836 face samples and 32 of 33 keel samples unbacked. **Measured: 21 s, none unbacked**, and none at 0.1 mm sampling either (42,690). |
+| support-gaps | -i test/support-gaps.step -cc 10 -t 1.5 --cores 4 --support | valid STEP through every §6.2 check, on a small part (`tools/make_support_gaps_part.py`) holding the two ways `rehearsal-support` left ceiling bare: a keel no face of which overhangs past 60°, and a strut tip dropped as a floating body from a node still kept. Both are checked to be present, so it cannot pass by no longer testing them. Before the fix: 16 of 1,836 face samples and 32 of 33 keel samples unbacked. **Measured: 21 s, none unbacked**, and none at 0.1 mm sampling either (42,690). **Re-measured 2026-11-07 at the exact grid rule (m = 3, thinnest member 1.607 mm): 21 s**, 3 support bodies of 591 mm³, all 1,869 samples backed. |
 | support-clipped | -i test/support-clipped-{cone,cylinder}.step -cc 7 -t 1.4 --cores 4 --orient 180 0 0 --support --support-thickness 1 | valid STEP through every §6.2 check on two small cuts of `TD_HX_rehearsal_test.step`, kept in its coordinates, where a ceiling just past the bar clips support nodes no refined mesh vertex lands in. Coverage is also asked at 0.1 mm, since 0.5 mm can step over such a sliver. Before the fix: 16 and 481 samples bare at 0.1 mm. **Measured: 13 s and 21 s; none bare, 1 sliver within 0.05 mm** beside the discarded chips, 11 samples on a rim. |
-| support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 107 s**, one support body of 5,296 mm³, 12,524 of 12,524 overhang samples backed, no support corner hanging free. |
-| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 235 s**, three support bodies of 15,206 mm³, 33,065 of 33,065 overhang samples backed, no support corner hanging free, 0 mm³ of the unsupported run outside the output. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
+| support-tilted | -i test/80mm-test-ball.step -cc 10 -t 1.5 --cores 4 --orient 35 20 -110 --support | valid STEP through every §6.2 check, the support stages running between `simplify` and `validate`, and the support checks of §6.2: a curved overhang, tilted. No golden sample. **Measured: 107 s**, one support body of 5,296 mm³, 12,524 of 12,524 overhang samples backed, no support corner hanging free. **Re-measured 2026-11-07 at the exact grid rule (m = 3, thinnest member 1.607 mm): 114 s**, one support body of 4,727 mm³ (−11 %), all 12,524 samples backed, no support corner hanging free. |
+| support-cylinder | -i test/test-cylinder.STEP -cc 10 -t 1.5 --cores 6 --orient 0 -90 0 --support | valid STEP, the support checks, the same run without `--support` contained in the output, generation < 20 minutes. **Measured: 235 s**, three support bodies of 15,206 mm³, 33,065 of 33,065 overhang samples backed, no support corner hanging free, 0 mm³ of the unsupported run outside the output. **Re-measured 2026-11-07 at the exact grid rule (m = 3, thinnest member 1.607 mm): 269 s**, three support bodies of 12,672 mm³ (−17 %), all 33,065 samples backed, no support corner hanging free, the unsupported run contained. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 | rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Measured 2026-10-31: 1 h 40 m, and coverage failed** — 630 of 125,777 overhang samples unbacked. The causes are fixed and verified on `support-gaps`. **Re-run 2026-11-02: failed at exit 4 after 8 h 22 m**, a support body overlapping the lattice by 1.475e-02 mm³; no file written. **Run again 2026-11-02 after those fixes: passes every §6.2 check. Measured: 2 h 08 m**, 4 h 56 m with the harness's checks; 27 support bodies of 40,136 mm³, 125,777 of 125,777 overhang samples backed, no overlap, 3 pocket regions left unsearched and reported. **Run 2026-11-05 with the local pocket search: passes every §6.2 check. Measured: 1 h 42 m**, 4 h 31 m with the harness's checks; the same 27 support bodies and 40,136 mm³, all overhang samples backed, no overlap, 2 pocket regions left unsearched and reported. **Run 2026-11-06 with the support grid through the rod axes: passes every §6.2 check. Measured: 1 h 46 m**, 4 h 45 m with the harness's checks; 52 support bodies of 32,018 mm³, all 125,777 overhang samples backed, no overlap; the generator warns of 2 of 225,637 ceiling points unbacked and 4 pocket regions unsearched. **Run again 2026-11-06 with those warnings traced to detection and to the kernel, and fixed: passes every §6.2 check with no support warning. Measured: 1 h 43 m**, 4 h 39 m with the harness's checks; 48 support bodies of 31,618 mm³, all 225,547 ceiling points and all 125,777 overhang samples backed, no overlap, no pocket region left unsearched. **Prepared for a golden sample, which does not exist yet:** the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup-golden-sample.step` reports `SKIP` until an inspected output is committed under that name. |
 
 | invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
@@ -635,8 +658,10 @@ diagnosis. Remove an item once it's fixed and verified.*
   on the ball and cylinder supports; **`rehearsal-support` has not been re-run
   with it**, so its saving there is projected (~2,121 s → ~400 s) and
   `gui/weights.py`'s `pockets` share is that projection, to be replaced with
-  the measured figure at the next final verification. What remains: the trims across the pool if
-  a measurement shows more than 5 %, and the free-standing thickness gate. `rehearsal-support` does not run the final-print
+  the measured figure at the next final verification. What remains: the trims
+  across the pool if a measurement shows more than 5 %. (The free-standing
+  thickness gate once listed here is not needed: the thickness holds by
+  construction, §4.6.) `rehearsal-support` does not run the final-print
   check (§6.2's "hangs over powder"), so the axis grid's freedom from free tips
   is verified on the four small support scenarios only.
   Golden samples for the three support scenarios wait for an inspected output.

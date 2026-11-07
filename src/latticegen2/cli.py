@@ -60,6 +60,45 @@ SUPPORT_OVERHANG_DEG = math.degrees(THETA)
 SUPPORT_START_DEG = 60.0
 
 
+def support_grid(a: float, t: float, thickness: float) -> tuple[int, float] | None:
+    """``(m, thinnest)``: the support grid division and the thinnest
+    free-standing support member it produces, in mm, for cube edge ``a``, strut
+    size ``t`` and ``--support-thickness``; ``None`` when even ``m = 1`` is
+    thinner than asked (docs/algorithm.md §14.3).
+
+    The rod faces are perpendicular to the other two cube axes and the grid's
+    planes run through the rod axes, so a support node beside a rod loses only a
+    ``t/2 × t/2`` corner square. At ``m >= 2`` a support node carries a rod on
+    at most one side per axis and its thinnest arm is ``q - t/2``, ``q = a/m``;
+    at ``m = 1`` it is a whole cube cell with a rod on all twelve edges, and the
+    thinnest member is ``a - t``. ``m`` is the largest division still at least
+    ``thickness`` thick.
+
+    Here rather than with the generator for the reason the two angles above
+    are: the window shows the result before a run, and must not import the
+    geometry kernel."""
+    m = int(math.floor(a / (t / 2.0 + thickness) + 1e-9))
+    if m >= 2:
+        return m, a / m - t / 2.0
+    if a - t >= thickness - 1e-9:
+        return 1, a - t
+    return None
+
+
+def support_thickness_max(a: float, t: float, decimals: int | None = None) -> float:
+    """The largest ``--support-thickness`` any division can deliver: ``a - t``,
+    at ``m = 1``, which is never less than ``m = 2``'s ``(a - t)/2``.
+
+    With ``decimals``, rounded *down*, so the figure a message names is itself
+    accepted: ``a - t`` at ``cc = 5, t = 1`` is 2.5355, and "at most 2.536"
+    would name a value the parser refuses."""
+    top = a - t
+    if decimals is None:
+        return top
+    scale = 10 ** decimals
+    return math.floor(top * scale + 1e-9) / scale
+
+
 USAGE = """\
 latticegen2 - generate a diamond-strut lattice filling an input STEP volume
 
@@ -86,8 +125,9 @@ Optional:
                         surface overhanging more than 60 deg from vertical,
                         with supports no steeper than the lattice rod angle
   --support-thickness <mm>
-                        Minimum support thickness (0.2-20, default -t).
-                        Requires --support.
+                        Thinnest free-standing support member (0.2-20, at
+                        most a - t, default -t). Sets how finely the support
+                        grid divides the lattice cube. Requires --support.
   -v, --verbose         Verbose console output (a full .log is always written)
   -h, --help            Show this message and exit
 
@@ -181,23 +221,72 @@ def _value(argv: list[str], i: int, flag: str) -> tuple[str, int]:
     return argv[i + 1], i + 2
 
 
+#: The ``ParamError.fix`` field naming each flag's parameter.
+_FIX_FIELD = {
+    "-cc": "cc", "-t": "t", "--cores": "cores", "--support-thickness": "thickness",
+    "--orient": "orient", "--orient rx": "rx", "--orient ry": "ry", "--orient rz": "rz",
+}
+#: The unit a range in a fix is given in.
+_FIX_UNIT = {"-cc": " mm", "-t": " mm", "--support-thickness": " mm",
+             "--orient rx": "°", "--orient ry": "°", "--orient rz": "°"}
+
+
+def _field(flag: str) -> str:
+    return "{" + _FIX_FIELD[flag] + "}" if flag in _FIX_FIELD else flag
+
+
+def _round_up(v: float, decimals: int = 2) -> float:
+    """``v`` rounded up, so a bound named as "at least" is itself enough."""
+    step = 10.0 ** decimals
+    return math.ceil(v * step - 1e-9) / step
+
+
+def _round_down(v: float, decimals: int = 2) -> float:
+    """``v`` rounded down, so a bound named as "smaller than" is never passed."""
+    step = 10.0 ** decimals
+    return math.floor(v * step + 1e-9) / step
+
+
+def _thickness_fix(cc: float, t: float, thickness: float, a: float) -> str:
+    """What makes a support thickness above ``a - t`` acceptable: a thinner
+    value, a larger cell, or a thinner strut -- each offered only where its
+    own range allows it."""
+    options = []
+    most = support_thickness_max(a, t, decimals=2)
+    if most >= SUPPORT_THICKNESS_RANGE[0]:
+        options.append(f"lower {{thickness}} to at most {most:.2f} mm")
+    cc_needed = _round_up((thickness + t) * 2.0 ** 0.5)
+    if cc_needed <= CC_RANGE[1]:
+        options.append(f"raise {{cc}} to at least {cc_needed:.2f} mm")
+    t_most = _round_down(a - thickness)
+    if not options and t_most >= T_RANGE[0]:
+        options.append(f"lower {{t}} to at most {t_most:.2f} mm")
+    if not options:
+        return "lower {thickness} or {t}, or raise {cc}"
+    return ", or ".join(options)
+
+
 def _as_float(flag: str, s: str) -> float:
     try:
         return float(s)
     except ValueError:
-        raise ParamError(f"Invalid numeric value for {flag}: '{s}'") from None
+        raise ParamError(f"Invalid numeric value for {flag}: '{s}'",
+                         fix=f"enter a number for {_field(flag)}") from None
 
 
 def _as_int(flag: str, s: str) -> int:
     try:
         return int(s)
     except ValueError:
-        raise ParamError(f"Invalid integer value for {flag}: '{s}'") from None
+        raise ParamError(f"Invalid integer value for {flag}: '{s}'",
+                         fix=f"enter a whole number for {_field(flag)}") from None
 
 
 def _in_range(flag: str, v: float, lo: float, hi: float) -> float:
     if v < lo or v > hi:
-        raise ParamError(f"{flag} = {v} is out of the valid range [{lo}, {hi}]")
+        raise ParamError(f"{flag} = {v} is out of the valid range [{lo}, {hi}]",
+                         fix=f"set {_field(flag)} between {format_param(lo)} and "
+                             f"{format_param(hi)}{_FIX_UNIT.get(flag, '')}")
     return v
 
 
@@ -372,11 +461,11 @@ def parse_args(argv: list[str]) -> Args:
             raise ParamError(f"Unknown argument: {a}. Run with --help for usage.")
 
     if input_path is None:
-        raise ParamError("-i/--input is required.\n\n" + USAGE)
+        raise ParamError("-i/--input is required.\n\n" + USAGE, fix="choose an {input}")
     if cc is None:
-        raise ParamError("-cc is required.\n\n" + USAGE)
+        raise ParamError("-cc is required.\n\n" + USAGE, fix="enter {cc}")
     if t is None:
-        raise ParamError("-t is required.\n\n" + USAGE)
+        raise ParamError("-t is required.\n\n" + USAGE, fix="enter {t}")
 
     _in_range("-cc", cc, *CC_RANGE)
     _in_range("-t", t, *T_RANGE)
@@ -388,7 +477,9 @@ def parse_args(argv: list[str]) -> Args:
         raise ParamError(
             f"-t = {t} mm must be smaller than the cube edge length "
             f"a = cc/sqrt(2) = {a_edge:.6f} mm (derived from -cc = {cc}); a strut "
-            f"this thick would not fit within one lattice cell."
+            f"this thick would not fit within one lattice cell.",
+            fix=f"make {{t}} smaller than {_round_down(a_edge):.2f} mm, or {{cc}} "
+                f"larger than {_round_up(t * 2.0 ** 0.5):.2f} mm",
         )
     # No further restriction applies. The mid-strut cap faces this generator
     # stitches junctions along stay intact for the whole of `t < a` — see
@@ -405,6 +496,17 @@ def parse_args(argv: list[str]) -> Args:
     if thickness is None:
         thickness = t
     _in_range("--support-thickness", thickness, *SUPPORT_THICKNESS_RANGE)
+    if support and support_grid(a_edge, t, thickness) is None:
+        # Asked only of a supported run: without `--support` the value is the
+        # default `t` and reaches nothing, so it must not refuse a lattice.
+        raise ParamError(
+            f"--support-thickness {format_param(thickness)} mm cannot be met at "
+            f"cc={format_param(cc)}, t={format_param(t)}: the thinnest support "
+            f"member is at most a - t = "
+            f"{format_param(support_thickness_max(a_edge, t, decimals=3))} mm "
+            f"(a = cc/sqrt(2)).",
+            fix=_thickness_fix(cc, t, thickness, a_edge),
+        )
 
     step_path, log_path = resolve_output_paths(
         input_path, output, cc, t, orient, support

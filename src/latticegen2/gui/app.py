@@ -60,7 +60,9 @@ oriented to the bed. With Generate support ticked, every part of the inner \
 surface that overhangs more than 60° from vertical is carried down to the \
 nearest strut or wall by solid supports no steeper than the lattice's own rods; \
 those surfaces are tinted in the preview. Supports are written as separate \
-bodies that share faces with the lattice and the walls, ready to be merged.
+bodies that share faces with the lattice and the walls, ready to be merged. \
+Min thickness is the thinnest free-standing support member; a value too thick \
+for the lattice cell to hold is refused.
 
 The output sits beside a .log recording the parameters, the per-stage timings, \
 the run's characteristics and its peak memory — written every run, whether or \
@@ -144,6 +146,25 @@ class Bar(tk.Canvas):
         if self._text:
             self.create_text(width // 2, height // 2, text=self._text,
                              font=("TkDefaultFont", 8))
+
+
+#: The window's own name for each parameter a refusal's fix can name
+#: (:class:`latticegen2.errors.ParamError`).
+FIELD_LABELS = {
+    "cc": "cc", "t": "t", "cores": "cores", "thickness": "Min thickness",
+    "rx": "rot X", "ry": "rot Y", "rz": "rot Z", "orient": "the rotation",
+    "input": "input file",
+}
+
+
+def start_hint(exc: LatticeGenError) -> str:
+    """The red line beneath the fields while Start! is greyed out: what to
+    change, in the window's own terms, or the parser's reason where it gives
+    no fix."""
+    fix = getattr(exc, "fix_text", lambda labels: None)(FIELD_LABELS)
+    if fix:
+        return f"To enable Start!, {fix}."
+    return str(exc).split("\n", 1)[0]
 
 
 class App:
@@ -501,12 +522,23 @@ class App:
         if self.run is not None:
             return
         self.message_var.set("")
+        argv = self._pending_argv()
+        chosen = bool(self.input_var.get().strip())
+        if not chosen:
+            # The parameters are still checked before a file is chosen, so the
+            # line can say what else must change; the stand-in name reaches no
+            # file system check and nothing is run with it.
+            argv[argv.index("-i") + 1] = "input.step"
         try:
-            args = parse_args(self._pending_argv())
+            args = parse_args(argv)
         except LatticeGenError as exc:
             self.derived_var.set("—")
-            first = str(exc).split("\n", 1)[0]
-            self.message_var.set(first if self.input_var.get().strip() else "")
+            self.message_var.set(start_hint(exc))
+            self.start.state(["disabled"])
+            return
+        if not chosen:
+            self.derived_var.set("—")
+            self.message_var.set("To enable Start!, choose an input file.")
             self.start.state(["disabled"])
             return
 

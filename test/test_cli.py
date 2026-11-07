@@ -4,11 +4,13 @@ Covers the ranges, the ``t < a`` cross-constraint, path resolution, and the rule
 that a rejected run touches no files.
 """
 
+import math
 import os
+import re
 
 import pytest
 
-from latticegen2 import sysinfo
+from latticegen2 import cli, sysinfo
 from latticegen2.cli import (
     HelpRequested,
     default_workers,
@@ -262,6 +264,10 @@ def _args(*extra):
     return parse_args(["-i", "part.step", "-cc", "10", "-t", "1.5", *extra])
 
 
+def _args_at(cc, t, *extra):
+    return parse_args(["-i", "part.step", "-cc", cc, "-t", t, *extra])
+
+
 def test_orientation_and_support_default_to_off():
     args = _args()
     assert args.orient == (0.0, 0.0, 0.0)
@@ -299,6 +305,89 @@ def test_support_defaults_and_names():
 def test_bad_orientation_and_support_arguments_are_rejected(extra):
     with pytest.raises(ParamError):
         _args(*extra)
+
+
+@pytest.mark.parametrize("cc, t, thickness, m, thinnest", [
+    (10.0, 1.5, 1.5, 3, 1.607),
+    (7.0, 1.4, 1.0, 2, 1.775),
+    (20.0, 4.0, 4.0, 2, 5.071),
+    (5.0, 1.0, 1.0, 2, 1.268),
+    (10.0, 1.5, 0.2, 7, 0.260),
+])
+def test_the_support_grid_is_the_finest_whose_thinnest_member_holds(cc, t, thickness, m, thinnest):
+    from latticegen2.cli import support_grid
+
+    a = cc / math.sqrt(2.0)
+    got_m, got = support_grid(a, t, thickness)
+    assert (got_m, round(got, 3)) == (m, thinnest)
+    assert got >= thickness
+    # One division finer would be too thin.
+    assert a / (m + 1) - t / 2 < thickness
+
+
+def test_a_support_thickness_beyond_a_minus_t_is_refused_naming_the_largest():
+    from latticegen2.cli import support_grid
+
+    # cc 5, t 1: a - t = 2.5355 mm, delivered at m = 1; the message names it
+    # rounded down, so the figure it names is itself accepted.
+    a = 5.0 / math.sqrt(2.0)
+    assert support_grid(a, 1.0, a - 1.0) == (1, pytest.approx(a - 1.0))
+    args = _args_at("5", "1", "--support", "--support-thickness", "2.535")
+    assert args.support_thickness == 2.535
+    with pytest.raises(ParamError, match=r"at most a - t = 2\.535 mm"):
+        _args_at("5", "1", "--support", "--support-thickness", "2.536")
+    # Asked only of a supported run: without --support the default t reaches
+    # nothing, so a legal lattice whose a - t is under t is not refused.
+    assert _args_at("5", "3").support is False
+    with pytest.raises(ParamError, match="at most a - t"):
+        _args_at("5", "3", "--support")
+
+
+FLAG_LABELS = {"cc": "-cc", "t": "-t", "cores": "--cores", "thickness": "--support-thickness",
+               "rx": "rx", "ry": "ry", "rz": "rz", "orient": "--orient", "input": "input"}
+
+
+def _fix(*argv) -> str:
+    with pytest.raises(ParamError) as info:
+        cli.parse_args(["-i", "part.step", *argv])
+    return info.value.fix_text(FLAG_LABELS)
+
+
+@pytest.mark.parametrize("argv, flags", [
+    # A strut too thick for its cell: either change is enough on its own.
+    (["-cc", "10", "-t", "18"], ("-t", "-cc")),
+    (["-cc", "5", "-t", "3.6"], ("-t", "-cc")),
+    # A support thickness no grid can hold.
+    (["-cc", "10", "-t", "1.5", "--support", "--support-thickness", "6"],
+     ("--support-thickness", "-cc")),
+    (["-cc", "5", "-t", "3", "--support"], ("--support-thickness", "-cc")),
+])
+def test_every_change_a_refusal_suggests_is_accepted(argv, flags):
+    """The window shows the fix while Start! is greyed out (specification.md
+    §3.1), so each change it offers must be enough on its own -- bounds are
+    rounded in the direction that makes the named value itself pass."""
+    fix = _fix(*argv)
+    found = re.findall(r"(-cc|-t|--support-thickness) (?:smaller|larger) than ([\d.]+)"
+                       r"|(-cc|-t|--support-thickness) to at (?:most|least) ([\d.]+)", fix)
+    changes = [(a or c, b or d) for a, b, c, d in found]
+    assert tuple(f for f, _ in changes) == flags, fix
+    for flag, value in changes:
+        changed = list(argv)
+        if flag in changed:
+            changed[changed.index(flag) + 1] = value
+        else:
+            changed += [flag, value]
+        cli.parse_args(["-i", "part.step", *changed])
+
+
+def test_a_refusal_names_the_parameter_and_its_range():
+    assert _fix("-cc", "100", "-t", "1") == "set -cc between 0.4 and 50 mm"
+    assert _fix("-cc", "abc", "-t", "1") == "enter a number for -cc"
+    assert _fix("-cc", "10", "-t", "1", "--cores", "1.5") == "enter a whole number for --cores"
+    assert _fix("-cc", "10", "-t", "1", "--orient", "0", "400", "0") == "set ry between -360 and 360°"
+    with pytest.raises(ParamError) as info:
+        cli.parse_args(["-cc", "10", "-t", "1"])
+    assert info.value.fix_text(FLAG_LABELS) == "choose an input"
 
 
 @pytest.mark.parametrize("extra", [("--overhang", "60"),

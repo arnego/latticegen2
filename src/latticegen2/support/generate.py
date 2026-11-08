@@ -62,6 +62,61 @@ def _touching(a, b, gap: float = 1e-3) -> bool:
     return bool(np.all(a[0] <= b[1] + gap) and np.all(b[0] <= a[1] + gap))
 
 
+def _edges_not_used_twice(solid) -> int:
+    """Non-degenerate edges of ``solid`` not used by exactly two of its faces."""
+    from OCP.BRep import BRep_Tool
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp
+    from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+
+    m = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(solid, TopAbs_ShapeEnum.TopAbs_EDGE,
+                                   TopAbs_ShapeEnum.TopAbs_FACE, m)
+    return sum(1 for k in range(1, m.Extent() + 1)
+               if m.FindFromIndex(k).Size() != 2
+               and not BRep_Tool.Degenerated_s(TopoDS.Edge_s(m.FindKey(k))))
+
+
+def remove_micro_caps(solids: list) -> tuple[list, list, list]:
+    """``(solids, removed, refused)``: every body with its sub-micron caps
+    removed (:func:`latticegen2.occ.remove_micro_caps`).
+
+    ``removed`` holds one position per cap taken out, ``refused`` one per body
+    whose repair failed its check and was kept as built. The repair is exact by
+    construction, and checked rather than trusted: the result must be one
+    valid solid with every edge used by exactly two faces, and its boundary may
+    not move by more than :data:`latticegen2.occ.MICRO_CAP_TOL` -- read, as §9
+    reads unification, as ``|dV| / surface area``, since the volume is
+    re-integrated over the host face and moves by quadrature noise (5.7e-6 mm^3
+    on the 6,442 mm^3 body this was found on, for a cap of ~1e-12 mm^3). A
+    refused repair leaves the body to ``validate``, whose export-truth gate
+    still judges it.
+    """
+    from .. import occ
+
+    out, removed, refused = [], [], []
+    for s in solids:
+        fixed, where = occ.remove_micro_caps(s)
+        if not where:
+            out.append(s)
+            continue
+        got = occ.solids(fixed)
+        ok = len(got) == 1 and occ.is_valid(got[0], parallel=False)
+        if ok:
+            ok = _edges_not_used_twice(got[0]) == 0
+        if ok:
+            moved = abs(occ.volume(got[0]) - occ.volume(s)) / max(occ.area(s), 1e-30)
+            ok = moved <= occ.MICRO_CAP_TOL
+        if ok:
+            out.append(got[0])
+            removed += where
+        else:
+            out.append(s)
+            refused += where
+    return out, removed, refused
+
+
 def absorb_lost(solids: list, lost, bare: np.ndarray, added: list | None = None
                 ) -> tuple[list, int]:
     """``(solids, n)``: ``solids`` with the ``n`` lost junction pieces that hold a
@@ -185,6 +240,18 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
             if any(i >= len(bodies) for i in g):
                 members, _js = join.join(members, overlaps=False)
             out += members
+    # A support node's corner within a micron of the input's wall leaves a cap
+    # no mesher can close, which export truth then refuses (§14.3 S6).
+    out, caps, caps_refused = remove_micro_caps(out)
+    stats["support_micro_caps_removed"] = len(caps)
+    if caps:
+        lines.append(f"note: {len(caps)} sub-micron cap(s) removed from support bodies "
+                     f"where a support node's corner grazed the input's surface, at "
+                     f"{', '.join(point_text(p) for p in caps[:5])}"
+                     f"{' ...' if len(caps) > 5 else ''}")
+    if caps_refused:
+        lines.append(f"sub-micron cap repair refused by its check, bodies kept as built, "
+                     f"at {', '.join(point_text(p) for p in caps_refused[:5])}")
     for s in out:
         nm = frustum.non_manifold_edges(s)
         if nm:

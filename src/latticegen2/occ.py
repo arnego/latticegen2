@@ -1829,6 +1829,148 @@ def only_inner_wires_dropped(
     return None
 
 
+MICRO_CAP_TOL = 1e-3
+"""Millimetres. The largest extent a face may have and still be part of a
+micro cap removed by :func:`remove_micro_caps`.
+
+A thousandth of a millimetre is 400x below the smallest legal strut and 200x
+below the thinnest support member the command line accepts, so nothing a
+printer or a downstream CAD tool could resolve is that small. It is also the
+bar :data:`latticegen2.boundary.FUSE_PINHOLE_WIRE_TOL` and §9's
+``UNIFY_MAX_DISPLACEMENT`` already use. The measured cap is 4x below it on its
+largest edge (2.5e-4 mm)."""
+
+
+def remove_micro_caps(
+    shape: TopoDS_Shape, tol: float = MICRO_CAP_TOL
+) -> tuple[TopoDS_Shape, list[tuple[float, float, float]]]:
+    """Fill sub-micron dimples and shave sub-micron bumps off a face.
+
+    Returns ``(shape, where)``: the repaired shape and one point per cap
+    removed, in the shape's own coordinates. ``where`` is empty, and ``shape``
+    the very object passed in, when there is nothing to remove.
+
+    **What the defect is.** A support body trimmed to the input, where the
+    corner of a support node lies within a fraction of a micron of the input's
+    wall, comes back carrying the tip of that corner as a **cap**: three planar
+    faces of ~1e-8 mm^2, edges 0.1 to 0.25 micron long, closing a matching
+    3-edge inner wire of the wall face. Measured on `test-cylinder.STEP` at
+    ``cc=10, t=1.5, --orient 140.5 -76.7 103.6 --support``: a support body of
+    1,047 faces, ``BRepCheck_Analyzer``-valid and manifold, whose wall face
+    ``BRepMesh`` cannot triangulate around a hole that small. The tessellation
+    leaves the cap's three rim edges used once, at every deflection from 0.05
+    down to 1e-4 mm, in memory and after a STEP round trip alike, so §9's
+    export-truth gate refuses the run -- correctly: the body cannot be meshed
+    consistently by anything downstream.
+
+    **The repair is exact by construction, and the threshold is not what makes
+    it so.** A cap is a connected set ``C`` of faces, each lying within ``tol``
+    (bounding box diagonal), whose edges are either shared by two faces of
+    ``C`` or shared with one face ``H`` outside it -- every one of the latter
+    with the same ``H``, and together making up exactly one **inner** wire
+    ``W`` of ``H``. Removing ``C`` and ``W`` then removes every edge ``C``
+    touches together with both of its users, and no other edge loses one, so a
+    shell that used every edge twice still does. ``H`` keeps its surface, which
+    simply continues across the region ``W`` bounded. The material added or
+    removed is the cap's own, under ``tol^3``.
+
+    Anything that does not fit that shape exactly is left alone -- a cap on an
+    outer wire, one spread over two host faces, one touching an edge used by
+    more than two faces, a whole solid smaller than ``tol`` -- and §9's gate
+    still judges it. So the repair can only ever turn a body the gate refuses
+    into one it accepts or leave it as it was; the caller checks the result
+    rather than trusting it.
+
+    ``BRepTools_ReShape`` rebuilds only the host face, as in
+    :func:`remove_pinhole_wires`: every other face, edge and vertex comes back
+    the same object.
+    """
+    all_faces = faces(shape)
+    edge_index = TopTools_IndexedMapOfShape()
+    edges_of: list[list[int]] = []
+    users: dict[int, list[int]] = {}
+    degenerate: set[int] = set()
+    for fi, face in enumerate(all_faces):
+        ids = []
+        for e in _explore(face, TopAbs_ShapeEnum.TopAbs_EDGE):
+            ei = edge_index.Add(e)
+            if BRep_Tool.Degenerated_s(TopoDS.Edge_s(e)):
+                degenerate.add(ei)
+                continue
+            ids.append(ei)
+            users.setdefault(ei, []).append(fi)
+        edges_of.append(ids)
+
+    small: set[int] = set()
+    for fi, face in enumerate(all_faces):
+        box = Bnd_Box()
+        BRepBndLib.Add_s(face, box, False)
+        if not box.IsVoid() and box.SquareExtent() < tol * tol:
+            small.add(fi)
+    if not small:
+        return shape, []
+
+    reshape = BRepTools_ReShape()
+    where: list[tuple[float, float, float]] = []
+    seen: set[int] = set()
+    for start in sorted(small):
+        if start in seen:
+            continue
+        # The connected set of small faces holding ``start``.
+        cap, todo = {start}, [start]
+        while todo:
+            fi = todo.pop()
+            for ei in edges_of[fi]:
+                for fj in users[ei]:
+                    if fj in small and fj not in cap:
+                        cap.add(fj)
+                        todo.append(fj)
+        seen |= cap
+        rim: set[int] = set()
+        hosts: set[int] = set()
+        ok = True
+        for fi in cap:
+            for ei in edges_of[fi]:
+                u = users[ei]
+                if len(u) != 2:
+                    ok = False                    # free or non-manifold: not ours
+                    break
+                outside = [fj for fj in u if fj not in cap]
+                if outside:
+                    rim.add(ei)
+                    hosts.update(outside)
+            if not ok:
+                break
+        if not ok or not rim or len(hosts) != 1:
+            continue
+        host = all_faces[next(iter(hosts))]
+        outer = BRepTools.OuterWire_s(host)
+        wire = None
+        for w in _explore(host, TopAbs_ShapeEnum.TopAbs_WIRE):
+            ids = {edge_index.FindIndex(e)
+                   for e in _explore(w, TopAbs_ShapeEnum.TopAbs_EDGE)} - degenerate
+            if ids == rim:
+                wire = w
+                break
+        if wire is None or wire.IsSame(outer):
+            continue
+        for fi in cap:
+            reshape.Remove(all_faces[fi])
+        reshape.Remove(wire)
+        box = Bnd_Box()
+        for fi in cap:
+            BRepBndLib.Add_s(all_faces[fi], box, False)
+        x0, y0, z0, x1, y1, z1 = box.Get()
+        where.append((round((x0 + x1) / 2, 3), round((y0 + y1) / 2, 3),
+                      round((z0 + z1) / 2, 3)))
+    if not where:
+        return shape, []
+    fixed = reshape.Apply(shape)
+    if fixed is None or fixed.IsNull():
+        return shape, []
+    return fixed, where
+
+
 def count_subshapes(shape: TopoDS_Shape) -> tuple[int, int]:
     """``(faces, edges)`` in ``shape`` — the compactness of its B-rep."""
     return (

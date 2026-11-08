@@ -398,6 +398,10 @@ An opt-in stage that creates support structures, as used for
   where a ceiling grazes a support node are discarded rather than shipped as
   floating micro-solids; the harness reports the bare samples beside them as
   slivers, within 0.05 mm of a support (§6.2).
+  Likewise a support node's corner grazing the input's wall within a micron
+  leaves a cap of faces too small for any mesher, which is removed so that
+  the body can be written, and reported as a `note:` with its position
+  (docs/algorithm.md §14.3 S6).
 - **Anchoring and design depth.** A support runs from the ceiling down to the
   nearest lattice rod below it, or, where no rod is reached, to the enveloping
   wall — the nearest anchor by drop, searched down the three rod directions —

@@ -2359,7 +2359,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind that budget: logical core count (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the export-truth measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), sub-micron cap removal (§14.3 S6), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the export-truth measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |
@@ -2851,6 +2851,36 @@ chip of ceiling contact: 0.001 mm³ on the rehearsal's cuts, on the far side of 
 grid plane from the support. It stays discarded, since a floating micro-solid in
 the file serves nothing, and the harness reports the bare samples beside it as
 slivers (`verify_geometry.COVERAGE_SLIVER_TOL`).
+
+**A support node's corner grazing the input's wall leaves a cap no mesher
+closes, and it is removed** (`occ.remove_micro_caps`, run by
+`generate.remove_micro_caps` on every finished body). Where a corner lies a
+fraction of a micron past the wall, the trimmed body carries the corner's tip:
+three planar faces of ~1e-8 mm², edges 0.1 to 0.25 µm, closing a matching
+3-edge inner wire of the wall face. Measured on `test-cylinder.STEP` at
+`cc = 10, t = 1.5`, `--orient 140.5 -76.7 103.6`: a body of 1,047 faces,
+`BRepCheck_Analyzer`-valid and manifold, whose 2,128 mm² wall face `BRepMesh`
+cannot triangulate around a hole that small. The three rim edges are used once
+at every rung of §9's ladder, 0.05 to 1e-4 mm, in memory and after a STEP round
+trip alike, so export truth refused the run — rightly: nothing downstream could
+mesh that body consistently.
+
+A cap is a connected set of faces each within `MICRO_CAP_TOL` (1e-3 mm,
+bounding-box diagonal) whose edges are shared within the set or with one face
+outside it, the latter making up exactly one **inner** wire of that face.
+Removing the faces and the wire removes every edge they touch together with
+both its users, so a shell using every edge twice still does, and the host's
+surface simply continues across the hole: the material moved is the cap's own,
+under `MICRO_CAP_TOL³`. The threshold decides what is small enough to be
+noise, not whether the repair keeps the body closed. Anything of another shape
+— a cap on an outer wire, across two host faces, beside an edge with other
+than two users — is left as built for export truth to judge, and so is a
+repaired body that is not one valid solid using every edge twice, or whose
+boundary moved more than `MICRO_CAP_TOL` read as `|ΔV| / area`, §9's
+displacement: the volume is re-integrated over the host face and moves by
+quadrature noise, 5.7e-6 mm³ on that body for a cap of ~1e-12 mm³. On that
+body the repair takes the readings from 3 to **0** and the run passes.
+Removals are logged as one `note:` line with their positions.
 
 **S7 — Pockets** (`support/voids.py`). Powder must not be trapped. Per group of
 bodies whose envelopes touch, the free space in the support envelope — the

@@ -55,7 +55,7 @@ For each parameter, specify: **name, type, units, valid range, default, required
 | Flag | Type | Required | Units | Range | Default | Description |
 |------|------|----------|-------|-------|---------|-------------|
 | -i --input | path | required | NA | NA | NA | Path to STEP file defining the lattice bounds |
-| -o --output | path | optional | NA | NA | `<input_stem>-lattice-cc<cc>t<t>.step` | Path and name of the output .step file. Must name a **file**, not a directory: `-o .\` and friends are rejected (exit 2) rather than turned into `.\.step`. `.step` is appended if absent. In the default name every value is rounded to at most 2 decimals, so the tags add at most 64 characters to the stem; the `.log` and the STEP header keep the exact values. A name or path the platform cannot hold is refused before anything is written (exit 2): a file name over 255 characters � counted on the longest the run writes, `<stem>.cancel` � or a path over 259 characters on Windows (4,095 bytes on Linux), counted on the run's own `temp/<stamp>/` files beside the output. |
+| -o --output | path | optional | NA | NA | `<input_stem>-lattice-cc<cc>t<t>.step` | Path and name of the output .step file. Must name a **file**, not a directory: `-o .\` and friends are rejected (exit 2) rather than turned into `.\.step`. `.step` is appended if absent. In the default name every value is rounded to at most 2 decimals, so the tags add at most 64 characters to the stem; the `.log` and the STEP header keep the exact values. A name or path the platform cannot hold is refused before anything is written (exit 2): a file name over 255 characters — counted on the longest the run writes, `<stem>.cancel` — or a path over 259 characters on Windows (4,095 bytes on Linux), counted on the run's own `temp/<stamp>/` files beside the output. |
 | -cc | float | required | mm | 0.4 - 50 | NA | Distance between the bottom nodes of two adjacent cells |
 | -t | float | required  | mm | 0.4 - 20 | NA | Side length of the diamond rod profile. Must be smaller than the cell edge `a = cc/√2`; that is the only cross-constraint. |
 | -v --verbose | flag | optional | NA | NA | disabled | Enable verbose console diagnostics while always writing a full `.log` file. |
@@ -182,7 +182,7 @@ no fix shows the parser's reason instead. Before an input file is chosen the
 parameters are still checked, against a stand-in name, and the line asks for
 the file only once nothing else is wrong. Once it is chosen, the length of
 the file the run will write, in the chosen output folder, is checked too
-(�3, `-o`): `To start, choose an output folder with a path 12 character(s)
+(§3, `-o`): `To start, choose an output folder with a path 12 character(s)
 shorter.` The command line's messages are
 unchanged.
 
@@ -505,6 +505,16 @@ The normative algorithm is docs/algorithm.md §14.
   It is also measured at the source, per trimmed junction, so a failure can name
   the junctions responsible rather than only a coordinate. See
   docs/algorithm.md §7.3 and §9.
+
+- **A sub-micron cap is removed, not refused.** Where the corner of a strut
+  or of a support node grazes the input's wall within a micron, the trimmed
+  body carries the corner's tip: a few faces of ~1e-8 mm² closing a hole of the
+  same size in the wall face, which no mesher closes and the export-truth gate
+  above rightly refuses. Lattice and support bodies alike have such a cap
+  removed — the wall continues across the hole, moving under 1e-9 mm³ — and the
+  run reports each one as a `note:` with its position. The repair touches
+  nothing else, is checked, and a body whose repair fails its check is kept as
+  built for export truth to judge (docs/algorithm.md §9, §14.3 S6).
 
 - **STEP schema/AP:** AP214
 

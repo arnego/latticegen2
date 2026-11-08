@@ -32,8 +32,17 @@ class ParamError(LatticeGenError):
         self.fix = fix
 
     def fix_text(self, labels: dict[str, str]) -> str | None:
-        """``fix`` with each parameter named by ``labels``."""
-        return self.fix.format(**labels) if self.fix else None
+        """``fix`` with each parameter named by ``labels``; a parameter
+        ``labels`` does not name keeps its own field name rather than raising,
+        since this runs inside the window's validation callback."""
+        return self.fix.format_map(_Labels(labels)) if self.fix else None
+
+
+class _Labels(dict):
+    """Labels for :meth:`ParamError.fix_text`, falling back to the field name."""
+
+    def __missing__(self, key: str) -> str:
+        return key
 
 
 class InputGeometryError(LatticeGenError):

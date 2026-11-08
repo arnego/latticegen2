@@ -1886,6 +1886,17 @@ def remove_micro_caps(
     the same object.
     """
     all_faces = faces(shape)
+    # Nearly every body has no small face, and the boxes alone say so: the edge
+    # index below is paid only by a body that has one.
+    small: set[int] = set()
+    for fi, face in enumerate(all_faces):
+        box = Bnd_Box()
+        BRepBndLib.Add_s(face, box, False)
+        if not box.IsVoid() and box.SquareExtent() < tol * tol:
+            small.add(fi)
+    if not small:
+        return shape, []
+
     edge_index = TopTools_IndexedMapOfShape()
     edges_of: list[list[int]] = []
     users: dict[int, list[int]] = {}
@@ -1900,15 +1911,6 @@ def remove_micro_caps(
             ids.append(ei)
             users.setdefault(ei, []).append(fi)
         edges_of.append(ids)
-
-    small: set[int] = set()
-    for fi, face in enumerate(all_faces):
-        box = Bnd_Box()
-        BRepBndLib.Add_s(face, box, False)
-        if not box.IsVoid() and box.SquareExtent() < tol * tol:
-            small.add(fi)
-    if not small:
-        return shape, []
 
     reshape = BRepTools_ReShape()
     where: list[tuple[float, float, float]] = []

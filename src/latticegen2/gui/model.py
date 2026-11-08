@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from .. import progress
 from ..runlog import STAGES, WARNING_PREFIX, format_bytes
+from .weights import overall_permille
 
 
 def format_elapsed(seconds: float) -> str:
@@ -32,7 +33,6 @@ def format_elapsed(seconds: float) -> str:
     hours, rest = divmod(total, 3600)
     minutes, secs = divmod(rest, 60)
     return f"{hours}h {minutes:02d}m {secs:02d}s"
-from .weights import overall_permille
 
 #: How many lines of the run's own output to keep for the failure panel. The
 #: rehearsal writes a few hundred; a bounded backlog means an hour-long run

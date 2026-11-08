@@ -519,7 +519,7 @@ class App:
             self.message_var.set("To start, choose an input file.")
             self.start.state(["disabled"])
             return
-        output = self._resolved_output()
+        output = self._resolved_output(args)
         try:
             # On the file the run will write — in the chosen folder, which the
             # parse above, given no -o, placed beside the input instead.
@@ -534,7 +534,7 @@ class App:
         self.derived_var.set(f"→ {name}")
         self.start.state(["!disabled"])
 
-    def _resolved_output(self) -> str:
+    def _resolved_output(self, args=None) -> str:
         """Where the .step goes: the chosen folder, with the derived filename.
 
         The name is never editable, and comes from
@@ -542,7 +542,8 @@ class App:
         here — ``format_param`` renders ``20.0`` as ``20`` and ``1.5`` as
         ``1.5``, and a second implementation of that would drift.
         """
-        args = parse_args(self._pending_argv())
+        if args is None:
+            args = parse_args(self._pending_argv())
         default_step, _log = resolve_output_paths(
             args.input, None, args.cc, args.t, args.orient, args.support,
             args.support_thickness)

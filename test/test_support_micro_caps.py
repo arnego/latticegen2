@@ -17,7 +17,7 @@ import pytest
 
 from latticegen2 import occ
 from latticegen2.lattice import strut_direction
-from latticegen2.support import generate
+from latticegen2.support import frustum, generate
 
 HERE = os.path.dirname(__file__)
 FIXTURE = os.path.join(HERE, "support-micro-cap.brep")
@@ -74,10 +74,28 @@ def test_a_micro_dimple_is_filled_exactly(depth):
     # The cylinder's own three faces, and only those: the wall continues.
     assert len(occ.faces(out)) == 3
     assert occ.is_valid(out)
-    assert generate._edges_not_used_twice(out) == 0
+    assert frustum.edges_not_used_twice(out) == 0
     # The cap's own volume is under depth^3; what moves beyond that is the
     # host face re-integrated, which is quadrature noise.
     assert abs(occ.volume(out) - occ.volume(s)) < 1e-6
+
+
+def test_a_repair_that_fails_its_check_keeps_the_body_as_built(monkeypatch):
+    """The repair is checked, not trusted: a result that is not one solid is
+    refused, and the body goes on exactly as it came, its cap reported."""
+    s = _dimpled_cylinder(1e-4)
+    real = occ.remove_micro_caps
+
+    def broken(shape, *a, **k):
+        _fixed, where = real(shape, *a, **k)
+        return occ.compound([shape, shape]), where
+
+    monkeypatch.setattr(occ, "remove_micro_caps", broken)
+    (out,), removed, refused = generate.remove_micro_caps([s])
+    assert removed == []
+    assert len(refused) == 1
+    assert np.allclose(refused[0], (20.3, 0.0, 20.0), atol=1e-3)
+    assert out is s
 
 
 def test_a_dimple_that_is_material_is_left_alone():
@@ -110,7 +128,7 @@ def test_the_real_body_fails_export_truth_and_passes_once_repaired(tmp_path):
     assert np.allclose(removed, [(171.544, 34.737, 100.905)], atol=1e-3)
     assert len(occ.faces(out)) == len(occ.faces(s)) - 3
     assert occ.is_valid(out)
-    assert generate._edges_not_used_twice(out) == 0
+    assert frustum.edges_not_used_twice(out) == 0
     assert abs(occ.volume(out) - occ.volume(s)) / occ.area(s) < occ.MICRO_CAP_TOL
 
     after = occ.exported_mesh_defects(out, str(tmp_path / "after.step"))

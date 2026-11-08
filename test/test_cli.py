@@ -446,6 +446,8 @@ def _fix(*argv) -> str:
     (["-cc", "10", "-t", "1.5", "--support", "--support-thickness", "6"],
      ("--support-thickness", "-cc")),
     (["-cc", "5", "-t", "3", "--support"], ("--support-thickness", "-cc")),
+    # Neither a thinner support nor a larger cell is in range: a thinner strut.
+    (["-cc", "28.43", "-t", "20", "--support", "--support-thickness", "19"], ("-t",)),
 ])
 def test_every_change_a_refusal_suggests_is_accepted(argv, flags):
     """The window shows the fix while Start! is greyed out (specification.md
@@ -473,6 +475,14 @@ def test_a_refusal_names_the_parameter_and_its_range():
     with pytest.raises(ParamError) as info:
         cli.parse_args(["-cc", "10", "-t", "1"])
     assert info.value.fix_text(FLAG_LABELS) == "choose an input"
+    # No single change in range is enough: all three are named, none bounded.
+    assert (_fix("-cc", "28.43", "-t", "20", "--support", "--support-thickness", "20")
+            == "lower --support-thickness or -t, or raise -cc")
+
+
+def test_a_fix_naming_a_field_without_a_label_keeps_the_field_name():
+    assert ParamError("x", fix="raise {cc} or {budget}").fix_text({"cc": "cc"}) == (
+        "raise cc or budget")
 
 
 @pytest.mark.parametrize("extra", [("--overhang", "60"),

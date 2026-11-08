@@ -431,8 +431,8 @@ def _estimate(piece, in_body, seed: int = 1):
     return ok.mean() * box, math.sqrt(max(int(ok.sum()), 1)) / ESTIMATE_SAMPLES * box
 
 
-def non_manifold_edges(solid) -> int:
-    """Edges of ``solid`` used by more than two of its faces."""
+def _edge_uses(solid) -> list:
+    """``(edge, number of face uses)`` for every edge of ``solid``."""
     from OCP.TopAbs import TopAbs_ShapeEnum
     from OCP.TopExp import TopExp
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
@@ -440,7 +440,21 @@ def non_manifold_edges(solid) -> int:
     m = TopTools_IndexedDataMapOfShapeListOfShape()
     TopExp.MapShapesAndAncestors_s(solid, TopAbs_ShapeEnum.TopAbs_EDGE,
                                    TopAbs_ShapeEnum.TopAbs_FACE, m)
-    return sum(1 for k in range(1, m.Extent() + 1) if m.FindFromIndex(k).Size() > 2)
+    return [(m.FindKey(k), m.FindFromIndex(k).Size()) for k in range(1, m.Extent() + 1)]
+
+
+def non_manifold_edges(solid) -> int:
+    """Edges of ``solid`` used by more than two of its faces."""
+    return sum(1 for _e, n in _edge_uses(solid) if n > 2)
+
+
+def edges_not_used_twice(solid) -> int:
+    """Non-degenerate edges of ``solid`` not used by exactly two of its faces."""
+    from OCP.BRep import BRep_Tool
+    from OCP.TopoDS import TopoDS
+
+    return sum(1 for e, n in _edge_uses(solid)
+               if n != 2 and not BRep_Tool.Degenerated_s(TopoDS.Edge_s(e)))
 
 
 def _unified(s, gates):

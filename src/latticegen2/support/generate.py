@@ -62,22 +62,6 @@ def _touching(a, b, gap: float = 1e-3) -> bool:
     return bool(np.all(a[0] <= b[1] + gap) and np.all(b[0] <= a[1] + gap))
 
 
-def _edges_not_used_twice(solid) -> int:
-    """Non-degenerate edges of ``solid`` not used by exactly two of its faces."""
-    from OCP.BRep import BRep_Tool
-    from OCP.TopAbs import TopAbs_ShapeEnum
-    from OCP.TopExp import TopExp
-    from OCP.TopoDS import TopoDS
-    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
-
-    m = TopTools_IndexedDataMapOfShapeListOfShape()
-    TopExp.MapShapesAndAncestors_s(solid, TopAbs_ShapeEnum.TopAbs_EDGE,
-                                   TopAbs_ShapeEnum.TopAbs_FACE, m)
-    return sum(1 for k in range(1, m.Extent() + 1)
-               if m.FindFromIndex(k).Size() != 2
-               and not BRep_Tool.Degenerated_s(TopoDS.Edge_s(m.FindKey(k))))
-
-
 def remove_micro_caps(solids: list) -> tuple[list, list, list]:
     """``(solids, removed, refused)``: every body with its sub-micron caps
     removed (:func:`latticegen2.occ.remove_micro_caps`).
@@ -94,6 +78,7 @@ def remove_micro_caps(solids: list) -> tuple[list, list, list]:
     still judges it.
     """
     from .. import occ
+    from . import frustum
 
     out, removed, refused = [], [], []
     for s in solids:
@@ -104,7 +89,7 @@ def remove_micro_caps(solids: list) -> tuple[list, list, list]:
         got = occ.solids(fixed)
         ok = len(got) == 1 and occ.is_valid(got[0], parallel=False)
         if ok:
-            ok = _edges_not_used_twice(got[0]) == 0
+            ok = frustum.edges_not_used_twice(got[0]) == 0
         if ok:
             moved = abs(occ.volume(got[0]) - occ.volume(s)) / max(occ.area(s), 1e-30)
             ok = moved <= occ.MICRO_CAP_TOL
@@ -250,7 +235,8 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                      f"{', '.join(point_text(p) for p in caps[:5])}"
                      f"{' ...' if len(caps) > 5 else ''}")
     if caps_refused:
-        lines.append(f"sub-micron cap repair refused by its check, bodies kept as built, "
+        lines.append(f"note: sub-micron cap repair refused by its check, bodies kept as built "
+                     f"for export truth to judge, "
                      f"at {', '.join(point_text(p) for p in caps_refused[:5])}")
     for s in out:
         nm = frustum.non_manifold_edges(s)

@@ -26,7 +26,13 @@ adjacent cells and `-t` the strut profile's side length.
 | `tkinter` | stdlib | The graphical front-end only. Ships with Python; on Debian and Ubuntu it is the separate `python3-tk` package, and the command line works without it | PSF (Tcl/Tk: BSD-style) |
 
 Nothing else to install. License texts are in [`licenses/`](licenses/), cross-referenced in
-[`licenses/LICENSES.md`](licenses/LICENSES.md).
+[`licenses/LICENSES.md`](licenses/LICENSES.md), including those of everything the
+dependencies pull in or embed.
+
+Portions of the redistributed software are copyright © 2015 and 2024 The FreeType
+Project ([www.freetype.org](https://www.freetype.org)). All rights reserved. This
+credit is required by the FreeType License: FreeType is compiled into
+Matplotlib and Pillow, which `vtk` requires.
 
 **Nothing contacts the network at runtime.** Installation does, once — unless
 you use a release bundle, which never does.

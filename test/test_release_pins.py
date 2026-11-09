@@ -51,7 +51,36 @@ def test_every_pin_has_a_licence_row_at_its_version(name):
     files = re.findall(r"\]\(([^)]+)\)", row[-1])
     assert files, f"{name}: its row links no licence text"
     for f in files:
-        assert (LICENSES / f).is_file(), f"{name}: {f} is missing"
+        path = LICENSES / f
+        assert path.is_file() or (path.is_dir() and any(path.rglob("*"))), \
+            f"{name}: {f} is missing"
+
+
+def _linked_files() -> set[Path]:
+    text = (LICENSES / "LICENSES.md").read_text(encoding="utf-8")
+    out = set()
+    for target in re.findall(r"\]\(([^)#]+)\)", text):
+        if "://" in target or target.startswith(".."):
+            continue
+        path = (LICENSES / target).resolve()
+        out |= set(path.rglob("*")) if path.is_dir() else {path}
+    return {p for p in out if p.is_file()}
+
+
+def test_every_licence_link_resolves():
+    text = (LICENSES / "LICENSES.md").read_text(encoding="utf-8")
+    for target in re.findall(r"\]\(([^)#]+)\)", text):
+        if "://" in target:
+            continue
+        assert (LICENSES / target).exists(), f"LICENSES.md links {target}, which is missing"
+
+
+def test_every_licence_text_is_linked_from_the_table():
+    """A text no row links is one nobody can tell the purpose of."""
+    texts = {p.resolve() for p in LICENSES.rglob("*")
+             if p.is_file() and p.name != "LICENSES.md" and "runtime" not in p.parts}
+    orphans = sorted(str(p.relative_to(LICENSES.resolve())) for p in texts - _linked_files())
+    assert not orphans, f"licence texts linked from nowhere: {orphans}"
 
 
 def test_vtk_and_what_it_pulls_in_are_pinned():

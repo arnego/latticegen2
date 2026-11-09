@@ -113,7 +113,12 @@ Then check the two things a release can get wrong that testing will not catch:
   actually shipped. Two checks hold this: `test/test_release_pins.py` holds
   every pin to a table row at its version with its licence files present, and
   `tools/build_release.py` refuses any downloaded wheel that is not pinned,
-  which is how a new transitive dependency gets noticed.
+  which is how a new transitive dependency gets noticed. When a pin of a wheel
+  with compiled code moves, run `tools/collect_licences.py` (it needs the
+  network). It refetches the texts of what those wheels embed, per platform and
+  at the version compiled in, and the diff shows what changed. Bump the
+  versions it names (`MATPLOTLIB_TAG`, the AOM and dav1d tags libavif pins) to
+  match the new pins first.
 - **Docs describe what ships.** [`README.md`](../README.md) and
   [`specification.md`](specification.md) reflect reality.
 

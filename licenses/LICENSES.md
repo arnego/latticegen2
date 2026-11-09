@@ -23,17 +23,17 @@ bundle is one that was actually observed rather than one that was assumed.
 | **OCP** (`cadquery-ocp`) | 7.9.3.1.1 | Python bindings for OCCT. The binding layer itself; it also redistributes the OCCT binaries above. | Apache-2.0 | [ocp-LICENSE_Apache_20.txt](ocp-LICENSE_Apache_20.txt) |
 | **OCP proxy** (`cadquery-ocp-proxy`) | 7.9.3.1.1 | A 3 kB shim package `cadquery-ocp` requires; carries no binaries of its own. | Apache-2.0 | [ocp-LICENSE_Apache_20.txt](ocp-LICENSE_Apache_20.txt) |
 | **VTK** | 9.6.2 | **Not used by latticegen2.** Present only because `cadquery-ocp` requires it and the OCP extension module links against its shared libraries — see the note below. | BSD-3-Clause | [vtk-LICENSE.txt](vtk-LICENSE.txt) |
-| **Matplotlib** (`matplotlib`) | 3.10.6 | **Not used.** Required by `vtk`. Ships the DejaVu and STIX fonts, whose terms are separate texts. | Matplotlib License (PSF-based); fonts: Bitstream Vera / DejaVu terms, SIL OFL 1.1 | [matplotlib-LICENSE.txt](matplotlib-LICENSE.txt), [matplotlib-LICENSE_DEJAVU.txt](matplotlib-LICENSE_DEJAVU.txt), [matplotlib-LICENSE_STIX.txt](matplotlib-LICENSE_STIX.txt) |
+| **Matplotlib** (`matplotlib`) | 3.10.6 | **Not used.** Required by `vtk`. Its wheel carries the first three texts. The rest cover fonts, colour maps and scripts it ships, from its source tree's `LICENSE/` at `v3.10.6`, and the code it compiles in is listed in the next table. | Matplotlib License (PSF-based); bundled fonts and assets under their own terms | [matplotlib-LICENSE.txt](matplotlib-LICENSE.txt), [matplotlib-LICENSE_DEJAVU.txt](matplotlib-LICENSE_DEJAVU.txt), [matplotlib-LICENSE_STIX.txt](matplotlib-LICENSE_STIX.txt), [matplotlib-LICENSE_AMSFONTS.txt](matplotlib-LICENSE_AMSFONTS.txt), [matplotlib-LICENSE_BAKOMA.txt](matplotlib-LICENSE_BAKOMA.txt), [matplotlib-LICENSE_CARLOGO.txt](matplotlib-LICENSE_CARLOGO.txt), [matplotlib-LICENSE_COLORBREWER.txt](matplotlib-LICENSE_COLORBREWER.txt), [matplotlib-LICENSE_COURIERTEN.txt](matplotlib-LICENSE_COURIERTEN.txt), [matplotlib-LICENSE_JSXTOOLS_RESIZE_OBSERVER.txt](matplotlib-LICENSE_JSXTOOLS_RESIZE_OBSERVER.txt), [matplotlib-LICENSE_QT4_EDITOR.txt](matplotlib-LICENSE_QT4_EDITOR.txt), [matplotlib-LICENSE_SOLARIZED.txt](matplotlib-LICENSE_SOLARIZED.txt), [matplotlib-LICENSE_YORICK.txt](matplotlib-LICENSE_YORICK.txt) |
 | **ContourPy** (`contourpy`) | 1.3.3 | **Not used.** Required by `matplotlib`. | BSD-3-Clause | [contourpy-LICENSE.txt](contourpy-LICENSE.txt) |
 | **Cycler** (`cycler`) | 0.12.1 | **Not used.** Required by `matplotlib`. | BSD-3-Clause | [cycler-LICENSE.txt](cycler-LICENSE.txt) |
 | **fontTools** (`fonttools`) | 4.60.1 | **Not used.** Required by `matplotlib`. Its external notices cover the font data and code it embeds. | MIT; embedded: SIL OFL 1.1, Apache-2.0, MIT | [fonttools-LICENSE.txt](fonttools-LICENSE.txt), [fonttools-LICENSE.external.txt](fonttools-LICENSE.external.txt) |
 | **Kiwi** (`kiwisolver`) | 1.4.9 | **Not used.** Required by `matplotlib`. | BSD-3-Clause | [kiwisolver-LICENSE.txt](kiwisolver-LICENSE.txt) |
 | **packaging** (`packaging`) | 25.0 | **Not used.** Required by `matplotlib`. | Apache-2.0 or BSD-2-Clause, at the recipient's choice | [packaging-LICENSE.txt](packaging-LICENSE.txt), [packaging-LICENSE.APACHE.txt](packaging-LICENSE.APACHE.txt), [packaging-LICENSE.BSD.txt](packaging-LICENSE.BSD.txt) |
-| **Pillow** (`pillow`) | 11.3.0 | **Not used.** Required by `matplotlib`. | MIT-CMU (HPND) | [pillow-LICENSE.txt](pillow-LICENSE.txt) |
+| **Pillow** (`pillow`) | 11.3.0 | **Not used.** Required by `matplotlib`. Each platform's wheel appends the licences of the libraries it embeds to its own licence file, so the two differ; both are kept as the wheels ship them. The Windows file lacks two codecs compiled into libavif, listed in the next table. | MIT-CMU (HPND); embedded libraries under their own terms | [pillow-LICENSE-windows.txt](pillow-LICENSE-windows.txt), [pillow-LICENSE-linux.txt](pillow-LICENSE-linux.txt) |
 | **pyparsing** (`pyparsing`) | 3.2.5 | **Not used.** Required by `matplotlib`. | MIT | [pyparsing-LICENSE.txt](pyparsing-LICENSE.txt) |
 | **dateutil** (`python-dateutil`) | 2.9.0.post0 | **Not used.** Required by `matplotlib`. | Apache-2.0 and BSD-3-Clause (dual, by contribution date) | [python-dateutil-LICENSE.txt](python-dateutil-LICENSE.txt) |
 | **six** (`six`) | 1.17.0 | **Not used.** Required by `python-dateutil`. | MIT | [six-LICENSE.txt](six-LICENSE.txt) |
-| **NumPy** | 2.4.6 | Vectorised array maths for classification, spatial indexing and the lattice basis. | BSD-3-Clause | [numpy-LICENSE.txt](numpy-LICENSE.txt) |
+| **NumPy** | 2.4.6 | Vectorised array maths for classification, spatial indexing and the lattice basis. Each platform's wheel appends the licences of its embedded OpenBLAS and, on Linux, the GCC Fortran runtime; the code it compiles in keeps its own texts in `numpy-components/`, as the wheel does. | BSD-3-Clause; OpenBLAS BSD-3-Clause; libgfortran GPL-3 with the GCC Runtime Library Exception; libquadmath LGPL-2.1 (Linux) | [numpy-LICENSE-windows.txt](numpy-LICENSE-windows.txt), [numpy-LICENSE-linux.txt](numpy-LICENSE-linux.txt), [numpy-components/](numpy-components/) |
 | **Tcl/Tk** | 8.6 (as built into the runtime) | The graphical front-end's toolkit, reached through the standard library's `tkinter`. **Portable bundles only** — see the note below. | BSD-style (Tcl/Tk licence terms) | [tcl-tk-LICENSE.txt](tcl-tk-LICENSE.txt) |
 
 ## Why VTK is redistributed despite being unused
@@ -63,10 +63,40 @@ record. `tools/build_release.py` now refuses a download holding any wheel not
 pinned there, and `test/test_release_pins.py` holds every pin to a row of the
 table above at the same version, with its licence files present.
 
-**The texts are the ones each wheel ships.** Some of these wheels also carry
-compiled third-party libraries: Pillow's image codecs, and the FreeType and
-Qhull code Matplotlib builds in. Those projects' own terms are not in the wheels'
-`dist-info`, and they are not reproduced here yet.
+## Libraries compiled into the wheels
+
+A wheel with compiled code can carry other projects' code inside it, as a
+shared library or linked in statically. Their licences ask for their notices to
+travel with the binary, so each is listed here. Where a wheel's own licence file
+already carries a library's text, that file is the one linked above. These are
+the ones a wheel leaves out, taken from upstream at the version compiled in.
+[`tools/collect_licences.py`](../tools/collect_licences.py) refetches all of
+them when a pin moves.
+
+| Library | Version | Compiled into | License | Text |
+|---|---|---|---|---|
+| **FreeType** | 2.6.1 | `matplotlib` (`ft2font`), both platforms. Matplotlib pins this version for reproducible text rendering (`subprojects/freetype-2.6.1.wrap`). | FreeType License (FTL), chosen over its GPL-2.0 alternative; asks for a credit in the documentation, given in README.md | [matplotlib-freetype-2.6.1-FTL.txt](matplotlib-freetype-2.6.1-FTL.txt) |
+| **Qhull** | 8.0.2 (2020.2) | `matplotlib` (`_qhull`), both platforms (`subprojects/qhull.wrap`) | Qhull License | [matplotlib-qhull-8.0.2-COPYING.txt](matplotlib-qhull-8.0.2-COPYING.txt) |
+| **Anti-Grain Geometry** | 2.4 | `matplotlib` (`_backend_agg`, `_image`), both platforms (`extern/agg24-svn`) | Agg permissive notice, carried in each source file's header | [matplotlib-agg-2.4-LICENSE.txt](matplotlib-agg-2.4-LICENSE.txt) |
+| **pybind11** | 2.13.2 or later (not recorded in the wheels) | `matplotlib`, `contourpy`, both platforms; header-only, so compiled in | BSD-3-Clause, the same text throughout 2.x | [pybind11-LICENSE.txt](pybind11-LICENSE.txt) |
+| **cppy** | 1.3.0 or later (not recorded in the wheel) | `kiwisolver`, both platforms; header-only | BSD-3-Clause | [cppy-LICENSE.txt](cppy-LICENSE.txt) |
+| **AOM** (libaom) | 3.12.1 | `pillow`, inside libavif 1.3.0 (`AVIF_CODEC_AOM=LOCAL`). On Windows only this text is missing; the Linux wheel's own file carries it. | BSD-2-Clause, plus the Alliance for Open Media Patent License 1.0 | [pillow-libavif-aom-3.12.1-LICENSE.txt](pillow-libavif-aom-3.12.1-LICENSE.txt), [pillow-libavif-aom-3.12.1-PATENTS.txt](pillow-libavif-aom-3.12.1-PATENTS.txt) |
+| **dav1d** | 1.5.1 | `pillow`, inside libavif 1.3.0 (`AVIF_CODEC_DAV1D=LOCAL`). As for AOM, missing from the Windows file only. | BSD-2-Clause | [pillow-libavif-dav1d-1.5.1-COPYING.txt](pillow-libavif-dav1d-1.5.1-COPYING.txt) |
+
+**What the Pillow wheels carry themselves**, for reference:
+- **Both platforms:** Brotli, FreeType 2.13.3, HarfBuzz, LittleCMS, libavif (with libyuv), libjpeg-turbo, libpng, libwebp (with sharpyuv), OpenJPEG, libtiff and xz.
+- **Windows:** zlib-ng.
+- **Linux:** zlib, bzip2, libxcb and libXau, and the AOM and dav1d texts above.
+
+The Windows wheel's FreeType section also prints the GPL-2.0 text. That is FreeType's alternative licence, and the FTL in the same section is the one taken.
+
+**Not covered yet: `cadquery-ocp` and `vtk`.** They embed far more than the
+packages above. `cadquery_ocp.libs` holds FreeImage, OpenEXR and Imath, LibRaw,
+Lerc, libdeflate, OpenJPH, zstd and its own copies of the image libraries, and
+`vtk.libs` holds about 200 libraries. Neither wheel carries texts for these.
+Two of OCP's need a decision rather than a copy:
+- FreeImage is offered under GPL-2.0, GPL-3.0 or the FreeImage Public License.
+- LibRaw is offered under LGPL-2.1 or CDDL-1.0.
 
 ## Bundled Python runtime (portable bundles only)
 
@@ -116,9 +146,13 @@ developer checkout, and it does:
 Nothing in either bundle is a modified OCCT build, and nothing prevents
 replacing it.
 
-No dependency carries a GPL copyleft obligation: the set is LGPL-2.1,
-Apache-2.0, BSD-2/3-Clause, MIT, MIT-CMU, the PSF-based Matplotlib License, and
-the SIL Open Font License and Bitstream Vera terms for bundled fonts.
+No dependency covered above carries a GPL copyleft obligation:
+- FreeType is taken under the FTL.
+- NumPy's libgfortran is GPL-3 with the GCC Runtime Library Exception, which exists so that programs linking it are not bound by the GPL.
+- NumPy's libquadmath, on Linux, is LGPL-2.1. It ships as a separate shared library in `numpy.libs/`, replaceable on the same terms as OCCT above.
+- The rest are permissive: Apache-2.0, BSD-2/3-Clause, MIT, MIT-CMU, the PSF-based Matplotlib License, the Qhull and Agg notices, the AOM patent licence, and font licences (SIL Open Font License, Bitstream Vera and others).
+
+`cadquery-ocp` and `vtk`'s embedded libraries are not yet assessed (above).
 
 ## psutil is no longer a runtime dependency
 

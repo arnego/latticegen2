@@ -410,7 +410,7 @@ An opt-in stage that creates support structures, as used for
   lattice**: after `simplify` and before `validate`. The generator receives the
   lattice solids, the input geometry, `--orient`, `--support-thickness` and the
   inner overhangs already detected, and returns support solids only. One
-  validity pass — including the export-truth gate — then judges the lattice and
+  validity pass — including the STEP round-trip check — then judges the lattice and
   the supports together (docs/algorithm.md §14.2).
 - **Separate from the lattice, manifold bodies.** Supports are **not** merged
   with the lattice. They share faces with the lattice and with the input's
@@ -509,12 +509,12 @@ The normative algorithm is docs/algorithm.md §14.
 - **A sub-micron cap is removed, not refused.** Where the corner of a strut
   or of a support node grazes the input's wall within a micron, the trimmed
   body carries the corner's tip: a few faces of ~1e-8 mm² closing a hole of the
-  same size in the wall face, which no mesher closes and the export-truth gate
+  same size in the wall face, which no mesher closes and the STEP round-trip check
   above rightly refuses. Lattice and support bodies alike have such a cap
   removed — the wall continues across the hole, moving under 1e-9 mm³ — and the
   run reports each one as a `note:` with its position. The repair touches
   nothing else, is checked, and a body whose repair fails its check is kept as
-  built for export truth to judge (docs/algorithm.md §9, §14.3 S6).
+  built for the STEP round-trip check to judge (docs/algorithm.md §9, §14.3 S6).
 
 - **STEP schema/AP:** AP214
 
@@ -559,7 +559,7 @@ beyond the box-only unit test that a junction wholly inside is checked and kept.
 half-strut, but it is far too slow to be a scenario. The measurements made on
 `SpiralTest` stay in docs/algorithm.md as the record they are.
 `test/spiral-island-unwritable.brep`, cut from an older version of that part,
-stays: it is the export-truth gate's one body that cannot be written, and reads
+stays: it is the STEP round-trip check's one body that cannot be written, and reads
 no `SpiralTest.step`.
 
 | Scenario | Parameters | Expected result |
@@ -696,7 +696,7 @@ diagnosis. Remove an item once it's fixed and verified.*
   canvas was rasterised to an image), not by eye in a running window.
 
 **Otherwise nothing is open here.** The last item — `TD_HX_rehearsal_test` at `cc=5, t=1`
-being refused at `export truth` — was closed 2026-08-26 and is the first chapter
+being refused at the STEP round-trip check — was closed 2026-08-26 and is the first chapter
 of §11, together with the two guards found while closing it. Every committed
 part now writes its output at every parameter set this project has run.
 `docs/testing.md` names the cheapest inner loop for anything touching

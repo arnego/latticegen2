@@ -228,7 +228,7 @@ class BoundaryResult:
     def worst_tolerance_pieces(self, n: int = 5) -> list[BoundaryPiece]:
         """The ``n`` pieces whose description leans hardest on tolerance.
 
-        Worst first. This is the source-side half of the export-truth question
+        Worst first. This is the source-side half of the STEP round-trip question
         (docs/algorithm.md §7.3): a piece near the top of this list was trimmed
         with a slack approaching the size of the feature it bounds, and slack is
         exactly what §9's export cannot carry.
@@ -596,8 +596,11 @@ def trim_junction(
                 # Kept only if it is actually better: the block is a smaller
                 # tool for the same kernel, not a different kind of answer, so
                 # it is checked by the same probe rather than assumed to work.
-                still = probe.worst_outside(_piece_vertices(candidate)) if candidate else 0.0
-                if still < outside_mm:
+                # An empty block result is the kernel's silent-empty failure,
+                # never "better": accepting it would discard the junction
+                # without the drop and the warning below.
+                still = probe.worst_outside(_piece_vertices(candidate)) if candidate else None
+                if still is not None and still < outside_mm:
                     out, tolerances, n_pinholes = candidate, cand_tol, n_ph
                     outside_mm = still
                     localized = True

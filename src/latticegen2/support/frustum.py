@@ -469,6 +469,12 @@ def _unified(s, gates):
     return u if gates.outside(u) == 0.0 else s
 
 
+def _sampled_empty(estimate) -> bool:
+    """Whether a sampled estimate ``(volume, standard error)`` finds nothing."""
+    est, sig = estimate
+    return est < 3.0 * sig
+
+
 def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True, refused=None):
     """``(solids, lines, estimate)``: ``piece`` intersected with the body,
     checked; ``solids`` is ``None`` when no rung passed. ``estimate`` is
@@ -494,8 +500,9 @@ def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True, refused=
 
     lines = []
     est, sig = refused if refused is not None else _estimate(piece, gates.inside_body)
-    if est < 3.0 * sig:
-        return [], [f"  {tag}: no material inside the body by sampling; dropped"], (est, sig)
+    if _sampled_empty((est, sig)):
+        # The caller decides whether that loses anything (`trim_or_split`).
+        return [], [f"  {tag}: no material inside the body by sampling"], (est, sig)
     rungs = [(piece, f) for f in (FUZZY_LADDER if full else FUZZY_LADDER[:1])]
     if refused is not None:
         rungs = rungs[1:]
@@ -508,8 +515,11 @@ def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True, refused=
         piece_rt = None
     for operand, fuzzy in rungs:
         got = _boolean(BRepAlgoAPI_Common, operand, [body], fuzzy)
-        vin = 0.0 if got is None else sum(occ.volume(x) for x in occ.solids(got))
         rung = f"fuzzy {fuzzy:g}{' after a STEP round trip' if operand is piece_rt else ''}"
+        if got is None:
+            lines.append(f"  {tag}, {rung}: the intersection did not complete; rejected")
+            continue
+        vin = sum(occ.volume(x) for x in occ.solids(got))
         if abs(vin - est) > max(ESTIMATE_REL_TOL * est, 4.0 * sig):
             lines.append(f"  {tag}, {rung}: {vin:.1f} mm^3 against {est:.1f} sampled; rejected")
             continue
@@ -926,35 +936,53 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     dropped = []      # (tag, centroid, mm^3 inside the body, ceiling points it held)
     dropped_pieces = []
 
+    def held_by(piece):
+        # Through its tessellation, not the exact classifier: a figure for a
+        # report, and on a 10,000-face piece the classifier would take hours.
+        return _tessellated_inside(piece)(probes) & gates.inside_body(probes)
+
+    def drop(piece, tag: str, est, why: str, held=None):
+        where = np.round(np.asarray(occ.centroid(piece), dtype=float), 3).tolist()
+        held = held_by(piece) if held is None else held
+        dropped.append((tag, where, est[0], held, why))
+        dropped_pieces.append(piece)
+        return [f"  {tag}: {why}; dropped"]
+
+    def sampled_empty(piece, tag: str, est, trim_lines):
+        # Sampling finds no material in the body. A piece holding no ceiling
+        # point loses nothing by going, but one that does is support missing
+        # there: the coverage count reads the grid it was built from, so going
+        # quietly would count those points as backed.
+        held = held_by(piece)
+        if not held.any():
+            return [], trim_lines + [f"  {tag}: discarded, it backs no ceiling point"]
+        # Counted at the sampling's own bound, three standard errors: the
+        # estimate itself is ~0, which would read as nothing lost.
+        bound = (3.0 * est[1], est[1])
+        return [], trim_lines + drop(
+            piece, tag, bound,
+            f"sampling found under {bound[0]:.1f} mm^3 of it inside the body, "
+            f"though it holds {int(held.sum())} ceiling point(s)", held)
+
     def trim_or_split(piece, tag: str, depth: int = 0):
         # One rung while the piece can still be split; the full ladder on a
         # piece that cannot.
-        halves = None
-        if depth < SPLIT_DEPTH:
-            got, trim_lines, est = _trim(piece, body, gates, tmpdir, tag, full=False)
-            if got is not None:
-                return got, trim_lines
-            halves = _split(piece, g)
-            if halves is None:
-                got, more, est = _trim(piece, body, gates, tmpdir, tag, refused=est)
-                trim_lines += more
-                if got is not None:
-                    return got, trim_lines
-        else:
-            got, trim_lines, est = _trim(piece, body, gates, tmpdir, tag)
+        splittable = depth < SPLIT_DEPTH
+        got, trim_lines, est = _trim(piece, body, gates, tmpdir, tag, full=not splittable)
+        if got is not None and not got and _sampled_empty(est):
+            return sampled_empty(piece, tag, est, trim_lines)
+        if got is not None:
+            return got, trim_lines
+        halves = _split(piece, g) if splittable else None
+        if splittable and halves is None:
+            got, more, est = _trim(piece, body, gates, tmpdir, tag, refused=est)
+            trim_lines += more
             if got is not None:
                 return got, trim_lines
         if halves is None:
             # The kernel cannot trim it at any rung or size: dropped and
             # reported, as a junction no trim produces is (§7.2).
-            where = np.round(np.asarray(occ.centroid(piece), dtype=float), 3).tolist()
-            # Through its tessellation, not the exact classifier: a figure for a
-            # report, and on a 10,000-face piece the classifier would take hours.
-            held = _tessellated_inside(piece)(probes) & gates.inside_body(probes)
-            dropped.append((tag, where, est[0], held))
-            dropped_pieces.append(piece)
-            trim_lines.append(f"  {tag}: no trim passed and no split is left; dropped")
-            return [], trim_lines
+            return [], trim_lines + drop(piece, tag, est, "no trim passed and no split is left")
         from .join import join
 
         trim_lines.append(f"  {tag}: no trim passed; split in {len(halves)} along a grid plane")
@@ -994,24 +1022,25 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
     # A probe outside the body is a ceiling point on the ceiling's own rim,
     # where a wall continues it: nothing below it can back it, and the wall does.
     covered |= ~gates.inside_body(probes)
-    for _tag, _where, _est, held in dropped:
+    for _tag, _where, _est, held, _why in dropped:
         covered &= ~held
     notes = []
     if dropped:
         # Every point a dropped piece held is uncovered by now, just above.
         lost = np.zeros(len(need), dtype=bool)
-        for _tag, _where, _est, held in dropped:
+        for _tag, _where, _est, held, _why in dropped:
             lost |= held
         notes.append(warning_text(
             DROPPED_WARNING,
-            f"the geometry kernel could not trim {len(dropped)} piece(s) of support to "
-            f"the input at any fuzzy value, after a STEP round trip, or in halves "
-            f"(docs/algorithm.md §14.3 S6)",
-            f"{sum(d[2] for d in dropped):.1f} mm^3 of support is missing, and "
+            f"{len(dropped)} piece(s) of support could not be trimmed to the input: "
+            f"by the geometry kernel at any fuzzy value, after a STEP round trip or "
+            f"in halves, or because sampling found no material of a piece that "
+            f"holds ceiling points (docs/algorithm.md §14.3 S6)",
+            f"about {sum(d[2] for d in dropped):.1f} mm^3 of support is missing, and "
             f"{int(lost.sum())} ceiling point(s) may print unsupported",
             [f"{tag} near {point_text(where)}: {est:.1f} mm^3, "
-             f"{int(held.sum())} ceiling point(s)"
-             for tag, where, est, held in dropped],
+             f"{int(held.sum())} ceiling point(s); {why}"
+             for tag, where, est, held, why in dropped],
         ))
     stats.update({"support_debris_solids": len(debris),
                   "support_pieces_dropped": len(dropped),

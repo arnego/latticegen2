@@ -72,7 +72,9 @@ if [ $# -eq 0 ] && { [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; }; then
         echo
         echo "  interpreter: $PY"
         echo
-        "$PY" -c "import numpy, OCP.TopoDS, tkinter"
+        # `|| true`: under `set -e` the failing probe would otherwise end the
+        # script here, before the hint below is printed.
+        "$PY" -c "import numpy, OCP.TopoDS, tkinter" || true
         echo
         echo "  On Debian and Ubuntu, tkinter is the separate python3-tk package."
         echo "  See README.md \"Installation\". A release bundle carries its own"

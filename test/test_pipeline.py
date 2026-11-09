@@ -451,3 +451,13 @@ def test_interface_warnings_reach_the_filter_and_name_a_place(tmp_path):
     assert len(warnings) == 3 and len(said) == 4
     assert all(point_text(lattice_node(lp, node)) in w for w in warnings)
     assert all(console is True for msg, console in said if msg in warnings)
+
+
+def test_two_runs_in_one_second_get_their_own_temp_folders(tmp_path):
+    from latticegen2 import pipeline
+
+    out = str(tmp_path / "part-lattice.step")
+    first = pipeline._make_tmpdir(out)
+    second = pipeline._make_tmpdir(out)
+    assert first != second
+    assert os.path.isdir(first) and os.path.isdir(second)

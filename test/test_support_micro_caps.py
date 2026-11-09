@@ -4,7 +4,7 @@ A support node's corner within a fraction of a micron of the input's wall
 leaves the trimmed support carrying the corner's tip: three faces of ~1e-8
 mm^2 closing a 3-edge inner wire of the wall face. The body is valid and
 manifold, and no mesher closes the wall around a hole that small, so §9's
-export-truth gate refuses the run. The repair removes the cap and its wire,
+STEP round-trip check refuses the run. The repair removes the cap and its wire,
 which is exact by construction; these tests ask that of the solids.
 """
 
@@ -24,7 +24,7 @@ FIXTURE = os.path.join(HERE, "support-micro-cap.brep")
 
 
 def load_fixture():
-    """The support body that failed export truth.
+    """The support body that failed the STEP round-trip check.
 
     `test-cylinder.STEP` at ``cc=10, t=1.5, --orient 140.5 -76.7 103.6
     --support``, 2026-11-07: the third of three support bodies, 1,047 faces,
@@ -108,7 +108,7 @@ def test_a_dimple_that_is_material_is_left_alone():
 def test_a_cap_on_an_outer_wire_is_left_alone():
     """On the seam the hole is part of the wall face's outer wire: removing that
     wire would remove the face, so the repair does not apply and the body is
-    returned as it came, for export truth to judge."""
+    returned as it came, for the STEP round-trip check to judge."""
     s = _dimpled_cylinder(1e-4, seam_on_crest=True)
     assert len(occ.faces(s)) == 6
     (out,), removed, refused = generate.remove_micro_caps([s])

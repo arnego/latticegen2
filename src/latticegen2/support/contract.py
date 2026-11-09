@@ -5,7 +5,7 @@ pipeline has assembled and unified, before ``validate`` — together with the
 input body, the run's parameters and the inner overhangs already detected. It
 returns the **support material only**, as separate bodies. The support stage
 checks they overlap nothing and appends them beside the lattice
-(:mod:`.assemble`); everything after it (``validate``, the export-truth gate,
+(:mod:`.assemble`); everything after it (``validate``, the STEP round-trip check,
 ``export``) gates lattice and supports together.
 
 Both types are plain frozen dataclasses so the generator can be exercised in a

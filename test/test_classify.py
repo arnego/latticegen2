@@ -473,3 +473,25 @@ def test_the_outside_probe_skips_only_what_cannot_be_its_answer():
               np.vstack([on, on[:1] * 1.002])):         # one point 0.04 mm out, under the margin
         assert probe.worst_outside(P) == brute(P)
     assert probe.worst_outside(np.vstack([on, on[:5] * 1.01])) > 0.0
+
+
+def test_true_surface_evaluation_honours_a_moved_face_once():
+    """The face's location must be applied once, not twice (BRepAdaptor_Surface
+    already carries it): a placed part's samples sit on its mesh."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+    from OCP.gp import gp_Trsf, gp_Vec
+    from OCP.TopLoc import TopLoc_Location
+
+    trsf = gp_Trsf()
+    trsf.SetTranslation(gp_Vec(100.0, 0.0, 0.0))
+    solid = BRepPrimAPI_MakeCylinder(5.0, 10.0).Shape().Moved(TopLoc_Location(trsf))
+    occ.mesh_shape(solid, 0.05)
+    checked = 0
+    for face in occ.faces(solid):
+        got = occ.face_uv_triangulation(face)
+        if got is None:
+            continue
+        pts, uvs, _tris, evaluate = got
+        assert np.abs(evaluate(uvs) - pts).max() < 1e-6
+        checked += 1
+    assert checked

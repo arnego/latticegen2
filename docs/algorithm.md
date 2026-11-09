@@ -1020,7 +1020,7 @@ reaches 100 % trivially, and this reading must never become a gate. A ranking is
 not a calibration, and treating it as one would be the mistake
 specification.md §11 records four times over.
 
-So this predicts and §9's export-truth gate decides. What it buys is the report
+So this predicts and §9's STEP round-trip check decides. What it buys is the report
 arriving at `connect`, about 40 s into an eight-minute part, naming junctions of
 a body the run has not yet built.
 
@@ -1058,7 +1058,7 @@ apart along the whole of their shared edge** — constant to six figures at ever
 sample, and returned identically by projecting either face's boundary onto the
 other's surface, so the two surfaces simply never meet. At `t = 1` mm the trim
 cuts that seam into faces of 0.010 to 0.226 mm², and the 4.17 mm³ island built
-from six such junctions is refused by §9's export-truth gate. That fixture is
+from six such junctions is refused by §9's STEP round-trip check. That fixture is
 why this measurement exists, and it stays refused.
 
 **It reports and does not refuse, and the table above is why that is not
@@ -1147,7 +1147,7 @@ statement of the mechanism; it is simply no longer reproduced by that input.
 committed part that currently exercises this at all — and it does exercise it
 end to end: the run repairs that cap with the local fuse, and the two mesh edges
 the duplicate used to produce, plus the `4x` edge beside them, are gone from its
-export-truth reading (`tools/prototypes/RESULTS.md` G23).
+STEP round-trip reading (`tools/prototypes/RESULTS.md` G23).
 
 **A flagged cap is fused, not simply declined, and that is a correction to what
 this section used to claim.** Declining withdraws *both* keys, so
@@ -1296,10 +1296,12 @@ memory `rehearsal-assemble-failure-is-not-debris`). The mechanism: a seam
 face can share an edge with a face the split carries through unchanged (a
 "straddling" edge — free within the seam-only subset even though the full
 tile uses it twice, since 144–720 such edges were measured in every
-prototype block tried once the check for them existed), and sewing that
-subset without its carried neighbour present lets `BRepBuilderAPI_Sewing`
-rebuild the edge onto a new `TopoDS_Edge` while the carried face keeps the
-original — one shared edge becomes two, each used once. `_split_seam_interior`
+prototype block tried once the check for them existed), and when that edge
+comes back as a new `TopoDS_Edge` while the carried face keeps the original,
+one shared edge becomes two, each used once. **What replaces it is the process
+boundary, not the sew** (G26, below): round 2 used to send every component to a
+worker once a run had two or more, and a seam subset read back from a `.brep`
+is all new objects. `_split_seam_interior`
 itself is unchanged by this; the guarantee needed is downstream, in
 `_sew_round_two`. Every interior interface a correctly sewn boundary layer
 presents is the whole template cap quad — four edges, by §5.3(b) — and every
@@ -1312,7 +1314,9 @@ after round 2; a component whose count is wrong is redone on the unsplit
 tile results (the behaviour before the split existed) rather than allowed
 into `assemble`. `SewStats.repaired_components` reports how many times this
 fires, logged in the run summary; it is 0 on every committed scenario, since
-none is large enough to tile (`MIN_PIECES_TO_TILE`) in the first place.
+none is large enough to tile (`MIN_PIECES_TO_TILE`) in the first place. The
+check stays now that its cause is known (G26): it is what any other way of
+making the split wrong would meet.
 
 **A count still wrong after that unsplit re-sew is a hard failure (exit 4), and
 was not until a v3.0.0 report showed why it has to be.** The unsplit sew is
@@ -1345,8 +1349,9 @@ counts should have agreed all along (§11's rule that a gate is only as
 trustworthy as the quantity it compares, in the one place both quantities were
 already in the file).
 
-**What the repair costs on this part is structural, and the one proposed fix is
-disproved.** `SewStats` records `(component, want, got_split, got_unsplit)` for
+**The split failed on the rehearsal because round 2 crossed a process, and a
+split component's round 2 now stays in the master (G26).** What follows is the
+record that led there, and its conclusion was wrong. `SewStats` records `(component, want, got_split, got_unsplit)` for
 every repaired component — free, since the unsplit sew has to run before either
 number is known — and the rehearsal reports `expected 73984, seam-only split
 gave 192692, full unsplit sew gives 73994` (the last of those is the 10
@@ -1359,8 +1364,31 @@ connected components of the tile's face-adjacency graph, and a tile's round-1
 result is one connected shell, so the closure of "add my straddling neighbours"
 is the tile itself (23,546 faces → 23,523, in 8 hops) and costs what the
 unsplit sew costs (523.20 s against 520.89 s). Every hop short of the fixpoint
-leaves a fresh frontier of exactly the edges it exists to remove. There is no
-lever left in this stage; see docs/specification.md §11.
+leaves a fresh frontier of exactly the edges it exists to remove. That much
+stands. What it concluded, that there is no lever left in this stage, does not:
+G21 closed the straddling set inside one process, and its part A had found the
+in-process routes identical, while the rehearsal ran round 2 through workers,
+since it has 14 components.
+
+G26 sewed one set of round-1 tile results three ways, on `dense-lattice` tiled
+16 ways (`tile_target=100, min_to_tile=300`, two components):
+
+| route | free edges, 4,408 expected | time |
+|---|---|---|
+| seam-only, in the master | **4,408** | 0.48 s |
+| seam-only, through a worker (as built until G26) | **12,216** | 1.43 s |
+| unsplit (the repair) | 4,408 | 1.35 s |
+
+The excess, 7,808, is twice the edges between the two halves, as the mechanism
+predicts. So `_sew_round_two` sews a split component's seam subset in the
+master, where its carried faces are, and sends only untiled components to the
+pool, which carry nothing past the sew. On that run round 2 and its check fall
+from 1.59 s + 1.67 s with one component repaired to 0.62 s + 0.12 s with none,
+and the output still matches the golden sample at 0 mm³.
+`test_a_split_component_is_not_sent_through_a_worker_in_round_two` fails on
+the code before. On the rehearsal this predicts the repair's ~545 s going to
+a seam-only sew of 13–14 % of the faces. That is not yet measured; the next
+`rehearsal-support` run is where it will be.
 
 **A hierarchical tree reduction was considered for round 2 itself — sewing
 tile results together pairwise across levels instead of in one call — and
@@ -1700,7 +1728,7 @@ program builds itself.
 * **Sub-micron caps are removed in the same job** (`pipeline._simplify_one`).
   Where a strut's corner grazes the input's wall within a micron, the trim
   leaves the corner's tip as a cap — a few faces of ~1e-8 mm² closing one inner
-  wire of the wall face — which no mesher closes, so the export-truth gate
+  wire of the wall face — which no mesher closes, so the STEP round-trip check
   below refuses the run. It is the defect §14.3 S6 found on a support body,
   and `occ.remove_micro_caps` removes it the same way: the cap's faces and the
   wire go, every edge they touch goes with both of its users, and the wall's
@@ -1731,10 +1759,10 @@ program builds itself.
   solid that passes pays nothing more. If it fails, the unrepaired solid is
   checked in its place and kept if it holds: a repair can never cost the run a
   solid it would otherwise have kept. A refused repair keeps the solid as
-  built for export truth to judge; both outcomes are a `note:` with the cap's
+  built for the STEP round-trip check to judge; both outcomes are a `note:` with the cap's
   position.
 
-* **Export-truth gate — what the validity gate below structurally cannot see.**
+* **STEP round-trip check — what the validity gate below structurally cannot see.**
   `BRepCheck_Analyzer` asks whether a shape agrees with itself to within the
   tolerances **recorded in this process**. STEP AP214 has nowhere to record
   them: a file carries exactly one `UNCERTAINTY_MEASURE_WITH_UNIT`, in its
@@ -2249,7 +2277,7 @@ Because priority #1 is precision, every optimization is designed so that its
   cannot perform. `BRepCheck_Analyzer` judges a shape against the tolerances
   **this process** recorded; STEP AP214 carries one tolerance for a whole file,
   so a body whose validity rests on a locally fat tolerance passes here and is
-  not guaranteed to survive being written. §9's export-truth gate measures the
+  not guaranteed to survive being written. §9's STEP round-trip check measures the
   quantity that decides — pcurve deviation against the feature carrying it — on
   every solid, and **fails rather than discarding anything**. Deleting material
   so that an export can succeed is precisely "produce a wrong result"; the run
@@ -2313,13 +2341,13 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Tolerance measured against feature size in the worker (§7.3) | Correctness, not speed, and a *localiser* rather than a gate. Costs one area and one centroid per trimmed piece, on the face list the trim already produced, and it is the last point at which the junction still has a name. Two of the six junctions forming `SpiralTest`'s unwritable 4.17 mm³ island rank 2nd and 4th of 2,404 pieces; combined with §8's components it names exactly one body where the piece-level reading names two dozen, at `connect` rather than at the end |
 | The input's own seam gaps measured once at `import` (§7.4) | Correctness reporting, not a gate. Two faces of a B-rep may sit apart and be held together by the edge's tolerance; this tool then cuts that region into features smaller than the gap. `SpiralTest.step`'s worst is **4.2e-02 mm**, constant along the edge, and it is why that part's island cannot be written — and why no pcurve re-fit repairs it (docs/specification.md §11). 0.1 s there, 1.2 s on the rehearsal's 1,043 shared edges. Reported at `import` and cited by §9's refusal, so a failure points at the model rather than only at a coordinate |
 | The exported file declares the shape's **greatest** tolerance, not the average (§9) | Correctness. AP214 carries one tolerance per file, and OCCT's Average default is pathological on a lattice — ~99 % exact interior edges pull it to the floor and clamp the boundary trims that actually need slack. `SpiralTest`'s dominant body tessellates with **0** broken edges in memory and came back from its own round trip with **2**; declaring the greatest tolerance takes it to **0** and lets the part ship. Free, and self-scaling: a body needing nothing declares nothing |
-| Export truth measured on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
+| STEP round-trip check on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
 | Degenerate triangles skipped in that count (§9) | Correctness of the *quantity*, not of any body, and the third time this project has found the same counting bug: `shell_defects` always skipped degenerate edges, `free_edges` was corrected in G21, this counter never had the test. Mesh points are interned by rounded coordinate, so at a pole a whole parametric range collapses to one id and such a triangle contributes the real edge twice — a closed fan reading as `4x`. Keyed on interned-id equality rather than area, because the defect is created by the interning. Without it the gate reports `TD_HX_rehearsal_test.step`'s **own input** as carrying 86 non-manifold edges, one per apex of its 54 apex-touching cones, and a plain sphere and cone as broken. Cannot hide a hole: a triangle bounding nothing is not one, and a cone with its base removed still reports all 63 segments. The rehearsal's dominant body falls 26 → 13 (G23, G24) |
 | A reading re-measured at a finer ruler before it refuses (§9) | Correctness, and the thing that finally separates the two causes of a non-manifold reading. No rule about the *kind* of reading works — G23 measured the genuinely unwritable body carrying the same classes as a sound one — but the mechanism separates cleanly: a broken description disagrees with itself more the harder it is looked at, where a body merely finer than the ruler agrees once the ruler is finer. Measured across 0.05→0.0001 mm, the rehearsal's dominant body reads 13, 8, 4, 4, **0** while `spiral-island-unwritable` reads 10, 13, 17, 21, **39**. **The rule is the terminus, not the slope**: only an exact zero clears, because the sound ladder plateaus and because a slope is the two-point calibration §11 records going wrong four times. Safe because a genuine hole can never reach zero — refining subdivides its boundary rather than closing it (63 → 71 → 158 on G23's control). Costs a **68-face neighbourhood**, not the body, and never a second STEP round trip; readings the neighbourhood's own cut boundary produces are excluded by requiring that a core face contributed them, which needs one ring and no bookkeeping. No size bound — bounding it is the sin this gate already removed once |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
-| Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; identical to a full round 2 at every prototype scale tried (§8, G8), but not on real, heavily trimmed production geometry, where the rehearsal measures 192,692 free edges against the 73,984 a correct sew leaves (§8) — a per-component free-edge check against `want_rings`, degenerate edges excluded, catches and repairs that, at the cost of the saving only for the repaired components. **The repair's cost is structural**: making the split correct means growing the sewn subset until it has no straddling edge, and that closure is the whole tile (G21) |
+| Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; identical to a full round 2 at every prototype scale tried (§8, G8), but not on real, heavily trimmed production geometry, where the rehearsal measures 192,692 free edges against the 73,984 a correct sew leaves (§8) — a per-component free-edge check against `want_rings`, degenerate edges excluded, catches and repairs that, at the cost of the saving only for the repaired components. **The split failed there because round 2 crossed a process** (G26): a seam subset read back from a worker is new objects, so its edges with the carried faces doubled. A split component is now sewn in the master, which `dense-lattice` tiled 16 ways measures at 4,408 free edges as expected against 12,216 through a worker |
 | One shared `WorkerPool` for the whole run | `spawn`'s process-creation cost is paid once per run rather than once per stage; classification, boundary trim, boundary-sew round 1, boundary-sew round 2 and unification all dispatch through it (§5.4, §8, §9, `latticegen2.parallel`). Built before `classify` rather than after it so that stage can use it too — which also means `boundary` now starts with warm workers instead of paying their first import, measured at −12.6 % on `dense-lattice`. Validity is the one parallel stage that does *not* use it, and §9 says why |
 | Same-domain unification across the shared pool | Measured single-threaded at 24 % (17 m 17 s) of the `cc=5, t=1` rehearsal; G7 measured OCP holding the GIL around the call, so this is the same process-pool-plus-`.brep` mechanism the rest of the pipeline uses, not threads (§9, specification.md §10 path 1) |
 | Validity via OCCT's own thread pool, on the master (§9) | The one heavy call with a `theIsParallel` flag, and the one heavy stage returning a scalar rather than geometry — so G17's GIL result does not bind OCCT's native threads and G15's identity result has nothing to attach to. 1.60× at 3.43 cores, verdict identical on valid solids and on all four real invalid faces (G18). Replaces path 4's per-solid process dispatch, which cannot coexist with it under `--cores` (`W` processes × `W` threads) and never reached the dominant solid that sets the floor; dropping it also deletes a 464 MB round trip |
@@ -2372,6 +2400,21 @@ Alternatives evaluated and rejected:
   count almost flatly in shape count, so it is dominated by a flat per-face
   term rather than a shape-count term a tree could usefully attack, and a tree
   pays that flat term once per level instead of once.
+* **Overlapping a split component's round 2 with the pool's untiled
+  components** (§8, G26): considered in review, 2026-11-10, and not built. It
+  is safe for the geometry, since components share no interface and the
+  workers hold no object of the master's. The master would be one more busy
+  process beside `W` workers, which breaks `--cores` "honoured exactly"
+  (specification.md §3). `WorkerPool.run` also feeds its jobs from a thread
+  that needs the GIL, which OCP holds through a sew (G7). The saving is at
+  most the untiled components' sews, 0.6 s on `dense-lattice` and likely a
+  few seconds on the rehearsal, far under specification.md §4.6's 5 %.
+  **Sending the whole split component to a worker** instead would be correct:
+  seam and carried faces in one `.brep` keep their shared edges (G15). It
+  would also be slower, as an estimate rather than a measurement. Moving the
+  rehearsal's dominant component means writing and reading ~300,000 faces,
+  likely tens of seconds, to move a seam-only sew of ~9 s (G21). That
+  component is one job either way, so nothing runs beside it.
 * **Python threads instead of processes, for same-domain unification and
   validity** (specification.md §10 paths 1, 4): rejected by measurement, G7 —
   OCP holds the GIL around both calls, so *Python* threads serialize. Note
@@ -2397,7 +2440,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind that budget: logical core count (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), sub-micron cap removal and its local check (§9, §14.3 S6), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the export-truth measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), sub-micron cap removal and its local check (§9, §14.3 S6), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the STEP round-trip measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |
@@ -2868,6 +2911,13 @@ and the ceiling points it leaves unbacked, printed regardless of `-v`
 declined: it would refuse the whole part over a few support nodes the kernel
 cannot cut, where the report says exactly what is missing and where.
 
+**A piece in which sampling finds no material is asked what it backs.** Its
+estimate is under three standard errors, so no rung is tried. If its
+tessellation holds no ceiling point, it is discarded and nothing is lost. If it
+holds any, it is dropped and reported as above. The coverage count reads the
+support grid the piece was built from, so going quietly would count those
+points as backed with no material under them.
+
 **`SpiralTest.step` at `cc = 5, t = 1`, `--orient -90 45 0` drops pieces
 there, and the failure is the kernel's.** One support body's intersection returned 0.1 mm³
 where sampling found 1,627.5 mm³, at every rung; the exact classifier puts 224
@@ -2901,7 +2951,7 @@ three planar faces of ~1e-8 mm², edges 0.1 to 0.25 µm, closing a matching
 `BRepCheck_Analyzer`-valid and manifold, whose 2,128 mm² wall face `BRepMesh`
 cannot triangulate around a hole that small. The three rim edges are used once
 at every rung of §9's ladder, 0.05 to 1e-4 mm, in memory and after a STEP round
-trip alike, so export truth refused the run — rightly: nothing downstream could
+trip alike, so the STEP round-trip check refused the run — rightly: nothing downstream could
 mesh that body consistently.
 
 A cap is a connected set of faces each within `MICRO_CAP_TOL` (1e-3 mm,
@@ -2913,7 +2963,7 @@ surface simply continues across the hole: the material moved is the cap's own,
 under `MICRO_CAP_TOL³`. The threshold decides what is small enough to be
 noise, not whether the repair keeps the body closed. Anything of another shape
 — a cap on an outer wire, across two host faces, beside an edge with other
-than two users — is left as built for export truth to judge, and so is a
+than two users — is left as built for the STEP round-trip check to judge, and so is a
 repaired body that is not one valid solid using every edge twice, or whose
 boundary moved more than `MICRO_CAP_TOL` read as `|ΔV| / area`, §9's
 displacement: the volume is re-integrated over the host face and moves by

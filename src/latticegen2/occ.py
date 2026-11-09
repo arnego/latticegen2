@@ -257,7 +257,7 @@ def invalid_faces(
     return out
 
 
-# --- Export truth: is this shape describable outside OCCT's memory model? ---
+# --- STEP round-trip check: is this shape describable outside OCCT's memory model? ---
 #
 # STEP AP214 carries exactly **one** modelling tolerance for a whole file — the
 # `UNCERTAINTY_MEASURE_WITH_UNIT` of its `geometric_representation_context` —
@@ -473,7 +473,7 @@ def curve_on_surface_deviations(
 ) -> CurveOnSurface:
     """Exact pcurve-versus-3D-curve deviation over every edge/face pair.
 
-    The second half of the export-truth question, and the one that is about the
+    The second half of the STEP round-trip question, and the one that is about the
     *file* rather than about the kernel's slack. STEP stores both
     representations of an edge — a 3D curve and a pcurve per face — inside one
     ``surface_curve``, and OCCT's writer marks ``master_representation`` as
@@ -605,7 +605,7 @@ def surface_seam_gaps(
     both ways. The two surfaces never meet; a 2.12e-02 mm edge tolerance is what
     holds the model together there. At ``t = 1`` mm the lattice cuts that seam
     into faces of 0.01 to 0.23 mm2, where the same gap is a hole, and the body
-    built from them is the one docs/specification.md S11's export-truth gate
+    built from them is the one docs/specification.md S11's STEP round-trip check
     refuses.
 
     **This is why re-fitting a pcurve cannot repair that body**, and the
@@ -907,6 +907,9 @@ class _Tally(NamedTuple):
     counts: dict[int, int]
     point_id: dict[tuple[int, int, int], int]
     core_keys: set[int] | None
+    unmeshed_core: int = 0
+    """Core faces the mesher left without a triangulation: they contribute no
+    key, so a rung must not read their silence as a clean count."""
 
 
 def _mesh_and_count(
@@ -938,14 +941,16 @@ def _mesh_and_count(
     core_keys: set[int] | None = set() if core is not None else None
     triangles = 0
     degenerate = 0
+    unmeshed_core = 0
     BRepMesh_IncrementalMesh(shape, deflection, False, 0.2, True)
     for f in _explore(shape, TopAbs_ShapeEnum.TopAbs_FACE):
         face = TopoDS.Face_s(f)
+        is_core = core is not None and core.Contains(face)
         loc = TopLoc_Location()
         tri = BRep_Tool.Triangulation_s(face, loc)
         if tri is None:
+            unmeshed_core += is_core
             continue
-        is_core = core is not None and core.Contains(face)
         trsf = loc.Transformation()
         ids = []
         for i in range(1, tri.NbNodes() + 1):
@@ -995,7 +1000,7 @@ def _mesh_and_count(
                 counts[edge] = counts.get(edge, 0) + 1
                 if is_core:
                     core_keys.add(edge)
-    return _Tally(triangles, degenerate, counts, point_id, core_keys)
+    return _Tally(triangles, degenerate, counts, point_id, core_keys, unmeshed_core)
 
 
 def _implicated_faces(
@@ -1196,6 +1201,13 @@ def refine_until_manifold(
                 False, counts, len(implicated), n_faces,
                 f"unmeasured: {tally.triangles} triangle(s) at {deflection} mm "
                 f"is past the guard")
+        if tally.unmeshed_core:
+            # A face that will not mesh contributes no reading, so a zero here
+            # would clear the very body that cannot be meshed.
+            return Refinement(
+                False, counts, len(implicated), n_faces,
+                f"unmeasured: {tally.unmeshed_core} implicated face(s) did not "
+                f"mesh at {deflection} mm")
         if bad == 0:
             return Refinement(True, counts, len(implicated), n_faces, "resolved")
         # Rung to rung, and deliberately never against the count
@@ -1860,7 +1872,7 @@ def remove_micro_caps(
     ``BRepMesh`` cannot triangulate around a hole that small. The tessellation
     leaves the cap's three rim edges used once, at every deflection from 0.05
     down to 1e-4 mm, in memory and after a STEP round trip alike, so §9's
-    export-truth gate refuses the run -- correctly: the body cannot be meshed
+    STEP round-trip check refuses the run -- correctly: the body cannot be meshed
     consistently by anything downstream.
 
     **The repair is exact by construction, and the threshold is not what makes
@@ -2108,12 +2120,16 @@ def face_uv_triangulation(face: TopoDS_Face):
         t = tri.Triangle(i)
         tris[i - 1] = (t.Value(1) - 1, t.Value(2) - 1, t.Value(3) - 1)
 
+    # BRepAdaptor_Surface carries the face's own location and returns located
+    # points, so `trsf` must not be applied to them a second time: on a part
+    # placed by an assembly that would put every true-surface sample off the
+    # mesh by the placement itself.
     surf = BRepAdaptor_Surface(face)
 
     def evaluate(uv_array: np.ndarray) -> np.ndarray:
         out = np.empty((len(uv_array), 3))
         for i, (u, v) in enumerate(uv_array):
-            p = surf.Value(float(u), float(v)).Transformed(trsf)
+            p = surf.Value(float(u), float(v))
             out[i] = (p.X(), p.Y(), p.Z())
         return out
 

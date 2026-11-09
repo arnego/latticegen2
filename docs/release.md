@@ -110,7 +110,10 @@ Then check the two things a release can get wrong that testing will not catch:
   versions. If a dependency moved, both change together and the licence texts in
   `licenses/` are re-checked. A mismatch is a release blocker, not a tidiness
   issue: the licence texts are only meaningful if they describe the bytes
-  actually shipped.
+  actually shipped. Two checks hold this: `test/test_release_pins.py` holds
+  every pin to a table row at its version with its licence files present, and
+  `tools/build_release.py` refuses any downloaded wheel that is not pinned,
+  which is how a new transitive dependency gets noticed.
 - **Docs describe what ships.** [`README.md`](../README.md) and
   [`specification.md`](specification.md) reflect reality.
 

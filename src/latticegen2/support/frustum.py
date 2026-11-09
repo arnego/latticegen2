@@ -946,7 +946,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
         held = held_by(piece) if held is None else held
         dropped.append((tag, where, est[0], held, why))
         dropped_pieces.append(piece)
-        return [], [f"  {tag}: {why}; dropped"]
+        return [f"  {tag}: {why}; dropped"]
 
     def sampled_empty(piece, tag: str, est, trim_lines):
         # Sampling finds no material in the body. A piece holding no ceiling
@@ -956,38 +956,33 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
         held = held_by(piece)
         if not held.any():
             return [], trim_lines + [f"  {tag}: discarded, it backs no ceiling point"]
-        _, more = drop(piece, tag, est,
-                       f"sampling found no material inside the body, though it "
-                       f"holds {int(held.sum())} ceiling point(s)", held)
-        return [], trim_lines + more
+        # Counted at the sampling's own bound, three standard errors: the
+        # estimate itself is ~0, which would read as nothing lost.
+        bound = (3.0 * est[1], est[1])
+        return [], trim_lines + drop(
+            piece, tag, bound,
+            f"sampling found under {bound[0]:.1f} mm^3 of it inside the body, "
+            f"though it holds {int(held.sum())} ceiling point(s)", held)
 
     def trim_or_split(piece, tag: str, depth: int = 0):
         # One rung while the piece can still be split; the full ladder on a
         # piece that cannot.
-        halves = None
-        if depth < SPLIT_DEPTH:
-            got, trim_lines, est = _trim(piece, body, gates, tmpdir, tag, full=False)
-            if got is not None and not got and _sampled_empty(est):
-                return sampled_empty(piece, tag, est, trim_lines)
-            if got is not None:
-                return got, trim_lines
-            halves = _split(piece, g)
-            if halves is None:
-                got, more, est = _trim(piece, body, gates, tmpdir, tag, refused=est)
-                trim_lines += more
-                if got is not None:
-                    return got, trim_lines
-        else:
-            got, trim_lines, est = _trim(piece, body, gates, tmpdir, tag)
-            if got is not None and not got and _sampled_empty(est):
-                return sampled_empty(piece, tag, est, trim_lines)
+        splittable = depth < SPLIT_DEPTH
+        got, trim_lines, est = _trim(piece, body, gates, tmpdir, tag, full=not splittable)
+        if got is not None and not got and _sampled_empty(est):
+            return sampled_empty(piece, tag, est, trim_lines)
+        if got is not None:
+            return got, trim_lines
+        halves = _split(piece, g) if splittable else None
+        if splittable and halves is None:
+            got, more, est = _trim(piece, body, gates, tmpdir, tag, refused=est)
+            trim_lines += more
             if got is not None:
                 return got, trim_lines
         if halves is None:
             # The kernel cannot trim it at any rung or size: dropped and
             # reported, as a junction no trim produces is (§7.2).
-            _, more = drop(piece, tag, est, "no trim passed and no split is left")
-            return [], trim_lines + more
+            return [], trim_lines + drop(piece, tag, est, "no trim passed and no split is left")
         from .join import join
 
         trim_lines.append(f"  {tag}: no trim passed; split in {len(halves)} along a grid plane")
@@ -1041,7 +1036,7 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
             f"by the geometry kernel at any fuzzy value, after a STEP round trip or "
             f"in halves, or because sampling found no material of a piece that "
             f"holds ceiling points (docs/algorithm.md §14.3 S6)",
-            f"{sum(d[2] for d in dropped):.1f} mm^3 of support is missing, and "
+            f"about {sum(d[2] for d in dropped):.1f} mm^3 of support is missing, and "
             f"{int(lost.sum())} ceiling point(s) may print unsupported",
             [f"{tag} near {point_text(where)}: {est:.1f} mm^3, "
              f"{int(held.sum())} ceiling point(s); {why}"

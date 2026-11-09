@@ -599,8 +599,8 @@ def trim_junction(
                 # An empty block result is the kernel's silent-empty failure,
                 # never "better": accepting it would discard the junction
                 # without the drop and the warning below.
-                still = probe.worst_outside(_piece_vertices(candidate)) if candidate else outside_mm
-                if candidate and still < outside_mm:
+                still = probe.worst_outside(_piece_vertices(candidate)) if candidate else None
+                if still is not None and still < outside_mm:
                     out, tolerances, n_pinholes = candidate, cand_tol, n_ph
                     outside_mm = still
                     localized = True

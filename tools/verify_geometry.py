@@ -224,6 +224,10 @@ def _cut_volume(a, b) -> float:
     return occ.volume(alg.Shape())
 
 
+#: A cut remainder this far below zero is integration noise, not a fault.
+GOLDEN_NEGATIVE_TOL = 1e-6
+
+
 def golden_sample_volume_diff(candidate_path: str, golden_path: str) -> float:
     """Larger of the two one-way difference volumes, in mm³.
 
@@ -236,13 +240,14 @@ def golden_sample_volume_diff(candidate_path: str, golden_path: str) -> float:
     """
     cand = occ.read_step(candidate_path)
     gold = occ.read_step(golden_path)
-    # Not ``max()``: it drops a NaN (a cut that did not complete) in the second
-    # place, and a negative remainder is no evidence of agreement either.
-    # Either makes the comparison unmeasured, which must not read as a match.
+    # Not ``max()`` alone: it drops a NaN (a cut that did not complete) in the
+    # second place. A clearly negative remainder is an inverted solid, no
+    # evidence of agreement either; one within GOLDEN_NEGATIVE_TOL is
+    # quadrature noise on a sliver and reads as zero.
     diffs = (_cut_volume(cand, gold), _cut_volume(gold, cand))
-    if any(not (d >= 0.0) for d in diffs):
+    if any(not (d >= -GOLDEN_NEGATIVE_TOL) for d in diffs):
         return float("nan")
-    return max(diffs)
+    return max(max(diffs), 0.0)
 
 
 def _diff_worker(queue, candidate_path: str, golden_path: str) -> None:

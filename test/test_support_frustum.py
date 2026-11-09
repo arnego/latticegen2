@@ -519,7 +519,7 @@ def test_a_piece_sampling_finds_empty_that_holds_ceiling_is_dropped_and_reported
     assert stats["support_pieces_dropped"] == 1
     warning = [line for line in lines
                if line.startswith(f"WARNING: {frustum.DROPPED_WARNING}")]
-    assert len(warning) == 1 and "sampling found no material" in warning[0]
+    assert len(warning) == 1 and "sampling found under 3.0 mm^3" in warning[0]
     assert stats["support_ceiling_points_uncovered"] > 0
 
 

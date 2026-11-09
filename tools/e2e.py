@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -705,7 +706,8 @@ def main(argv: list[str]) -> int:
                 # that scenario's failure, and the rest still run and report.
                 rep = Report(name)
                 rep.check("scenario completed without an exception", False,
-                          f"{type(exc).__name__}: {exc}")
+                          f"{type(exc).__name__}: {exc}\n"
+                          + traceback.format_exc(limit=-4))
                 reports.append(rep)
             print(flush=True)
 

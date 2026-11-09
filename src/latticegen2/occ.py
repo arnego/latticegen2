@@ -1842,7 +1842,7 @@ largest edge (2.5e-4 mm)."""
 
 
 def remove_micro_caps(
-    shape: TopoDS_Shape, tol: float = MICRO_CAP_TOL
+    shape: TopoDS_Shape, tol: float = MICRO_CAP_TOL, hosts: list | None = None
 ) -> tuple[TopoDS_Shape, list[tuple[float, float, float]]]:
     """Fill sub-micron dimples and shave sub-micron bumps off a face.
 
@@ -1884,6 +1884,10 @@ def remove_micro_caps(
     ``BRepTools_ReShape`` rebuilds only the host face, as in
     :func:`remove_pinhole_wires`: every other face, edge and vertex comes back
     the same object.
+
+    ``hosts``, when given, receives one ``(host face, removed wire, cap face
+    count)`` per cap removed, for :func:`micro_cap_repair_fault` to check the
+    repair locally rather than over the whole solid.
     """
     all_faces = faces(shape)
     # Nearly every body has no small face, and the boxes alone say so: the edge
@@ -1929,7 +1933,7 @@ def remove_micro_caps(
                         todo.append(fj)
         seen |= cap
         rim: set[int] = set()
-        hosts: set[int] = set()
+        host_ids: set[int] = set()
         ok = True
         for fi in cap:
             for ei in edges_of[fi]:
@@ -1940,12 +1944,12 @@ def remove_micro_caps(
                 outside = [fj for fj in u if fj not in cap]
                 if outside:
                     rim.add(ei)
-                    hosts.update(outside)
+                    host_ids.update(outside)
             if not ok:
                 break
-        if not ok or not rim or len(hosts) != 1:
+        if not ok or not rim or len(host_ids) != 1:
             continue
-        host = all_faces[next(iter(hosts))]
+        host = all_faces[next(iter(host_ids))]
         outer = BRepTools.OuterWire_s(host)
         wire = None
         for w in _explore(host, TopAbs_ShapeEnum.TopAbs_WIRE):
@@ -1959,6 +1963,8 @@ def remove_micro_caps(
         for fi in cap:
             reshape.Remove(all_faces[fi])
         reshape.Remove(wire)
+        if hosts is not None:
+            hosts.append((host, wire, len(cap)))
         box = Bnd_Box()
         for fi in cap:
             BRepBndLib.Add_s(all_faces[fi], box, False)
@@ -1969,8 +1975,76 @@ def remove_micro_caps(
         return shape, []
     fixed = reshape.Apply(shape)
     if fixed is None or fixed.IsNull():
+        if hosts is not None:
+            hosts.clear()
         return shape, []
     return fixed, where
+
+
+def micro_cap_repair_fault(
+    before: TopoDS_Shape, after: TopoDS_Shape, hosts: list,
+    tol: float = MICRO_CAP_TOL,
+) -> str | None:
+    """``None`` when ``after`` is ``before`` less exactly the caps in ``hosts``.
+
+    Returns a human-readable reason otherwise. The local check on
+    :func:`remove_micro_caps` for a lattice solid, where re-validating and
+    re-integrating the whole body after a repair would cost minutes at
+    production scale for a change confined to one face (docs/algorithm.md §9).
+    It is structural, in the manner of :func:`only_inner_wires_dropped`:
+
+    * ``after`` is one solid with exactly the cap faces fewer than ``before``;
+    * each host face comes back with the **same outer wire object** and the
+      same orientation, and its wires are exactly its old ones less the
+      removed wire -- so no edge outside the cap was rebuilt, and every edge
+      the cap touched went with both of its users (``remove_micro_caps``
+      admits a cap only if each of its edges has exactly two);
+    * each rebuilt host face is valid on its own;
+    * its area moved by at most ``tol^2``, the most a hole bounded by faces
+      within ``tol`` could cover.
+
+    The volume moved is bounded by the cap's own extent, under ``tol^3``, so it
+    is not re-integrated. The caller still checks the whole solid with
+    ``BRepCheck_Analyzer``: in `simplify` that check runs on every unified
+    solid anyway, so the repair adds nothing to it.
+    """
+    got = solids(after)
+    if len(got) != 1:
+        return f"the repair produced {len(got)} solids"
+    removed = sum(n for _h, _w, n in hosts)
+    after_faces = faces(got[0])
+    fb, fa = len(faces(before)), len(after_faces)
+    if fa != fb - removed:
+        return f"the face count went {fb} -> {fa} where {removed} cap face(s) were removed"
+    outers = TopTools_IndexedMapOfShape()
+    for f in after_faces:
+        outers.Add(BRepTools.OuterWire_s(f))
+    if outers.Extent() != len(after_faces):
+        return "two faces share one outer wire, so the host cannot be found"
+    hmap = TopTools_IndexedMapOfShape()
+    lost: dict[int, list] = {}
+    for host, wire, _n in hosts:
+        lost.setdefault(hmap.Add(host), []).append(wire)
+    for hi in range(1, hmap.Extent() + 1):
+        host = TopoDS.Face_s(hmap.FindKey(hi))
+        i = outers.FindIndex(BRepTools.OuterWire_s(host))
+        if i == 0:
+            return "a host face's outer wire was rebuilt"
+        face = after_faces[i - 1]
+        if face.Orientation() != host.Orientation():
+            return "a host face changed orientation"
+        want = [w for w in _explore(host, TopAbs_ShapeEnum.TopAbs_WIRE)
+                if not any(w.IsSame(x) for x in lost[hi])]
+        have = list(_explore(face, TopAbs_ShapeEnum.TopAbs_WIRE))
+        if len(have) != len(want) or not all(
+                any(w.IsSame(x) for x in want) for w in have):
+            return "a host face's wires are not its old ones less the cap's"
+        if not is_valid(face, parallel=False):
+            return "a rebuilt host face is not valid"
+        moved = abs(area(face) - area(host))
+        if moved > tol * tol:
+            return f"a host face's area moved {moved:.3e} mm^2, past {tol * tol:g}"
+    return None
 
 
 def count_subshapes(shape: TopoDS_Shape) -> tuple[int, int]:

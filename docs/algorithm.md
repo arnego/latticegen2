@@ -229,7 +229,8 @@ flowchart TD
     L --> M0[Assemble per component, prove every edge
     is used twice, once each way]
     M0 -->|not closed or not orientable| E3
-    M0 --> S[Same-domain unification per solid,
+    M0 --> S[Same-domain unification and sub-micron
+    cap removal per solid,
     across the shared worker pool]
     S -->|--support| SU[Detect inner overhangs, generate support bodies
     against the completed lattice, append them beside it - section 14]
@@ -1696,6 +1697,43 @@ program builds itself.
   identifies edges as the whole of the difference. A gate is only as good as the
   part it was measured on — the same lesson as §5.1's, in a different place.
 
+* **Sub-micron caps are removed in the same job** (`pipeline._simplify_one`).
+  Where a strut's corner grazes the input's wall within a micron, the trim
+  leaves the corner's tip as a cap — a few faces of ~1e-8 mm² closing one inner
+  wire of the wall face — which no mesher closes, so the export-truth gate
+  below refuses the run. It is the defect §14.3 S6 found on a support body,
+  and `occ.remove_micro_caps` removes it the same way: the cap's faces and the
+  wire go, every edge they touch goes with both of its users, and the wall's
+  surface continues across the hole. No lattice body has been measured
+  carrying one; every committed scenario and the rehearsal's lattice pass.
+
+  **It runs on the finished solid, after unification, and never on a trimmed
+  piece in the boundary worker.** A tiny face there can lie on a cap quad, and
+  removing it would change the interface areas §7.1 compares. After
+  `simplify` the topology is final.
+
+  **What it costs is a bounding box per face**, 9 to 32 µs — 0.14 s on
+  `dense-lattice`'s 14,790-face body, an estimated 5 to 20 s on the
+  rehearsal's 584k-face body, across the worker pool with the other solids.
+  The edge index the repair needs is built only for a solid with a face under
+  `MICRO_CAP_TOL`.
+
+  **Where it fires, it is checked locally and then by the check that was
+  running anyway.** Support bodies re-validate and re-integrate the whole body
+  (§14.3 S6); on a 584k-face lattice body that is minutes, for a change
+  confined to one face. So `occ.micro_cap_repair_fault` checks the repair
+  structurally: one solid with exactly the cap's faces fewer, each host face
+  back with the same outer wire object and orientation, its wires its old ones
+  less the cap's, valid on its own, its area moved by at most `MICRO_CAP_TOL²`.
+  The volume moved is bounded by the cap, under `MICRO_CAP_TOL³`, and is not
+  re-integrated. Then the whole-solid `BRepCheck_Analyzer` call `_unify_one`
+  makes on every unified solid is asked of the repaired solid instead, so a
+  solid that passes pays nothing more. If it fails, the unrepaired solid is
+  checked in its place and kept if it holds: a repair can never cost the run a
+  solid it would otherwise have kept. A refused repair keeps the solid as
+  built for export truth to judge; both outcomes are a `note:` with the cap's
+  position.
+
 * **Export-truth gate — what the validity gate below structurally cannot see.**
   `BRepCheck_Analyzer` asks whether a shape agrees with itself to within the
   tolerances **recorded in this process**. STEP AP214 has nowhere to record
@@ -2359,7 +2397,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind that budget: logical core count (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), sub-micron cap removal (§14.3 S6), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the export-truth measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), sub-micron cap removal and its local check (§9, §14.3 S6), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the export-truth measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |
@@ -2854,7 +2892,8 @@ slivers (`verify_geometry.COVERAGE_SLIVER_TOL`).
 
 **A support node's corner grazing the input's wall leaves a cap no mesher
 closes, and it is removed** (`occ.remove_micro_caps`, run by
-`generate.remove_micro_caps` on every finished body). Where a corner lies a
+`generate.remove_micro_caps` on every finished body; lattice bodies get the
+same repair in `simplify`, §9). Where a corner lies a
 fraction of a micron past the wall, the trimmed body carries the corner's tip:
 three planar faces of ~1e-8 mm², edges 0.1 to 0.25 µm, closing a matching
 3-edge inner wire of the wall face. Measured on `test-cylinder.STEP` at

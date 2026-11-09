@@ -49,7 +49,15 @@ from .lattice import node as lattice_node
 from .parallel import WorkerPool, set_thread_budget
 from .parallel import read_brep as _read_brep
 from .parallel import write_brep as _write_brep
-from .runlog import RunLog, Timer, box_text, format_bytes, point_text, warning_text
+from .runlog import (
+    RunLog,
+    Timer,
+    box_text,
+    format_bytes,
+    point_text,
+    points_text,
+    warning_text,
+)
 from .stepout import generation_params_text, rewrite_step_header
 
 INTERFACE_REPAIR_ROUNDS = 8
@@ -651,6 +659,18 @@ def _run_with_pool(
             [box_text(*occ.bounding_box(result_solids[i]))
              for i in simplify_stats["invalid_at"]],
         ))
+    caps, caps_refused = simplify_stats["caps_removed"], simplify_stats["caps_refused"]
+    # Logged as the support stage logs its own caps: a `note:` is a repair that
+    # left the output as intended, not a warning (specification.md §3).
+    if caps:
+        rl.line(f"note: {len(caps)} sub-micron cap(s) removed from lattice bodies "
+                f"where a strut's corner grazed the input's surface, at "
+                f"{points_text(caps)}")
+    if caps_refused:
+        rl.line(f"note: sub-micron cap repair refused by its check, lattice bodies "
+                f"kept as built for export truth to judge, at "
+                f"{points_text(caps_refused)}")
+    stats["lattice_micro_caps_removed"] = len(caps)
     if simplify_stats["max_worker_rss"]:
         rl.note_worker_rss(simplify_stats["max_worker_rss"])
         rl.line(f"peak simplify worker memory: {format_bytes(simplify_stats['max_worker_rss'])}")
@@ -1264,27 +1284,9 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool]:
     from being kept, and `validate` refuses it exactly as it did before, so
     paying 34.7 s to find that out would buy nothing.
     """
-    ran = True
-    try:
-        merged = occ.unify_same_domain(solid, unify_edges=False)
-    except Standard_Failure:
-        return solid, False, False
-    if _shell_is_broken(merged):
-        # The merge across curved faces is what breaks (see `_shell_is_broken`),
-        # and it is also the small part of the job: the lattice is planar. So the second rung merges planar faces only, by forbidding
-        # a merge across any edge of a curved face, and keeps nearly all of the
-        # reduction. Only if that fails too is the solid exported as built.
-        try:
-            merged = occ.unify_same_domain(
-                solid, unify_edges=False, keep_curved=True)
-        except Standard_Failure:
-            return solid, False, False
-        if _shell_is_broken(merged):
-            return solid, ran, True
-    try:
-        merged = occ.unify_same_domain(merged, unify_edges=True, unify_faces=False)
-    except Standard_Failure:
-        pass
+    merged, ran, degraded, fresh = _unify_unchecked(solid)
+    if not fresh:
+        return merged, ran, degraded
     # `parallel=False` because this runs *inside* a worker: the pool around it
     # already occupies the whole `--cores` budget, and OCCT's own thread pool is
     # deliberately left unbounded there (`parallel.set_thread_budget` is not
@@ -1294,6 +1296,83 @@ def _unify_one(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool]:
     if not occ.is_valid(merged, parallel=False):
         return solid, ran, True
     return merged, ran, False
+
+
+def _unify_unchecked(solid: TopoDS_Shape) -> tuple[TopoDS_Shape, bool, bool, bool]:
+    """:func:`_unify_one`'s ladder without its closing validity check.
+
+    Returns ``(shape, ran, degraded, fresh)``; ``fresh`` says ``shape`` is a
+    new unification result that still has to be checked, where otherwise it is
+    ``solid`` itself, kept as built.
+    """
+    ran = True
+    try:
+        merged = occ.unify_same_domain(solid, unify_edges=False)
+    except Standard_Failure:
+        return solid, False, False, False
+    if _shell_is_broken(merged):
+        # The merge across curved faces is what breaks (see `_shell_is_broken`),
+        # and it is also the small part of the job: the lattice is planar. So
+        # the second rung merges planar faces only, by forbidding a merge across
+        # any edge of a curved face, and keeps nearly all of the reduction. Only
+        # if that fails too is the solid exported as built.
+        try:
+            merged = occ.unify_same_domain(
+                solid, unify_edges=False, keep_curved=True)
+        except Standard_Failure:
+            return solid, False, False, False
+        if _shell_is_broken(merged):
+            return solid, ran, True, False
+    try:
+        merged = occ.unify_same_domain(merged, unify_edges=True, unify_faces=False)
+    except Standard_Failure:
+        pass
+    return merged, ran, False, True
+
+
+def _simplify_one(solid: TopoDS_Shape):
+    """Unify one lattice solid and remove its sub-micron caps.
+
+    Returns ``(shape, ran, degraded, removed, refused)``, the last two one
+    position per cap removed, or found and kept because its repair failed a
+    check.
+
+    **The caps** are the ones docs/algorithm.md §14.3 S6 removes from support
+    bodies: the corner of a strut grazing the input's wall within a micron
+    leaves its tip as a few faces of ~1e-8 mm^2 closing one inner wire of the
+    wall face, which no mesher closes and §9's export-truth gate refuses.
+    :func:`latticegen2.occ.remove_micro_caps` takes them out exactly, and it
+    runs here, on the finished solid, rather than on trimmed pieces in the
+    boundary worker: a tiny face there can lie on a cap quad, and removing it
+    would change the interface areas §7.1 compares.
+
+    **What it costs is the scan, and the check rides on `_unify_one`'s.** A
+    solid with no face under :data:`~latticegen2.occ.MICRO_CAP_TOL` -- every
+    solid measured so far -- pays one bounding box per face, 9 to 32 us. Where
+    a cap is removed, :func:`latticegen2.occ.micro_cap_repair_fault` checks the
+    repair locally, and the whole-solid validity check `_unify_one` already
+    runs on every unified solid is asked of the repaired solid in place of the
+    unrepaired one. Only if that fails is the unrepaired solid checked, so a
+    repair can never cost the run a solid it would otherwise have kept.
+    """
+    merged, ran, degraded, fresh = _unify_unchecked(solid)
+    hosts: list = []
+    repaired, removed = occ.remove_micro_caps(merged, hosts=hosts)
+    refused: list = []
+    if removed and occ.micro_cap_repair_fault(merged, repaired, hosts) is not None:
+        repaired, refused, removed = merged, removed, []
+    if removed:
+        repaired = occ.solids(repaired)[0]
+    if not fresh and not removed:
+        return merged, ran, degraded, [], refused
+    # `parallel=False` for `_unify_one`'s reason: this runs inside a worker.
+    if occ.is_valid(repaired, parallel=False):
+        return repaired, ran, degraded, removed, refused
+    if removed:
+        refused, removed = refused + removed, []
+        if not fresh or occ.is_valid(merged, parallel=False):
+            return merged, ran, degraded, [], refused
+    return solid, ran, True, [], refused
 
 
 def _check_unify_result(
@@ -1371,6 +1450,8 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
     worst_drift = 0.0
     unmerged_at: list[int] = []
     invalid_at: list[int] = []
+    caps_removed: list = []
+    caps_refused: list = []
     out: list[TopoDS_Shape] = []
     for done, solid in enumerate(solids):
         if report is not None:
@@ -1380,7 +1461,9 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
         edges_before += e
         pre_volume = occ.volume(solid)
 
-        merged, ran, degraded = _unify_one(solid)
+        merged, ran, degraded, removed, refused = _simplify_one(solid)
+        caps_removed += removed
+        caps_refused += refused
         if not ran:
             unmerged_at.append(len(out))
         if degraded:
@@ -1407,6 +1490,8 @@ def _unify_serial(solids: list[TopoDS_Shape], report=None):
         "unmerged_at": unmerged_at,
         "invalid_merges": len(invalid_at),
         "invalid_at": invalid_at,
+        "caps_removed": caps_removed,
+        "caps_refused": caps_refused,
         "max_worker_rss": 0,
     }
 
@@ -1424,7 +1509,7 @@ def _worker_unify(job):
     faces_before, edges_before = occ.count_subshapes(solid)
     pre_volume = occ.volume(solid)
 
-    merged, ran, degraded = _unify_one(solid)
+    merged, ran, degraded, removed, refused = _simplify_one(solid)
     produced = occ.solids(merged)
     n_produced = len(produced)
     if n_produced == 1:
@@ -1444,7 +1529,8 @@ def _worker_unify(job):
         # takes the peak from `rss_index=-1`, so anything appended past it is
         # silently read as a memory figure.
         out_path, faces_before, edges_before, faces_after, edges_after,
-        pre_volume, post_volume, n_produced, ran, degraded, peak_rss_bytes(),
+        pre_volume, post_volume, n_produced, ran, degraded, removed, refused,
+        peak_rss_bytes(),
     )
 
 
@@ -1482,8 +1568,12 @@ def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str, r
     unmerged_at: list[int] = []
     invalid_at: list[int] = []
     out: list[TopoDS_Shape] = []
+    caps_removed: list = []
+    caps_refused: list = []
     for (out_path, fb, eb, fa, ea, pre_volume, post_volume, n_produced, ran,
-         degraded, _rss) in results:
+         degraded, removed, refused, _rss) in results:
+        caps_removed += removed
+        caps_refused += refused
         faces_before += fb
         edges_before += eb
         if not ran:
@@ -1511,6 +1601,8 @@ def _unify_parallel(solids: list[TopoDS_Shape], pool: WorkerPool, tmpdir: str, r
         "unmerged_at": unmerged_at,
         "invalid_merges": len(invalid_at),
         "invalid_at": invalid_at,
+        "caps_removed": caps_removed,
+        "caps_refused": caps_refused,
         "max_worker_rss": max_rss,
     }
 

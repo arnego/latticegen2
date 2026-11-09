@@ -86,6 +86,13 @@ def point_text(p) -> str:
     return "[" + ", ".join(f"{float(x):.3f}" for x in p) + "] mm"
 
 
+def points_text(points, limit: int = 5) -> str:
+    """The first ``limit`` of ``points`` by :func:`point_text`, then `` ...``
+    when there are more, for a `note:` naming where a repair acted."""
+    return (", ".join(point_text(p) for p in points[:limit])
+            + (" ..." if len(points) > limit else ""))
+
+
 def box_text(lo, hi) -> str:
     """A region of the part, for :func:`warning_text`."""
     return ", ".join(f"{'xyz'[a]} {float(lo[a]):.3f} to {float(hi[a]):.3f}"

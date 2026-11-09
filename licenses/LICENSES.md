@@ -23,6 +23,16 @@ bundle is one that was actually observed rather than one that was assumed.
 | **OCP** (`cadquery-ocp`) | 7.9.3.1.1 | Python bindings for OCCT. The binding layer itself; it also redistributes the OCCT binaries above. | Apache-2.0 | [ocp-LICENSE_Apache_20.txt](ocp-LICENSE_Apache_20.txt) |
 | **OCP proxy** (`cadquery-ocp-proxy`) | 7.9.3.1.1 | A 3 kB shim package `cadquery-ocp` requires; carries no binaries of its own. | Apache-2.0 | [ocp-LICENSE_Apache_20.txt](ocp-LICENSE_Apache_20.txt) |
 | **VTK** | 9.6.2 | **Not used by latticegen2.** Present only because `cadquery-ocp` requires it and the OCP extension module links against its shared libraries — see the note below. | BSD-3-Clause | [vtk-LICENSE.txt](vtk-LICENSE.txt) |
+| **Matplotlib** (`matplotlib`) | 3.10.6 | **Not used.** Required by `vtk`. Ships the DejaVu and STIX fonts, whose terms are separate texts. | Matplotlib License (PSF-based); fonts: Bitstream Vera / DejaVu terms, SIL OFL 1.1 | [matplotlib-LICENSE.txt](matplotlib-LICENSE.txt), [matplotlib-LICENSE_DEJAVU.txt](matplotlib-LICENSE_DEJAVU.txt), [matplotlib-LICENSE_STIX.txt](matplotlib-LICENSE_STIX.txt) |
+| **ContourPy** (`contourpy`) | 1.3.3 | **Not used.** Required by `matplotlib`. | BSD-3-Clause | [contourpy-LICENSE.txt](contourpy-LICENSE.txt) |
+| **Cycler** (`cycler`) | 0.12.1 | **Not used.** Required by `matplotlib`. | BSD-3-Clause | [cycler-LICENSE.txt](cycler-LICENSE.txt) |
+| **fontTools** (`fonttools`) | 4.60.1 | **Not used.** Required by `matplotlib`. Its external notices cover the font data and code it embeds. | MIT; embedded: SIL OFL 1.1, Apache-2.0, MIT | [fonttools-LICENSE.txt](fonttools-LICENSE.txt), [fonttools-LICENSE.external.txt](fonttools-LICENSE.external.txt) |
+| **Kiwi** (`kiwisolver`) | 1.4.9 | **Not used.** Required by `matplotlib`. | BSD-3-Clause | [kiwisolver-LICENSE.txt](kiwisolver-LICENSE.txt) |
+| **packaging** (`packaging`) | 25.0 | **Not used.** Required by `matplotlib`. | Apache-2.0 or BSD-2-Clause, at the recipient's choice | [packaging-LICENSE.txt](packaging-LICENSE.txt), [packaging-LICENSE.APACHE.txt](packaging-LICENSE.APACHE.txt), [packaging-LICENSE.BSD.txt](packaging-LICENSE.BSD.txt) |
+| **Pillow** (`pillow`) | 11.3.0 | **Not used.** Required by `matplotlib`. | MIT-CMU (HPND) | [pillow-LICENSE.txt](pillow-LICENSE.txt) |
+| **pyparsing** (`pyparsing`) | 3.2.5 | **Not used.** Required by `matplotlib`. | MIT | [pyparsing-LICENSE.txt](pyparsing-LICENSE.txt) |
+| **dateutil** (`python-dateutil`) | 2.9.0.post0 | **Not used.** Required by `matplotlib`. | Apache-2.0 and BSD-3-Clause (dual, by contribution date) | [python-dateutil-LICENSE.txt](python-dateutil-LICENSE.txt) |
+| **six** (`six`) | 1.17.0 | **Not used.** Required by `python-dateutil`. | MIT | [six-LICENSE.txt](six-LICENSE.txt) |
 | **NumPy** | 2.4.6 | Vectorised array maths for classification, spatial indexing and the lattice basis. | BSD-3-Clause | [numpy-LICENSE.txt](numpy-LICENSE.txt) |
 | **Tcl/Tk** | 8.6 (as built into the runtime) | The graphical front-end's toolkit, reached through the standard library's `tkinter`. **Portable bundles only** — see the note below. | BSD-style (Tcl/Tk licence terms) | [tcl-tk-LICENSE.txt](tcl-tk-LICENSE.txt) |
 
@@ -43,6 +53,20 @@ assumed:
 It is therefore a redistribution obligation, and its BSD-3-Clause text is
 included here accordingly. It is also roughly 60% of a release bundle's size
 (328 MB installed).
+
+**What VTK requires is shipped too, for the same reason.** `vtk` 9.6.2 declares
+`matplotlib`, and `matplotlib` nine more: the ten rows marked *Required by* in
+the table. latticegen2 imports none of them. Until they were pinned in
+`requirements-bundle.txt`, `pip download` took whatever version PyPI served on
+the day, so the bundle held wheels whose licences this directory did not
+record. `tools/build_release.py` now refuses a download holding any wheel not
+pinned there, and `test/test_release_pins.py` holds every pin to a row of the
+table above at the same version, with its licence files present.
+
+**The texts are the ones each wheel ships.** Some of these wheels also carry
+compiled third-party libraries: Pillow's image codecs, and the FreeType and
+Qhull code Matplotlib builds in. Those projects' own terms are not in the wheels'
+`dist-info`, and they are not reproduced here yet.
 
 ## Bundled Python runtime (portable bundles only)
 
@@ -93,7 +117,8 @@ Nothing in either bundle is a modified OCCT build, and nothing prevents
 replacing it.
 
 No dependency carries a GPL copyleft obligation: the set is LGPL-2.1,
-Apache-2.0 and BSD-3-Clause.
+Apache-2.0, BSD-2/3-Clause, MIT, MIT-CMU, the PSF-based Matplotlib License, and
+the SIL Open Font License and Bitstream Vera terms for bundled fonts.
 
 ## psutil is no longer a runtime dependency
 

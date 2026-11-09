@@ -2039,3 +2039,43 @@ peak-RSS reading from `rss_index=-1`. A flag appended to the worker's result
 tuple *after* that reading is silently read as a memory figure — which is how
 `test_unify_only_dispatches_to_the_pool_when_eligible` caught it, reporting a
 peak of 0.
+
+## G26 — does round 2's seam split fail only because it crosses a process? ✅ YES
+
+**Run 2026-11-09**, [`g26_round2_pool_identity.py`](g26_round2_pool_identity.py),
+after a code review reproduced the seam-only split failing in a fake pool and
+nowhere else. The question G21 did not ask: G21 closed the straddling set
+inside one process, and its part A found the in-process routes identical, but
+`_sew_round_two` sent every component to a worker once a run had two or more,
+which the rehearsal, with 14, always did.
+
+A real pipeline run of `test-cylinder.STEP` at `cc=10, t=1.5` with tiling
+forced (`tile_target=100, min_to_tile=300`): two components, the dominant one in
+16 tiles, 5,448 seam faces and 8,804 carried. The same round-1 results, sewn
+three ways:
+
+| route | free edges, 4,408 expected | time |
+|---|---|---|
+| seam-only, in the master | **4,408** | 0.48 s |
+| seam-only, through a worker and read back | **12,216** | 1.43 s |
+| unsplit, in the master (the repair) | 4,408 | 1.35 s |
+
+The excess, 7,808, is twice the edges between seam and carried faces: read back
+from a `.brep`, the seam faces are new objects, so each such edge exists twice
+and each copy is used once. The sew rebuilds nothing.
+
+**Fix:** a split component's round 2 is sewn in the master, and only untiled
+components go to the pool. On the same run, round 2 and its check go from
+1.59 s + 1.67 s with one component repaired to 0.62 s + 0.12 s with none. The
+output matches `test-cylinder-cc10t1.5-golden-sample.step` at 0 mm³.
+`test_weld.py::test_a_split_component_is_not_sent_through_a_worker_in_round_two`
+fails on the code before.
+
+**Not yet measured at production scale.** The rehearsal's `expected 73984,
+seam-only split gave 192692` fits the mechanism, and its ~545–651 s repair
+should become a seam-only sew of 13–14 % of the faces. The next
+`rehearsal-support` run will say.
+
+Lesson: G21's lesson again, one level up. A prototype that rebuilds part of the
+pipeline has to rebuild all of it, and here "all of it" included which process
+the call runs in.

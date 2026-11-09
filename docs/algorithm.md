@@ -1296,10 +1296,12 @@ memory `rehearsal-assemble-failure-is-not-debris`). The mechanism: a seam
 face can share an edge with a face the split carries through unchanged (a
 "straddling" edge — free within the seam-only subset even though the full
 tile uses it twice, since 144–720 such edges were measured in every
-prototype block tried once the check for them existed), and sewing that
-subset without its carried neighbour present lets `BRepBuilderAPI_Sewing`
-rebuild the edge onto a new `TopoDS_Edge` while the carried face keeps the
-original — one shared edge becomes two, each used once. `_split_seam_interior`
+prototype block tried once the check for them existed), and when that edge
+comes back as a new `TopoDS_Edge` while the carried face keeps the original,
+one shared edge becomes two, each used once. **What replaces it is the process
+boundary, not the sew** (G26, below): round 2 used to send every component to a
+worker once a run had two or more, and a seam subset read back from a `.brep`
+is all new objects. `_split_seam_interior`
 itself is unchanged by this; the guarantee needed is downstream, in
 `_sew_round_two`. Every interior interface a correctly sewn boundary layer
 presents is the whole template cap quad — four edges, by §5.3(b) — and every
@@ -1312,7 +1314,9 @@ after round 2; a component whose count is wrong is redone on the unsplit
 tile results (the behaviour before the split existed) rather than allowed
 into `assemble`. `SewStats.repaired_components` reports how many times this
 fires, logged in the run summary; it is 0 on every committed scenario, since
-none is large enough to tile (`MIN_PIECES_TO_TILE`) in the first place.
+none is large enough to tile (`MIN_PIECES_TO_TILE`) in the first place. The
+check stays now that its cause is known (G26): it is what any other way of
+making the split wrong would meet.
 
 **A count still wrong after that unsplit re-sew is a hard failure (exit 4), and
 was not until a v3.0.0 report showed why it has to be.** The unsplit sew is
@@ -1345,8 +1349,9 @@ counts should have agreed all along (§11's rule that a gate is only as
 trustworthy as the quantity it compares, in the one place both quantities were
 already in the file).
 
-**What the repair costs on this part is structural, and the one proposed fix is
-disproved.** `SewStats` records `(component, want, got_split, got_unsplit)` for
+**The split failed on the rehearsal because round 2 crossed a process, and a
+split component's round 2 now stays in the master (G26).** What follows is the
+record that led there, and its conclusion was wrong. `SewStats` records `(component, want, got_split, got_unsplit)` for
 every repaired component — free, since the unsplit sew has to run before either
 number is known — and the rehearsal reports `expected 73984, seam-only split
 gave 192692, full unsplit sew gives 73994` (the last of those is the 10
@@ -1359,8 +1364,31 @@ connected components of the tile's face-adjacency graph, and a tile's round-1
 result is one connected shell, so the closure of "add my straddling neighbours"
 is the tile itself (23,546 faces → 23,523, in 8 hops) and costs what the
 unsplit sew costs (523.20 s against 520.89 s). Every hop short of the fixpoint
-leaves a fresh frontier of exactly the edges it exists to remove. There is no
-lever left in this stage; see docs/specification.md §11.
+leaves a fresh frontier of exactly the edges it exists to remove. That much
+stands. What it concluded, that there is no lever left in this stage, does not:
+G21 closed the straddling set inside one process, and its part A had found the
+in-process routes identical, while the rehearsal ran round 2 through workers,
+since it has 14 components.
+
+G26 sewed one set of round-1 tile results three ways, on `dense-lattice` tiled
+16 ways (`tile_target=100, min_to_tile=300`, two components):
+
+| route | free edges, 4,408 expected | time |
+|---|---|---|
+| seam-only, in the master | **4,408** | 0.48 s |
+| seam-only, through a worker (as built until G26) | **12,216** | 1.43 s |
+| unsplit (the repair) | 4,408 | 1.35 s |
+
+The excess, 7,808, is twice the edges between the two halves, as the mechanism
+predicts. So `_sew_round_two` sews a split component's seam subset in the
+master, where its carried faces are, and sends only untiled components to the
+pool, which carry nothing past the sew. On that run round 2 and its check fall
+from 1.59 s + 1.67 s with one component repaired to 0.62 s + 0.12 s with none,
+and the output still matches the golden sample at 0 mm³.
+`test_a_split_component_is_not_sent_through_a_worker_in_round_two` fails on
+the code before. On the rehearsal this predicts the repair's ~545 s going to
+a seam-only sew of 13–14 % of the faces. That is not yet measured; the next
+`rehearsal-support` run is where it will be.
 
 **A hierarchical tree reduction was considered for round 2 itself — sewing
 tile results together pairwise across levels instead of in one call — and
@@ -2319,7 +2347,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
-| Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; identical to a full round 2 at every prototype scale tried (§8, G8), but not on real, heavily trimmed production geometry, where the rehearsal measures 192,692 free edges against the 73,984 a correct sew leaves (§8) — a per-component free-edge check against `want_rings`, degenerate edges excluded, catches and repairs that, at the cost of the saving only for the repaired components. **The repair's cost is structural**: making the split correct means growing the sewn subset until it has no straddling edge, and that closure is the whole tile (G21) |
+| Boundary sew round 2 sews only the free-edge-bearing subset | Applies round 2's flat per-face cost to `F_seam` (13–14 % of a tile's faces, measured) instead of the full tiled face count; identical to a full round 2 at every prototype scale tried (§8, G8), but not on real, heavily trimmed production geometry, where the rehearsal measures 192,692 free edges against the 73,984 a correct sew leaves (§8) — a per-component free-edge check against `want_rings`, degenerate edges excluded, catches and repairs that, at the cost of the saving only for the repaired components. **The split failed there because round 2 crossed a process** (G26): a seam subset read back from a worker is new objects, so its edges with the carried faces doubled. A split component is now sewn in the master, which `dense-lattice` tiled 16 ways measures at 4,408 free edges as expected against 12,216 through a worker |
 | One shared `WorkerPool` for the whole run | `spawn`'s process-creation cost is paid once per run rather than once per stage; classification, boundary trim, boundary-sew round 1, boundary-sew round 2 and unification all dispatch through it (§5.4, §8, §9, `latticegen2.parallel`). Built before `classify` rather than after it so that stage can use it too — which also means `boundary` now starts with warm workers instead of paying their first import, measured at −12.6 % on `dense-lattice`. Validity is the one parallel stage that does *not* use it, and §9 says why |
 | Same-domain unification across the shared pool | Measured single-threaded at 24 % (17 m 17 s) of the `cc=5, t=1` rehearsal; G7 measured OCP holding the GIL around the call, so this is the same process-pool-plus-`.brep` mechanism the rest of the pipeline uses, not threads (§9, specification.md §10 path 1) |
 | Validity via OCCT's own thread pool, on the master (§9) | The one heavy call with a `theIsParallel` flag, and the one heavy stage returning a scalar rather than geometry — so G17's GIL result does not bind OCCT's native threads and G15's identity result has nothing to attach to. 1.60× at 3.43 cores, verdict identical on valid solids and on all four real invalid faces (G18). Replaces path 4's per-solid process dispatch, which cannot coexist with it under `--cores` (`W` processes × `W` threads) and never reached the dominant solid that sets the floor; dropping it also deletes a 464 MB round trip |
@@ -2867,6 +2895,13 @@ and the ceiling points it leaves unbacked, printed regardless of `-v`
 (`frustum.DROPPED_WARNING`). The alternative, failing the run, was weighed and
 declined: it would refuse the whole part over a few support nodes the kernel
 cannot cut, where the report says exactly what is missing and where.
+
+**A piece in which sampling finds no material is asked what it backs.** Its
+estimate is under three standard errors, so no rung is tried. If its
+tessellation holds no ceiling point, it is discarded and nothing is lost. If it
+holds any, it is dropped and reported as above. The coverage count reads the
+support grid the piece was built from, so going quietly would count those
+points as backed with no material under them.
 
 **`SpiralTest.step` at `cc = 5, t = 1`, `--orient -90 45 0` drops pieces
 there, and the failure is the kernel's.** One support body's intersection returned 0.1 mm³

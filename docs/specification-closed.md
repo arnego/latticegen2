@@ -587,6 +587,15 @@ seam at `import`, and the refusal cites it.
 
 ### `stitch`'s round-2 repair — chapter closed: the fix disproved, the check repaired, the scan parallelised
 
+**Corrected 2026-11-09 (G26).** This chapter's conclusion, that the repair is
+the price of a correct shell and no lever is left, is wrong. The split failed
+because round 2 sent the component to a worker, and the seam faces came back as
+new objects, so every edge they shared with the carried faces was duplicated.
+Sewn in the master, the same split gives exactly the expected count, and a
+split component's round 2 now stays there (docs/algorithm.md §8,
+`tools/prototypes/RESULTS.md` G26). G21's closure measurement below stands as
+measured. It answered a question about a cause that was not this one.
+
 **Opened 2026-08-17, closed 2026-08-18.** §10's last live item, in two parts:
 the ~545–651 s full unsplit sew that boundary-sew round 2 falls back to on this
 part (85 % of `stitch`), and the 44.1 s serial validity scan beside it. Both

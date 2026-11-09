@@ -176,6 +176,52 @@ def git_metadata(ref: str) -> tuple[str, str]:
 # dependencies
 # --------------------------------------------------------------------------
 
+def _canonical(name: str) -> str:
+    """A distribution name as PEP 503 compares it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pinned_requirements(path: Path = REQUIREMENTS) -> dict[str, str]:
+    """``{canonical name: version}`` for every ``name==version`` line."""
+    pins: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, sep, version = line.partition("==")
+        if not sep:
+            raise SystemExit(f"FAILED: {path.name}: '{line}' is not an exact pin")
+        pins[_canonical(name)] = version.strip()
+    return pins
+
+
+def unpinned_wheels(wheels: list[Path], pins: dict[str, str]) -> list[str]:
+    """Wheel files whose distribution and version are not pinned exactly.
+
+    Every wheel in a bundle has to be one licenses/LICENSES.md records, and the
+    pins are what that table is held to (test/test_release_pins.py). A wheel
+    pip pulled in through a dependency that is not pinned is a wheel whose
+    licence nobody checked.
+    """
+    bad = []
+    for wheel in wheels:
+        name, version = wheel.name.split("-")[:2]
+        if pins.get(_canonical(name)) != version:
+            bad.append(wheel.name)
+    return bad
+
+
+def _check_pinned(wheels: list[Path]) -> None:
+    bad = unpinned_wheels(wheels, pinned_requirements())
+    if bad:
+        raise SystemExit(
+            "FAILED: wheels not pinned in requirements-bundle.txt, so their\n"
+            "        licences are not recorded in licenses/LICENSES.md:\n"
+            + "".join(f"          {b}\n" for b in bad)
+            + "        Pin each one and add its licence text and table row."
+        )
+
+
 def fetch_wheels(dest: Path, wheels_dir: Path | None, target_python: str) -> Path:
     """Return a directory holding the pinned wheels for this host and Python.
 
@@ -189,6 +235,7 @@ def fetch_wheels(dest: Path, wheels_dir: Path | None, target_python: str) -> Pat
         if not found:
             raise SystemExit(f"FAILED: no .whl files in {wheels_dir}")
         print(f"    using {len(found)} pre-downloaded wheels from {wheels_dir}")
+        _check_pinned(found)
         return wheels_dir
 
     rmtree(dest)
@@ -203,6 +250,7 @@ def fetch_wheels(dest: Path, wheels_dir: Path | None, target_python: str) -> Pat
         )
     run([sys.executable, "-m", "pip", "download", "--only-binary=:all:",
          "--disable-pip-version-check", "-r", REQUIREMENTS, "-d", dest])
+    _check_pinned(sorted(dest.glob("*.whl")))
     return dest
 
 

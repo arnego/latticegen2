@@ -414,6 +414,13 @@ one worth carrying:
   hard** (G21): the sewn subset has to grow until no edge straddles it, which is
   the whole tile, at the unsplit sew's own cost. `stitch`'s repair is the price
   of a correct shell on this part, not an unfixed inefficiency.
+* **That last conclusion was wrong (G26, 2026-11-09).** The split failed
+  because round 2 sent the component to a worker: the seam faces came back from
+  the `.brep` as new objects, and every edge they shared with the carried faces
+  was duplicated. Sewn in the master, the same split gives exactly the expected
+  count. A split component's round 2 now stays in the master
+  (docs/algorithm.md §8). The 651 s should go with it, but that is not yet
+  re-measured on this part.
 
 The general lesson is one this file keeps re-learning: a stage timer that lumps
 six phases together tells you the stage is slow and nothing about which proposal

@@ -232,7 +232,7 @@ def _long_box():
     )
 
 
-def _line_pieces(lp, tpl, n: int) -> list[BoundaryPiece]:
+def _line_pieces(lp, tpl, n: int, j: int = 0) -> list[BoundaryPiece]:
     """``n`` trimmed junctions in a row along ``+e0``, interfaces already dropped.
 
     Each node is fully inside :func:`_long_box`, so trimming leaves the whole
@@ -244,7 +244,7 @@ def _line_pieces(lp, tpl, n: int) -> list[BoundaryPiece]:
     and the two ends keep their outward cap intact, so the whole chain sews into
     one fully **closed** shell — a tube capped at both ends, not an open pipe.
     """
-    positions = nodes(lp, np.array([(i, 0, 0) for i in range(n)], dtype=np.int64))
+    positions = nodes(lp, np.array([(i, j, 0) for i in range(n)], dtype=np.int64))
     pieces = []
     for i in range(n):
         faces, tags, vol = trim_junction(lp, tpl, positions[i], _long_box()).pieces[0]
@@ -252,7 +252,7 @@ def _line_pieces(lp, tpl, n: int) -> list[BoundaryPiece]:
             f for f, t in zip(faces, tags)
             if not (t == 3 and i > 0) and not (t == 0 and i < n - 1)
         ]
-        pieces.append(BoundaryPiece(node=(i, 0, 0), volume=vol, faces=keep))
+        pieces.append(BoundaryPiece(node=(i, j, 0), volume=vol, faces=keep))
     return pieces
 
 
@@ -394,11 +394,11 @@ def test_round_two_repairs_a_component_the_seam_split_got_wrong(template, monkey
     isolation reproduces exactly what a full round 2 would have done — held at
     every prototype scale tried (G8), all of them on lightly trimmed junctions,
     but not on the real, heavily trimmed geometry of the `cc=5, t=1` production
-    rehearsal (docs/specification.md §10): there, `BRepBuilderAPI_Sewing` could
-    rebuild a "straddling" edge shared with a carried-through face onto a new
-    `TopoDS_Edge`, leaving 118,760 open edges at `assemble` where 10 were
-    expected. A setup this small cannot reproduce that OCCT behaviour directly
-    (no prototype scale has) — so the split is monkeypatched to drop one seam
+    rehearsal (docs/specification.md §10): there, a "straddling" edge shared with
+    a carried-through face came back as a new `TopoDS_Edge`, leaving 118,760
+    open edges at `assemble` where 10 were expected. G26 traced that to round 2
+    crossing a process (the test below); the net stays for whatever else could
+    make a split wrong, so the split is monkeypatched here to drop one seam
     face, standing in for "the split silently produced a wrong result", and the
     fix is verified by its symptom: a wrong free-edge count is caught against
     ``want_rings`` and that component is redone on the unsplit tile results,
@@ -503,6 +503,36 @@ def test_tiled_sew_across_worker_processes_matches_the_sequential_path(template,
     assert (open_edges, misoriented) == (0, 0)
     solid = occ.make_solid(shell_of(parallel[0]))
     assert occ.volume(solid) == pytest.approx(8 * tpl.volume, rel=1e-9)
+
+
+def test_a_split_component_is_not_sent_through_a_worker_in_round_two(template, tmp_path):
+    """G26: a split component's round 2 stays in the process holding its
+    carried faces.
+
+    Two untiled components beside it make round 2 dispatch across workers. A
+    seam subset sent through a `.brep` comes back as new objects, so every edge
+    it shares with a face carried through by reference would exist twice, each
+    used once, and the split would be rejected and the component re-sewn whole
+    every time.
+    """
+    lp, tpl, _ = template
+    chain = _line_pieces(lp, tpl, 12)
+    small = _line_pieces(lp, tpl, 2, j=5) + _line_pieces(lp, tpl, 2, j=10)
+    pieces = chain + small
+    groups = [0] * len(chain) + [1, 1, 2, 2]
+
+    out, stats = weld.sew_boundary(
+        pieces, groups, workers=4, tmpdir=str(tmp_path),
+        tile_target=3, min_to_tile=3, want_rings={},
+    )
+    assert stats.tiled_components == 1 and stats.tiles > 1
+    assert stats.max_worker_rss > 0, "the untiled components went to workers"
+    assert stats.repaired_components == 0, "a sound split must not be redone"
+    for group, n in ((0, 12), (1, 2), (2, 2)):
+        open_edges, misoriented, *_ = weld.shell_defects(shell_of(out[group]))
+        assert (open_edges, misoriented) == (0, 0)
+        solid = occ.make_solid(shell_of(out[group]))
+        assert occ.volume(solid) == pytest.approx(n * tpl.volume, rel=1e-9)
 
 
 def test_tiled_sew_falls_back_to_sequential_when_the_shared_pool_is_inert(template, tmp_path):

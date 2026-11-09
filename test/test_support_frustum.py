@@ -492,6 +492,59 @@ def test_a_piece_no_trim_produces_is_dropped_and_reported(chamber, monkeypatch, 
     assert "\n  body-0 near [" in warning[0]
     assert stats["support_ceiling_points_uncovered"] > 0
 
+
+def _sampled_empty_first_body(frustum, monkeypatch):
+    real = frustum._trim
+
+    def empty_first_body(piece, *args, **kw):
+        if args[-1].startswith("body-0"):
+            return [], ["sampled empty"], (0.0, 1.0)
+        return real(piece, *args, **kw)
+
+    monkeypatch.setattr(frustum, "_trim", empty_first_body)
+    monkeypatch.setattr(frustum, "SPLIT_DEPTH", 0)
+
+
+def test_a_piece_sampling_finds_empty_that_holds_ceiling_is_dropped_and_reported(
+        chamber, monkeypatch, tmp_path):
+    """Sampling can miss a sliver of support, and the coverage count reads the
+    grid the piece was built from: going quietly, its ceiling points would be
+    counted as backed with no material shipped under them."""
+    from latticegen2.support import frustum
+    from latticegen2.support.generate import supports_for
+
+    body, mesh, lp, kept, occ = chamber
+    _sampled_empty_first_body(frustum, monkeypatch)
+    solids, stats, lines = supports_for(body, mesh, [], kept, lp, 1.5, tmpdir=str(tmp_path))
+    assert stats["support_pieces_dropped"] == 1
+    warning = [line for line in lines
+               if line.startswith(f"WARNING: {frustum.DROPPED_WARNING}")]
+    assert len(warning) == 1 and "sampling found no material" in warning[0]
+    assert stats["support_ceiling_points_uncovered"] > 0
+
+
+def test_a_piece_sampling_finds_empty_that_backs_nothing_is_discarded_quietly(
+        chamber, monkeypatch, tmp_path):
+    from latticegen2.support import frustum
+    from latticegen2.support.generate import supports_for
+
+    body, mesh, lp, kept, occ = chamber
+    _sampled_empty_first_body(frustum, monkeypatch)
+    real_inside = frustum._tessellated_inside
+    first = []
+
+    def nothing_in_first(piece):
+        if not first:  # body-0 is the first piece asked
+            first.append(piece)
+            return lambda pts: np.zeros(len(pts), dtype=bool)
+        return real_inside(piece)
+
+    monkeypatch.setattr(frustum, "_tessellated_inside", nothing_in_first)
+    solids, stats, lines = supports_for(body, mesh, [], kept, lp, 1.5, tmpdir=str(tmp_path))
+    assert stats["support_pieces_dropped"] == 0
+    assert not any(line.startswith(f"WARNING: {frustum.DROPPED_WARNING}") for line in lines)
+
+
 def test_supports_are_assembled_beside_the_lattice(chamber, chamber_supports):
     from latticegen2.support import assemble
 

@@ -705,31 +705,43 @@ def _sew_round_two(
     def _finish(sewn: dict[int, list]) -> dict[int, list]:
         return {g: sewn[g] + interior_faces[g] for g in groups}
 
-    def _serial() -> tuple[dict[int, list], int]:
-        return _finish({g: _sew_faces(seam_face_lists[g], tolerance) for g in groups}), 0
+    # **A split component is sewn in this process, never in a worker** (G26).
+    # Its carried faces stay here by reference and share edges with its seam
+    # faces; a seam subset sent through a `.brep` comes back as new objects, so
+    # every edge between the two halves would exist twice, each used once, and
+    # the split would always fail the free-edge check below. Measured on
+    # `dense-lattice` tiled 16 ways: 4,408 free edges as expected in process,
+    # 12,216 through a worker. Only untiled components, which carry nothing
+    # past the sew, go to the pool.
+    local = [g for g in groups if plan[g] is not None]
+    remote = [g for g in groups if plan[g] is None]
+    if tmpdir is None or len(remote) < 2 or not ((pool is not None and pool.active) or workers > 1):
+        local, remote = groups, []
 
-    if tmpdir is None or len(groups) < 2:
-        out, max_rss = _serial()
-    else:
+    sewn: dict[int, list] = {}
+    max_rss = 0
+    if remote:
         jobs = []
-        for group in groups:
+        for group in remote:
             in_path = os.path.join(tmpdir, f"sew_round2_{group}.brep")
             out_path = os.path.join(tmpdir, f"sew_round2_{group}_out.brep")
             _write_brep(occ.compound(occ.compound(fl) for fl in seam_face_lists[group]), in_path)
             jobs.append((in_path, out_path, tolerance))
 
-        def _run(p: WorkerPool) -> tuple[dict[int, list], int]:
+        def _run(p: WorkerPool) -> int:
             raw, rss = p.run(_worker_sew_tile, jobs)
-            sewn = {group: occ.faces(_read_brep(out_path)) for group, (out_path, _rss) in zip(groups, raw)}
-            return _finish(sewn), rss
+            for group, (out_path, _rss) in zip(remote, raw):
+                sewn[group] = occ.faces(_read_brep(out_path))
+            return rss
 
         if pool is not None and pool.active:
-            out, max_rss = _run(pool)
-        elif workers <= 1:
-            out, max_rss = _serial()
+            max_rss = _run(pool)
         else:
             with WorkerPool(min(workers, len(jobs))) as owned:
-                out, max_rss = _run(owned)
+                max_rss = _run(owned)
+    for group in local:
+        sewn[group] = _sew_faces(seam_face_lists[group], tolerance)
+    out = _finish(sewn)
 
     if stats is not None:
         stats.t_round2 = time.perf_counter() - t0

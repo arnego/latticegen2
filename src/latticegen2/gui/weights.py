@@ -31,7 +31,7 @@ Replace it with the measured figure at the next ``rehearsal-support`` run.
 small part is boundary- and export-dominated — on ``80mm-test-ball``
 ``simplify`` is trivial — so the bar will visibly jump there, and a part with
 little overhanging surface will run through the support stages almost at
-once. ``validate`` is dominated by the export-truth gate (docs/algorithm.md
+once. ``validate`` is dominated by the STEP round-trip check (docs/algorithm.md
 §9), which writes, re-reads and tessellates every output solid; at
 ``cc=5, t=1`` on this same part that gate alone is half an hour and
 ``validate`` is the largest stage of the run, where here it is a quarter of

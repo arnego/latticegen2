@@ -1020,7 +1020,7 @@ reaches 100 % trivially, and this reading must never become a gate. A ranking is
 not a calibration, and treating it as one would be the mistake
 specification.md §11 records four times over.
 
-So this predicts and §9's export-truth gate decides. What it buys is the report
+So this predicts and §9's STEP round-trip check decides. What it buys is the report
 arriving at `connect`, about 40 s into an eight-minute part, naming junctions of
 a body the run has not yet built.
 
@@ -1058,7 +1058,7 @@ apart along the whole of their shared edge** — constant to six figures at ever
 sample, and returned identically by projecting either face's boundary onto the
 other's surface, so the two surfaces simply never meet. At `t = 1` mm the trim
 cuts that seam into faces of 0.010 to 0.226 mm², and the 4.17 mm³ island built
-from six such junctions is refused by §9's export-truth gate. That fixture is
+from six such junctions is refused by §9's STEP round-trip check. That fixture is
 why this measurement exists, and it stays refused.
 
 **It reports and does not refuse, and the table above is why that is not
@@ -1147,7 +1147,7 @@ statement of the mechanism; it is simply no longer reproduced by that input.
 committed part that currently exercises this at all — and it does exercise it
 end to end: the run repairs that cap with the local fuse, and the two mesh edges
 the duplicate used to produce, plus the `4x` edge beside them, are gone from its
-export-truth reading (`tools/prototypes/RESULTS.md` G23).
+STEP round-trip reading (`tools/prototypes/RESULTS.md` G23).
 
 **A flagged cap is fused, not simply declined, and that is a correction to what
 this section used to claim.** Declining withdraws *both* keys, so
@@ -1700,7 +1700,7 @@ program builds itself.
 * **Sub-micron caps are removed in the same job** (`pipeline._simplify_one`).
   Where a strut's corner grazes the input's wall within a micron, the trim
   leaves the corner's tip as a cap — a few faces of ~1e-8 mm² closing one inner
-  wire of the wall face — which no mesher closes, so the export-truth gate
+  wire of the wall face — which no mesher closes, so the STEP round-trip check
   below refuses the run. It is the defect §14.3 S6 found on a support body,
   and `occ.remove_micro_caps` removes it the same way: the cap's faces and the
   wire go, every edge they touch goes with both of its users, and the wall's
@@ -1731,10 +1731,10 @@ program builds itself.
   solid that passes pays nothing more. If it fails, the unrepaired solid is
   checked in its place and kept if it holds: a repair can never cost the run a
   solid it would otherwise have kept. A refused repair keeps the solid as
-  built for export truth to judge; both outcomes are a `note:` with the cap's
+  built for the STEP round-trip check to judge; both outcomes are a `note:` with the cap's
   position.
 
-* **Export-truth gate — what the validity gate below structurally cannot see.**
+* **STEP round-trip check — what the validity gate below structurally cannot see.**
   `BRepCheck_Analyzer` asks whether a shape agrees with itself to within the
   tolerances **recorded in this process**. STEP AP214 has nowhere to record
   them: a file carries exactly one `UNCERTAINTY_MEASURE_WITH_UNIT`, in its
@@ -2249,7 +2249,7 @@ Because priority #1 is precision, every optimization is designed so that its
   cannot perform. `BRepCheck_Analyzer` judges a shape against the tolerances
   **this process** recorded; STEP AP214 carries one tolerance for a whole file,
   so a body whose validity rests on a locally fat tolerance passes here and is
-  not guaranteed to survive being written. §9's export-truth gate measures the
+  not guaranteed to survive being written. §9's STEP round-trip check measures the
   quantity that decides — pcurve deviation against the feature carrying it — on
   every solid, and **fails rather than discarding anything**. Deleting material
   so that an export can succeed is precisely "produce a wrong result"; the run
@@ -2313,7 +2313,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Tolerance measured against feature size in the worker (§7.3) | Correctness, not speed, and a *localiser* rather than a gate. Costs one area and one centroid per trimmed piece, on the face list the trim already produced, and it is the last point at which the junction still has a name. Two of the six junctions forming `SpiralTest`'s unwritable 4.17 mm³ island rank 2nd and 4th of 2,404 pieces; combined with §8's components it names exactly one body where the piece-level reading names two dozen, at `connect` rather than at the end |
 | The input's own seam gaps measured once at `import` (§7.4) | Correctness reporting, not a gate. Two faces of a B-rep may sit apart and be held together by the edge's tolerance; this tool then cuts that region into features smaller than the gap. `SpiralTest.step`'s worst is **4.2e-02 mm**, constant along the edge, and it is why that part's island cannot be written — and why no pcurve re-fit repairs it (docs/specification.md §11). 0.1 s there, 1.2 s on the rehearsal's 1,043 shared edges. Reported at `import` and cited by §9's refusal, so a failure points at the model rather than only at a coordinate |
 | The exported file declares the shape's **greatest** tolerance, not the average (§9) | Correctness. AP214 carries one tolerance per file, and OCCT's Average default is pathological on a lattice — ~99 % exact interior edges pull it to the floor and clamp the boundary trims that actually need slack. `SpiralTest`'s dominant body tessellates with **0** broken edges in memory and came back from its own round trip with **2**; declaring the greatest tolerance takes it to **0** and lets the part ship. Free, and self-scaling: a body needing nothing declares nothing |
-| Export truth measured on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
+| STEP round-trip check on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
 | Degenerate triangles skipped in that count (§9) | Correctness of the *quantity*, not of any body, and the third time this project has found the same counting bug: `shell_defects` always skipped degenerate edges, `free_edges` was corrected in G21, this counter never had the test. Mesh points are interned by rounded coordinate, so at a pole a whole parametric range collapses to one id and such a triangle contributes the real edge twice — a closed fan reading as `4x`. Keyed on interned-id equality rather than area, because the defect is created by the interning. Without it the gate reports `TD_HX_rehearsal_test.step`'s **own input** as carrying 86 non-manifold edges, one per apex of its 54 apex-touching cones, and a plain sphere and cone as broken. Cannot hide a hole: a triangle bounding nothing is not one, and a cone with its base removed still reports all 63 segments. The rehearsal's dominant body falls 26 → 13 (G23, G24) |
 | A reading re-measured at a finer ruler before it refuses (§9) | Correctness, and the thing that finally separates the two causes of a non-manifold reading. No rule about the *kind* of reading works — G23 measured the genuinely unwritable body carrying the same classes as a sound one — but the mechanism separates cleanly: a broken description disagrees with itself more the harder it is looked at, where a body merely finer than the ruler agrees once the ruler is finer. Measured across 0.05→0.0001 mm, the rehearsal's dominant body reads 13, 8, 4, 4, **0** while `spiral-island-unwritable` reads 10, 13, 17, 21, **39**. **The rule is the terminus, not the slope**: only an exact zero clears, because the sound ladder plateaus and because a slope is the two-point calibration §11 records going wrong four times. Safe because a genuine hole can never reach zero — refining subdivides its boundary rather than closing it (63 → 71 → 158 on G23's control). Costs a **68-face neighbourhood**, not the body, and never a second STEP round trip; readings the neighbourhood's own cut boundary produces are excluded by requiring that a core face contributed them, which needs one ring and no bookkeeping. No size bound — bounding it is the sin this gate already removed once |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
@@ -2397,7 +2397,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/cli.py`](../src/latticegen2/cli.py) | CLI parsing and validation, output path resolution, `--cores` budget resolution |
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind that budget: logical core count (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
-| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), sub-micron cap removal and its local check (§9, §14.3 S6), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the export-truth measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
+| [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), sub-micron cap removal and its local check (§9, §14.3 S6), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the STEP round-trip measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |
@@ -2901,7 +2901,7 @@ three planar faces of ~1e-8 mm², edges 0.1 to 0.25 µm, closing a matching
 `BRepCheck_Analyzer`-valid and manifold, whose 2,128 mm² wall face `BRepMesh`
 cannot triangulate around a hole that small. The three rim edges are used once
 at every rung of §9's ladder, 0.05 to 1e-4 mm, in memory and after a STEP round
-trip alike, so export truth refused the run — rightly: nothing downstream could
+trip alike, so the STEP round-trip check refused the run — rightly: nothing downstream could
 mesh that body consistently.
 
 A cap is a connected set of faces each within `MICRO_CAP_TOL` (1e-3 mm,
@@ -2913,7 +2913,7 @@ surface simply continues across the hole: the material moved is the cap's own,
 under `MICRO_CAP_TOL³`. The threshold decides what is small enough to be
 noise, not whether the repair keeps the body closed. Anything of another shape
 — a cap on an outer wire, across two host faces, beside an edge with other
-than two users — is left as built for export truth to judge, and so is a
+than two users — is left as built for the STEP round-trip check to judge, and so is a
 repaired body that is not one valid solid using every edge twice, or whose
 boundary moved more than `MICRO_CAP_TOL` read as `|ΔV| / area`, §9's
 displacement: the volume is re-integrated over the host face and moves by

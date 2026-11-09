@@ -174,7 +174,7 @@ two bars (docs/testing.md)."""
 def curve_on_surface(path: str) -> dict:
     """Is the *shipped file* still describable, once its tolerances are gone?
 
-    The strongest form of the export-truth check, because it is asked of the
+    The strongest form of the STEP round-trip check, because it is asked of the
     artefact rather than of the process that wrote it: the file is read back
     with OCCT's own reader, tolerances and all, and every edge/face pair is
     measured exactly (``latticegen2.occ.curve_on_surface_deviations``).
@@ -236,7 +236,13 @@ def golden_sample_volume_diff(candidate_path: str, golden_path: str) -> float:
     """
     cand = occ.read_step(candidate_path)
     gold = occ.read_step(golden_path)
-    return max(_cut_volume(cand, gold), _cut_volume(gold, cand))
+    # Not ``max()``: it drops a NaN (a cut that did not complete) in the second
+    # place, and a negative remainder is no evidence of agreement either.
+    # Either makes the comparison unmeasured, which must not read as a match.
+    diffs = (_cut_volume(cand, gold), _cut_volume(gold, cand))
+    if any(not (d >= 0.0) for d in diffs):
+        return float("nan")
+    return max(diffs)
 
 
 def _diff_worker(queue, candidate_path: str, golden_path: str) -> None:

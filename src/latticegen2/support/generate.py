@@ -11,7 +11,7 @@ bodies that share a face (:mod:`.join`), in that order.
 What happens to them is not the generator's job: the support stage checks
 they overlap neither the lattice nor each other and appends them beside the
 lattice as separate bodies (:mod:`.assemble`); then ``validate`` ->
-export-truth -> ``export`` run on the final product. What an implementation
+STEP round-trip check -> ``export`` run on the final product. What an implementation
 owes that chain:
 
 * **Inside the body.** No material outside the input solid (specification.md
@@ -74,7 +74,7 @@ def remove_micro_caps(solids: list) -> tuple[list, list, list]:
     reads unification, as ``|dV| / surface area``, since the volume is
     re-integrated over the host face and moves by quadrature noise (5.7e-6 mm^3
     on the 6,442 mm^3 body this was found on, for a cap of ~1e-12 mm^3). A
-    refused repair leaves the body to ``validate``, whose export-truth gate
+    refused repair leaves the body to ``validate``, whose STEP round-trip check
     still judges it.
     """
     from .. import occ
@@ -226,7 +226,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                 members, _js = join.join(members, overlaps=False)
             out += members
     # A support node's corner within a micron of the input's wall leaves a cap
-    # no mesher can close, which export truth then refuses (§14.3 S6).
+    # no mesher can close, which the STEP round-trip check then refuses (§14.3 S6).
     out, caps, caps_refused = remove_micro_caps(out)
     stats["support_micro_caps_removed"] = len(caps)
     if caps:
@@ -235,7 +235,7 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
                      f"{points_text(caps)}")
     if caps_refused:
         lines.append(f"note: sub-micron cap repair refused by its check, bodies kept as built "
-                     f"for export truth to judge, "
+                     f"for the STEP round-trip check to judge, "
                      f"at {points_text(caps_refused)}")
     for s in out:
         nm = frustum.non_manifold_edges(s)

@@ -1,4 +1,4 @@
-"""Export truth: the two measurements that ask what ``BRepCheck_Analyzer`` cannot.
+"""STEP round-trip check: the two measurements that ask what ``BRepCheck_Analyzer`` cannot.
 
 ``BRepCheck_Analyzer`` asks whether a shape agrees with itself to within the
 tolerances **recorded in this process**. STEP AP214 carries one modelling
@@ -80,7 +80,7 @@ def test_step_does_not_carry_a_per_subshape_tolerance(tmp_path):
 
     assert max(BRep_Tool.Tolerance_s(v) for v in vertices(back)) < 1e-5, (
         "STEP carried a per-vertex tolerance through a round trip; if that is "
-        "genuinely true now, the export-truth gates need re-deriving"
+        "genuinely true now, the STEP round-trip checks need re-deriving"
     )
 
 
@@ -323,7 +323,7 @@ def test_repairing_the_island_is_what_makes_it_invisible(tmp_path):
     triangles, bad = defects.triangles, defects.bad
     assert triangles > 0
     assert bad > 0, (
-        "this body is why the export-truth gate exists; if it now survives a "
+        "this body is why the STEP round-trip check exists; if it now survives a "
         "round trip, either OCCT or the generator has changed and the gate "
         "needs re-deriving against fresh ground truth"
     )
@@ -398,7 +398,7 @@ def test_a_pole_does_not_read_as_a_defect(tmp_path):
     Measured before the degenerate-triangle skip: this sphere reported
     ``bad == 4`` with ``by_use == {4: 2, 1: 2}`` and `MakeCone(5, 0, 10)`
     reported ``bad == 2`` with ``{4: 1, 1: 1}`` -- one defect per degenerate
-    triangle, on closed solids the export-truth gate would have refused
+    triangle, on closed solids the STEP round-trip check would have refused
     outright. Those figures are what make this a regression test rather than a
     tautology.
     """

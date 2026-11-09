@@ -37,7 +37,7 @@ header rewrite.
 | `test_support_regions.py` | Ceiling points against closed forms: a box lid refined to the step, well-shaped refinement on the hole-block roof, a sphere cap ending on the exact 60° isocline, a tube's underside within 30° of its bottom, and the chamfered hole-block's 30° facet left out by the strict bar | yes |
 | `test_support_voids.py` | Pockets (docs/algorithm.md §14.3 S7) on a cup under a lid: the fill is exactly the cup, a pocket the lattice sealed is left alone, a support sealing nothing fills nothing, a witness the cut disagrees with fails loudly, and the generator's own supports on the cup leave nothing sealed | yes |
 | `test_lattice_micro_caps.py` | Sub-micron caps on lattice bodies, removed in `simplify` (docs/algorithm.md §9). A cube's corner — the trihedral a junction presents to a wall — pressed 1e-4 mm into a cylinder's crest is removed, valid, every edge used twice; the local check accepts the repair and names a wrong one; a repair refused by the local check, or by the whole-solid check, keeps the unrepaired solid and reports the cap; serial and pool paths report the same caps | yes |
-| `test_support_micro_caps.py` | Sub-micron caps on support bodies (docs/algorithm.md §14.3 S6). Against `support-micro-cap.brep`, the support body of `test-cylinder.STEP` at `--orient 140.5 -76.7 103.6 --support` that export truth refused: valid and manifold, 3 mesh edges used once at every rung of the ladder, and after the repair three faces fewer, valid, every edge used twice, and **0** readings. Synthetic: a support node's corner pressed 5e-5 and 2e-4 mm into a cylinder's crest is filled back to the cylinder's own three faces; pressed 0.5 mm it is material and left alone; on the seam, where the hole is part of the outer wire, it is left alone too | yes |
+| `test_support_micro_caps.py` | Sub-micron caps on support bodies (docs/algorithm.md §14.3 S6). Against `support-micro-cap.brep`, the support body of `test-cylinder.STEP` at `--orient 140.5 -76.7 103.6 --support` that the STEP round-trip check refused: valid and manifold, 3 mesh edges used once at every rung of the ladder, and after the repair three faces fewer, valid, every edge used twice, and **0** readings. Synthetic: a support node's corner pressed 5e-5 and 2e-4 mm into a cylinder's crest is filled back to the cylinder's own three faces; pressed 0.5 mm it is material and left alone; on the seam, where the hole is part of the outer wire, it is left alone too | yes |
 | `test_support_join.py` | Joining support bodies: face-sharing supports become one body with merged faces, overlapping ones their union, edge-only contacts stay apart, and a fuse that loses volume is redone one at a time or, where it cannot be, kept as it was or fails | yes |
 | `test_connect.py` | The junction graph and the floating-body rule's three outcomes | no |
 | `test_stepmeta.py` | Quote-aware STEP header editing, including never overwriting a populated `FILE_SCHEMA` | no |
@@ -154,7 +154,7 @@ beyond the box-only unit test that a junction wholly inside is checked and kept.
 half-strut, but it is far too slow to be a scenario. The measurements made on
 `SpiralTest` stay in docs/algorithm.md as the record they are.
 `test/spiral-island-unwritable.brep`, cut from an older version of that part,
-stays: it is the export-truth gate's one body that cannot be written, and reads
+stays: it is the STEP round-trip check's one body that cannot be written, and reads
 no `SpiralTest.step`.
 
 Two things follow for anyone extending this file. A boolean-based check needs a
@@ -306,13 +306,13 @@ For reference, the committed parts on a 6-core / 32 GB workstation:
 |---|---|---|
 | 80 mm ball, `cc=20 t=4` | ~6 s | boundary trim, export |
 | test cylinder, `cc=10 t=1.5` | ~40 s | simplify, boundary trim, stitch |
-| `TD_HX_rehearsal_test`, `cc=5 t=1` | **91 min, 18.65 GB peak, 2.15 GB written** — 14 solids, 584,114 faces (specification.md §11) | validate (35 m 05 s, 95 % of it export truth), boundary trim, simplify, stitch |
+| `TD_HX_rehearsal_test`, `cc=5 t=1` | **91 min, 18.65 GB peak, 2.15 GB written** — 14 solids, 584,114 faces (specification.md §11) | validate (35 m 05 s, 95 % of it the STEP round-trip check), boundary trim, simplify, stitch |
 | `TD_HX_rehearsal_test`, `cc=7 t=1.4` | **~20 min, 8.76 GB peak, 990 MB written** — 33 solids, 280,612 faces. The cheapest real part for anything touching `validate` | validate (11 m 24 s), boundary trim, simplify |
 
 **The rehearsal row is not comparable with the others, and not with its own
 past figures.** It is a single run rather than a controlled pair, and most of
 what separates it from the ~52 min this part used to take is one stage:
-`validate` carries the unbounded export-truth check, **2,003 s of its 2,105 s**
+`validate` carries the unbounded STEP round-trip check, **2,003 s of its 2,105 s**
 (docs/algorithm.md §9). Read it as the current cost of the whole part, not as a
 performance measurement. **Prefer a controlled pair run back to back on the same
 machine** for any performance claim here — the standard this file holds itself
@@ -335,7 +335,7 @@ committed case that exercises the unification degrade (docs/specification.md
 §11): its dominant body is valid at 279,358 faces, unification returns an
 invalid one at 193,721, and the run keeps the un-unified solid and says so.
 
-**Cheaper still, for the export-truth gate specifically**, are the committed
+**Cheaper still, for the STEP round-trip check specifically**, are the committed
 fixtures — `spiral-island-unwritable.brep` (refused, 13 → 17) and a cone with
 its base disk removed (a genuine hole, 63 → 71 → 158, never resolved). Both run
 in `test_export_truth.py` in seconds, and between them they pin both directions
@@ -372,7 +372,7 @@ runs are not.
 
 The last row is the scale rehearsal, the largest part this project measures
 against and the one that currently produces no output — it is refused at
-`export truth` (specification.md §10). Its per-stage history, and the honest
+the STEP round-trip check (specification.md §10). Its per-stage history, and the honest
 result for each of the parallelism paths tried on it, are in
 [specification.md](specification.md) §11.
 

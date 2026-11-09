@@ -3,7 +3,7 @@
 The cap docs/algorithm.md §14.3 S6 removes from support bodies can form on the
 lattice too: a strut's corner grazing the input's wall within a micron leaves
 its tip as a few faces of ~1e-8 mm^2 closing one inner wire of the wall face,
-and §9's export-truth gate refuses the run. `simplify` removes it, on the
+and §9's STEP round-trip check refuses the run. `simplify` removes it, on the
 finished solid, checking the repair locally and riding the validity check it
 already runs on every unified solid.
 

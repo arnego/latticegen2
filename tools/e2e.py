@@ -697,7 +697,16 @@ def main(argv: list[str]) -> int:
                 continue
             if name in OPT_IN and not (only and name in only):
                 continue
-            reports.append(fn(outdir))
+            try:
+                reports.append(fn(outdir))
+            except Exception as exc:  # a check that raises is a failed scenario
+                # Scenarios are independent: one helper raising (an unreadable
+                # STEP, a support count the file does not hold) is recorded as
+                # that scenario's failure, and the rest still run and report.
+                rep = Report(name)
+                rep.check("scenario completed without an exception", False,
+                          f"{type(exc).__name__}: {exc}")
+                reports.append(rep)
             print(flush=True)
 
     print("=== e2e summary ===")

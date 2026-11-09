@@ -103,9 +103,19 @@ def _raise_still_disagreeing(iface, pieces, interior_set, tmpdir):
 
 def _make_tmpdir(output_path: str) -> str:
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    tmpdir = os.path.join(os.path.dirname(output_path) or ".", "temp", stamp)
-    os.makedirs(tmpdir, exist_ok=True)
-    return tmpdir
+    base = os.path.join(os.path.dirname(output_path) or ".", "temp")
+    os.makedirs(base, exist_ok=True)
+    # Created exclusively: two runs into one folder within the same second
+    # must not share fixed-name intermediates, nor delete each other's. The
+    # suffix appears only on such a collision (cli.TEMP_PATH_RESERVE allows it).
+    for n in range(1000):
+        tmpdir = os.path.join(base, stamp if n == 0 else f"{stamp}-{n}")
+        try:
+            os.mkdir(tmpdir)
+            return tmpdir
+        except FileExistsError:
+            continue
+    raise OutputError(f"Cannot create a fresh temporary folder under {base}")
 
 
 def run_pipeline(args: Args, rl: RunLog) -> dict:
@@ -668,7 +678,7 @@ def _run_with_pool(
                 f"{points_text(caps)}")
     if caps_refused:
         rl.line(f"note: sub-micron cap repair refused by its check, lattice bodies "
-                f"kept as built for export truth to judge, at "
+                f"kept as built for the STEP round-trip check to judge, at "
                 f"{points_text(caps_refused)}")
     stats["lattice_micro_caps_removed"] = len(caps)
     if simplify_stats["max_worker_rss"]:
@@ -868,7 +878,7 @@ def _check_component_tolerance(rl: RunLog, comps, keep_labels, pieces, stats: di
         f"{len(flagged)} output body/bodies contain junctions whose trim needed a "
         f"tolerance comparable to the feature it bounds (docs/algorithm.md §7.3)",
         "Such a body may not survive being written to STEP, and a body largely made "
-        "of them is where an unwritable output comes from; the export-truth gate at "
+        "of them is where an unwritable output comes from; the STEP round-trip check at "
         "`validate` refuses the run if so. Read the percentage, not the worst "
         "reading: a large body will contain one",
         [f"body {cid}: {volume:.4f} mm^3, {above} of {total} boundary junction(s) "
@@ -934,7 +944,7 @@ def _report_seam_gaps(rl: RunLog, gap, t: float, stats: dict) -> None:
         f"edge(s) are over the bar. That is a property of the input file, covered by "
         f"its own tolerance",
         "The trim will cut that region into features smaller than the gap, and the "
-        "run may fail at `export truth`; if it does, this is the geometry to fix",
+        "run may fail at the STEP round-trip check; if it does, this is the geometry to fix",
         [f"worst at {point_text(gap.where)}"],
     ))
 
@@ -992,7 +1002,7 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
         worst = max(worst, reading.worst)
         fraction = max(fraction, reading.loose_area_fraction)
         n_faces, _ = occ.count_subshapes(solid)
-        rl.substage("export truth", i, len(solids))
+        rl.substage("STEP round-trip check", i, len(solids))
         defects = occ.exported_mesh_defects(solid, probe)
         triangles, bad = defects.triangles, defects.bad
         rl.line(
@@ -1039,7 +1049,7 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
                 refined.append((i, bad, fine.counts[-1][0]))
             else:
                 broken.append((i, bad, triangles, fine))
-    rl.substage("export truth", len(solids), len(solids))
+    rl.substage("STEP round-trip check", len(solids), len(solids))
     elapsed = (_dt.datetime.now() - started).total_seconds()
     stats["export_truth_s"] = round(elapsed, 2)
     stats["worst_pcurve_deviation_mm"] = f"{worst:.3e}"
@@ -1055,7 +1065,7 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
             for i, bad, d in refined
         )
     rl.line(
-        f"export truth: all {len(solids)} solid(s) round-tripped and tessellated; "
+        f"STEP round-trip check: all {len(solids)} solid(s) round-tripped and tessellated; "
         f"worst pcurve-vs-3D deviation {worst:.4e} mm over {pairs} edge/face "
         f"pair(s) [{elapsed:.1f}s]"
         + (f"; {len(refined)} solid(s) cleared only after being re-measured at "
@@ -1088,7 +1098,7 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
 
 
 def _seam_gap_note(gap, t: float) -> str:
-    """Name the input's own seam gap in an export-truth failure, when it is big.
+    """Name the input's own seam gap in a STEP round-trip failure, when it is big.
 
     The failure above gives a coordinate in the *output*; this gives the reason,
     in the *input*, and it is the difference between a user re-running with
@@ -1340,7 +1350,7 @@ def _simplify_one(solid: TopoDS_Shape):
     **The caps** are the ones docs/algorithm.md §14.3 S6 removes from support
     bodies: the corner of a strut grazing the input's wall within a micron
     leaves its tip as a few faces of ~1e-8 mm^2 closing one inner wire of the
-    wall face, which no mesher closes and §9's export-truth gate refuses.
+    wall face, which no mesher closes and §9's STEP round-trip check refuses.
     :func:`latticegen2.occ.remove_micro_caps` takes them out exactly, and it
     runs here, on the finished solid, rather than on trimmed pieces in the
     boundary worker: a tiny face there can lie on a cap quad, and removing it

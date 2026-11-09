@@ -503,3 +503,22 @@ def test_the_support_angles_are_the_rod_angle_and_sixty_degrees():
     assert SUPPORT_OVERHANG_DEG == math.degrees(math.asin(math.sqrt(2.0 / 3.0)))
     assert SUPPORT_OVERHANG_DEG == pytest.approx(54.7356, abs=1e-4)
     assert SUPPORT_START_DEG == 60.0
+
+
+
+@pytest.mark.parametrize("argv", [
+    ["-i", "part.step", "-cc", "nan", "-t", "1.5"],
+    ["-i", "part.step", "-cc", "10", "-t", "nan"],
+    BASE + ["--orient", "nan", "0", "0"],
+    BASE + ["--support", "--support-thickness", "nan"],
+])
+def test_nan_is_refused_like_any_out_of_range_value(argv):
+    """NaN compares False both ways, so it must not slip past the range test."""
+    with pytest.raises(ParamError):
+        parse_args(argv)
+
+
+def test_args_default_support_thickness_is_one_mm_whatever_t():
+    args = cli.Args(input="p.step", output="p.step", log_path="p.log", cc=10.0,
+                    t=1.5, workers=1, verbose=False, cores=None, support=True)
+    assert args.support_thickness == cli.SUPPORT_THICKNESS_DEFAULT

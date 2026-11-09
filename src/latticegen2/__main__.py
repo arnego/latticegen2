@@ -151,7 +151,14 @@ def main(argv: list[str] | None = None) -> int:
 
     from .pipeline import run_pipeline
 
-    rl = RunLog(args.log_path, verbose=args.verbose).open()
+    try:
+        rl = RunLog(args.log_path, verbose=args.verbose).open()
+    except OSError as exc:
+        # A write failure like any other (exit 6, one reason line), not an
+        # unexpected traceback: a read-only, locked or directory-named .log.
+        print(f"FAILED: cannot write the log file {args.log_path}: {exc}",
+              file=sys.stderr)
+        return 6
     rl.stage_names = stages_for(args.support)
 
     def finish(status: str, code: int, reason: "str | None") -> int:

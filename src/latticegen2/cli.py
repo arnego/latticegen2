@@ -172,12 +172,9 @@ class Args:
     orient: tuple[float, float, float] = _orient.IDENTITY
     """Print orientation ``(rx, ry, rz)`` in degrees (specification.md §4.5)."""
     support: bool = False
-    support_thickness: float | None = None
-    """Minimum support thickness in mm; ``None`` means the strut size ``t``."""
-
-    def __post_init__(self):
-        if self.support_thickness is None:
-            object.__setattr__(self, "support_thickness", self.t)
+    support_thickness: float = SUPPORT_THICKNESS_DEFAULT
+    """Minimum support thickness in mm: 1 mm unless given, whatever ``t`` is
+    (specification.md §4.6)."""
 
     def params_extra(self) -> str:
         """Orientation and support parameters for the STEP header, when in force."""
@@ -287,7 +284,7 @@ def _as_int(flag: str, s: str) -> int:
 
 
 def _in_range(flag: str, v: float, lo: float, hi: float) -> float:
-    if v < lo or v > hi:
+    if not lo <= v <= hi:  # written so NaN, which compares False, is refused
         raise ParamError(f"{flag} = {v} is out of the valid range [{lo}, {hi}]",
                          fix=f"set {_field(flag)} between {format_param(lo)} and "
                              f"{format_param(hi)}{_FIX_UNIT.get(flag, '')}")
@@ -547,7 +544,9 @@ LONGEST_SIBLING_SUFFIX = ".cancel"
 #: ``YYYYMMDD-HHMMSS`` stamp and a staged file. The longest staged names
 #: measured are about 35 characters (``disagree_<node>_<half>.brep``,
 #: ``support-body-<i>.<split>....step``, ``pockets-<uuid>-<slab>-before.brep``).
-TEMP_PATH_RESERVE = len(os.path.join("temp", "20261107-153000", "")) + 48
+#: The stamp carries a ``-<n>`` suffix, up to ``-999``, when another run took it
+#: in the same second (``pipeline._make_tmpdir``).
+TEMP_PATH_RESERVE = len(os.path.join("temp", "20261107-153000-999", "")) + 48
 
 
 def _path_units(s: str) -> int:

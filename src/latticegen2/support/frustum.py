@@ -508,8 +508,11 @@ def _trim(piece, body, gates, tmpdir: str, tag: str, full: bool = True, refused=
         piece_rt = None
     for operand, fuzzy in rungs:
         got = _boolean(BRepAlgoAPI_Common, operand, [body], fuzzy)
-        vin = 0.0 if got is None else sum(occ.volume(x) for x in occ.solids(got))
         rung = f"fuzzy {fuzzy:g}{' after a STEP round trip' if operand is piece_rt else ''}"
+        if got is None:
+            lines.append(f"  {tag}, {rung}: the intersection did not complete; rejected")
+            continue
+        vin = sum(occ.volume(x) for x in occ.solids(got))
         if abs(vin - est) > max(ESTIMATE_REL_TOL * est, 4.0 * sig):
             lines.append(f"  {tag}, {rung}: {vin:.1f} mm^3 against {est:.1f} sampled; rejected")
             continue

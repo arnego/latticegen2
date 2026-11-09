@@ -49,7 +49,15 @@ from .lattice import node as lattice_node
 from .parallel import WorkerPool, set_thread_budget
 from .parallel import read_brep as _read_brep
 from .parallel import write_brep as _write_brep
-from .runlog import RunLog, Timer, box_text, format_bytes, point_text, warning_text
+from .runlog import (
+    RunLog,
+    Timer,
+    box_text,
+    format_bytes,
+    point_text,
+    points_text,
+    warning_text,
+)
 from .stepout import generation_params_text, rewrite_step_header
 
 INTERFACE_REPAIR_ROUNDS = 8
@@ -652,18 +660,16 @@ def _run_with_pool(
              for i in simplify_stats["invalid_at"]],
         ))
     caps, caps_refused = simplify_stats["caps_removed"], simplify_stats["caps_refused"]
+    # Logged as the support stage logs its own caps: a `note:` is a repair that
+    # left the output as intended, not a warning (specification.md §3).
     if caps:
-        rl.always(
-            f"note: {len(caps)} sub-micron cap(s) removed from lattice bodies where "
-            f"a strut's corner grazed the input's surface, at "
-            f"{', '.join(point_text(p) for p in caps[:5])}"
-            f"{' ...' if len(caps) > 5 else ''}")
+        rl.line(f"note: {len(caps)} sub-micron cap(s) removed from lattice bodies "
+                f"where a strut's corner grazed the input's surface, at "
+                f"{points_text(caps)}")
     if caps_refused:
-        rl.always(
-            f"note: sub-micron cap repair refused by its check, lattice bodies kept "
-            f"as built for export truth to judge, at "
-            f"{', '.join(point_text(p) for p in caps_refused[:5])}"
-            f"{' ...' if len(caps_refused) > 5 else ''}")
+        rl.line(f"note: sub-micron cap repair refused by its check, lattice bodies "
+                f"kept as built for export truth to judge, at "
+                f"{points_text(caps_refused)}")
     stats["lattice_micro_caps_removed"] = len(caps)
     if simplify_stats["max_worker_rss"]:
         rl.note_worker_rss(simplify_stats["max_worker_rss"])

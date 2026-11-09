@@ -42,7 +42,7 @@ import time
 
 import numpy as np
 
-from ..runlog import WARNING_PREFIX, point_text, warning_text
+from ..runlog import WARNING_PREFIX, point_text, points_text, warning_text
 from .contract import SupportInput, SupportResult
 
 UNBACKED_WARNING = "ceiling left without support"
@@ -232,12 +232,11 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     if caps:
         lines.append(f"note: {len(caps)} sub-micron cap(s) removed from support bodies "
                      f"where a support node's corner grazed the input's surface, at "
-                     f"{', '.join(point_text(p) for p in caps[:5])}"
-                     f"{' ...' if len(caps) > 5 else ''}")
+                     f"{points_text(caps)}")
     if caps_refused:
         lines.append(f"note: sub-micron cap repair refused by its check, bodies kept as built "
                      f"for export truth to judge, "
-                     f"at {', '.join(point_text(p) for p in caps_refused[:5])}")
+                     f"at {points_text(caps_refused)}")
     for s in out:
         nm = frustum.non_manifold_edges(s)
         if nm:

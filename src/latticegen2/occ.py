@@ -2012,10 +2012,10 @@ def micro_cap_repair_fault(
     if len(got) != 1:
         return f"the repair produced {len(got)} solids"
     removed = sum(n for _h, _w, n in hosts)
-    fb, fa = len(faces(before)), len(faces(got[0]))
+    after_faces = faces(got[0])
+    fb, fa = len(faces(before)), len(after_faces)
     if fa != fb - removed:
         return f"the face count went {fb} -> {fa} where {removed} cap face(s) were removed"
-    after_faces = faces(got[0])
     outers = TopTools_IndexedMapOfShape()
     for f in after_faces:
         outers.Add(BRepTools.OuterWire_s(f))

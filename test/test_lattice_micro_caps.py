@@ -15,10 +15,12 @@ the corner a junction presents to a wall is exactly that trihedral.
 from __future__ import annotations
 
 import numpy as np
+from OCP.Standard import Standard_Failure
 
 from latticegen2 import occ
 from latticegen2.parallel import WorkerPool
 from latticegen2.pipeline import _simplify_one, _unify
+from latticegen2.runlog import points_text
 from latticegen2.support import frustum
 
 from test_support_micro_caps import _dimpled_cylinder
@@ -36,6 +38,29 @@ def test_simplify_removes_a_cap_from_a_lattice_solid():
     assert occ.is_valid(out)
     assert frustum.edges_not_used_twice(out) == 0
     assert abs(occ.volume(out) - occ.volume(s)) < 1e-6
+
+
+def test_a_cap_is_removed_even_where_unification_refuses(monkeypatch):
+    """A kernel that will not unify keeps the solid as built, and the cap is
+    still removed from it -- checked whole, since no unified solid was."""
+    s = _dimpled_cylinder(1e-4)
+
+    def refuse(*a, **k):
+        raise Standard_Failure("refused")
+
+    monkeypatch.setattr(occ, "unify_same_domain", refuse)
+    out, ran, degraded, removed, refused = _simplify_one(s)
+    assert not ran and not degraded
+    assert refused == []
+    assert len(removed) == 1 and np.allclose(removed[0], CAP_AT, atol=1e-3)
+    assert len(occ.faces(out)) == 3
+    assert occ.is_valid(out)
+
+
+def test_points_are_listed_five_at_most():
+    pts = [(float(i), 0.0, 0.0) for i in range(7)]
+    assert points_text(pts[:2]) == "[0.000, 0.000, 0.000] mm, [1.000, 0.000, 0.000] mm"
+    assert points_text(pts).endswith("[4.000, 0.000, 0.000] mm ...")
 
 
 def test_a_solid_without_a_cap_is_unchanged_by_the_repair():

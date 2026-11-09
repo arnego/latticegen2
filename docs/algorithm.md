@@ -2400,6 +2400,21 @@ Alternatives evaluated and rejected:
   count almost flatly in shape count, so it is dominated by a flat per-face
   term rather than a shape-count term a tree could usefully attack, and a tree
   pays that flat term once per level instead of once.
+* **Overlapping a split component's round 2 with the pool's untiled
+  components** (§8, G26): considered in review, 2026-11-10, and not built. It
+  is safe for the geometry, since components share no interface and the
+  workers hold no object of the master's. The master would be one more busy
+  process beside `W` workers, which breaks `--cores` "honoured exactly"
+  (specification.md §3). `WorkerPool.run` also feeds its jobs from a thread
+  that needs the GIL, which OCP holds through a sew (G7). The saving is at
+  most the untiled components' sews, 0.6 s on `dense-lattice` and likely a
+  few seconds on the rehearsal, far under specification.md §4.6's 5 %.
+  **Sending the whole split component to a worker** instead would be correct:
+  seam and carried faces in one `.brep` keep their shared edges (G15). It
+  would also be slower, as an estimate rather than a measurement. Moving the
+  rehearsal's dominant component means writing and reading ~300,000 faces,
+  likely tens of seconds, to move a seam-only sew of ~9 s (G21). That
+  component is one job either way, so nothing runs beside it.
 * **Python threads instead of processes, for same-domain unification and
   validity** (specification.md §10 paths 1, 4): rejected by measurement, G7 —
   OCP holds the GIL around both calls, so *Python* threads serialize. Note

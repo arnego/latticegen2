@@ -1387,8 +1387,11 @@ from 1.59 s + 1.67 s with one component repaired to 0.62 s + 0.12 s with none,
 and the output still matches the golden sample at 0 mm³.
 `test_a_split_component_is_not_sent_through_a_worker_in_round_two` fails on
 the code before. On the rehearsal this predicts the repair's ~545 s going to
-a seam-only sew of 13–14 % of the faces. That is not yet measured; the next
-`rehearsal-support` run is where it will be.
+a seam-only sew of 13–14 % of the faces. **Measured on `rehearsal-support`,
+2026-11-10** (`cc=7, t=1.4`, one tiled component of 21 tiles): no component
+repaired, round 2 4.35 s, and `stitch` **257 s → 40 s** against the run of
+2026-11-06, the shell unchanged — the same 81 solids and 331,441 mm³ of
+lattice.
 
 **A hierarchical tree reduction was considered for round 2 itself — sewing
 tile results together pairwise across levels instead of in one call — and
@@ -3252,8 +3255,15 @@ crease points drew in.
 |---|---|---|---|---|---|---|---|
 | `support` 1,120 s, `pockets` 3,309 s | 333.6 s | 339.3 s | 63.2 s | 296.8 s | 5.4 s | 1,178.6 s | ~2,131 s |
 
-**The overlap check now runs across the worker pool** (§14.2); the figure
-above is the serial check, and the rehearsal has not been re-run with it.
+**With the overlap check across the worker pool (§14.2) and round 2 of the
+boundary sew kept in the master (§8, G26), 2026-11-10, the run takes
+1 h 06 m** and passes every check with no support warning, writing the same 48
+support bodies of 31,618 mm³. The overlap check takes 212 s against ~2,131 s,
+171 jobs over 4,313 junctions, and `pockets` falls from 3,309 s to 1,388 s.
+
+| stage | ceiling points | grid | staircase | trim | backing check | pocket search | overlap check |
+|---|---|---|---|---|---|---|---|
+| `support` 1,114 s, `pockets` 1,388 s | 331.1 s | 340.0 s | 63.1 s | 293.6 s | 5.2 s | 1,171.8 s | 211.8 s |
 
 **Still to come:** S6 dispatched across the worker pool if a measurement shows
 more than 5 % (specification.md §4.6's parallelisation). The free-standing

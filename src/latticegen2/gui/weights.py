@@ -14,18 +14,13 @@ without — ``overhang``, ``support`` and ``pockets``, between ``simplify`` and
 :data:`SECONDS_PLAIN` is the run without ``--support`` of the 2026-10-11
 controlled pair. :data:`SECONDS_SUPPORT` is the ``rehearsal-support`` e2e
 scenario (docs/specification.md §6.1, ``--support-thickness 1``) of
-2026-11-06, every stage of it, with the support grid through the rods' centre
-axes (docs/algorithm.md §14.3 S4): 1 h 46 m end to end, of which ``pockets``
--- the pocket search across the pool, then the overlap check -- was 54 %.
-Its lattice stages agree with the plain run's to within a few per cent except
-``validate``, which checks the 52 support bodies too.
-
-**``pockets`` is projected, not measured.** That run's overlap check took
-~2,121 s on the master; it now runs across the worker pool
-(docs/algorithm.md §14.2), and ``pockets`` carries ~400 s for it instead —
-the six workers' share of the same work, with dispatch overhead. That makes
-``pockets`` 1,684 s, 37 % of a projected 1 h 17 m, and ``support`` 25 %.
-Replace it with the measured figure at the next ``rehearsal-support`` run.
+2026-11-10, every stage of it, with the overlap check of docs/algorithm.md
+§14.2 across the worker pool: 1 h 06 m end to end, of which ``pockets`` --
+the pocket search across the pool, then the overlap check -- was 35 % and
+``support`` 28 %. Its lattice stages agree with the plain run's to within a
+few per cent except ``validate``, which checks the 48 support bodies too, and
+``stitch``, which no longer re-sews a split component (docs/algorithm.md §8,
+G26): 40 s against the plain run's 259 s, which predates that fix.
 
 **What these tables are not.** They are one part's shape, on one machine. A
 small part is boundary- and export-dominated — on ``80mm-test-ball``
@@ -35,7 +30,7 @@ once. ``validate`` is dominated by the STEP round-trip check (docs/algorithm.md
 §9), which writes, re-reads and tessellates every output solid; at
 ``cc=5, t=1`` on this same part that gate alone is half an hour and
 ``validate`` is the largest stage of the run, where here it is a quarter of
-the plain run and a twelfth of the supported one.
+the plain run and an eighth of the supported one.
 That is the accepted trade: a fixed weighting is monotone and never lies about
 what has finished, where a time-based estimate would sit at 100 % of a stage
 that had not ended. Read the bar as "how far through the work", never as an
@@ -68,23 +63,22 @@ SECONDS_PLAIN: dict[str, float] = {
 
 #: Wall-clock seconds per stage of a run **with** ``--support``.
 SECONDS_SUPPORT: dict[str, float] = {
-    "template": 0.09,
+    "template": 0.05,
     "import": 1.2,
-    "tessellate": 2.5,
-    "classify": 13.8,
-    "boundary": 574.1,
-    "connect": 10.4,
-    "stitch": 256.0,
-    "instance": 13.4,
-    "assemble": 8.2,
-    "simplify": 240.5,
+    "tessellate": 2.2,
+    "classify": 13.4,
+    "boundary": 569.8,
+    "connect": 10.6,
+    "stitch": 39.9,
+    "instance": 13.7,
+    "assemble": 8.6,
+    "simplify": 238.8,
     "overhang": 6.9,
-    "support": 1130.6,
-    "pockets": 1683.9,  # projected: 3,404.9 measured, less ~2,121 serial
-                        # overlap check, plus ~400 across the pool
-    "validate": 558.1,
-    "export": 106.2,
-}  # 1 h 16 m 46 s projected end to end (1 h 45 m 35 s measured)
+    "support": 1114.2,
+    "pockets": 1388.0,
+    "validate": 464.3,
+    "export": 96.9,
+}  # 1 h 06 m 08 s end to end
 
 
 def _permille(seconds: dict[str, float], stages: tuple) -> dict[str, int]:

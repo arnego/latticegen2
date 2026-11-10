@@ -1059,9 +1059,65 @@ the previous entry; peak tree RSS 10,270 MB against 10,179 MB.
 previous entry's, so `src/latticegen2/gui/weights.py` keeps that entry's
 `SECONDS_SUPPORT`.
 
-**Since then, projected rather than measured:** the overlap check runs across
-the worker pool (docs/algorithm.md §14.2), measured 3× faster on the ball's
-and the cylinder's supports. `SECONDS_SUPPORT`'s `pockets` now carries the
-2026-11-06 figure less its ~2,121 s serial overlap check plus ~400 s for it
-across six workers — 1,684 s, a projected 1 h 17 m run. The next
-`rehearsal-support` run replaces the projection with a measurement.
+**Since then:** the overlap check runs across the worker pool
+(docs/algorithm.md §14.2). The next entry measures it.
+
+## What changed between the previous entry and the next
+
+The overlap check of docs/algorithm.md §14.2 is divided into jobs across the
+worker pool, and round 2 of the boundary sew keeps a split component in the
+master (§8, G26). Sub-micron caps are removed from support and lattice bodies
+(§9, §14.3 S6); none is found on this part.
+
+## 2026-11-10 — overlap check across the pool, `TD_HX_rehearsal_test` at `cc=7, t=1.4`, single run
+
+The `rehearsal-support` e2e scenario, the same command and parameters as the
+previous entry, run for the 4.0.0 release without the profiler, so the figures
+are the run log's own and there is no resource table. Output in the session
+scratchpad (not committed).
+
+| Stage | Duration |
+|---|---|
+| template | 0.05s |
+| import | 1.17s |
+| tessellate | 2.21s |
+| classify | 13.39s |
+| boundary | 569.8s |
+| connect | 10.59s |
+| stitch | 39.91s |
+| instance | 13.66s |
+| assemble | 8.57s |
+| simplify | 238.8s |
+| overhang | 6.87s |
+| support | 1,114.2s |
+| pockets | 1,388.0s |
+| validate | 464.3s |
+| export | 96.9s |
+
+**Run 1 h 06 m 16 s, and every check of specification.md §6.2 passes with no
+support warning**: 822 MB written, 81 solids, 331,441 mm³ of lattice and the
+same 48 support bodies of 31,618 mm³; all 225,547 ceiling points and all
+125,777 overhang samples backed, no overlap, no slab unsearched. The harness's
+own checks took a further 2 h 56 m, 4 h 02 m in all. Peak memory 7.25 GB by
+the run's own measure; peak simplify worker 4.31 GB. The `support timing`
+line:
+
+| part | seconds |
+|---|---|
+| ceiling points | 331.1 |
+| grid, both manifold repairs and the exact rod-node cuts | 340.0 |
+| staircase solids | 63.1 |
+| trim (S6) | 293.6 |
+| backing check | 5.2 |
+| pocket search and fill join (S7) | 1,171.8 |
+
+**`pockets` 3,309 s → 1,388 s**: the overlap check takes **211.8 s** across
+171 jobs over 4,313 junctions, against ~2,131 s at one core — 10×, where
+~400 s had been projected. **`stitch` 257 s → 40 s**: the one tiled component
+of 21 tiles is sewn seam-only in round 2 (4.35 s) and needs no repair, as G26
+predicted. The run 1 h 42 m 41 s → 1 h 06 m 16 s, −35 %. Every other stage is
+within a few per cent of the previous entry; `validate` 498 s → 464 s.
+
+**Downstream consumer.** `src/latticegen2/gui/weights.py` holds this run's
+log stage times as `SECONDS_SUPPORT`; `SECONDS_PLAIN` is still the plain column
+of the 2026-10-11 pair, whose `stitch` (259 s) predates G26.

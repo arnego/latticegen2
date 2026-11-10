@@ -375,6 +375,8 @@ def scenario_invalid_input(outdir: str) -> Report:
 
 CYLINDER_SUPPORT_GOLDEN = os.path.join(
     TESTDIR, "test-cylinder-cc10t1.5-rotx0y-90z0-sup1-golden-sample.step")
+TILTED_SUPPORT_GOLDEN = os.path.join(
+    TESTDIR, "80mm-test-ball-cc10t1.5-rotx35y20z-110-sup1-golden-sample.step")
 
 
 def support_checks(rep: Report, output: str, input_path: str, cc: float, t: float,
@@ -578,11 +580,12 @@ def scenario_support_tilted(outdir: str) -> Report:
     if proc.returncode == 0:
         geometry_checks(rep, out, BALL, 10.0, 1.5)
         support_checks(rep, out, BALL, 10.0, 1.5, orient, 1.0, final_print=True)
+        golden_check(rep, out, TILTED_SUPPORT_GOLDEN, 10.0, 1.5)
     return rep
 
 
 def scenario_support_cylinder(outdir: str) -> Report:
-    """Print support on the test cylinder, prepared for a golden sample.
+    """Print support on the test cylinder, compared against its golden sample.
 
     Default thickness (1 mm), turned `--orient 0 -90 0`. Two things are
     checked beyond the usual: the support checks of §6.2, and that **the same
@@ -591,10 +594,8 @@ def scenario_support_cylinder(outdir: str) -> Report:
     none of it. The committed lattice golden sample cannot say that here: it is
     the unrotated lattice.
 
-    **No golden sample exists yet, deliberately** (docs/testing.md): one is only
-    worth having once a human has inspected the output it pins. `golden_check`
-    reports `SKIP` until `test-cylinder-cc10t1.5-rotx0y-90z0-sup1-golden-sample.step`
-    is committed, and compares against it from then on.
+    The golden sample, `test-cylinder-cc10t1.5-rotx0y-90z0-sup1-golden-sample.step`,
+    is this scenario's output of 2026-11-10 (docs/testing.md).
     """
     rep = Report("support-cylinder")
     print(f"=== {rep.name} ===", flush=True)
@@ -642,8 +643,8 @@ def scenario_rehearsal_support(outdir: str) -> Report:
     and only for final verification. Pass `--keep <dir>` with it to write into a folder that outlives
     the harness, since a run this long is not one to repeat for its log.
 
-    **No golden sample exists yet** (docs/testing.md): `golden_check` reports
-    `SKIP` until an inspected output is committed.
+    **No golden sample** (docs/testing.md): the output is about 820 MB, past
+    GitHub's 100 MB file limit, so `golden_check` reports `SKIP`.
     """
     rep = Report("rehearsal-support")
     print(f"=== {rep.name} ===", flush=True)

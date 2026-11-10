@@ -259,6 +259,18 @@ committed after manual verification of the geometry they contain. Both are
 reproduced by the current implementation with a symmetric-difference volume of
 0 mm³.
 
+Two more pin print supports:
+`test/80mm-test-ball-cc10t1.5-rotx35y20z-110-sup1-golden-sample.step`
+(`support-tilted`) and `test/test-cylinder-cc10t1.5-rotx0y-90z0-sup1-golden-sample.step`
+(`support-cylinder`). Each is that scenario's output of the 2026-11-10 e2e run,
+committed on the user's decision with every §6.2 check passing: one support body
+of 4,481 mm³ on the ball and three of 11,487 mm³ on the cylinder, every overhang
+sample backed, no overlap, nothing hanging over powder. Their exact comparison
+is the costliest in the harness: 404 s and 888 s measured, adding about 22
+minutes to a full e2e run. `rehearsal-support`
+still has none: its output is about 820 MB, past GitHub's 100 MB file limit, so its comparison
+stays `SKIP`.
+
 Regenerating one is a review decision, not a routine step: a golden sample only
 has value while somebody has actually looked at it. If you do replace one,
 confirm the volume-based comparison against the *existing* sample first — that

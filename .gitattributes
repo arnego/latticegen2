@@ -23,7 +23,7 @@
 #   CLAUDE.md         instructions for the coding agent, not for the operator
 #   docs/usernotes.md private working notes
 #   docs/release.md   the developer's release manual (docs/release.md itself)
-#   test/             59 MB of fixtures and golden samples; verification runs in
+#   test/             ~170 MB of fixtures and golden samples; verification runs in
 #                     CI only (docs/specification.md §6.3)
 #   tools/            dev harnesses and the release builder
 

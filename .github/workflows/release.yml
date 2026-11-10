@@ -58,7 +58,8 @@ jobs:
       - name: Install and run unit tests
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test]"
+          # Constrained to the bundle pins, so the tests run against what ships.
+          python -m pip install -c requirements-bundle.txt -e ".[test]"
           python -m pytest test -q
 
       - name: Build bundles

@@ -105,15 +105,20 @@ def test_a_dimple_that_is_material_is_left_alone():
     assert out is s
 
 
-def test_a_cap_on_an_outer_wire_is_left_alone():
+def test_a_cap_on_an_outer_wire_is_collapsed_instead():
     """On the seam the hole is part of the wall face's outer wire: removing that
-    wire would remove the face, so the repair does not apply and the body is
-    returned as it came, for the STEP round-trip check to judge."""
+    wire would remove the face, so it is not removed as a cap. It is collapsed
+    as a corner facet instead (``test_lattice_micro_corners.py``): the cap's
+    faces and edges go, their vertices become one, and the outer wire stays."""
     s = _dimpled_cylinder(1e-4, seam_on_crest=True)
     assert len(occ.faces(s)) == 6
     (out,), removed, refused = generate.remove_micro_caps([s])
-    assert removed == [] and refused == []
-    assert out is s
+    assert refused == []
+    assert np.allclose(removed, [(20.3, 0.0, 20.0)], atol=1e-3)
+    assert len(occ.faces(out)) == 3
+    assert occ.is_valid(out)
+    assert frustum.edges_not_used_twice(out) == 0
+    assert abs(occ.volume(out) - occ.volume(s)) / occ.area(s) < 1e-4
 
 
 def test_the_real_body_fails_export_truth_and_passes_once_repaired(tmp_path):

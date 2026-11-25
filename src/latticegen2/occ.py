@@ -42,7 +42,7 @@ from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_Reader, STEPControl_StepModelType, STEPControl_Writer
 from OCP.ShapeFix import ShapeFix_Edge
 from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
-from OCP.TopAbs import TopAbs_ShapeEnum
+from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
 from OCP.TopExp import TopExp, TopExp_Explorer
 from OCP.TopTools import (
     TopTools_IndexedDataMapOfShapeListOfShape,
@@ -1854,13 +1854,15 @@ largest edge (2.5e-4 mm)."""
 
 
 def remove_micro_caps(
-    shape: TopoDS_Shape, tol: float = MICRO_CAP_TOL, hosts: list | None = None
+    shape: TopoDS_Shape, tol: float = MICRO_CAP_TOL, hosts: list | None = None,
+    corners: list | None = None,
 ) -> tuple[TopoDS_Shape, list[tuple[float, float, float]]]:
-    """Fill sub-micron dimples and shave sub-micron bumps off a face.
+    """Fill sub-micron dimples, shave sub-micron bumps off a face, and collapse
+    sub-micron facets left at a corner.
 
-    Returns ``(shape, where)``: the repaired shape and one point per cap
-    removed, in the shape's own coordinates. ``where`` is empty, and ``shape``
-    the very object passed in, when there is nothing to remove.
+    Returns ``(shape, where)``: the repaired shape and one point per cap or
+    facet removed, in the shape's own coordinates. ``where`` is empty, and
+    ``shape`` the very object passed in, when there is nothing to remove.
 
     **What the defect is.** A support body trimmed to the input, where the
     corner of a support node lies within a fraction of a micron of the input's
@@ -1900,15 +1902,54 @@ def remove_micro_caps(
     ``hosts``, when given, receives one ``(host face, removed wire, cap face
     count)`` per cap removed, for :func:`micro_cap_repair_fault` to check the
     repair locally rather than over the whole solid.
+
+    **The second shape is a corner facet, and it is the cap turned inside
+    out.** Where the corner of a strut pokes a fraction of a micron *out*
+    through the input's wall, the trim shaves the tip off and leaves a facet of
+    the wall: a face of ~1e-10 mm^2 lying in the *outer* wires of the faces
+    that met at the corner, rather than in an inner wire of one. Measured on
+    the user's `TDHX_error_report_test.stp` at ``cc=7, t=1.4, --orient 180 0
+    0``: junction (197, -258, -279) trimmed against a cylindrical wall carries a
+    3.568e-10 mm^2 triangle with sides of 12 to 69 nm between three strut
+    faces. ``BRepMesh`` leaves its rim used once at every rung of §9's ladder,
+    so the STEP round-trip check refused the run after the whole pipeline had
+    been paid for.
+
+    A connected set ``C`` of small faces whose edges each have two users is
+    such a facet when its rim is shared with **more than one** face, or with
+    one face but not as one of its inner wires. It is collapsed to a single
+    vertex: ``C``'s faces and every edge they own go, and every vertex they
+    touch is replaced by one vertex ``v*`` at their centroid, toleranced to
+    cover them all. Each face that held a rim edge loses it from its wire, and
+    the two edges either side of it now meet at ``v*``; an edge used by two
+    faces before is used by the same two after, so a shell that used every edge
+    twice still does. The material moved is the facet's own, under ``tol^3``.
+
+    It is admitted only where that argument holds: ``v*``'s tolerance within
+    ``tol``; no edge outside ``C`` with both ends on ``C`` (it would close on
+    itself); no degenerated edge at ``C``; and every wire that loses a rim edge
+    keeping at least two others, with all of a face's rim edges in one wire.
+    Anything else is left as it is, for §9's gate to judge. ``corners``, when
+    given, receives one ``(faces touched, facet face count)`` per facet, the
+    faces as they were before, for :func:`micro_cap_repair_fault`.
     """
     all_faces = faces(shape)
     # Nearly every body has no small face, and the boxes alone say so: the edge
     # index below is paid only by a body that has one.
     small: set[int] = set()
+    # Extents as one array rather than a box object per face: a corner facet
+    # needs its neighbours found by box, and holding hundreds of thousands of
+    # wrapped boxes for a repair that almost never fires is memory for nothing.
+    # A void box is stored inverted so that it overlaps nothing.
+    boxes = np.empty((len(all_faces), 6))
     for fi, face in enumerate(all_faces):
         box = Bnd_Box()
         BRepBndLib.Add_s(face, box, False)
-        if not box.IsVoid() and box.SquareExtent() < tol * tol:
+        if box.IsVoid():
+            boxes[fi] = (np.inf, np.inf, np.inf, -np.inf, -np.inf, -np.inf)
+            continue
+        boxes[fi] = box.Get()
+        if box.SquareExtent() < tol * tol:
             small.add(fi)
     if not small:
         return shape, []
@@ -1959,45 +2000,129 @@ def remove_micro_caps(
                     host_ids.update(outside)
             if not ok:
                 break
-        if not ok or not rim or len(host_ids) != 1:
+        if not ok or not rim:
             continue
-        host = all_faces[next(iter(host_ids))]
-        outer = BRepTools.OuterWire_s(host)
         wire = None
-        for w in _explore(host, TopAbs_ShapeEnum.TopAbs_WIRE):
-            ids = {edge_index.FindIndex(e)
-                   for e in _explore(w, TopAbs_ShapeEnum.TopAbs_EDGE)} - degenerate
-            if ids == rim:
-                wire = w
-                break
-        if wire is None or wire.IsSame(outer):
+        if len(host_ids) == 1:
+            host = all_faces[next(iter(host_ids))]
+            for w in _explore(host, TopAbs_ShapeEnum.TopAbs_WIRE):
+                ids = {edge_index.FindIndex(e)
+                       for e in _explore(w, TopAbs_ShapeEnum.TopAbs_EDGE)} - degenerate
+                if ids == rim:
+                    wire = w
+                    break
+            if wire is not None and wire.IsSame(BRepTools.OuterWire_s(host)):
+                wire = None
+        if wire is not None:
+            for fi in cap:
+                reshape.Remove(all_faces[fi])
+            reshape.Remove(wire)
+            if hosts is not None:
+                hosts.append((host, wire, len(cap)))
+            box = Bnd_Box()
+            for fi in cap:
+                BRepBndLib.Add_s(all_faces[fi], box, False)
+            x0, y0, z0, x1, y1, z1 = box.Get()
+            where.append((round((x0 + x1) / 2, 3), round((y0 + y1) / 2, 3),
+                          round((z0 + z1) / 2, 3)))
             continue
+        # Not a cap: try it as a corner facet, collapsed to one vertex.
+        corner = _corner_collapse(all_faces, boxes, cap, rim, edge_index, tol)
+        if corner is None:
+            continue
+        old_vertices, merged, touched = corner
+        forward = TopAbs_Orientation.TopAbs_FORWARD
+        for v in old_vertices:
+            reshape.Replace(v.Oriented(forward), merged.Oriented(forward))
         for fi in cap:
             reshape.Remove(all_faces[fi])
-        reshape.Remove(wire)
-        if hosts is not None:
-            hosts.append((host, wire, len(cap)))
-        box = Bnd_Box()
-        for fi in cap:
-            BRepBndLib.Add_s(all_faces[fi], box, False)
-        x0, y0, z0, x1, y1, z1 = box.Get()
-        where.append((round((x0 + x1) / 2, 3), round((y0 + y1) / 2, 3),
-                      round((z0 + z1) / 2, 3)))
+            for e in _explore(all_faces[fi], TopAbs_ShapeEnum.TopAbs_EDGE):
+                reshape.Remove(e)
+        if corners is not None:
+            corners.append(([all_faces[fj] for fj in touched], len(cap)))
+        p = BRep_Tool.Pnt_s(merged)
+        where.append((round(p.X(), 3), round(p.Y(), 3), round(p.Z(), 3)))
     if not where:
         return shape, []
     fixed = reshape.Apply(shape)
     if fixed is None or fixed.IsNull():
         if hosts is not None:
             hosts.clear()
+        if corners is not None:
+            corners.clear()
         return shape, []
     return fixed, where
 
 
+def _corner_collapse(all_faces, boxes, cap, rim, edge_index, tol):
+    """``(vertices, merged vertex, touched face indices)`` collapsing the
+    corner facet ``cap`` of :func:`remove_micro_caps`, or ``None`` where the
+    collapse cannot be shown to keep every edge used twice.
+
+    Only faces whose boxes come within ``tol`` of the facet are searched for
+    ones touching its vertices, found from ``boxes`` (one ``xmin, ymin, zmin,
+    xmax, ymax, zmax`` row per face) in one vectorised test, so a body of
+    hundreds of thousands of faces pays almost nothing per facet.
+    """
+    vmap = TopTools_IndexedMapOfShape()
+    for fi in cap:
+        for v in _explore(all_faces[fi], TopAbs_ShapeEnum.TopAbs_VERTEX):
+            vmap.Add(v)
+    ids = sorted(cap)
+    lo = boxes[ids, :3].min(axis=0) - tol
+    hi = boxes[ids, 3:].max(axis=0) + tol
+    near = np.flatnonzero(np.all(boxes[:, :3] <= hi, axis=1)
+                          & np.all(boxes[:, 3:] >= lo, axis=1))
+    touched: list[int] = []
+    for fj in near.tolist():
+        if fj in cap:
+            continue
+        if any(vmap.Contains(v) for v in
+               _explore(all_faces[fj], TopAbs_ShapeEnum.TopAbs_VERTEX)):
+            touched.append(fj)
+    for fj in touched:
+        rim_wires = 0
+        for w in _explore(all_faces[fj], TopAbs_ShapeEnum.TopAbs_WIRE):
+            n_rim = n_rest = 0
+            for e in _explore(w, TopAbs_ShapeEnum.TopAbs_EDGE):
+                edge = TopoDS.Edge_s(e)
+                ends = [vmap.Contains(v) for v in
+                        (TopExp.FirstVertex_s(edge), TopExp.LastVertex_s(edge))]
+                if edge_index.FindIndex(e) in rim:
+                    n_rim += 1
+                    continue
+                if BRep_Tool.Degenerated_s(edge) and any(ends):
+                    return None                   # a pole at the facet
+                if all(ends):
+                    return None                   # would close on itself
+                n_rest += 1
+            if n_rim:
+                rim_wires += 1
+                if n_rest < 2:
+                    return None                   # the wire would vanish
+        if rim_wires > 1:
+            return None                           # two wires would meet at v*
+    pts = np.array([[p.X(), p.Y(), p.Z()] for p in
+                    (BRep_Tool.Pnt_s(TopoDS.Vertex_s(vmap.FindKey(i)))
+                     for i in range(1, vmap.Extent() + 1))])
+    centre = pts.mean(axis=0)
+    reach = max(
+        float(np.linalg.norm(pts[i - 1] - centre))
+        + BRep_Tool.Tolerance_s(TopoDS.Vertex_s(vmap.FindKey(i)))
+        for i in range(1, vmap.Extent() + 1))
+    if reach > tol:
+        return None
+    merged = TopoDS_Vertex()
+    BRep_Builder().MakeVertex(merged, gp_Pnt(*centre), reach)
+    return ([vmap.FindKey(i) for i in range(1, vmap.Extent() + 1)], merged, touched)
+
+
 def micro_cap_repair_fault(
     before: TopoDS_Shape, after: TopoDS_Shape, hosts: list,
-    tol: float = MICRO_CAP_TOL,
+    tol: float = MICRO_CAP_TOL, corners: list = (),
 ) -> str | None:
-    """``None`` when ``after`` is ``before`` less exactly the caps in ``hosts``.
+    """``None`` when ``after`` is ``before`` less exactly the caps in ``hosts``
+    and the corner facets in ``corners``.
 
     Returns a human-readable reason otherwise. The local check on
     :func:`remove_micro_caps` for a lattice solid, where re-validating and
@@ -2019,15 +2144,24 @@ def micro_cap_repair_fault(
     is not re-integrated. The caller still checks the whole solid with
     ``BRepCheck_Analyzer``: in `simplify` that check runs on every unified
     solid anyway, so the repair adds nothing to it.
+
+    A corner facet rebuilds every face touching it, outer wire included, so it
+    is checked by what must hold of those faces instead: exactly they are new
+    objects, each valid on its own, their area moved by at most ``tol^2`` each
+    in total, and every edge they hold used by exactly two faces of ``after``.
     """
     got = solids(after)
     if len(got) != 1:
         return f"the repair produced {len(got)} solids"
-    removed = sum(n for _h, _w, n in hosts)
+    removed = sum(n for _h, _w, n in hosts) + sum(n for _t, n in corners)
     after_faces = faces(got[0])
     fb, fa = len(faces(before)), len(after_faces)
     if fa != fb - removed:
         return f"the face count went {fb} -> {fa} where {removed} cap face(s) were removed"
+    if corners:
+        fault = _corner_repair_fault(before, got[0], after_faces, hosts, corners, tol)
+        if fault is not None:
+            return fault
     outers = TopTools_IndexedMapOfShape()
     for f in after_faces:
         outers.Add(BRepTools.OuterWire_s(f))
@@ -2056,6 +2190,46 @@ def micro_cap_repair_fault(
         moved = abs(area(face) - area(host))
         if moved > tol * tol:
             return f"a host face's area moved {moved:.3e} mm^2, past {tol * tol:g}"
+    return None
+
+
+def _corner_repair_fault(before, solid, after_faces, hosts, corners, tol):
+    """The corner-facet half of :func:`micro_cap_repair_fault`."""
+    old = TopTools_IndexedMapOfShape()
+    for f in _explore(before, TopAbs_ShapeEnum.TopAbs_FACE):
+        old.Add(f)
+    changed = [f for f in after_faces if old.FindIndex(f) == 0]
+    sources = [h for h, _w, _n in hosts] + [f for t, _n in corners for f in t]
+    if len(changed) != len(sources):
+        return (f"{len(changed)} face(s) were rebuilt where {len(sources)} "
+                f"touch the removed caps and facets")
+    # No area bar here, unlike a cap's host: a rebuilt face's wire now closes
+    # only within ``v*``'s tolerance, and an area integrated around a wire
+    # with a gap carries a term set by where the surface's parametric origin
+    # lies -- measured 1.6e-05 mm^2 on a 2.4 mm^2 face for a facet of 3.6e-10,
+    # unchanged under adaptive integration. That is docs/algorithm.md S7's
+    # volume lesson again: a quantity OCCT does not define on the shape cannot
+    # be a bar. What bounds the boundary's movement is ``v*``'s tolerance,
+    # which is checked against ``tol`` instead.
+    bound = max([tol] + [BRep_Tool.Tolerance_s(TopoDS.Vertex_s(v)) for s in sources
+                         for v in _explore(s, TopAbs_ShapeEnum.TopAbs_VERTEX)])
+    for f in changed:
+        if not is_valid(f, parallel=False):
+            return "a face rebuilt around a corner facet is not valid"
+        for v in _explore(f, TopAbs_ShapeEnum.TopAbs_VERTEX):
+            if BRep_Tool.Tolerance_s(TopoDS.Vertex_s(v)) > bound:
+                return (f"a vertex beside a removed corner facet carries a "
+                        f"tolerance past {bound:g} mm")
+    users = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(
+        solid, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, users)
+    for f in changed:
+        for e in _explore(f, TopAbs_ShapeEnum.TopAbs_EDGE):
+            if BRep_Tool.Degenerated_s(TopoDS.Edge_s(e)):
+                continue
+            n = len(list(users.FindFromKey(e)))
+            if n != 2:
+                return f"an edge beside a removed corner facet is used by {n} face(s)"
     return None
 
 

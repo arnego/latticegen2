@@ -230,11 +230,11 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
     out, caps, caps_refused = remove_micro_caps(out)
     stats["support_micro_caps_removed"] = len(caps)
     if caps:
-        lines.append(f"note: {len(caps)} sub-micron cap(s) removed from support bodies "
+        lines.append(f"note: {len(caps)} sub-micron cap(s) or corner facet(s) removed from support bodies "
                      f"where a support node's corner grazed the input's surface, at "
                      f"{points_text(caps)}")
     if caps_refused:
-        lines.append(f"note: sub-micron cap repair refused by its check, bodies kept as built "
+        lines.append(f"note: sub-micron cap or facet repair refused by its check, bodies kept as built "
                      f"for the STEP round-trip check to judge, "
                      f"at {points_text(caps_refused)}")
     for s in out:

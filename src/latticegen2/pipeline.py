@@ -673,11 +673,11 @@ def _run_with_pool(
     # Logged as the support stage logs its own caps: a `note:` is a repair that
     # left the output as intended, not a warning (specification.md §3).
     if caps:
-        rl.line(f"note: {len(caps)} sub-micron cap(s) removed from lattice bodies "
-                f"where a strut's corner grazed the input's surface, at "
+        rl.line(f"note: {len(caps)} sub-micron cap(s) or corner facet(s) removed from "
+                f"lattice bodies where a strut's corner grazed the input's surface, at "
                 f"{points_text(caps)}")
     if caps_refused:
-        rl.line(f"note: sub-micron cap repair refused by its check, lattice bodies "
+        rl.line(f"note: sub-micron cap or facet repair refused by its check, lattice bodies "
                 f"kept as built for the STEP round-trip check to judge, at "
                 f"{points_text(caps_refused)}")
     stats["lattice_micro_caps_removed"] = len(caps)
@@ -730,7 +730,7 @@ def _run_with_pool(
                 f"{len(invalid)} of {len(result_solids)} output solids failed OCCT's "
                 f"BRepCheck_Analyzer validity check."
             )
-        _check_export_truth(rl, result_solids, tmpdir, stats, seam_gap, args.t)
+        _check_export_truth(rl, result_solids, tmpdir, stats, seam_gap, args.t, lp.a)
     rl.line(f"validity: all {len(result_solids)} solid(s) pass BRepCheck_Analyzer")
     stats["solids_written"] = len(result_solids)
     # What reaches the end product, split by origin. Supports never overlap
@@ -950,7 +950,8 @@ def _report_seam_gaps(rl: RunLog, gap, t: float, stats: dict) -> None:
 
 
 def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
-                        stats: dict, seam_gap=None, t: float = 0.0) -> None:
+                        stats: dict, seam_gap=None, t: float = 0.0,
+                        cell: float = 0.0) -> None:
     """Can each output body survive being written to STEP? Measured, per body.
 
     `BRepCheck_Analyzer` asks whether a shape agrees with itself to within the
@@ -988,7 +989,7 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
     took it out of the deciding seat.
     """
     started = _dt.datetime.now()
-    broken: list[tuple[int, int, int, occ.Refinement]] = []
+    broken: list[tuple[int, int, int, occ.Refinement, list]] = []
     refined: list[tuple[int, int, float]] = []
     worst = 0.0
     fraction = 0.0
@@ -1048,7 +1049,7 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
                 # apart afterwards.
                 refined.append((i, bad, fine.counts[-1][0]))
             else:
-                broken.append((i, bad, triangles, fine))
+                broken.append((i, bad, triangles, fine, defects.where))
     rl.substage("STEP round-trip check", len(solids), len(solids))
     elapsed = (_dt.datetime.now() - started).total_seconds()
     stats["export_truth_s"] = round(elapsed, 2)
@@ -1072,13 +1073,18 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
            f"a finer deflection" if refined else "")
     )
     if broken:
-        first, bad, triangles, fine = broken[0]
+        first, bad, triangles, fine, where = broken[0]
         ladder = " -> ".join(f"{n} at {d} mm" for d, n in fine.counts) or "none"
+        # Where, first and in the part's coordinates: the defect is in the
+        # *output* body, and a message whose only coordinate is the input's
+        # seam gap below sends the reader to inspect the wrong place -- which
+        # is what a user did with the run that taught this.
+        distinct = list(dict.fromkeys(tuple(p) for p in where))
         raise ProcessingError(
             f"Solid {first} does not survive being written to STEP: after a "
             f"round trip its {triangles} triangles carry {bad} edge(s) not used "
-            f"by exactly two of them, so nothing downstream can tessellate it "
-            f"consistently"
+            f"by exactly two of them, at {points_text(distinct)}, so nothing "
+            f"downstream can tessellate it consistently"
             # The ladder, not just the count. "13 -> 8 -> 4 -> 4, still 4 at
             # 0.0001 mm" says the readings are geometry; "10 -> 13 -> 17" says
             # the body comes apart the more closely it is measured. A bare
@@ -1093,11 +1099,11 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
             f"(docs/algorithm.md S9). The run stops rather than writing it: "
             f"nothing has been discarded, the temporary folder is kept, and the "
             f"`connect` stage above named the junctions this body was built from."
-            + _seam_gap_note(seam_gap, t)
+            + _seam_gap_note(seam_gap, t, distinct, cell)
         )
 
 
-def _seam_gap_note(gap, t: float) -> str:
+def _seam_gap_note(gap, t: float, near=(), cell: float = 0.0) -> str:
     """Name the input's own seam gap in a STEP round-trip failure, when it is big.
 
     The failure above gives a coordinate in the *output*; this gives the reason,
@@ -1105,13 +1111,29 @@ def _seam_gap_note(gap, t: float) -> str:
     different parameters and a user fixing their model. `SpiralTest.step` at
     ``cc=5, t=1`` is the whole case: a 4.2406e-02 mm gap between two of its own
     swept patches, cut into 0.01 mm2 faces by a 1 mm strut.
+
+    **It says how far the gap is from the readings, and blames it only when it
+    is near them.** The input's worst gap is one point of the whole part, and
+    the readings can be anywhere: on `TDHX_error_report_test.stp` they lay
+    50 mm from it, and a user who was told "the input is what has to change"
+    went to inspect the gap and found nothing there. ``near`` are the readings'
+    positions; past ``cell`` (one lattice cell edge, the reach of a junction)
+    from all of them, the gap is reported as what it is and nothing more.
     """
     if gap is None or t <= 0.0 or gap.worst <= SEAM_GAP_WARN_FRACTION * t:
         return ""
+    at = f"[{gap.where[0]:.3f}, {gap.where[1]:.3f}, {gap.where[2]:.3f}]"
+    if near and cell > 0.0:
+        far = min(float(np.linalg.norm(np.subtract(p, gap.where))) for p in near)
+        if far > cell:
+            return (
+                f" The `import` stage also found two faces of the *input* body "
+                f"{gap.worst:.4e} mm apart at {at}, but that is {far:.1f} mm from "
+                f"the readings above, so it is not what this body failed on."
+            )
     return (
         f" Note also the `import` stage's reading: two faces of the *input* body "
-        f"are {gap.worst:.4e} mm apart at their shared edge "
-        f"[{gap.where[0]:.3f}, {gap.where[1]:.3f}, {gap.where[2]:.3f}], "
+        f"are {gap.worst:.4e} mm apart at their shared edge {at}, "
         f"{gap.worst / t:.2e} of t={t:g} mm. A gap between two surfaces cannot be "
         f"repaired by re-fitting a curve on either of them, so where that region "
         f"is what was trimmed, the input is what has to change."
@@ -1367,9 +1389,11 @@ def _simplify_one(solid: TopoDS_Shape):
     """
     merged, ran, degraded, fresh = _unify_unchecked(solid)
     hosts: list = []
-    repaired, removed = occ.remove_micro_caps(merged, hosts=hosts)
+    corners: list = []
+    repaired, removed = occ.remove_micro_caps(merged, hosts=hosts, corners=corners)
     refused: list = []
-    if removed and occ.micro_cap_repair_fault(merged, repaired, hosts) is not None:
+    if removed and occ.micro_cap_repair_fault(
+            merged, repaired, hosts, corners=corners) is not None:
         repaired, refused, removed = merged, removed, []
     if removed:
         repaired = occ.solids(repaired)[0]

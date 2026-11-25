@@ -353,6 +353,30 @@ def test_coverage_gate_rejects_a_genuinely_undercovered_face(monkeypatch):
         check_surface_mesh_coverage(shape, lp)
 
 
+def test_containment_failure_names_the_face_where_a_user_can_find_it(monkeypatch):
+    """A face index means nothing in the user's CAD tool, and the message once
+    read ``lo=(np.float64(1894.8399999999998), ...)`` -- a user asked for a
+    point at the face instead (2026-11-23). It now gives the face's centre and
+    extent, the stray node and how far out it lies, in millimetres."""
+    lp = lattice_params(10.0, 1.5)
+    shape = occ.read_step(CYLINDER)
+    occ.mesh_shape(shape, chordal_target(lp))
+    real_box = occ.bounding_box
+
+    def shrunk(target, tol=0.0):
+        lo, hi = real_box(target, tol)
+        mid = (lo + hi) / 2
+        return mid - 1e-3, mid + 1e-3
+
+    monkeypatch.setattr(occ, "bounding_box", shrunk)
+    with pytest.raises(InputGeometryError) as err:
+        check_surface_mesh_coverage(shape, lp)
+    msg = str(err.value)
+    assert "np.float64" not in msg
+    assert "centred at [" in msg and "] mm" in msg
+    assert "mm outside that face's own CAD bounding box (x " in msg
+
+
 def test_coverage_gate_tolerates_a_sliver_shortfall():
     """A shortfall below one mesh element is noise, whatever its ratio.
 

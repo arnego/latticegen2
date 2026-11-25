@@ -1738,6 +1738,39 @@ program builds itself.
   surface continues across the hole. No lattice body has been measured
   carrying one; every committed scenario and the rehearsal's lattice pass.
 
+  **The same job collapses a sub-micron corner facet, the cap turned inside
+  out.** Where a strut's corner pokes a fraction of a micron *out* through a
+  curved wall, the trim shaves its tip off and leaves a facet of the wall
+  between the strut faces that met at the corner: a face of ~1e-10 mm² lying
+  in their *outer* wires rather than closing an inner wire of one face.
+  Measured on a user's `TDHX_error_report_test.stp` at `cc=7, t=1.4,
+  --orient 180 0 0` (2026-11-25): junction (197, −258, −279) carries a
+  3.568e-10 mm² cylinder triangle with sides of 12 to 69 nm at
+  [1880.289, −74.490, 972.343], and the 61,582-face lattice body built from it
+  read 7 mesh edges used once at every rung of the ladder below, so the run
+  was refused after its whole pipeline. The user reported it as an error "in
+  the transition between a fillet and a curved surface".
+
+  A connected set of faces each within `MICRO_CAP_TOL`, every edge of it with
+  two users, that is not a cap — its rim shared with more than one face, or
+  with one face but not as an inner wire — is collapsed to one vertex: its
+  faces and every edge they own go, and every vertex they touch becomes one
+  vertex `v*` at their centroid, toleranced to cover them all. Each face that
+  held a rim edge loses it, and the edges either side of it meet at `v*`. An
+  edge used by two faces before is used by the same two after, so a shell that
+  used every edge twice still does; the material moved is the facet's own.
+  It is admitted only where that argument holds: `v*`'s tolerance within
+  `MICRO_CAP_TOL`, no other edge with both ends on the facet, no degenerated
+  edge at it, and every wire that loses a rim edge keeping two others, a
+  face's rim edges all in one wire. On that body it removes the failing facet
+  and one more, and the readings go from 7 to **0**. A cap whose rim is the
+  wall's *outer* wire — on a seam, where removing the wire would remove the
+  face — is now collapsed the same way rather than left.
+
+  OCCT's own `ShapeFix_FixSmallFace`, whose spot-face fix names exactly this,
+  changes nothing on that junction, as its small-edge tools did nothing on §7's
+  pinhole wires.
+
   **It runs on the finished solid, after unification, and never on a trimmed
   piece in the boundary worker.** A tiny face there can lie on a cap quad, and
   removing it would change the interface areas §7.1 compares. After
@@ -1757,7 +1790,16 @@ program builds itself.
   back with the same outer wire object and orientation, its wires its old ones
   less the cap's, valid on its own, its area moved by at most `MICRO_CAP_TOL²`.
   The volume moved is bounded by the cap, under `MICRO_CAP_TOL³`, and is not
-  re-integrated. Then the whole-solid `BRepCheck_Analyzer` call `_unify_one`
+  re-integrated. A corner facet rebuilds every face touching it, outer wire
+  included, so those are held instead to: exactly they are new objects, each
+  valid on its own, no vertex of theirs past `MICRO_CAP_TOL` or their old
+  tolerance, and every edge they hold used by exactly two faces. **No area
+  bar**: each rebuilt wire now closes within `v*`'s tolerance rather than
+  exactly, and an area integrated around a wire with a gap carries a term set
+  by where the surface's parametric origin lies — 1.6e-05 mm² on a 2.4 mm²
+  face for a facet of 3.6e-10, unchanged under adaptive integration. That is
+  §7's volume lesson again (G19): a quantity OCCT does not define on the shape
+  cannot be a bar. Then the whole-solid `BRepCheck_Analyzer` call `_unify_one`
   makes on every unified solid is asked of the repaired solid instead, so a
   solid that passes pays nothing more. If it fails, the unrepaired solid is
   checked in its place and kept if it holds: a repair can never cost the run a
@@ -2964,9 +3006,12 @@ Removing the faces and the wire removes every edge they touch together with
 both its users, so a shell using every edge twice still does, and the host's
 surface simply continues across the hole: the material moved is the cap's own,
 under `MICRO_CAP_TOL³`. The threshold decides what is small enough to be
-noise, not whether the repair keeps the body closed. Anything of another shape
-— a cap on an outer wire, across two host faces, beside an edge with other
-than two users — is left as built for the STEP round-trip check to judge, and so is a
+noise, not whether the repair keeps the body closed. A set of tiny faces of
+another shape — a cap on an outer wire, or one across two host faces — is
+collapsed to one vertex as §9 describes for a lattice body's corner facet,
+where that collapse can be shown to keep every edge used twice. Anything else
+— beside an edge with other than two users, or a collapse that fails those
+conditions — is left as built for the STEP round-trip check to judge, and so is a
 repaired body that is not one valid solid using every edge twice, or whose
 boundary moved more than `MICRO_CAP_TOL` read as `|ΔV| / area`, §9's
 displacement: the volume is re-integrated over the host face and moves by

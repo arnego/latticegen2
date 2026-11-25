@@ -514,6 +514,13 @@ The normative algorithm is docs/algorithm.md §14.
   run reports each one as a `note:` with its position. The repair touches
   nothing else, is checked, and a body whose repair fails its check is kept as
   built for the STEP round-trip check to judge (docs/algorithm.md §9, §14.3 S6).
+  The same holds for a **sub-micron corner facet**, the cap turned inside out:
+  where the corner pokes a fraction of a micron *out* through a curved wall,
+  the trim leaves a facet of the wall of ~1e-10 mm² between the faces that met
+  at the corner. It is collapsed to a single vertex, which closes the faces
+  around it within that vertex's tolerance (docs/algorithm.md §9). Found on a
+  user's part, where it was reported as an error at the transition between a
+  fillet and a curved surface.
 
 - **STEP schema/AP:** AP214
 

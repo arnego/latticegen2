@@ -1073,6 +1073,11 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
            f"a finer deflection" if refined else "")
     )
     if broken:
+        # Kept beside the rest of the temp folder, as `validate` keeps an
+        # invalid solid: a refusal is only worth analysing with the body it
+        # refused, and a support body exists nowhere else once the run stops.
+        for i, *_rest in broken:
+            _write_brep(solids[i], os.path.join(tmpdir, f"export_truth_refused_{i}.brep"))
         first, bad, triangles, fine, where = broken[0]
         ladder = " -> ".join(f"{n} at {d} mm" for d, n in fine.counts) or "none"
         # Where, first and in the part's coordinates: the defect is in the
@@ -1097,7 +1102,8 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
             f"B-rep carries one per subshape, so a body whose validity rests on "
             f"a locally fat tolerance is valid here and not in the file "
             f"(docs/algorithm.md S9). The run stops rather than writing it: "
-            f"nothing has been discarded, the temporary folder is kept, and the "
+            f"nothing has been discarded, the temporary folder is kept with each "
+            f"refused solid in it as `export_truth_refused_<n>.brep`, and the "
             f"`connect` stage above named the junctions this body was built from."
             + _seam_gap_note(seam_gap, t, distinct, cell)
         )

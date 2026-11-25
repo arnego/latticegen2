@@ -209,3 +209,5 @@ def test_the_round_trip_failure_names_where_the_body_breaks(junction, tmp_path):
     assert "[1880.289, -74.490, 972.343] mm" in msg
     assert "not what this body failed on" in msg
     assert "the input is what has to change" not in msg
+    # The refused body is kept for analysis; a support body exists nowhere else.
+    assert (tmp_path / "export_truth_refused_0.brep").is_file()

@@ -18,7 +18,7 @@ import numpy as np
 
 from OCP.Adaptor3d import Adaptor3d_CurveOnSurface
 from OCP.BRep import BRep_Builder, BRep_Tool
-from OCP.BRepAdaptor import BRepAdaptor_Surface
+from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeFace,
@@ -35,11 +35,14 @@ from OCP.Bnd import Bnd_Box
 from OCP.GProp import GProp_GProps
 from OCP.Geom2dAdaptor import Geom2dAdaptor_Curve
 from OCP.GeomAbs import GeomAbs_SurfaceType
+from OCP.GeomAPI import GeomAPI_ProjectPointOnCurve
 from OCP.GeomAdaptor import GeomAdaptor_Curve, GeomAdaptor_Surface
 from OCP.GeomLib import GeomLib_CheckCurveOnSurface
 from OCP.IFSelect import IFSelect_ReturnStatus
 from OCP.Interface import Interface_Static
+from OCP.Precision import Precision
 from OCP.STEPControl import STEPControl_Reader, STEPControl_StepModelType, STEPControl_Writer
+from OCP.ShapeBuild import ShapeBuild_Edge
 from OCP.ShapeFix import ShapeFix_Edge
 from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
@@ -1932,6 +1935,13 @@ def remove_micro_caps(
     Anything else is left as it is, for §9's gate to judge. ``corners``, when
     given, receives one ``(faces touched, facet face count)`` per facet, the
     faces as they were before, for :func:`micro_cap_repair_fault`.
+
+    **The third shape is a lens** (:func:`_lens_collapse`): a face of exactly
+    two edges between the same two vertices, within ``tol`` of each other --
+    two descriptions of one intersection, enclosing a sliver however long it
+    is. Found on a support body of the same run, where it was the one reading
+    left at 1e-4 mm. It is recorded in ``corners`` too, with the two faces
+    either side as the ones touched.
     """
     all_faces = faces(shape)
     # Nearly every body has no small face, and the boxes alone say so: the edge
@@ -1942,6 +1952,8 @@ def remove_micro_caps(
     # wrapped boxes for a repair that almost never fires is memory for nothing.
     # A void box is stored inverted so that it overlaps nothing.
     boxes = np.empty((len(all_faces), 6))
+    two_edged: list[int] = []
+    face_edges = TopTools_IndexedMapOfShape()
     for fi, face in enumerate(all_faces):
         box = Bnd_Box()
         BRepBndLib.Add_s(face, box, False)
@@ -1951,7 +1963,13 @@ def remove_micro_caps(
         boxes[fi] = box.Get()
         if box.SquareExtent() < tol * tol:
             small.add(fi)
-    if not small:
+        else:
+            # One map built in C++ per face: a lens has exactly two edges.
+            face_edges.Clear()
+            TopExp.MapShapes_s(face, TopAbs_ShapeEnum.TopAbs_EDGE, face_edges)
+            if face_edges.Extent() == 2:
+                two_edged.append(fi)
+    if not small and not two_edged:
         return shape, []
 
     edge_index = TopTools_IndexedMapOfShape()
@@ -1972,6 +1990,7 @@ def remove_micro_caps(
     reshape = BRepTools_ReShape()
     where: list[tuple[float, float, float]] = []
     seen: set[int] = set()
+    rebuilt: set[int] = set()       # faces an earlier repair here rebuilds
     for start in sorted(small):
         if start in seen:
             continue
@@ -2017,6 +2036,7 @@ def remove_micro_caps(
             for fi in cap:
                 reshape.Remove(all_faces[fi])
             reshape.Remove(wire)
+            rebuilt.add(next(iter(host_ids)))
             if hosts is not None:
                 hosts.append((host, wire, len(cap)))
             box = Bnd_Box()
@@ -2031,6 +2051,7 @@ def remove_micro_caps(
         if corner is None:
             continue
         old_vertices, merged, touched = corner
+        rebuilt.update(touched)
         forward = TopAbs_Orientation.TopAbs_FORWARD
         for v in old_vertices:
             reshape.Replace(v.Oriented(forward), merged.Oriented(forward))
@@ -2042,6 +2063,25 @@ def remove_micro_caps(
             corners.append(([all_faces[fj] for fj in touched], len(cap)))
         p = BRep_Tool.Pnt_s(merged)
         where.append((round(p.X(), 3), round(p.Y(), 3), round(p.Z(), 3)))
+    # Lenses last, and never beside a face an earlier repair has rebuilt: two
+    # replacements of one edge in one reshape would contradict each other.
+    claimed = seen | rebuilt
+    for fi in two_edged:
+        lens = _lens_collapse(all_faces, fi, edges_of, users, tol)
+        if lens is None:
+            continue
+        keep, drop, merged_edge, sides, same_sense, mid = lens
+        if fi in claimed or any(fj in claimed for fj in sides):
+            continue
+        claimed.update((fi, *sides))
+        forward = TopAbs_Orientation.TopAbs_FORWARD
+        reshape.Replace(keep.Oriented(forward), merged_edge.Oriented(forward))
+        reshape.Replace(drop.Oriented(forward), merged_edge.Oriented(
+            forward if same_sense else TopAbs_Orientation.TopAbs_REVERSED))
+        reshape.Remove(all_faces[fi])
+        if corners is not None:
+            corners.append(([all_faces[fj] for fj in sides], 1))
+        where.append(mid)
     if not where:
         return shape, []
     fixed = reshape.Apply(shape)
@@ -2052,6 +2092,79 @@ def remove_micro_caps(
             corners.clear()
         return shape, []
     return fixed, where
+
+
+def _lens_collapse(all_faces, fi, edges_of, users, tol):
+    """``(kept edge, dropped edge, kept edge rebuilt, (face, face), same
+    sense, position)`` collapsing the lens ``fi`` onto one of its two edges, or
+    ``None`` where it is not a lens this can collapse exactly.
+
+    A **lens** is a face bounded by exactly two edges between the same two
+    vertices, each lying within ``tol`` of the other: two descriptions of one
+    edge, enclosing a sliver no mesher can triangulate. Measured on a support
+    body of `TDHX_error_report_test.stp`: the input's own circle where a
+    support face lies on the wall's plane, and the boolean's B-spline for the
+    same intersection, 0.025 mm long, 3.1e-04 mm apart at most, enclosing a
+    cylinder face of area -5.2e-06 mm^2. It is removed and the two faces either
+    side share the tighter of the two edges, which is given a pcurve on the
+    other face and a tolerance covering it: each edge used twice before is used
+    twice after, and nothing moves further than the lens is wide.
+    """
+    ids = edges_of[fi]
+    if len(ids) != 2 or len(set(ids)) != 2:
+        return None
+    face = all_faces[fi]
+    found = [TopoDS.Edge_s(e) for e in _explore(face, TopAbs_ShapeEnum.TopAbs_EDGE)]
+    if len(found) != 2:
+        return None                               # a seam, used twice by the face
+    e1, e2 = found
+    sides = []
+    for ei in ids:
+        u = users.get(ei, [])
+        if len(u) != 2 or fi not in u:
+            return None
+        sides.append(next(fj for fj in u if fj != fi))
+    if sides[0] == sides[1]:
+        return None
+    a1, b1 = TopExp.FirstVertex_s(e1), TopExp.LastVertex_s(e1)
+    a2, b2 = TopExp.FirstVertex_s(e2), TopExp.LastVertex_s(e2)
+    if a1.IsSame(b1) or not ({a1.IsSame(a2), a1.IsSame(b2)} & {True})             or not ({b1.IsSame(a2), b1.IsSame(b2)} & {True}):
+        return None
+    if max(_edge_gap(e1, e2), _edge_gap(e2, e1)) > tol:
+        return None
+    # `edges_of` lists the face's edges in exploration order, so ids[k] is ek.
+    keep_k = 0 if BRep_Tool.Tolerance_s(e1) <= BRep_Tool.Tolerance_s(e2) else 1
+    keep, drop = (e1, e2) if keep_k == 0 else (e2, e1)
+    other = TopoDS.Face_s(all_faces[sides[1 - keep_k]])
+    merged = TopoDS.Edge_s(ShapeBuild_Edge().Copy(keep, True))
+    fix = ShapeFix_Edge()
+    fix.FixAddPCurve(merged, other, False, Precision.Confusion_s())
+    fix.FixSameParameter(merged)
+    fix.FixVertexTolerance(merged, other)
+    if BRep_Tool.Tolerance_s(merged) > tol:
+        return None
+    same = TopExp.FirstVertex_s(keep).IsSame(TopExp.FirstVertex_s(drop))
+    c = BRepAdaptor_Curve(keep)
+    p = c.Value(0.5 * (c.FirstParameter() + c.LastParameter()))
+    return (keep, drop, merged, tuple(sides), same,
+            (round(p.X(), 3), round(p.Y(), 3), round(p.Z(), 3)))
+
+
+def _edge_gap(a: TopoDS_Edge, b: TopoDS_Edge, samples: int = 33) -> float:
+    """Largest distance from a sample of ``a`` to ``b``'s 3D curve."""
+    ca = BRepAdaptor_Curve(a)
+    curve = BRep_Tool.Curve_s(b, 0.0, 0.0)
+    if curve is None:
+        return float("inf")
+    first, last = ca.FirstParameter(), ca.LastParameter()
+    worst = 0.0
+    for k in range(samples):
+        proj = GeomAPI_ProjectPointOnCurve(
+            ca.Value(first + (last - first) * k / (samples - 1)), curve)
+        if proj.NbPoints() == 0:
+            return float("inf")
+        worst = max(worst, proj.LowerDistance())
+    return worst
 
 
 def _corner_collapse(all_faces, boxes, cap, rim, edge_index, tol):
@@ -2212,13 +2325,19 @@ def _corner_repair_fault(before, solid, after_faces, hosts, corners, tol):
     # be a bar. What bounds the boundary's movement is ``v*``'s tolerance,
     # which is checked against ``tol`` instead.
     bound = max([tol] + [BRep_Tool.Tolerance_s(TopoDS.Vertex_s(v)) for s in sources
-                         for v in _explore(s, TopAbs_ShapeEnum.TopAbs_VERTEX)])
+                         for v in _explore(s, TopAbs_ShapeEnum.TopAbs_VERTEX)]
+                + [BRep_Tool.Tolerance_s(TopoDS.Edge_s(e)) for s in sources
+                   for e in _explore(s, TopAbs_ShapeEnum.TopAbs_EDGE)])
     for f in changed:
         if not is_valid(f, parallel=False):
             return "a face rebuilt around a corner facet is not valid"
         for v in _explore(f, TopAbs_ShapeEnum.TopAbs_VERTEX):
             if BRep_Tool.Tolerance_s(TopoDS.Vertex_s(v)) > bound:
                 return (f"a vertex beside a removed corner facet carries a "
+                        f"tolerance past {bound:g} mm")
+        for e in _explore(f, TopAbs_ShapeEnum.TopAbs_EDGE):
+            if BRep_Tool.Tolerance_s(TopoDS.Edge_s(e)) > bound:
+                return (f"an edge beside a removed facet or lens carries a "
                         f"tolerance past {bound:g} mm")
     users = TopTools_IndexedDataMapOfShapeListOfShape()
     TopExp.MapShapesAndAncestors_s(

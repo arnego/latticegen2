@@ -520,7 +520,9 @@ The normative algorithm is docs/algorithm.md §14.
   at the corner. It is collapsed to a single vertex, which closes the faces
   around it within that vertex's tolerance (docs/algorithm.md §9). Found on a
   user's part, where it was reported as an error at the transition between a
-  fillet and a curved surface.
+  fillet and a curved surface. So is a **lens**: two descriptions of one edge,
+  within a micron of each other, enclosing a sliver face; the faces either side
+  share one of them instead.
 
 - **STEP schema/AP:** AP214
 

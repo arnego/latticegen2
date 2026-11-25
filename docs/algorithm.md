@@ -1771,6 +1771,19 @@ program builds itself.
   changes nothing on that junction, as its small-edge tools did nothing on §7's
   pinhole wires.
 
+  **And a lens, which is thin rather than small.** A face bounded by exactly
+  two edges between the same two vertices, each within `MICRO_CAP_TOL` of the
+  other, is two descriptions of one edge enclosing a sliver, however long.
+  Found on a support body of the same run, once the lattice passed: where a
+  support face lies on the input's plane and meets a cylindrical wall, the
+  input's own circle and the boolean's B-spline for the same intersection,
+  0.025 mm long and 3.1e-04 mm apart, enclosed a cylinder face of area
+  −5.2e-06 mm², and it was that body's one reading left at 1e-4 mm. The lens
+  is removed and the faces either side share the tighter of its two edges,
+  given a pcurve on the other face and a tolerance covering it, which must
+  stay within `MICRO_CAP_TOL`; each edge used twice before is used twice
+  after. Finding one costs an edge map per face, 0.20 s over 61,582 faces.
+
   **It runs on the finished solid, after unification, and never on a trimmed
   piece in the boundary worker.** A tiny face there can lie on a cap quad, and
   removing it would change the interface areas §7.1 compares. After
@@ -3009,7 +3022,9 @@ under `MICRO_CAP_TOL³`. The threshold decides what is small enough to be
 noise, not whether the repair keeps the body closed. A set of tiny faces of
 another shape — a cap on an outer wire, or one across two host faces — is
 collapsed to one vertex as §9 describes for a lattice body's corner facet,
-where that collapse can be shown to keep every edge used twice. Anything else
+where that collapse can be shown to keep every edge used twice; and a lens,
+two edges within `MICRO_CAP_TOL` of each other bounding one face, is collapsed
+onto one of them (§9). Anything else
 — beside an edge with other than two users, or a collapse that fails those
 conditions — is left as built for the STEP round-trip check to judge, and so is a
 repaired body that is not one valid solid using every edge twice, or whose

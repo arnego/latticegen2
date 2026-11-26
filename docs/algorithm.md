@@ -978,6 +978,12 @@ edges) was tried first and cures only (197, −268, −273). The face BRepCheck
 calls self-intersecting there, the 6,697 mm² plane, is not the cause: its
 tangent arcs meet 60 mm away.
 
+On the whole run, `--support --support-thickness 1`, 6 cores, 2026-11-26: no
+junction is left out. The three are trimmed at 1e-05 and 1e-04, and the lattice
+rises from 94,431.8 to 94,466.8 mm³, which is their 34.8 mm³. Support is 38
+bodies of 19,518 mm³ (was 19,522), and the harness finds all 88,220 overhang
+samples backed. The run took 33 m 01 s.
+
 **One consequence reaches §8, and it is why `unweldable` now checks
 boundary-to-boundary caps.** A rebuilt junction's caps are geometrically
 identical to what its neighbours expect — measured within 1e-15 mm, four orders

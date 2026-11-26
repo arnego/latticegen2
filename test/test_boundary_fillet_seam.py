@@ -156,6 +156,105 @@ def test_a_rung_the_kernel_refuses_leaves_the_junction_dropped(setup, monkeypatc
     assert trim.dropped and trim.pieces == [] and trim.outside_mm > 1.0
 
 
+def test_a_rung_that_keeps_too_little_is_refused(setup, monkeypatch):
+    """The probe sees only material outside. A rung returning one half-strut's
+    worth of the right answer -- nothing outside, most of it missing -- must not
+    replace the drop and its warning with a quiet note."""
+    lp, tpl, block, _mesh, probe = setup
+    node = (197, -267, -274)
+    pos = _at(lp, node)
+
+    def too_little(_tpl, at, body, fuzzy):
+        algo = BRepAlgoAPI_Common()
+        args = TopTools_ListOfShape()
+        args.Append(tpl.half_solids[0].Moved(occ.translation(at)))
+        tools = TopTools_ListOfShape()
+        tools.Append(body)
+        algo.SetArguments(args)
+        algo.SetTools(tools)
+        algo.SetFuzzyValue(fuzzy)
+        algo.Build()
+        return algo.Shape()
+
+    part = sum(occ.volume(s) for s in occ.solids(too_little(tpl, pos, block, 1e-4)))
+    assert 0.0 < part < JUNCTIONS[node] - 3.0
+    monkeypatch.setattr(boundary, "_trim_fuzzy", too_little)
+    trim = trim_junction(lp, tpl, pos, block, probe)
+    assert trim.dropped and trim.fuzzy == 0.0
+
+
+@pytest.mark.parametrize("node", list(JUNCTIONS))
+def test_the_sampled_reading_agrees_with_the_trim(setup, node):
+    lp, tpl, block, _mesh, _probe = setup
+    want, se = boundary._inside_volume(lp, tpl, _at(lp, node), block)
+    assert abs(want - JUNCTIONS[node]) <= (boundary.FUZZY_CHECK_SIGMAS * se
+                                           + boundary.FUZZY_CHECK_REL * tpl.volume)
+    assert se < 0.05 * JUNCTIONS[node]
+
+
+def test_points_drawn_inside_a_junction_are_inside_it(setup):
+    """The analytic sampler against the kernel's own classifier of the template."""
+    lp, tpl, _block, _mesh, _probe = setup
+    pos = _at(lp, (197, -267, -274))
+    pts = boundary._junction_points(lp, pos, 400, seed=3)
+    junction = tpl.solid.Moved(occ.translation(pos))
+    c = BRepClass3d_SolidClassifier(junction)
+    states = []
+    for p in pts:
+        c.Perform(gp_Pnt(*p), 1e-7)
+        states.append(c.State())
+    assert len(pts) == 400
+    assert all(s != TopAbs_State.TopAbs_OUT for s in states)
+
+
+def test_a_superseded_block_trim_is_not_counted_too(setup, monkeypatch):
+    """A junction is reported by the rung whose trim it keeps."""
+    lp, tpl, block, _mesh, probe = setup
+    pos = _at(lp, (197, -267, -274))
+
+    class BlockHelps:
+        """The real probe, except that the block's result -- the second
+        reading -- comes out better than the first without clearing."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def worst_outside(self, pts):
+            self.calls += 1
+            got = probe.worst_outside(pts)
+            return min(got, 1.0) if self.calls == 2 and got > 0 else got
+
+    monkeypatch.setattr(boundary, "_retrim_against_local_block",
+                        lambda *a: _exact_common(tpl, pos, block))
+    trim = trim_junction(lp, tpl, pos, block, BlockHelps())
+    assert not trim.dropped and trim.fuzzy > 0.0
+    assert trim.localized is False
+
+
+def test_the_note_names_each_junction_and_counts_the_rest():
+    from types import SimpleNamespace
+
+    from latticegen2 import pipeline
+    from latticegen2.runlog import WARNING_PLACES
+
+    lp = lattice_params(7.0, 1.4, (180.0, 0.0, 0.0))
+    nodes = [((i, -267, -274), 1e-4) for i in range(WARNING_PLACES + 3)]
+    said = []
+    rl = SimpleNamespace(always=said.append)
+    stats = {}
+    pipeline._report_fuzzy_junctions(
+        rl, lp, SimpleNamespace(n_fuzzy_junctions=len(nodes), fuzzy_nodes=nodes), stats)
+    (line,) = said
+    assert line.startswith(f"note: {len(nodes)} junction(s)")
+    assert "(0, -267, -274) at [" in line and "(fuzzy 0.0001 mm)" in line
+    assert line.endswith(", and 3 more")
+    assert stats == {"fuzzy_junctions": len(nodes)}
+    said.clear()
+    pipeline._report_fuzzy_junctions(
+        rl, lp, SimpleNamespace(n_fuzzy_junctions=0, fuzzy_nodes=[]), {})
+    assert said == []
+
+
 def test_a_kernel_throw_is_a_refused_rung(setup, monkeypatch):
     lp, tpl, block, _mesh, _probe = setup
 

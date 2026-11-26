@@ -946,9 +946,15 @@ worker-parallel.
 **Then the whole-body trim again, with a fuzzy value**
 (`boundary.JUNCTION_FUZZY_LADDER`, 1e-5, 1e-4 and 1e-3 mm, in order), where
 the block too leaves material outside. Each rung is re-probed like the block
-and kept only if it is better, so a junction no rung trims is dropped and
-reported as before. Each kept one is a `note:` naming the junction and its
-value.
+and kept only if it is better. A rung that clears the probe is also held to a
+sampled reading of how much of the junction lies in the body: 2,000 points
+drawn inside the junction from its half-struts' own expressions, each asked of
+the body's exact classifier (`boundary._inside_volume`). It must agree within
+four standard errors plus 1 % of the junction. The probe cannot see a trim that
+kept too little, and without that check a rung returning part of the right
+answer would replace the drop and its warning with a quiet note. A junction no
+rung trims is dropped and reported as before. Each kept one is a `note:` naming
+the junction and its value.
 
 Found on a user's `TDHX_error_report_test.stp` at `cc=7, t=1.4,
 --orient 180 0 0`, where three junctions at [1883–1889, −17.5 to −28, 983.06]

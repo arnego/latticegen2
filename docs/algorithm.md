@@ -1314,7 +1314,9 @@ user's run at `-cc 7 -t 1.4 --orient 180 0 0 --support --support-thickness 1`,
 2026-11-26, read back by `verify_geometry.brepcheck`: **all 41 solids valid**,
 where the same run without this repair has the lattice body invalid; lattice
 94,431.8175 mm³ and support 19,522.1544 mm³ either way, 30 m 55 s against
-29 m 55 s on 6 cores. No
+29 m 55 s on 6 cores. With §7.2's fuzzy trim as well (2026-11-27): all 41
+solids valid read back, lattice 94,466.8102 mm³, support 19,518.4357 mm³, no
+junction left out, 33 m 56 s. No
 committed part has a crossed cusp — the scan costs at most 0.07 s, on the
 rehearsal's 388 faces — so the golden samples cannot move.
 

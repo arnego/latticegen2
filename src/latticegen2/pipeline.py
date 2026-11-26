@@ -1077,7 +1077,11 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
         # invalid solid: a refusal is only worth analysing with the body it
         # refused, and a support body exists nowhere else once the run stops.
         for i, *_rest in broken:
-            _write_brep(solids[i], os.path.join(tmpdir, f"export_truth_refused_{i}.brep"))
+            try:
+                _write_brep(solids[i],
+                            os.path.join(tmpdir, f"export_truth_refused_{i}.brep"))
+            except Exception as exc:              # never mask the refusal itself
+                rl.line(f"  could not keep refused solid {i} for analysis: {exc}")
         first, bad, triangles, fine, where = broken[0]
         ladder = " -> ".join(f"{n} at {d} mm" for d, n in fine.counts) or "none"
         # Where, first and in the part's coordinates: the defect is in the
@@ -1103,8 +1107,9 @@ def _check_export_truth(rl: RunLog, solids: list[TopoDS_Shape], tmpdir: str,
             f"a locally fat tolerance is valid here and not in the file "
             f"(docs/algorithm.md S9). The run stops rather than writing it: "
             f"nothing has been discarded, the temporary folder is kept with each "
-            f"refused solid in it as `export_truth_refused_<n>.brep`, and the "
-            f"`connect` stage above named the junctions this body was built from."
+            f"refused solid in it as `export_truth_refused_<n>.brep`, and for a "
+            f"lattice body the `connect` stage above named the junctions it was "
+            f"built from."
             + _seam_gap_note(seam_gap, t, distinct, cell)
         )
 

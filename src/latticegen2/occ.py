@@ -1991,6 +1991,7 @@ def remove_micro_caps(
     where: list[tuple[float, float, float]] = []
     seen: set[int] = set()
     rebuilt: set[int] = set()       # faces an earlier repair here rebuilds
+    replaced = TopTools_IndexedMapOfShape()   # vertices a corner collapse replaces
     for start in sorted(small):
         if start in seen:
             continue
@@ -2032,6 +2033,8 @@ def remove_micro_caps(
                     break
             if wire is not None and wire.IsSame(BRepTools.OuterWire_s(host)):
                 wire = None
+        if wire is not None and next(iter(host_ids)) in rebuilt:
+            continue                              # an earlier repair rebuilds it
         if wire is not None:
             for fi in cap:
                 reshape.Remove(all_faces[fi])
@@ -2051,7 +2054,11 @@ def remove_micro_caps(
         if corner is None:
             continue
         old_vertices, merged, touched = corner
+        if rebuilt.intersection(touched):
+            continue                              # an earlier repair rebuilds one
         rebuilt.update(touched)
+        for v in old_vertices:
+            replaced.Add(v)
         forward = TopAbs_Orientation.TopAbs_FORWARD
         for v in old_vertices:
             reshape.Replace(v.Oriented(forward), merged.Oriented(forward))
@@ -2073,6 +2080,9 @@ def remove_micro_caps(
         keep, drop, merged_edge, sides, same_sense, mid = lens
         if fi in claimed or any(fj in claimed for fj in sides):
             continue
+        if any(replaced.Contains(v) for v in
+               (TopExp.FirstVertex_s(keep), TopExp.LastVertex_s(keep))):
+            continue                              # its copy would keep the old vertex
         claimed.update((fi, *sides))
         forward = TopAbs_Orientation.TopAbs_FORWARD
         reshape.Replace(keep.Oriented(forward), merged_edge.Oriented(forward))
@@ -2128,7 +2138,9 @@ def _lens_collapse(all_faces, fi, edges_of, users, tol):
         return None
     a1, b1 = TopExp.FirstVertex_s(e1), TopExp.LastVertex_s(e1)
     a2, b2 = TopExp.FirstVertex_s(e2), TopExp.LastVertex_s(e2)
-    if a1.IsSame(b1) or not ({a1.IsSame(a2), a1.IsSame(b2)} & {True})             or not ({b1.IsSame(a2), b1.IsSame(b2)} & {True}):
+    joined = ((a1.IsSame(a2) or a1.IsSame(b2))
+              and (b1.IsSame(a2) or b1.IsSame(b2)))
+    if a1.IsSame(b1) or not joined:
         return None
     if max(_edge_gap(e1, e2), _edge_gap(e2, e1)) > tol:
         return None
@@ -2141,7 +2153,9 @@ def _lens_collapse(all_faces, fi, edges_of, users, tol):
     fix.FixAddPCurve(merged, other, False, Precision.Confusion_s())
     fix.FixSameParameter(merged)
     fix.FixVertexTolerance(merged, other)
-    if BRep_Tool.Tolerance_s(merged) > tol:
+    if max([BRep_Tool.Tolerance_s(merged)]
+           + [BRep_Tool.Tolerance_s(v) for v in
+              (TopExp.FirstVertex_s(merged), TopExp.LastVertex_s(merged))]) > tol:
         return None
     same = TopExp.FirstVertex_s(keep).IsSame(TopExp.FirstVertex_s(drop))
     c = BRepAdaptor_Curve(keep)
@@ -2258,10 +2272,12 @@ def micro_cap_repair_fault(
     ``BRepCheck_Analyzer``: in `simplify` that check runs on every unified
     solid anyway, so the repair adds nothing to it.
 
-    A corner facet rebuilds every face touching it, outer wire included, so it
-    is checked by what must hold of those faces instead: exactly they are new
-    objects, each valid on its own, their area moved by at most ``tol^2`` each
-    in total, and every edge they hold used by exactly two faces of ``after``.
+    A corner facet or a lens rebuilds every face touching it, outer wire
+    included, so it is checked by what must hold of those faces instead:
+    exactly they are new objects, each valid on its own, no vertex or edge of
+    theirs toleranced past ``tol`` or what they carried before, and every edge
+    they hold used by exactly two faces of ``after``. Deliberately no area bar:
+    see :func:`_corner_repair_fault`.
     """
     got = solids(after)
     if len(got) != 1:
@@ -2312,7 +2328,11 @@ def _corner_repair_fault(before, solid, after_faces, hosts, corners, tol):
     for f in _explore(before, TopAbs_ShapeEnum.TopAbs_FACE):
         old.Add(f)
     changed = [f for f in after_faces if old.FindIndex(f) == 0]
-    sources = [h for h, _w, _n in hosts] + [f for t, _n in corners for f in t]
+    # A face beside two repairs is rebuilt once, so it is counted once.
+    unique = TopTools_IndexedMapOfShape()
+    for f in [h for h, _w, _n in hosts] + [f for t, _n in corners for f in t]:
+        unique.Add(f)
+    sources = [unique.FindKey(i) for i in range(1, unique.Extent() + 1)]
     if len(changed) != len(sources):
         return (f"{len(changed)} face(s) were rebuilt where {len(sources)} "
                 f"touch the removed caps and facets")

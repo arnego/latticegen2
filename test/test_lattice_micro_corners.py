@@ -211,3 +211,15 @@ def test_the_round_trip_failure_names_where_the_body_breaks(junction, tmp_path):
     assert "the input is what has to change" not in msg
     # The refused body is kept for analysis; a support body exists nowhere else.
     assert (tmp_path / "export_truth_refused_0.brep").is_file()
+
+
+def test_a_face_beside_two_repairs_is_counted_once(junction):
+    """A strut face beside two facets is rebuilt once; the check must not
+    expect it twice, or a sound repair of both is refused (code review)."""
+    hosts: list = []
+    corners: list = []
+    fixed, _where = occ.remove_micro_caps(junction, hosts=hosts, corners=corners)
+    touched, n = corners[0]
+    # The same neighbour listed again by a second, face-less record.
+    twice = corners + [([touched[0]], 0)]
+    assert occ.micro_cap_repair_fault(junction, fixed, hosts, corners=twice) is None

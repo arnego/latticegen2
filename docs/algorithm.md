@@ -1168,7 +1168,21 @@ input reads **0** at §9's STEP round-trip check (was 3), its largest vertex
 tolerance falls from 1.334 mm to 4.9e-03 mm, and the run's support near the
 defect:
 
-USERRESULT
+| `-cc 7 -t 1.4 --orient 180 0 0 --support` | repair stubbed out | repaired |
+|---|---|---|
+| support pieces no trim produced | 2, 61.7 mm³ | **0** |
+| ceiling points backed by nothing | 439 of 144,799 | **0** of 144,056 |
+| support | 39 bodies, 19,470 mm³ | 38 bodies, 19,522 mm³ |
+| lattice | 94,423.0 mm³ | 94,431.8 mm³ |
+| run, 2026-11-26 | 35 m 32 s on 5 cores | 26 m 42 s on 6 cores |
+
+The harness's own coverage check, asked of the written file
+(`verify_geometry.overhang_coverage`), finds all 88,220 samples over the
+7,243 mm² of inner overhang backed, one a sliver within 0.05 mm. Three lattice
+junctions left out by §7.2 at [1883–1889, −17.5 to −28, 983.06] are the same
+either way, 50 mm from the defect, beside a face BRepCheck calls
+self-intersecting where circular arcs meet tangentially; the repair does not
+touch them.
 
 One more thing it found: with the defect gone, a support trim there reached the
 coplanar-face merge for the first time, and `ShapeUpgrade_UnifySameDomain`

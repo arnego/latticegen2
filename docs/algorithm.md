@@ -207,7 +207,8 @@ flowchart TD
     B --> C[Build junction template J,
     verify 6 cap quads intact]
     C -->|caps missing| E1
-    C --> D[Import input STEP, compute AABB,
+    C --> D[Import input STEP, repair misplaced
+    vertices, compute AABB,
     stage input.brep for workers]
     D -->|read/parse failure| E2[Exit 3: input geometry error]
     D --> F[Tessellate surface, verify per-face
@@ -1077,6 +1078,118 @@ docs/specification.md §11 records it in full: no re-fitting of a pcurve keeps
 that body, because no curve on either surface closes a gap between the surfaces.
 The measurement costs 0.1 s on `SpiralTest` and 1.2 s on the rehearsal's 1,043
 shared edges.
+
+### 7.5 A vertex the input file places at the wrong point, repaired at `import`
+
+§7.4 measures a gap the file covers with a tolerance and leaves it. This one is
+a contradiction, and it is repaired (`latticegen2.inputfix`), because left as
+built it costs support exactly where the user needs it.
+
+**The defect.** A user's `TDHX_error_report_test.stp` has an edge `E`
+(`EDGE_CURVE #19081`) whose B-spline (`#19076`) starts at x = 1919.736, while
+the vertex `X` it names (`#14382`) sits at x = 1918.402, 1.334 mm away, on a
+straight edge `G` that runs on past the curve's real start `q`. Every loop in
+the file is closed topologically; only the geometry disagrees. The reader builds
+what the file says:
+
+* `X`'s tolerance grows to 1.334 mm, to cover both points;
+* the face `F` beside `E` that should run along `G` from `X` to `q` has no edge
+  there, so its boundary is **open in its own parameters**. Where `F` is curved,
+  as on the user's part, the reader patches the gap with a *degenerated* edge,
+  one OCCT treats as a point, whose pcurve nevertheless runs the 1.334 mm across
+  `F`; where `F` is planar it does not, and the body even reads valid;
+* the face `H` on `E`'s other side runs out along `G` to `X` and back, a spike
+  of no width.
+
+Every edge is still used by two faces, so §8's closure checks cannot see it. The
+user's run (PR #48) warned of 2 support pieces near [1916.6–1921.9, −70.4,
+977.1] that no trim produced, 62 mm³ of support missing and 439 ceiling points
+unbacked, and the input body itself could not pass §9's STEP round-trip check
+(3 readings at every rung). On `test/input-defect.step`, a block whose roof
+carries the same contradiction 13 mm wide (`tools/make_input_defect_part.py`),
+the run is refused at `tessellate`: the roof face's open boundary meshes to
+exactly half its area, and §5.1's coverage gate rightly stops.
+
+**What detects it** is an edge whose 3D curve ends further than
+`inputfix.GAP_TOL` (0.01 mm) from the vertex it names. That holds on both
+variants, where the degenerated edge holds on one. Ordinary exports leave such
+gaps below ~1e-3 mm (9.6e-4 is the user's part's largest besides the defect);
+`TD_HX_rehearsal_test.step` has one of 0.016 mm, which the repair declines, as
+below.
+
+**The repair** splits `G` where `E`'s curve ends. With `K` the other face of
+`G`: a vertex `V` is made at `q` and `G` is split there into `A`, from `X`, and
+`B`. `F` takes `A` beside `E`, in place of the degenerated edge if there is one;
+`H` takes `B` alone, losing its spike; `K` takes `A` and `B`; and `E` ends at
+`V`. `X`'s tolerance is reset and grown back only to what its remaining edges
+need. Every edge used by two faces before is used by two after, and no surface
+or curve moves: the three faces keep their surfaces and are re-bounded along
+curves they already had, `A` getting a pcurve on `F` by projection.
+
+It acts only where every part of that description holds: exactly one edge at
+`X` runs through `q` in its interior and itself ends at `X`; `E` and `G` are
+each used by two faces; exactly one face uses both, and in it they meet at `X`;
+the other face of `E` passes through `X` beside it; no seam edge is involved;
+and a degenerated edge there, if any, sweeps `X → q` along `G`.
+
+**It is checked afterwards, and volume is deliberately not the check.** The
+defective body's volume is not defined: `H`'s open parameter-space wire makes
+OCCT's boundary integral count a strip that is not there. Measured on the user's
+part, `H` is a 1 mm fillet strip that reads 3.8605 mm² — 0.2839 rad × 13.598 mm,
+out to the misplaced vertex — where its mesh and the repaired face both read
+3.4817, 0.2839 × 12.264 mm, the length it really has. That is §7's lesson
+(G19) again: a quantity OCCT does not define on the shape cannot be a bar. So
+each rebuilt face is held instead to the area of **its own mesh**, an
+independent reading (to 1e-3 relative; 1.2e-4 measured on the B-spline `F`, and
+11 % is the discrepancy it exists to catch). Besides that, each rebuilt face
+must be valid on its own, every edge of the body used by exactly two faces, the
+tolerances left at `X` and `V` within `MICRO_CAP_TOL`, and the neighbourhood
+must mesh closed at some rung of §9's ladder. A repair any of this refuses is
+undone — `X` gets its tolerance back, since the defective body is consistent
+only with it — and the defect reported.
+
+**What the run says.** A repair is a `note:` printed regardless of `-v`, with
+the position: the output is then as the file meant it, but the file is still
+worth fixing in CAD. A defect left as built is a warning naming both points when
+it is wider than a tenth of `t`, the bar §8's own tolerance repairs are held
+to, and a log line when narrower — the rehearsal's 0.016 mm is 1 % of its
+strut. Separately, any vertex of the input described less precisely than a tenth
+of `t` is a warning, unless it is a gap already reported.
+
+**It runs on every input, and costs nothing on a sound one**: 0.09 s on the
+rehearsal's 388 faces, which it returns as the same object. Every committed part
+is returned unchanged, so the golden samples still compare at 0 mm³.
+
+**Measured.** On `test/input-defect.step` at `-cc 10 -t 1.5 --support`, the
+`input-defect` scenario: the body repaired to exactly 24,000 mm³ and the run
+passing every §6.2 check against the block as intended, in 29 s, all 9,810
+overhang samples over the 1,200 mm² roof backed. On the user's part the repaired
+input reads **0** at §9's STEP round-trip check (was 3), its largest vertex
+tolerance falls from 1.334 mm to 4.9e-03 mm, and the run's support near the
+defect:
+
+| `-cc 7 -t 1.4 --orient 180 0 0 --support` | repair stubbed out | repaired |
+|---|---|---|
+| support pieces no trim produced | 2, 61.7 mm³ | **0** |
+| ceiling points backed by nothing | 439 of 144,799 | **0** of 144,056 |
+| support | 39 bodies, 19,470 mm³ | 38 bodies, 19,522 mm³ |
+| lattice | 94,423.0 mm³ | 94,431.8 mm³ |
+| run, 2026-11-26 | 35 m 32 s on 5 cores | 26 m 42 s on 6 cores |
+
+The harness's own coverage check, asked of the written file
+(`verify_geometry.overhang_coverage`), finds all 88,220 samples over the
+7,243 mm² of inner overhang backed, one a sliver within 0.05 mm. Three lattice
+junctions left out by §7.2 at [1883–1889, −17.5 to −28, 983.06] are the same
+either way, 50 mm from the defect, beside a face BRepCheck calls
+self-intersecting where circular arcs meet tangentially; the repair does not
+touch them.
+
+One more thing it found: with the defect gone, a support trim there reached the
+coplanar-face merge for the first time, and `ShapeUpgrade_UnifySameDomain`
+threw `Courbes non jointives` on it — the throw §9 records on lattice bodies,
+which the support path did not catch and so ended the run seven minutes into
+`support`. `frustum._unified` now keeps such a trim unmerged, as it already did
+for a merge that moved anything.
 
 ---
 
@@ -2205,6 +2318,8 @@ program builds itself.
   | Warning | Where it names |
   |---|---|
   | faces of the input do not meet (§7.4) | the worst gap |
+  | the input file contradicts itself (§7.5) | each curve end and the vertex it names |
+  | the input file is imprecise (§7.5) | the vertex |
   | lattice junctions left out (§7.2) | each junction |
   | trims resting on their own tolerance (§7.3) | each body's worst face |
   | struts closed off where they should join, not joined, not welded (§7.1, §8) | each junction |
@@ -2402,6 +2517,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | STEP round-trip check on **every** output solid (§9) | Correctness, and the one place on this branch where cost was traded away rather than saved. `BRepCheck_Analyzer` judges against tolerances STEP cannot carry — one `UNCERTAINTY_MEASURE_WITH_UNIT` per file against one per subshape — so a body can pass it and still not survive being written, and §8's rung-2 repair is what turns the first into the second. The instrument asks directly: write the body, read it back, tessellate, count broken edges. Three cheaper proxies were tried and two false-positive on sound rehearsal solids, so they are logged and do not decide. No size bound: bounding it is what puts the dominant body outside the check |
 | Degenerate triangles skipped in that count (§9) | Correctness of the *quantity*, not of any body, and the third time this project has found the same counting bug: `shell_defects` always skipped degenerate edges, `free_edges` was corrected in G21, this counter never had the test. Mesh points are interned by rounded coordinate, so at a pole a whole parametric range collapses to one id and such a triangle contributes the real edge twice — a closed fan reading as `4x`. Keyed on interned-id equality rather than area, because the defect is created by the interning. Without it the gate reports `TD_HX_rehearsal_test.step`'s **own input** as carrying 86 non-manifold edges, one per apex of its 54 apex-touching cones, and a plain sphere and cone as broken. Cannot hide a hole: a triangle bounding nothing is not one, and a cone with its base removed still reports all 63 segments. The rehearsal's dominant body falls 26 → 13 (G23, G24) |
 | A reading re-measured at a finer ruler before it refuses (§9) | Correctness, and the thing that finally separates the two causes of a non-manifold reading. No rule about the *kind* of reading works — G23 measured the genuinely unwritable body carrying the same classes as a sound one — but the mechanism separates cleanly: a broken description disagrees with itself more the harder it is looked at, where a body merely finer than the ruler agrees once the ruler is finer. Measured across 0.05→0.0001 mm, the rehearsal's dominant body reads 13, 8, 4, 4, **0** while `spiral-island-unwritable` reads 10, 13, 17, 21, **39**. **The rule is the terminus, not the slope**: only an exact zero clears, because the sound ladder plateaus and because a slope is the two-point calibration §11 records going wrong four times. Safe because a genuine hole can never reach zero — refining subdivides its boundary rather than closing it (63 → 71 → 158 on G23's control). Costs a **68-face neighbourhood**, not the body, and never a second STEP round trip; readings the neighbourhood's own cut boundary produces are excluded by requiring that a core face contributed them, which needs one ring and no bookkeeping. No size bound — bounding it is the sin this gate already removed once |
+| Misplaced input vertices repaired at `import` (§7.5) | Correctness, not speed. An edge naming a vertex 1.334 mm from where its curve ends leaves two faces claiming one strip and one face's boundary open, invisible to every closure check; support beside it could not be trimmed. Split where the curve ends, held to each rebuilt face's own mesh area rather than to a volume the defective body does not define. 0.09 s on the rehearsal, which it returns unchanged |
 | Connectivity by graph | Floating-body rule needs no boolean, and has no unresolvable case |
 | Sewing confined to the boundary layer | Delivered by inverting the assembly: the boundary is sewn first and the interior is then *built onto* its topology, so the volume-scaling shell never reaches a geometric search (§8) |
 | Boundary sew tiled by lattice-index block | Applies the `n^1.8` term to tiles instead of the whole component, in parallel across workers; **measured 2.25× against a no-tiling control at 21,955 pieces / 35 tiles** (8 m 57 s against 20 m 27 s), producing an identical shell (§8, G6) |
@@ -2499,6 +2615,7 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/sysinfo.py`](../src/latticegen2/sysinfo.py) | Machine detection behind that budget: logical core count (specification.md §3) |
 | [`src/latticegen2/lattice.py`](../src/latticegen2/lattice.py) | §2 (directions, basis, node enumeration, index range), §3.1 (profile), half-struts |
 | [`src/latticegen2/occ.py`](../src/latticegen2/occ.py) | OCCT helpers: STEP I/O, measurement, meshing, sewing, validity (whole-shape and the batched per-face scan behind §8's repair), pinhole-wire removal (§7), sub-micron cap removal and its local check (§9, §14.3 S6), the sew's two-rung vertex-tolerance repair (§8), the input's own seam gaps (§7.4), and the STEP round-trip measurements — tolerance against feature size (§7.3), pcurve-versus-3D-curve deviation, and the tessellation of the written body with the finer-ruler second pass that decides what one of its readings means (§9) |
+| [`src/latticegen2/inputfix.py`](../src/latticegen2/inputfix.py) | §7.5 (finding an edge whose curve ends away from its vertex, splitting the edge it lies on there, and the checks the repair is held to) |
 | [`src/latticegen2/junction.py`](../src/latticegen2/junction.py) | §3.2–§3.3 (the template and its cap-integrity gate) |
 | [`src/latticegen2/classify.py`](../src/latticegen2/classify.py) | §5 (tessellation, both mesh gates, spatial indices, distance and ray-parity tests, node classes), §5.4 (the strided parallel sweep and its `.npz` mesh staging) |
 | [`src/latticegen2/interior.py`](../src/latticegen2/interior.py) | §6 (template topology extraction, cap correspondence, indexed shell build) |

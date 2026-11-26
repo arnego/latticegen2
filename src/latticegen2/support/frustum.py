@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+from OCP.Standard import Standard_Failure
 from OCP.TopoDS import TopoDS
 from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
 
@@ -460,8 +461,18 @@ def edges_not_used_twice(solid) -> int:
 def _unified(s, gates):
     """``s`` with its coplanar faces merged -- unless unification moved anything.
     Measured on the cylinder: a valid unified solid with material 2.25 mm
-    outside the body."""
-    u = occ.unify_same_domain(s)
+    outside the body.
+
+    Or unless the kernel declines it: ``ShapeUpgrade_UnifySameDomain`` throws
+    ``Courbes non jointives`` on sound trimmed geometry, as on lattice bodies
+    (docs/algorithm.md §9). Measured on a support piece of a user's part
+    (``TDHX_error_report_test.stp``, ``-cc 7 -t 1.4 --orient 180 0 0``) beside
+    the input defect docs/algorithm.md §7.5 repairs: unmerged, the trim is kept,
+    since merging only makes it smaller."""
+    try:
+        u = occ.unify_same_domain(s)
+    except Standard_Failure:
+        return s
     if not occ.is_valid(u, parallel=False):
         return s
     if abs(occ.volume(u) - occ.volume(s)) > 1e-6 * occ.volume(s):

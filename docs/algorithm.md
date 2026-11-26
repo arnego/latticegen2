@@ -1306,7 +1306,12 @@ on every rebuild there. The misplaced-vertex repair had never met such a wire.
 
 **Measured.** On the user's part, all five cusps are repaired and the input body
 is `BRepCheck`-valid for the first time, in memory and after a STEP round trip;
-`repair_input` takes 5.2 s against 1.2 s, the checks being the difference. No
+`repair_input` takes 5.2 s against 1.2 s, the checks being the difference. The
+user's run at `-cc 7 -t 1.4 --orient 180 0 0 --support --support-thickness 1`,
+2026-11-26, read back by `verify_geometry.brepcheck`: **all 41 solids valid**,
+where the same run without this repair has the lattice body invalid; lattice
+94,431.8175 mm³ and support 19,522.1544 mm³ either way, 30 m 55 s against
+29 m 55 s on 6 cores. No
 committed part has a crossed cusp — the scan costs at most 0.07 s, on the
 rehearsal's 388 faces — so the golden samples cannot move.
 

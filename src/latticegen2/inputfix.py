@@ -56,8 +56,8 @@ cannot carry that tolerance: the lattice body of the user's run failed
 arcs are re-bounded there on their own circles, and the third edge at ``V`` --
 the line where the two hole walls touch -- is replaced by the segment from its
 other, unmoved end to ``Q``. ``Q`` lies along the tangent from ``V``, so that
-segment departs from both walls by the square of a micron's tenth: 3.5e-9 mm
-here. No surface moves, and the material moved is the sliver's own. It acts only
+segment departs from each wall only by the square of that offset over twice
+the wall's radius: 3.5e-9 mm here. No surface moves, and the material moved is the sliver's own. It acts only
 on a planar face, two circles in its plane, a vertex of exactly those three
 edges and three faces, and a sliver narrower than :data:`SLIVER_MAX`; and it is
 checked as the other repair is, plus the one property it exists for: each
@@ -519,7 +519,8 @@ class _Snapshot:
     The checks hold the repair to what it changes, not to the file: an input
     whose faces already carry a 4.9e-3 mm vertex (the user's part has them) or
     fail ``BRepCheck`` on their own (its faces 166, 168 and 266 do, crossing
-    their own boundary at a cusp until :func:`_repair_cusps` runs) must not have a sound repair refused for that. Taken
+    their own boundary at a cusp until :func:`_repair_cusps` runs) must not
+    have a sound repair refused for that. Taken
     before :func:`_apply`, which changes tolerances in place, and used to put
     them back if the repair is refused."""
 
@@ -904,7 +905,12 @@ def _apply_cusps(shape: TopoDS_Shape, plans,
 
 def _survives_step(faces: list[TopoDS_Face]) -> bool:
     """Each face, written to STEP alone and read back, still valid: the file
-    keeps no vertex tolerance a boolean widened to cover the crossing."""
+    keeps no vertex tolerance a boolean widened to cover the crossing.
+
+    The files are a probe of a few faces, written and deleted inside this call,
+    not a cache, so they go to the system's temporary folder rather than the
+    run's ``temp/<stamp>/`` (specification.md §4.4): the repair runs before
+    anything else reads the body and needs no folder of the run's."""
     with tempfile.TemporaryDirectory(prefix="latticegen2-inputfix-") as d:
         for i, face in enumerate(faces):
             path = os.path.join(d, f"face{i}.step")
@@ -984,22 +990,26 @@ def _repair_cusps(work: TopoDS_Shape) -> tuple[TopoDS_Shape, list[WireCrossing],
             if key in tried:
                 continue
             tried.add(key)
-            body = _Body(work)
-            plans, why = [], None
-            for c in group:
-                try:
+            # One cusp that cannot be planned declines the face: it is valid
+            # only once every cusp is repaired. That cusp keeps its own reason.
+            plans, why, culprit = [], None, None
+            try:
+                body = _Body(work)
+                for c in group:
                     plan, why = _plan_cusp(body, c)
-                except Exception as exc:  # kernel refusal: leave it as built
-                    plan, why = None, f"the kernel refused to examine it ({exc})"
-                if plan is None:
-                    break
-                plans.append(plan)
+                    if plan is None:
+                        culprit = c
+                        break
+                    plans.append(plan)
+            except Exception as exc:      # kernel refusal: leave it as built
+                why = f"the kernel refused to examine it ({exc})"
             if why is None:
-                faces = _touched(plans)
-                valid_before = [BRepCheck_Analyzer(f).IsValid() for f in faces]
-                snap = _Snapshot(faces)
-                checked = True
+                snap = None
                 try:
+                    faces = _touched(plans)
+                    valid_before = [BRepCheck_Analyzer(f).IsValid() for f in faces]
+                    snap = _Snapshot(faces)
+                    checked = True
                     after, rebuilt = _apply_cusps(work, plans, faces)
                     why = _check_cusps(work, after, rebuilt, valid_before, snap)
                 except Exception as exc:  # kernel refusal: leave it as built
@@ -1009,8 +1019,11 @@ def _repair_cusps(work: TopoDS_Shape) -> tuple[TopoDS_Shape, list[WireCrossing],
                               for c in group]
                     work, repaired = after, True
                     break
-                snap.restore()
-            found += [_crossing(c, False, why) for c in group]
+                if snap is not None:
+                    snap.restore()
+            found += [_crossing(c, False, why if culprit is None or c is culprit else
+                                "another cusp of the same face could not be repaired")
+                      for c in group]
         if not repaired:
             return work, found, checked
 

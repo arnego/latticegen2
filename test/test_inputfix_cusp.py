@@ -301,3 +301,39 @@ def test_an_unrepaired_crossing_is_one_warning_with_its_positions(tmp_path, monk
     assert "crosses itself" in warnings[0] and "refused for the test" in warnings[0]
     assert "vertex at [1893.261, 89.682, 983.600] mm" in warnings[0]
     assert stats["input_crossings_left"] == 2
+
+
+def test_a_kernel_failure_while_preparing_never_ends_the_run(monkeypatch):
+    """The repair runs on every input: a throw anywhere in it declines the
+    face and returns the body as built."""
+    from OCP.Standard import Standard_Failure
+
+    def boom(*_a, **_k):
+        raise Standard_Failure("test")
+
+    block = _block()
+    for name in ("_Body", "_Snapshot"):
+        with monkeypatch.context() as m:
+            m.setattr(inputfix, name, boom)
+            rep = inputfix.repair_input(block)
+        assert rep.shape.IsSame(block), name
+        assert [c.repaired for c in rep.crossings] == [False, False], name
+        assert all("kernel refused" in c.reason for c in rep.crossings), name
+
+
+def test_only_the_cusp_that_cannot_be_planned_carries_its_reason(monkeypatch):
+    """One cusp declines its whole face; the other is told why it was left."""
+    block = _block()
+    real = inputfix._plan_cusp
+
+    def fussy(body, c):
+        if inputfix._round(c.q) == CUSPS[1]:
+            return None, "refused for the test"
+        return real(body, c)
+
+    monkeypatch.setattr(inputfix, "_plan_cusp", fussy)
+    rep = inputfix.repair_input(block)
+    reasons = {c.vertex: c.reason for c in rep.crossings}
+    assert reasons[CUSPS[1]] == "refused for the test"
+    assert reasons[CUSPS[0]] == "another cusp of the same face could not be repaired"
+    assert rep.shape.IsSame(block)

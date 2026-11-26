@@ -943,6 +943,44 @@ actually refused later — which is the honest state of knowledge here.
 INPUT_VERTEX_TOL_WARN_FRACTION = occ.SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION
 
 
+def _report_input_crossings(rl: RunLog, crossings, stats: dict) -> None:
+    """Say where a face of the input crosses its own boundary at a cusp.
+
+    Repaired, it is a ``note:`` printed regardless of ``-v``, like a repaired
+    misplaced vertex. Left as built it is always a warning, however small:
+    a body trimmed there is valid in this process and need not be once written,
+    because STEP keeps none of the tolerance that covers the crossing
+    (docs/algorithm.md §7.5).
+    """
+    fixed = [c for c in crossings if c.repaired]
+    left = [c for c in crossings if not c.repaired]
+    stats["input_crossings_repaired"] = len(fixed)
+    stats["input_crossings_left"] = len(left)
+    if fixed:
+        rl.always(
+            f"note: a face of the input file crosses its own boundary at "
+            f"{len(fixed)} place(s), where two arcs leave a vertex in the same "
+            f"direction and overlap by up to {max(c.width for c in fixed):.1e} mm; "
+            f"the vertex is moved to where they cross, up to "
+            f"{max(c.span for c in fixed):.1e} mm away, so that a body trimmed there "
+            f"is still valid once written to STEP. Worth fixing in the CAD model at "
+            f"{points_text([c.vertex for c in fixed])}"
+        )
+    if left:
+        rl.always(warning_text(
+            "a face of the input crosses itself",
+            f"at {len(left)} place(s) two arcs of one face leave a vertex in the same "
+            f"direction and cross again up to {max(c.span for c in left):.1e} mm from "
+            f"it, and the repair could not be made "
+            f"({'; '.join(sorted({c.reason for c in left}))})",
+            "A lattice or support body trimmed there is valid here but can fail the "
+            "B-rep validity check once read back from the STEP file, and a CAD tool "
+            "may refuse it; fix the CAD model at that point",
+            [f"arcs cross at {point_text(c.where)}, vertex at {point_text(c.vertex)}"
+             for c in left],
+        ))
+
+
 def _report_input_repair(rl: RunLog, repair, t: float, stats: dict) -> None:
     """Say where the input file contradicts itself, and what was done about it.
 
@@ -988,6 +1026,7 @@ def _report_input_repair(rl: RunLog, repair, t: float, stats: dict) -> None:
             [f"curve ends at {point_text(d.where)}, vertex at {point_text(d.vertex)}"
              for d in wide],
         ))
+    _report_input_crossings(rl, repair.crossings, stats)
     # One place, one warning: a vertex fattened by a gap just reported is that gap.
     explained = any(d.vertex == repair.max_vertex_tol_at for d in wide)
     if repair.max_vertex_tol > bar and not explained:

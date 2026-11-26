@@ -673,11 +673,11 @@ def _run_with_pool(
     # Logged as the support stage logs its own caps: a `note:` is a repair that
     # left the output as intended, not a warning (specification.md §3).
     if caps:
-        rl.line(f"note: {len(caps)} sub-micron cap(s) or corner facet(s) removed from "
-                f"lattice bodies where a strut's corner grazed the input's surface, at "
+        rl.line(f"note: {len(caps)} sub-micron sliver(s) -- caps, corner facets or lenses "
+                f"-- removed from lattice bodies where a strut met the input's surface, at "
                 f"{points_text(caps)}")
     if caps_refused:
-        rl.line(f"note: sub-micron cap or facet repair refused by its check, lattice bodies "
+        rl.line(f"note: sub-micron sliver repair refused by its check, lattice bodies "
                 f"kept as built for the STEP round-trip check to judge, at "
                 f"{points_text(caps_refused)}")
     stats["lattice_micro_caps_removed"] = len(caps)

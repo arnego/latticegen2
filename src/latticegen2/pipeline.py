@@ -51,6 +51,7 @@ from .parallel import WorkerPool, set_thread_budget
 from .parallel import read_brep as _read_brep
 from .parallel import write_brep as _write_brep
 from .runlog import (
+    WARNING_PLACES,
     RunLog,
     Timer,
     box_text,
@@ -349,6 +350,23 @@ def _run_with_pool(
             f"of it (docs/algorithm.md §7.2)."
         )
         stats["localized_junctions"] = boundary.n_localized_junctions
+    if boundary.n_fuzzy_junctions:
+        # A `note:`, not a warning: the trim that was kept leaves nothing
+        # outside the body by the same probe that would otherwise have dropped
+        # the junction. Named, because the input is worth a look there: its
+        # faces meet with a gap only their tolerance covers (§7.2).
+        places = ", ".join(
+            f"{node} at {point_text(lattice_node(lp, node))} (fuzzy {fz:g} mm)"
+            for node, fz in boundary.fuzzy_nodes[:WARNING_PLACES]
+        )
+        more = len(boundary.fuzzy_nodes) - WARNING_PLACES
+        rl.always(
+            f"note: {boundary.n_fuzzy_junctions} junction(s) left material outside "
+            f"the input body at every exact trim and were trimmed with a fuzzy "
+            f"value instead (docs/algorithm.md §7.2): {places}"
+            + (f", and {more} more" if more > 0 else "")
+        )
+        stats["fuzzy_junctions"] = boundary.n_fuzzy_junctions
     if boundary.n_dropped_junctions:
         # Loud rather than quiet: this is the one place the tool knowingly
         # leaves lattice out, and specification.md §1's containment is why.

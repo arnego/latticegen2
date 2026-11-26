@@ -982,7 +982,8 @@ and no point of the junction inside it is missing. Raising every
 under-toleranced edge of the input to its own deviation (400 of its 1,414
 edges) was tried first and cures only (197, −268, −273). The face BRepCheck
 calls self-intersecting there, the 6,697 mm² plane, is not the cause: its
-tangent arcs meet 60 mm away.
+tangent arcs meet 60 mm away, and are the crossed cusps §7.5 now repairs at
+`import`.
 
 On the whole run, `--support --support-thickness 1`, 6 cores, 2026-11-26: no
 junction is left out. The three are trimmed at 1e-05 and 1e-04, and the lattice
@@ -1229,7 +1230,7 @@ The harness's own coverage check, asked of the written file
 junctions left out by §7.2 at [1883–1889, −17.5 to −28, 983.06] were the same
 either way, 50 mm from the defect. They are now trimmed by §7.2's fuzzy rung,
 and the cause was a seam between fillets rather than the self-intersecting face
-beside them.
+beside them, which is the crossed cusp repaired below.
 
 One more thing it found: with the defect gone, a support trim there reached the
 coplanar-face merge for the first time, and `ShapeUpgrade_UnifySameDomain`

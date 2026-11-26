@@ -202,6 +202,9 @@ def main(argv: list[str] | None = None) -> int:
         # the user would see the same line twice.
         rl.line(f"FAILED: {exc}", console=False)
         print(f"FAILED: {exc}", file=sys.stderr)
+        # Where it failed, for the bad-geometry viewer: before `result`, which
+        # is always the last event. Emits only; the .log has the reason line.
+        rl.failure_mark(exc)
         return finish(progress.FAILED, exc.exit_code, str(exc))
     except Exception as exc:  # unexpected: report it, but still as one line first
         rl.line(f"FAILED: unexpected {type(exc).__name__}: {exc}", console=False)

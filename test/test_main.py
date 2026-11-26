@@ -113,3 +113,24 @@ def test_a_window_that_cannot_start_reports_one_line_and_no_traceback(monkeypatc
     assert captured.err.count("FAILED:") == 1
     assert "_tkinter" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_a_failure_on_an_input_face_marks_it_just_before_the_result(tmp_path, capsys):
+    """The window's bad-geometry viewer learns where a run failed from one
+    ``mark`` event, sent immediately before ``result`` (specification.md §3.1);
+    the reason line and the ``.log`` are as they always were."""
+    import json
+
+    part = os.path.join(os.path.dirname(__file__), "bad-geometry-failure.step")
+    out = tmp_path / "out.step"
+    code, captured = _run(tmp_path, capsys, ["-i", part, "-o", str(out), "-cc", "10",
+                                             "-t", "1.5", "--cores", "1",
+                                             "--progress-stream"])
+    assert code == 3
+    events = [json.loads(line) for line in captured.out.splitlines() if line.startswith("{")]
+    assert [e["ev"] for e in events[-2:]] == ["mark", "result"]
+    mark = events[-2]
+    assert mark["severity"] == "error"
+    assert [p["kind"] for p in mark["places"]][:1] == ["face"]
+    assert [ln for ln in captured.err.splitlines() if ln.startswith("FAILED:")] == [
+        f"FAILED: {mark['message']}"]

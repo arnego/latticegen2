@@ -184,3 +184,46 @@ def test_an_unknown_stage_name_is_refused_at_the_timer(tmp_path):
     rl = RunLog(str(tmp_path / "run.log")).open()
     with pytest.raises(ValueError, match="unknown pipeline stage"):
         Timer(rl, "weld")
+
+
+def test_a_warning_with_places_writes_the_same_log_and_marks_them_only_when_watched(tmp_path):
+    """The bad-geometry viewer's ``mark`` events (specification.md §3.1) are
+    additive like every other event: the ``.log`` is the same bytes, and a run
+    nobody watches emits nothing."""
+    from latticegen2.runlog import Place, warning_text
+
+    def warn(rl):
+        rl.warning(warning_text("corner moved", "a vertex is loose", "It may fail",
+                                [Place.point((1, 2, 3)), Place.box((0, 0, 0), (1, 1, 1))]))
+        rl.warning(warning_text("no place", "nothing to point at", "Fine"))
+        rl.close()
+
+    plain, streamed = tmp_path / "plain.log", tmp_path / "streamed.log"
+    warn(RunLog(str(plain)).open())
+    rec = Recorder()
+    warn(RunLog(str(streamed), emit=rec).open())
+    assert log_body(plain) == log_body(streamed)
+    assert "WARNING: corner moved" in log_body(plain)
+    (mark,) = rec.of(progress.MARK)               # the place-less warning marks nothing
+    assert mark["severity"] == progress.WARNING_MARK and mark["title"] == "corner moved"
+    assert [p["kind"] for p in mark["places"]] == ["point", "box"]
+    assert mark["places"][0] == {"kind": "point", "text": "[1.000, 2.000, 3.000] mm",
+                                 "p": [1.0, 2.0, 3.0]}
+    # The mark follows its warning's own log event.
+    kinds = [ev for ev, _f in rec.events]
+    assert kinds.index(progress.MARK) == kinds.index(progress.LOG) + 1
+
+
+def test_a_failure_with_places_marks_them_in_red_and_logs_nothing(tmp_path):
+    from latticegen2.errors import ProcessingError
+    from latticegen2.runlog import Place
+
+    path = tmp_path / "run.log"
+    rec = Recorder()
+    rl = RunLog(str(path), emit=rec).open()
+    rl.failure_mark(ProcessingError("it broke", places=[Place.point((0, 0, 1))]))
+    rl.failure_mark(ProcessingError("it broke nowhere"))
+    rl.close()
+    assert path.read_text(encoding="utf-8") == ""
+    (mark,) = rec.of(progress.MARK)
+    assert mark["severity"] == progress.ERROR_MARK and mark["message"] == "it broke"

@@ -38,6 +38,8 @@ BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
 GAPS = os.path.join(TESTDIR, "support-gaps.step")
 DEFECT = os.path.join(TESTDIR, "input-defect.step")
+BAD_WARNING = os.path.join(TESTDIR, "bad-geometry-warning.step")
+BAD_FAILURE = os.path.join(TESTDIR, "bad-geometry-failure.step")
 CLIPPED = {name: os.path.join(TESTDIR, f"support-clipped-{name}.step")
            for name in ("cone", "cylinder")}
 BALL_GOLDEN = os.path.join(TESTDIR, "80mm-test-ball-cc20t4-golden-sample.step")
@@ -272,6 +274,26 @@ def _mask_volatile(text: str) -> str:
     return re.sub(r"generated=\d{4}-\d\d-\d\d \d\d:\d\d:\d\d", "generated=<ts>", text)
 
 
+def _log_body(step_path: str, own_dir: str) -> str:
+    """A run's log with everything that legitimately varies between two runs
+    blanked: clock times, elapsed times, measured memory, and the run's own
+    directory. What survives is every count, every geometric figure and the
+    order they appear in — which is precisely what an observer may not
+    change.
+    """
+    with open(os.path.splitext(step_path)[0] + ".log", encoding="utf-8") as fh:
+        body = fh.read()
+    body = re.sub(r"^\[\d\d:\d\d:\d\d\] ", "", body, flags=re.M)
+    body = re.sub(r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d", "<ts>", body)
+    body = re.sub(r"\d{8}-\d{6}", "<stamp>", body)
+    body = re.sub(r"\d+(\.\d+)?s\b", "<dur>", body)
+    body = re.sub(r"\d+(\.\d+)? [KMGT]?B\b", "<size>", body)
+    # `stitch` reports its six phase timings as bare seconds under keys
+    # ending `_s`, which the duration pattern above cannot reach.
+    body = re.sub(r"(_s: )[\d.]+", r"\1<dur>", body)
+    return body.replace(own_dir, "<outdir>")
+
+
 def scenario_progress_stream(outdir: str) -> Report:
     """The gate protecting the whole progress-event design (docs/algorithm.md §10).
 
@@ -312,27 +334,8 @@ def scenario_progress_stream(outdir: str) -> Report:
               f"{os.path.getsize(plain)} vs {os.path.getsize(streamed)} bytes")
 
     # 2. The log is the same log. Only the front-end's channel may differ.
-    def log_body(step_path: str, own_dir: str) -> str:
-        """The log with everything that legitimately varies between two runs
-        blanked: clock times, elapsed times, measured memory, and the run's own
-        directory. What survives is every count, every geometric figure and the
-        order they appear in — which is precisely what an observer may not
-        change.
-        """
-        with open(os.path.splitext(step_path)[0] + ".log", encoding="utf-8") as fh:
-            body = fh.read()
-        body = re.sub(r"^\[\d\d:\d\d:\d\d\] ", "", body, flags=re.M)
-        body = re.sub(r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d", "<ts>", body)
-        body = re.sub(r"\d{8}-\d{6}", "<stamp>", body)
-        body = re.sub(r"\d+(\.\d+)?s\b", "<dur>", body)
-        body = re.sub(r"\d+(\.\d+)? [KMGT]?B\b", "<size>", body)
-        # `stitch` reports its six phase timings as bare seconds under keys
-        # ending `_s`, which the duration pattern above cannot reach.
-        body = re.sub(r"(_s: )[\d.]+", r"\1<dur>", body)
-        return body.replace(own_dir, "<outdir>")
-
     rep.check(".log identical outside clock, memory and path",
-              log_body(plain, quiet_dir) == log_body(streamed, loud_dir))
+              _log_body(plain, quiet_dir) == _log_body(streamed, loud_dir))
 
     # 3. And the stream it produced is actually usable — otherwise the two
     #    checks above would also pass if the flag did nothing at all.
@@ -371,6 +374,178 @@ def scenario_invalid_input(outdir: str) -> Report:
               proc.stderr.strip().splitlines()[0][:160] if proc.stderr.strip() else "(no stderr)")
     rep.check("no .step written", not os.path.isfile(out))
     rep.check("no .log written", not os.path.isfile(log))
+    # The window launches every run with --progress-stream: a parameter
+    # refusal must give it nothing to mark, so "Show bad geometry" stays hidden.
+    streamed, _ = run_generator(["-i", BALL, "-cc", "5", "-t", "4", "-o", out,
+                                 "--progress-stream"])
+    events = _events(streamed.stdout)
+    rep.check("streamed, it marks nothing for the bad-geometry viewer",
+              streamed.returncode == 2 and not any(e["ev"] == progress.MARK for e in events)
+              and not _reduced(events).has_bad_geometry,
+              f"exit {streamed.returncode}, {len(events)} event(s)")
+    return rep
+
+
+def _events(stdout: str) -> list[dict]:
+    return [e for e in (progress.parse_line(line) for line in stdout.splitlines())
+            if e is not None]
+
+
+def _reduced(events: list[dict]):
+    """The window's own reduction of a run's events (latticegen2.gui.model)."""
+    from latticegen2.gui.model import RunState
+
+    state = RunState()
+    for event in events:
+        state.apply(event)
+    return state
+
+
+def _marks_say_what_the_text_says(rep: Report, marks: list[dict]) -> None:
+    """Every place a mark carries is a line of its message, and the numbers it
+    carries are the figures that line prints -- so the viewer marks exactly
+    where the text sends the reader."""
+    from latticegen2.runlog import point_text
+
+    bad = []
+    for m in marks:
+        for place in m["places"]:
+            if place["text"] not in m["message"]:
+                bad.append(f"{place['text']!r} not in its message")
+            keys = {"point": ("p",), "segment": ("a", "b"), "box": (),
+                    "face": ("centroid",)}[place["kind"]]
+            for k in keys:
+                if point_text(place[k]) not in place["text"]:
+                    bad.append(f"{place['kind']} {k}={place[k]} not printed as such")
+            if place["kind"] in ("box", "face"):
+                lo, hi = place["lo"], place["hi"]
+                if not all(f"{'xyz'[a]} {lo[a]:.3f} to {hi[a]:.3f}" in place["text"]
+                           for a in range(3)):
+                    bad.append(f"{place['kind']} box not printed as such")
+    rep.check("each mark's places are lines of its message, with the same figures",
+              not bad, "; ".join(bad[:3]))
+
+
+def scenario_bad_geometry_warning(outdir: str) -> Report:
+    """A run that succeeds with warnings pointing at the input (specification.md
+    §3.1): every warning reaches the bad-geometry viewer as a yellow mark, and
+    watching the run does not change it -- the `mark` events add nothing to the
+    `.log` and nothing to the `.step`."""
+    rep = Report("bad-geometry-warning")
+    print(f"=== {rep.name} ===", flush=True)
+    quiet_dir = os.path.join(outdir, "bad-warning-quiet")
+    loud_dir = os.path.join(outdir, "bad-warning-loud")
+    os.makedirs(quiet_dir, exist_ok=True)
+    os.makedirs(loud_dir, exist_ok=True)
+    plain = os.path.join(quiet_dir, "bad-warning.step")
+    streamed = os.path.join(loud_dir, "bad-warning.step")
+    base = ["-i", BAD_WARNING, "-cc", "10", "-t", "1.5", "--cores", "4"]
+    quiet, _ = run_generator([*base, "-o", plain])
+    loud, elapsed = run_generator([*base, "-o", streamed, "--progress-stream"])
+    rep.check("both runs exit 0", quiet.returncode == 0 and loud.returncode == 0,
+              f"{quiet.returncode}/{loud.returncode} in {elapsed:.1f} s "
+              f"{loud.stderr.strip()[-200:]}")
+    if quiet.returncode != 0 or loud.returncode != 0:
+        return rep
+    left = _mask_volatile(open(plain, encoding="utf-8", errors="replace").read())
+    right = _mask_volatile(open(streamed, encoding="utf-8", errors="replace").read())
+    rep.check("STEP identical outside the header timestamp", left == right)
+    log = _log_body(streamed, loud_dir)
+    rep.check(".log identical outside clock, memory and path",
+              _log_body(plain, quiet_dir) == log)
+
+    events = _events(loud.stdout)
+    marks = [e for e in events if e["ev"] == progress.MARK]
+    warnings = log.count("WARNING: ")
+    rep.check("the moved corner is warned of",
+              "WARNING: the input file contradicts itself" in log,
+              f"{warnings} warning(s) in the log")
+    rep.check("one yellow mark per warning, and no red one",
+              len(marks) == warnings and all(m["severity"] == progress.WARNING_MARK
+                                             for m in marks),
+              f"{len(marks)} mark(s): {[m['title'] for m in marks]}")
+    rep.check("each mark carries its warning's text, as the .log has it",
+              all(m["message"] in log for m in marks))
+    _marks_say_what_the_text_says(rep, marks)
+    corner = [p for m in marks if m["title"] == "the input file contradicts itself"
+              for p in m["places"]]
+    rep.check("the corner is a segment from where its edges end to the vertex",
+              len(corner) == 1 and corner[0]["kind"] == "segment"
+              and max(abs(x) for x in corner[0]["a"]) < 1e-6
+              and abs(corner[0]["b"][0] - 0.5) < 1e-6
+              and max(abs(x) for x in corner[0]["b"][1:]) < 1e-6,
+              str(corner[:1]))
+    state = _reduced(events)
+    rep.check("the window would show \"Show bad geometry\", with warnings only",
+              state.has_bad_geometry and not any(m.is_error for m in state.marks),
+              f"{len(state.marks)} mark(s)")
+    return rep
+
+
+def scenario_bad_geometry_failure(outdir: str) -> Report:
+    """A run that fails on a face of the input, after warning about it
+    (specification.md §3.1): a yellow mark for the warning, a red one for the
+    failure, the failure's naming the face by a box the viewer finds among the
+    preview's own faces."""
+    rep = Report("bad-geometry-failure")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "bad-failure.step")
+    proc, elapsed = run_generator(["-i", BAD_FAILURE, "-cc", "10", "-t", "1.5",
+                                   "--cores", "4", "-o", out, "--progress-stream"])
+    reasons = [l for l in proc.stderr.splitlines() if l.startswith("FAILED:")]
+    rep.check("exits 3, an input-geometry failure", proc.returncode == 3,
+              f"exit {proc.returncode} in {elapsed:.1f} s")
+    rep.check("one human-readable reason line", len(reasons) == 1,
+              reasons[0][:160] if reasons else proc.stderr.strip()[-160:])
+    rep.check("no .step written", not os.path.isfile(out))
+
+    events = _events(proc.stdout)
+    marks = [e for e in events if e["ev"] == progress.MARK]
+    errors = [m for m in marks if m["severity"] == progress.ERROR_MARK]
+    warnings = [m for m in marks if m["severity"] == progress.WARNING_MARK]
+    rep.check("one red mark and at least one yellow",
+              len(errors) == 1 and len(warnings) >= 1,
+              f"{len(errors)} error(s), {len(warnings)} warning(s)")
+    rep.check("the red mark comes last, just before the result",
+              len(events) >= 2 and events[-1]["ev"] == progress.RESULT
+              and events[-2]["ev"] == progress.MARK
+              and events[-2]["severity"] == progress.ERROR_MARK)
+    if not errors:
+        return rep
+    rep.check("the red mark carries the failure's reason",
+              reasons != [] and reasons[0] == f"FAILED: {errors[0]['message']}")
+    _marks_say_what_the_text_says(rep, marks)
+    faces = [p for p in errors[0]["places"] if p["kind"] == "face"]
+    roof = ((13.0, 0.0, 20.0), (40.0, 30.0, 20.0))
+    rep.check("the red mark names the split roof's far face by its box",
+              len(faces) == 1
+              and max(abs(a - b) for a, b in zip(faces[0]["lo"] + faces[0]["hi"],
+                                                 roof[0] + roof[1])) < 1e-3,
+              str(faces[:1])[:200])
+
+    # The viewer finds that face among the preview mesh's own: the helper the
+    # window runs, at the viewer's cap, and the viewer's own matching.
+    import numpy as np
+
+    from latticegen2.gui import marks as gui_marks
+
+    npz = os.path.join(outdir, "bad-failure-preview.npz")
+    pv = subprocess.run([PYTHON, MAIN, "--preview-mesh", BAD_FAILURE, npz,
+                         "--max-triangles", "12000"], capture_output=True, text=True, cwd=ROOT)
+    found = None
+    if pv.returncode == 0 and faces:
+        with np.load(npz) as z:
+            k = gui_marks.match_face(faces[0]["lo"], faces[0]["hi"], z["face_lo"], z["face_hi"])
+            if k is not None and np.any(z["face"] == k):
+                found = (k, int(np.sum(z["face"] == k)))
+    rep.check("the viewer finds that face in its preview mesh", found is not None,
+              f"preview exit {pv.returncode}; face, triangles: {found}")
+
+    state = _reduced(events)
+    rep.check("the window would show \"Show bad geometry\", with red and yellow",
+              state.has_bad_geometry and any(m.is_error for m in state.marks)
+              and any(not m.is_error for m in state.marks),
+              f"{len(state.marks)} mark(s)")
     return rep
 
 
@@ -714,6 +889,8 @@ SCENARIOS = {
     "support-gaps": scenario_support_gaps,
     "support-clipped": scenario_support_clipped,
     "input-defect": scenario_input_defect,
+    "bad-geometry-warning": scenario_bad_geometry_warning,
+    "bad-geometry-failure": scenario_bad_geometry_failure,
     "support-tilted": scenario_support_tilted,
     "support-cylinder": scenario_support_cylinder,
     "rehearsal-support": scenario_rehearsal_support,

@@ -45,6 +45,10 @@ LOG = "log"
 SUMMARY = "summary"
 #: How the run ended. Always the last event.
 RESULT = "result"
+#: Where a warning or a failure points in the part, as numbers rather than text,
+#: for the bad-geometry viewer. No counterpart in the ``.log``, which already
+#: has the warning's or the failure's text.
+MARK = "mark"
 
 #: Every event's fields, excluding ``ev`` and ``t`` which all of them carry.
 #:
@@ -59,7 +63,13 @@ FIELDS: dict[str, tuple[str, ...]] = {
     LOG: ("msg", "console"),
     SUMMARY: ("duration", "peak_rss", "params", "stats", "stages"),
     RESULT: ("status", "exit", "reason", "output", "log", "tmpdir"),
+    MARK: ("severity", "title", "message", "places"),
 }
+
+#: ``mark.severity`` values: a warning's places are drawn yellow, a failure's red.
+WARNING_MARK = "warning"
+ERROR_MARK = "error"
+SEVERITIES = (WARNING_MARK, ERROR_MARK)
 
 EVENTS: tuple[str, ...] = tuple(FIELDS)
 

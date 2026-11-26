@@ -155,7 +155,7 @@ can sit in a corner of the screen.
   log records both (`support_grid_divisions`, `support_min_member_mm`). With
   the box ticked, every part of the
   previewed surface that overhangs more than 60° at the current orientation —
-  what will be supported — is **tinted**, and the tint is recomputed on every
+  what will be supported — is **tinted blue**, and the tint is recomputed on every
   change of orientation — boxes, steppers and mouse drag alike — so it can be
   checked before an hour-long run is started.
 * **verbose** — a tick box beside `cores`, controlling the log pane described
@@ -281,6 +281,54 @@ folder**, re-enables the inputs and returns `Stop!` to `Start!`, ready for
 another run with the same or different parameters. A failure shows the same
 single reason line the command line prints (§7).
 
+**Show bad geometry.** A run that warns about, or fails on, a place in the part
+— a point, a region, a pair of points, an input face — makes a **Show bad
+geometry** button appear beside **Open export folder**, from the first such
+warning on, while the run is still in flight too. It opens a large viewer over
+the window, which shows where the trouble is on the input itself:
+
+* **What it draws.** The input at the run's print orientation, shaded as the
+  small view shades it, through the same renderer, without the print bed. The
+  run's orientation and input are taken when `Start!` is pressed, so editing
+  the fields afterwards moves nothing. It first shows the small view's mesh,
+  then a finer one (12,000 triangles) from the same helper.
+* **Marks.** Every place a warning points at is **yellow**, every place a
+  failure points at **red**: a point as a dot, a region as a box, a pair of
+  points as two dots joined, an input face as that face tinted, with a pin at
+  its centre. Marks are drawn over the part, so one behind it is still seen.
+  Clicking a mark opens a box beside it, bordered in its colour, with the
+  message's title, the place's own line of text, and what went wrong and what
+  it may cause; a click elsewhere or Esc closes it.
+* **Overlays.** The view fills the window. Over its top-right corner sit a
+  **Show overhangs** tick box, always shown and unticked by default, which tints
+  what will be supported in the same **blue** as the small view; and beneath it
+  a clickable **issue list**, errors first, open by default and folding to its
+  title bar. Picking an entry centres the view on it and opens its box.
+* **Controls**, described in a discreet line at the top-left:
+
+  | Action | Input |
+  |---|---|
+  | rotate | left drag, as in the small view; it turns the view, never the run's orientation |
+  | pan | middle drag |
+  | zoom | mouse wheel, about the cursor |
+  | fit all | F or Home |
+  | details | left click on a mark (a press that does not move) |
+
+* **The window** opens at about 70 % of the screen, resizes with its viewport,
+  and closes with its **×** or Esc. There is one at a time; the button raises
+  it. A new run closes it.
+
+**Where the places come from.** Not from the text: a warning's places travel as
+numbers in a `mark` event on the progress stream (docs/algorithm.md §10),
+each carrying the exact line the warning prints for it, so the `.log` and the
+console are unchanged. A failure's places come from its exception, sent just
+before `result`. A message that points nowhere — a parameter refused, say —
+sends no mark and shows no button. A failure's face is found among the
+viewer's own faces by its bounding box, since the run may have repaired the
+input before naming it. `note:` lines, repairs that left the output as
+intended, are not marked.
+
+
 **Zero arguments open a window only where a window can exist.** On a machine
 with no display a bare invocation still exits 2 with usage, exactly as it always
 has, so scripts and CI are unaffected. `--gui` given explicitly always tries and
@@ -297,6 +345,10 @@ rather than parameters:
   run. Neither of the obvious channels works: a windowed process has no console
   and so cannot send Ctrl+Break, and giving the child a pipe for stdin was
   measured stalling the worker pool outright (docs/algorithm.md §10).
+
+A third channel, the `mark` event, is part of the first: it rides
+`--progress-stream`, and the `bad-geometry-warning` scenario proves it changes
+neither the `.log` nor the `.step` the same way.
 
 **Toolkit.** `tkinter`, from the standard library — no new packaged dependency.
 Portable bundles consequently redistribute Tcl/Tk, which
@@ -583,7 +635,9 @@ no `SpiralTest.step`.
 | input-defect | -i test/input-defect.step -cc 10 -t 1.5 --cores 4 --support | valid STEP through every §6.2 check, judged against the block the file means, on a small part (`tools/make_input_defect_part.py`) whose roof carries the contradiction of a user's file: an edge naming a vertex 13 mm from where its curve ends (docs/algorithm.md §7.5). The repair is checked to have run and no input warning to remain. Before the fix: refused at exit 3, the roof's near face meshing to half its area. **Measured: 29 s**, the repaired body exactly 24,000 mm³, all 9,810 overhang samples over the 1,200 mm² roof backed. |
 | rehearsal-support | -i test/TD_HX_rehearsal_test.step -cc 7 -t 1.4 --cores 6 --support --orient 180 0 0 --support-thickness 1 | **Opt-in: runs only when named with `--only rehearsal-support`**, and only for final verification. Print support at production scale, the part turned over: valid STEP through every §6.2 check including the support checks, generation < 12 hours on 6 cores. **Measured 2026-10-31: 1 h 40 m, and coverage failed** — 630 of 125,777 overhang samples unbacked. The causes are fixed and verified on `support-gaps`. **Re-run 2026-11-02: failed at exit 4 after 8 h 22 m**, a support body overlapping the lattice by 1.475e-02 mm³; no file written. **Run again 2026-11-02 after those fixes: passes every §6.2 check. Measured: 2 h 08 m**, 4 h 56 m with the harness's checks; 27 support bodies of 40,136 mm³, 125,777 of 125,777 overhang samples backed, no overlap, 3 pocket regions left unsearched and reported. **Run 2026-11-05 with the local pocket search: passes every §6.2 check. Measured: 1 h 42 m**, 4 h 31 m with the harness's checks; the same 27 support bodies and 40,136 mm³, all overhang samples backed, no overlap, 2 pocket regions left unsearched and reported. **Run 2026-11-06 with the support grid through the rod axes: passes every §6.2 check. Measured: 1 h 46 m**, 4 h 45 m with the harness's checks; 52 support bodies of 32,018 mm³, all 125,777 overhang samples backed, no overlap; the generator warns of 2 of 225,637 ceiling points unbacked and 4 pocket regions unsearched. **Run again 2026-11-06 with those warnings traced to detection and to the kernel, and fixed: passes every §6.2 check with no support warning. Measured: 1 h 43 m**, 4 h 39 m with the harness's checks; 48 support bodies of 31,618 mm³, all 225,547 ceiling points and all 125,777 overhang samples backed, no overlap, no pocket region left unsearched. **Run 2026-11-10 with the overlap check across the pool and round 2 of the boundary sew kept in the master: passes every §6.2 check. Measured: 1 h 06 m**, 4 h 02 m with the harness's checks; the same 48 support bodies of 31,618 mm³, all 225,547 ceiling points and all 125,777 overhang samples backed, no overlap, no support warning. The overlap check takes 212 s against ~2,131 s, and `stitch` 40 s against 257 s. **No golden sample:** its output is about 820 MB, past GitHub's 100 MB file limit, so the comparison against `test/TD_HX_rehearsal_test-cc7t1.4-rotx180y0z0-sup1-golden-sample.step` reports `SKIP`. |
 
-| invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line. **Passes.** |
+| bad-geometry-warning | -i test/bad-geometry-warning.step -cc 10 -t 1.5 --cores 4 | On a block whose file places one corner vertex 0.5 mm from where its three edges end (`tools/make_bad_geometry_parts.py`), which the input repair declines: exit 0 with warnings, run with and without `--progress-stream`. Each warning arrives as a yellow `mark` event whose places are lines of the warning with the same figures; the moved corner is a segment from where the edges end to the vertex; the `.log` and the `.step` are identical either way; and the window's own reduction would show **Show bad geometry**. **Measured: 6.5 s**, 2 warnings, 2 yellow marks. |
+| bad-geometry-failure | -i test/bad-geometry-failure.step -cc 10 -t 1.5 --cores 4 --progress-stream | On `input-defect.step`'s block with the front edge left in two pieces, so the repair declines and the roof's far face meshes wrong: exit 3 with one reason line, a yellow mark for the warning and one red mark, just before `result`, naming that face by its box; the preview helper's mesh at the viewer's cap holds a face the viewer matches to it. **Measured: 1.2 s.** |
+| invalid-input | -i test/80mm-test-ball.step -cc 5 -t 4 (strut size `t` >= cell edge `a=cc/√2`) | exits 2, no `.step` or `.log` file written, one human-readable reason line, and, run with `--progress-stream`, no `mark` event. **Passes.** |
 
 **The hole-block parts are not e2e scenarios.** `test/Hole-block-basic.STEP` and
 `test/Hole-block-chamfered.STEP`, at `--orient 90 0 0`, are the support

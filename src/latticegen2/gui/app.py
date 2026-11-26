@@ -42,6 +42,11 @@ from .model import RunState
 from .orientview import OrientationView
 from .runner import GRACE_SECONDS, LaunchError, Preview, Run, build_argv
 
+#: Triangles in the mesh the bad-geometry viewer asks for -- finer than the
+#: small view's, which it shows until this one arrives. The same figure as
+#: ``latticegen2.preview.VIEWER_TRIANGLES``; ``test_gui`` holds them equal.
+VIEWER_TRIANGLES = 12000
+
 POLL_MS = 100
 BAR_HEIGHT = 16
 WIDTH = 460
@@ -211,6 +216,20 @@ class App:
         #: arrived and the filter in force. Redrawing only when that changes
         #: keeps the 10 Hz poll from rebuilding a 400-line widget for nothing.
         self._log_key: tuple | None = None
+        #: The small view's mesh as arrays, with the face each triangle came
+        #: from, and the input it is of: what the bad-geometry viewer shows
+        #: until its own finer mesh arrives.
+        self._mesh: tuple | None = None
+        self._mesh_for: str | None = None
+        #: The bad-geometry viewer while it is open, the helper building its
+        #: mesh, how many marks it was last given, and the run it shows -- its
+        #: input and orientation, taken when Start! was pressed, so editing the
+        #: fields afterwards does not move what the run's marks are drawn on.
+        self._viewer = None
+        self._viewer_preview: Preview | None = None
+        self._viewer_marks = 0
+        self._run_input: str | None = None
+        self._run_orient: tuple = (0.0, 0.0, 0.0)
 
         self._build(root)
         for var in (self.input_var, self.cc_var, self.t_var, self.cores_var,
@@ -361,8 +380,13 @@ class App:
 
         self.result_label = ttk.Label(self.panel, text="", wraplength=WIDTH - 24)
         self.result_label.grid(row=5, column=0, sticky="w", pady=(6, 0))
-        self.open_button = ttk.Button(self.panel, text="Open export folder",
+        # Side by side, each gridded only when it has something to do: the
+        # folder once the run has ended, the viewer from the first mark on.
+        self.end_buttons = ttk.Frame(self.panel)
+        self.open_button = ttk.Button(self.end_buttons, text="Open export folder",
                                       command=self._open_output_folder)
+        self.bad_button = ttk.Button(self.end_buttons, text="Show bad geometry",
+                                     command=self._show_bad_geometry)
 
     def _spin(self, parent, label, var, bounds, step, column):
         ttk.Label(parent, text=label).grid(row=0, column=column, sticky="w",
@@ -477,8 +501,11 @@ class App:
 
             with np.load(result) as z:
                 self.view.set_mesh(z["verts"], z["tris"])
+                self._mesh = _mesh_arrays(z)
+                self._mesh_for = preview.input_path
         except Exception:                                      # noqa: BLE001
             self.view.set_mesh(None, None)
+            self._mesh = self._mesh_for = None
         finally:
             # The arrays are in the view now; the file has no further use, and
             # a long session would otherwise keep one per input it was shown.
@@ -570,6 +597,9 @@ class App:
             return
 
         self.state = RunState()
+        self._close_viewer()
+        self._run_input = args.input
+        self._run_orient = tuple(float(a) for a in args.orient)
         try:
             self.run = Run(
                 build_argv(
@@ -596,6 +626,8 @@ class App:
         self.view.set_enabled(False)
         self.result_label.configure(text="")
         self.open_button.grid_forget()
+        self.bad_button.grid_forget()
+        self.end_buttons.grid_forget()
         self.panel.grid(row=9, column=0, columnspan=3, sticky="ew")
         self._refresh()
 
@@ -621,6 +653,7 @@ class App:
             self.run.force_stop()
         if self._preview is not None:
             self._preview.abandon()
+        self._close_viewer()
         if self._preview_dir is not None:
             import shutil
 
@@ -636,6 +669,7 @@ class App:
         construction because ``after`` schedules it there.
         """
         self._poll_preview()
+        self._poll_viewer_preview()
         run = self.run
         if run is not None:
             drained = False
@@ -687,6 +721,7 @@ class App:
             self.sub_bar.set(state.sub_fraction, state.sub_text())
         self.resource_label.configure(text=state.resource_text())
         self._render_log()
+        self._sync_bad_geometry()
 
     def _render_log(self) -> None:
         """Draw the lines the tick box admits, and hide the pane when there
@@ -740,8 +775,92 @@ class App:
             text += f"\nIntermediate files kept in: {state.tmpdir}"
         self.result_label.configure(
             text=("✔ " if state.status == progress.OK else "✘ ") + text)
-        self.open_button.grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self.end_buttons.grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self.open_button.grid(row=0, column=0, sticky="w")
+        self._sync_bad_geometry()
         self._revalidate()
+
+    # -- the bad-geometry viewer ------------------------------------------
+
+    def _sync_bad_geometry(self) -> None:
+        """Show "Show bad geometry" from the first mark on, during the run or
+        after it, and give an open viewer the marks it has not seen yet."""
+        if not self.state.has_bad_geometry:
+            return
+        if not self.bad_button.winfo_manager():
+            self.end_buttons.grid(row=6, column=0, sticky="w", pady=(4, 0))
+            self.bad_button.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        if self._viewer is not None and len(self.state.marks) != self._viewer_marks:
+            self._viewer_marks = len(self.state.marks)
+            self._viewer.set_marks(self.state.marks)
+
+    def _show_bad_geometry(self) -> None:
+        if self._viewer is not None:
+            self._viewer.deiconify()
+            self._viewer.lift()
+            self._viewer.focus_set()
+            return
+        from .badgeom import BadGeometryViewer
+
+        same = self._mesh is not None and self._mesh_for == self._run_input
+        self._viewer = BadGeometryViewer(
+            self.root, orient=self._run_orient, mesh=self._mesh if same else None,
+            marks=self.state.marks, on_close=self._viewer_closed)
+        self._viewer_marks = len(self.state.marks)
+        self._start_viewer_preview()
+
+    def _start_viewer_preview(self) -> None:
+        """Ask for the viewer's own, finer mesh of the run's input."""
+        path = self._run_input
+        if not path or not os.path.isfile(path):
+            return
+        if self._preview_dir is None:
+            self._preview_dir = tempfile.mkdtemp(prefix="latticegen2-preview-")
+        try:
+            self._viewer_preview = Preview(
+                path, os.path.join(self._preview_dir, f"v{time.monotonic_ns()}.npz"),
+                max_triangles=VIEWER_TRIANGLES)
+        except (LaunchError, OSError):
+            self._viewer_preview = None   # the small view's mesh will do
+
+    def _poll_viewer_preview(self) -> None:
+        preview = self._viewer_preview
+        if preview is None:
+            return
+        try:
+            result = preview.events.get_nowait()
+        except Exception:
+            return
+        self._viewer_preview = None
+        if result is None:
+            return
+        try:
+            import numpy as np
+
+            if self._viewer is not None:
+                with np.load(result) as z:
+                    self._viewer.set_mesh(_mesh_arrays(z))
+        except Exception:                                      # noqa: BLE001
+            pass
+        finally:
+            try:
+                os.remove(result)
+            except OSError:
+                pass
+
+    def _viewer_closed(self) -> None:
+        self._viewer = None
+        self._viewer_marks = 0
+        if self._viewer_preview is not None:
+            self._viewer_preview.abandon()
+            self._viewer_preview = None
+
+    def _close_viewer(self) -> None:
+        if self._viewer is not None:
+            self._viewer.close()
+        elif self._viewer_preview is not None:
+            self._viewer_preview.abandon()
+            self._viewer_preview = None
 
     # -- odds and ends -----------------------------------------------------
 
@@ -787,3 +906,12 @@ def launch() -> int:
     App(root)
     root.mainloop()
     return 0
+
+
+def _mesh_arrays(z) -> tuple:
+    """``(verts, tris, face, face_lo, face_hi)`` from a preview ``.npz``; the
+    last three ``None`` in one written before the helper recorded faces."""
+    def get(name):
+        return z[name] if name in z.files else None
+
+    return (z["verts"], z["tris"], get("face"), get("face_lo"), get("face_hi"))

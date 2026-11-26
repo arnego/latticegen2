@@ -129,6 +129,16 @@ down in order, the temp folder is kept for analysis and the window says where it
 is. When the run finishes, **Open export folder** takes you to the result and the
 inputs re-enable for another run.
 
+When the run warns about, or fails on, a place in the part, **Show bad
+geometry** appears beside it — from the first such warning, while the run is
+still going. It opens a large, resizable view of the input at the run's print
+orientation with every such place marked on it: **red** for a failure,
+**yellow** for a warning, as a dot, a box, a pair of points, or a whole input
+face. Click a mark, or pick it from the issue list over the top-right corner,
+for what was said about it. Rotate with a left drag, pan with a middle drag,
+zoom with the wheel, and press F to fit the part again; **Show overhangs**
+tints what will be supported in the same blue as the small view.
+
 The **verbose** tick box beside `cores` is the window's `-v`: ticked, a pane
 appears carrying every line the run logs. Unticked it holds only what the run
 said unprompted — kernel chatter, and anything on stderr, which is where a
@@ -158,7 +168,7 @@ line beneath the fields says what to change, e.g. `To start, lower Min
 thickness to at most 5.57 mm, or raise cc to at least 10.61 mm.` With it
 ticked, the parts of the
 surface that overhang more than 60° from vertical at the current orientation —
-what will be supported — are tinted in the view, and the tint follows every
+what will be supported — are tinted blue in the view, and the tint follows every
 change, so the orientation can be checked before a long run is started.
 
 The window is deliberately small and plain, so it can sit in a corner of the

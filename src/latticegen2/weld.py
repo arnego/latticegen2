@@ -72,6 +72,7 @@ from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape, TopTools_Ind
 
 from . import occ
 from .errors import ProcessingError
+from .runlog import Place, point_text
 from .lattice import OPPOSITE_HALF, LatticeParams, half_strut_offset, neighbor_step
 from .lattice import node as lattice_node
 from .parallel import WorkerPool
@@ -823,7 +824,9 @@ def _sew_round_two(
                             f"excess is a duplicated or unwelded edge at one of "
                             f"them rather than a hole somewhere else; positions "
                             f"(of all free edges): {[p.tolist() for p in where]}"
-                        )
+                        ),
+                        places=[Place.point(p, f"free edge of component {group} at "
+                                               f"{point_text(p)}") for p in where],
                     )
     if stats is not None:
         stats.t_repair = time.perf_counter() - t0
@@ -1151,7 +1154,9 @@ def interface_rings(
                     f"The boundary shell has no unique free edge for interface "
                     f"{node} cap {h} between {np.round(a, 4).tolist()} and "
                     f"{np.round(b, 4).tolist()}. The interior cannot be joined to "
-                    f"it, so the output would not be watertight."
+                    f"it, so the output would not be watertight.",
+                    places=[Place.segment(a, b, f"interface {node} cap {h} between "
+                                                f"{point_text(a)} and {point_text(b)}")],
                 )
             edge, vs = found[0]
             edges.append(edge)
@@ -1266,6 +1271,8 @@ def close_shells(shells: dict[int, TopoDS_Shell]) -> tuple[list, dict]:
             f"{open_edges} edge(s) are not used by exactly two faces ({breakdown}) "
             f"and {miso} are used twice the same way round. An edge on one face is "
             f"a hole nothing filled; on three or more, material met where it should "
-            f"have been joined. Sample positions: {[p.tolist() for p in samples]}"
+            f"have been joined. Sample positions: {[p.tolist() for p in samples]}",
+            places=[Place.point(p, f"edge not used once each way by two faces at "
+                                   f"{point_text(p)}") for p in samples],
         )
     return solids, {"assembled_shells": len(shells)}

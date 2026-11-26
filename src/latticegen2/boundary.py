@@ -57,6 +57,7 @@ from OCP.TopTools import TopTools_ListOfShape
 from . import occ
 from .connect import UnionFind
 from .errors import ProcessingError
+from .runlog import Place, point_text
 from .junction import JunctionTemplate, build_template, is_cap_plane_face
 from .lattice import (
     OPPOSITE_HALF,
@@ -455,7 +456,8 @@ def _retrim_per_half(
                 f"Re-trimming half-strut {h} of the junction at "
                 f"{tuple(node_pos)} failed. The fused junction's own "
                 f"intersection had already returned it untrimmed, so there is "
-                f"no result left to fall back on."
+                f"no result left to fall back on.",
+                places=_junction_places(node_pos),
             )
         solids = occ.solids(algo.Shape())
         got = sum(occ.volume(sd) for sd in solids)
@@ -481,7 +483,8 @@ def _retrim_per_half(
     if not fuse.IsDone():
         raise ProcessingError(
             f"Could not fuse the re-trimmed half-struts of the junction at "
-            f"{tuple(node_pos)} back into one solid."
+            f"{tuple(node_pos)} back into one solid.",
+            places=_junction_places(node_pos),
         )
     fuse.SimplifyResult()
     return fuse.Shape()
@@ -523,7 +526,8 @@ def trim_junction(
     algo.Build()
     if not algo.IsDone():
         raise ProcessingError(
-            f"Boundary intersection failed for junction at {tuple(node_pos)}."
+            f"Boundary intersection failed for junction at {tuple(node_pos)}.",
+            places=_junction_places(node_pos),
         )
 
     result = algo.Shape()
@@ -665,7 +669,8 @@ def _remove_pinholes(node_pos: np.ndarray, solid, tol: float | None = None):
             solid, PINHOLE_WIRE_TOL if tol is None else tol)
     except Exception as exc:                                   # noqa: BLE001
         raise ProcessingError(
-            f"Pinhole-wire removal failed for the junction at {tuple(node_pos)}: {exc}"
+            f"Pinhole-wire removal failed for the junction at {tuple(node_pos)}: {exc}",
+            places=_junction_places(node_pos),
         ) from exc
     if n_removed <= 0:
         return solid, 0
@@ -679,7 +684,8 @@ def _remove_pinholes(node_pos: np.ndarray, solid, tol: float | None = None):
             f"{tuple(node_pos)} changed its surface area from {area_before:.9g} "
             f"to {area_after:.9g} mm^2 ({drift:.3e} relative, tolerance "
             f"{PINHOLE_AREA_TOL:g}). A wire that bounds no area cannot change "
-            f"it, so one that bounded something was removed."
+            f"it, so one that bounded something was removed.",
+            places=_junction_places(node_pos),
         )
 
     reason = occ.only_inner_wires_dropped(
@@ -689,10 +695,16 @@ def _remove_pinholes(node_pos: np.ndarray, solid, tol: float | None = None):
         raise ProcessingError(
             f"Removing {n_removed} pinhole wire(s) from the junction at "
             f"{tuple(node_pos)} did not leave the piece's boundary intact: "
-            f"{reason}."
+            f"{reason}.",
+            places=_junction_places(node_pos),
         )
     return cleaned, n_removed
 
+
+
+def _junction_places(node_pos) -> tuple:
+    """A failing junction as a place, for the bad-geometry viewer."""
+    return (Place.point(node_pos, f"junction at {point_text(node_pos)}"),)
 
 # --- Interface resolution (master side) -------------------------------------
 

@@ -111,3 +111,36 @@ def thin(tris: np.ndarray, limit: int) -> np.ndarray:
     if len(tris) <= limit:
         return np.arange(len(tris))
     return np.linspace(0, len(tris) - 1, limit).astype(np.int64)
+
+
+# -- the bad-geometry viewer's camera (specification.md §3.1) -----------------
+#
+# The viewer projects through the same fixed frame as the small view; what it
+# adds is a *view* rotation in front of that frame, a scale and a pan. Turning
+# the view rather than the part is what keeps the run's print orientation out
+# of reach of the mouse there, and a left drag turns it exactly as a drag turns
+# the part in the small view, through :func:`drag_rotation`.
+
+def view_points(points: np.ndarray, view: np.ndarray, pivot: np.ndarray) -> np.ndarray:
+    """Bed-space points turned by the view rotation ``view`` about ``pivot``."""
+    points = np.asarray(points, dtype=float)
+    return (points - pivot) @ np.asarray(view).T + pivot
+
+
+def fit_scale(extent: float, width: float, height: float, margin: float = 1.15) -> float:
+    """Pixels per millimetre that fit a sphere of radius ``extent`` in the view."""
+    return min(width, height) * 0.5 / (max(extent, 1e-6) * margin)
+
+
+def zoom_about(scale: float, pan: tuple, factor: float, cursor: tuple,
+               centre: tuple) -> tuple[float, tuple]:
+    """``(scale, pan)`` after zooming by ``factor`` about the pixel ``cursor``.
+
+    A screen point is ``centre + pan + scale * xy``; the point under the cursor
+    stays under it, which is what makes a wheel zoom feel anchored.
+    """
+    new = scale * factor
+    k = new / scale
+    px = cursor[0] - centre[0] - (cursor[0] - centre[0] - pan[0]) * k
+    py = cursor[1] - centre[1] - (cursor[1] - centre[1] - pan[1]) * k
+    return new, (px, py)

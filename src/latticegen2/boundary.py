@@ -471,9 +471,9 @@ FUZZY_CHECK_SAMPLES = 2000
 fuzzy trim is held to (:func:`_inside_volume`).
 
 At 2,000 the standard error on a junction 40 % inside is about 1 % of the
-junction, a quarter of a mm³ at ``cc=7, t=1.4``, at about 2 s per junction
-with the body's exact classifier. It is paid only where a fuzzy rung is about
-to be kept."""
+junction, a quarter of a mm³ at ``cc=7, t=1.4``. Each junction repaired this
+way took 7 to 11 s in all on the user's 514-face body, ladder included, in a
+worker. It is paid only where a fuzzy rung is about to be kept."""
 
 FUZZY_CHECK_SIGMAS = 4.0
 FUZZY_CHECK_REL = 0.01

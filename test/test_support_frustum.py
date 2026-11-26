@@ -805,3 +805,21 @@ def test_a_lost_piece_holding_a_bare_point_joins_the_support_it_touches():
     assert n == 1 and len(solids) == 1
     assert occ.volume(solids[0]) == pytest.approx(12.0)     # overlap counted once
     assert exact_inside(solids[0], bare).all()
+
+
+def test_a_trim_the_kernel_will_not_unify_is_kept_as_trimmed(monkeypatch):
+    """`ShapeUpgrade_UnifySameDomain` throws `Courbes non jointives` on sound
+    trimmed geometry (docs/algorithm.md §9). Merging faces only makes a support
+    smaller, so a throw keeps the trim unmerged rather than ending the run --
+    which it did on a user's part, seven minutes into `support`."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.Standard import Standard_Failure
+
+    from latticegen2.support import frustum
+
+    def refuse(*_a, **_k):
+        raise Standard_Failure("Courbes non jointives")
+
+    monkeypatch.setattr(frustum.occ, "unify_same_domain", refuse)
+    box = BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape()
+    assert frustum._unified(box, gates=None).IsSame(box)

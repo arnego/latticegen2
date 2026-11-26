@@ -37,6 +37,7 @@ TESTDIR = os.path.join(ROOT, "test")
 BALL = os.path.join(TESTDIR, "80mm-test-ball.step")
 CYLINDER = os.path.join(TESTDIR, "test-cylinder.STEP")
 GAPS = os.path.join(TESTDIR, "support-gaps.step")
+DEFECT = os.path.join(TESTDIR, "input-defect.step")
 CLIPPED = {name: os.path.join(TESTDIR, f"support-clipped-{name}.step")
            for name in ("cone", "cylinder")}
 BALL_GOLDEN = os.path.join(TESTDIR, "80mm-test-ball-cc20t4-golden-sample.step")
@@ -565,6 +566,46 @@ def scenario_support_gaps(outdir: str) -> Report:
     return rep
 
 
+def scenario_input_defect(outdir: str) -> Report:
+    """A block whose roof carries the contradiction of a user's file: an edge
+    naming a vertex 13 mm from where its curve ends (docs/algorithm.md §7.5,
+    tools/make_input_defect_part.py). Unrepaired, the run is refused at
+    `tessellate`, the roof's near face meshing to half its area; repaired, it
+    must ship with every ceiling point backed.
+
+    The output is judged against the block the file *means*, written afresh by
+    the tool that made the defect, rather than against the defective file: that
+    file's own roof face meshes to half its area, so sampling it would test
+    half the ceiling."""
+    import make_input_defect_part as part
+
+    rep = Report("input-defect")
+    print(f"=== {rep.name} ===", flush=True)
+    out = os.path.join(outdir, "input-defect.step")
+    intended = os.path.join(outdir, "input-defect-intended.step")
+    proc, elapsed = run_generator(
+        ["-i", DEFECT, "-cc", "10", "-t", "1.5", "-o", out, "--cores", "4", "--support"]
+    )
+    rep.check("process exits 0", proc.returncode == 0, proc.stderr.strip()[-300:])
+    rep.check("runtime under 2 minutes", elapsed < 120, f"{elapsed:.1f}s")
+    if proc.returncode == 0:
+        with open(os.path.splitext(out)[0] + ".log", encoding="utf-8") as fh:
+            log = fh.read()
+        rep.check("the input is repaired at the defect",
+                  "input_defects_repaired: 1" in log and "input_defects_left: 0" in log,
+                  "note present" if "note: the input file contradicts itself" in log
+                  else "no repair note")
+        rep.check("no warning about the input is left",
+                  "WARNING: the input file" not in log)
+        rep.check("the generator's own count agrees: no ceiling point bare",
+                  "support_ceiling_points_uncovered: 0" in log, _unbacked(log))
+        part.write_intended(intended)
+        geometry_checks(rep, out, intended, 10.0, 1.5)
+        support_checks(rep, out, intended, 10.0, 1.5, (0.0, 0.0, 0.0), 1.0,
+                       final_print=True)
+    return rep
+
+
 def scenario_support_tilted(outdir: str) -> Report:
     """Orientation and support together, on the ball: a curved overhang, tilted."""
     rep = Report("support-tilted")
@@ -672,6 +713,7 @@ SCENARIOS = {
     "oriented-lattice": scenario_oriented_lattice,
     "support-gaps": scenario_support_gaps,
     "support-clipped": scenario_support_clipped,
+    "input-defect": scenario_input_defect,
     "support-tilted": scenario_support_tilted,
     "support-cylinder": scenario_support_cylinder,
     "rehearsal-support": scenario_rehearsal_support,

@@ -344,7 +344,8 @@ the design choices are in
 [tools/prototypes/RESULTS.md](tools/prototypes/RESULTS.md).
 
 ```
-import → tessellate → classify → instance interior → trim boundary
+import (+ repair the input where it contradicts itself)
+       → tessellate → classify → instance interior → trim boundary
        → connect → stitch → simplify → validate → write STEP
 ```
 

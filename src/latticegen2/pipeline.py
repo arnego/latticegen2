@@ -42,6 +42,7 @@ from .classify import Klass, classify_nodes, stage_mesh, tessellate_surface
 from .cli import Args
 from .connect import build_components
 from .errors import InputGeometryError, OutputError, ProcessingError
+from .inputfix import repair_input
 from .interior import build_interior_shell, extract_template_mesh
 from .junction import build_template
 from .lattice import candidate_nodes_of_points, lattice_params, neighbor_step, part_name
@@ -168,9 +169,14 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
                 f"Input STEP contains no solid bodies: {args.input}. The lattice "
                 f"bounds must be defined by a solid, not by surfaces alone."
             )
+        # Before anything reads the body: every later stage, the workers' staged
+        # copy included, must see the repaired one (docs/algorithm.md §7.5).
+        input_repair = repair_input(body)
+        body = input_repair.shape
         lo, hi = occ.bounding_box(body)
         seam_gap = occ.surface_seam_gaps(body, bar=SEAM_GAP_WARN_FRACTION * args.t)
     rl.line(f"input bounding box: lo={np.round(lo, 4).tolist()} hi={np.round(hi, 4).tolist()}")
+    _report_input_repair(rl, input_repair, args.t, stats)
     _report_seam_gaps(rl, seam_gap, args.t, stats)
 
     body_path = os.path.join(tmpdir, "input.brep")
@@ -903,6 +909,75 @@ Measured, gap divided by the ``t`` each part is normally run at: the ball
 4.2e-02. The first two are silent, the last two speak up, and only the last is
 actually refused later — which is the honest state of knowledge here.
 """
+
+
+#: A vertex of the input whose tolerance is past this fraction of ``t`` is
+#: reported: the file describes that point no more closely than a tenth of a
+#: strut, the bar the pipeline's own tolerance repairs are held to
+#: (docs/algorithm.md §8, ``occ.SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION``).
+INPUT_VERTEX_TOL_WARN_FRACTION = occ.SELF_INTERSECT_MAX_VERTEX_TOL_FRACTION
+
+
+def _report_input_repair(rl: RunLog, repair, t: float, stats: dict) -> None:
+    """Say where the input file contradicts itself, and what was done about it.
+
+    A repaired defect is a ``note:``, since the output is then as the file
+    meant it; it is printed regardless of ``-v`` because it is about the
+    user's *file*, which should be fixed in CAD all the same. A defect left as
+    built is a warning naming its position when it is wider than
+    :data:`INPUT_VERTEX_TOL_WARN_FRACTION` of ``t``: the lattice and support near
+    it may be missing (docs/algorithm.md §7.5). A narrower one is logged only:
+    `TD_HX_rehearsal_test.step`, inspected and accepted, has one of 0.016 mm.
+    """
+    bar = INPUT_VERTEX_TOL_WARN_FRACTION * t
+    fixed = [d for d in repair.defects if d.repaired]
+    left = [d for d in repair.defects if not d.repaired]
+    wide = [d for d in left if d.span > bar]
+    stats["input_defects_repaired"] = len(fixed)
+    stats["input_defects_left"] = len(left)
+    stats["input_max_vertex_tol_mm"] = f"{repair.max_vertex_tol:.3e}"
+    if fixed:
+        rl.always(
+            f"note: the input file contradicts itself at {len(fixed)} place(s) and "
+            f"was repaired there: an edge's curve ends up to "
+            f"{max(d.span for d in fixed):.4f} mm from the vertex the file gives it, "
+            f"on an edge running on past it, so two faces claimed the same strip; "
+            f"that edge is split where the curve really ends. Worth fixing in the CAD "
+            f"model at {points_text([d.where for d in fixed])}"
+        )
+    for d in left:
+        if d not in wide:
+            rl.line(f"input: an edge's curve ends {d.span:.3e} mm from its vertex at "
+                    f"{point_text(d.where)}, left as built ({d.reason}) -- under "
+                    f"{INPUT_VERTEX_TOL_WARN_FRACTION:g} of t={t:g} mm")
+    if wide:
+        rl.always(warning_text(
+            "the input file contradicts itself",
+            f"at {len(wide)} place(s) an edge's curve ends up to "
+            f"{max(d.span for d in wide):.4f} mm from the vertex the file gives it, "
+            f"more than {INPUT_VERTEX_TOL_WARN_FRACTION:g} of t={t:g} mm, and the "
+            f"repair could not be made ({'; '.join(sorted({d.reason for d in wide}))})",
+            "Booleans against the body there can fail, so lattice or support near it "
+            "may be missing and an overhang there may be left unsupported; fix the CAD "
+            "model at that point",
+            [f"curve ends at {point_text(d.where)}, vertex at {point_text(d.vertex)}"
+             for d in wide],
+        ))
+    # One place, one warning: a vertex fattened by a gap just reported is that gap.
+    explained = any(d.vertex == repair.max_vertex_tol_at for d in wide)
+    if repair.max_vertex_tol > bar and not explained:
+        rl.always(warning_text(
+            "the input file is imprecise",
+            f"a vertex of the input is described only to within "
+            f"{repair.max_vertex_tol:.4f} mm, more than "
+            f"{INPUT_VERTEX_TOL_WARN_FRACTION:g} of t={t:g} mm",
+            "Booleans against the body there can fail, so lattice or support near it "
+            "may be missing; fix the CAD model at that point",
+            [f"at {point_text(repair.max_vertex_tol_at)}"],
+        ))
+    else:
+        rl.line(f"input vertex tolerances: worst {repair.max_vertex_tol:.3e} mm at "
+                f"{point_text(repair.max_vertex_tol_at)}")
 
 
 def _report_seam_gaps(rl: RunLog, gap, t: float, stats: dict) -> None:

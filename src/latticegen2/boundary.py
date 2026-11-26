@@ -37,6 +37,7 @@ and small metadata cross the process boundary, never geometry.
 from __future__ import annotations
 
 import itertools
+import math
 import os
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -206,6 +207,11 @@ class BoundaryResult:
     n_localized_junctions: int = 0
     """Junctions re-trimmed against a locally cut block of the body because the
     whole-body intersection left material outside it (docs/algorithm.md §7.2)."""
+    n_fuzzy_junctions: int = 0
+    """Junctions trimmed at a value of :data:`JUNCTION_FUZZY_LADDER` because the
+    trims before it left material outside the body (docs/algorithm.md §7.2)."""
+    fuzzy_nodes: list = field(default_factory=list)
+    """Their nodes, each with the fuzzy value it needed, for the note to name."""
     n_dropped_junctions: int = 0
     """Junctions discarded because no intersection kept them inside the body
     (docs/algorithm.md §7.2, :attr:`TrimResult.dropped`)."""
@@ -321,6 +327,9 @@ class TrimResult(NamedTuple):
     so the neighbours' caps simply stay closed and the output stays watertight.
     Reported loudly, never silently: a run that has to do this should say so.
     """
+    fuzzy: float = 0.0
+    """The value of :data:`JUNCTION_FUZZY_LADDER` the kept trim was made with,
+    or zero when the trim needed none (docs/algorithm.md §7.2)."""
 
 
 LOCAL_BLOCK_CELLS = 1.0
@@ -416,6 +425,121 @@ def _retrim_against_local_block(
     algo.SetTools(tools)
     algo.Build()
     return algo.Shape() if algo.IsDone() else None
+
+
+JUNCTION_FUZZY_LADDER = (1e-5, 1e-4, 1e-3)
+"""Millimetres. Fuzzy values the whole-body trim is retried at, in order, when
+it and the local block both leave material outside (docs/algorithm.md §7.2).
+
+The ladder the support trims climb (``support.build.FUZZY_LADDER``) less its
+zero rung, which this junction has already tried. Measured on a user's
+`TDHX_error_report_test.stp` at ``cc=7, t=1.4, --orient 180 0 0``: three
+fillets around a bore meet one another 3.5e-05 mm apart, a gap their edge
+tolerance covers, beside a plane they meet; three junctions crossing that
+corner trim wrong at 0 and 2e-05 and exactly from 5e-05 up. The top rung is
+400 times below the smallest legal strut."""
+
+
+def _trim_fuzzy(
+    tpl: JunctionTemplate,
+    node_pos: np.ndarray,
+    body: TopoDS_Shape,
+    fuzzy: float,
+) -> TopoDS_Shape | None:
+    """The fused junction's intersection with the body at a fuzzy value.
+
+    ``None`` when the kernel does not finish or raises: the caller then keeps
+    what it had, which the probe has already judged."""
+    try:
+        algo = BRepAlgoAPI_Common()
+        args = TopTools_ListOfShape()
+        args.Append(tpl.solid.Moved(occ.translation(node_pos)))
+        tools = TopTools_ListOfShape()
+        tools.Append(body)
+        algo.SetArguments(args)
+        algo.SetTools(tools)
+        algo.SetFuzzyValue(fuzzy)
+        algo.Build()
+        if not algo.IsDone():
+            return None
+        return algo.Shape()
+    except Exception:  # noqa: BLE001 -- OCCT's Standard_Failure; the rung is optional
+        return None
+
+
+FUZZY_CHECK_SAMPLES = 2000
+"""Points drawn inside a junction to read its volume within the body, which a
+fuzzy trim is held to (:func:`_inside_volume`).
+
+At 2,000 the standard error on a junction 40 % inside is about 1 % of the
+junction, a quarter of a mm³ at ``cc=7, t=1.4``. Each junction repaired this
+way took 7 to 11 s in all on the user's 514-face body, ladder included, in a
+worker. It is paid only where a fuzzy rung is about to be kept."""
+
+FUZZY_CHECK_SIGMAS = 4.0
+FUZZY_CHECK_REL = 0.01
+"""A fuzzy trim passes when its volume is within ``FUZZY_CHECK_SIGMAS``
+standard errors plus ``FUZZY_CHECK_REL`` of the junction of the sampled
+reading. The relative term absorbs points classified on the body's surface."""
+
+
+def _junction_points(lp: LatticeParams, node_pos: np.ndarray, n: int,
+                     seed: int = 1) -> np.ndarray:
+    """``n`` points drawn uniformly inside the junction at ``node_pos``.
+
+    Membership is read off the half-struts analytically (docs/algorithm.md
+    §3.1: a diamond of circumradius ``r`` in ``(u_k, v_k)``, from the node to
+    the cap at ``a/2``), so no boolean and no classifier is asked."""
+    rng = np.random.default_rng(seed)
+    reach = lp.a / 2.0 + lp.r
+    node_pos = np.asarray(node_pos, dtype=float)
+    got = []
+    count = 0
+    while count < n:
+        rel = (rng.random((4 * n, 3)) * 2.0 - 1.0) * reach
+        inside = np.zeros(len(rel), dtype=bool)
+        for k in range(3):
+            along = rel @ lp.e[k]
+            across = np.abs(rel @ lp.u[k]) + np.abs(rel @ lp.v[k])
+            inside |= (np.abs(along) <= lp.a / 2.0) & (across <= lp.r)
+        got.append(rel[inside])
+        count += int(inside.sum())
+    return node_pos + np.concatenate(got)[:n]
+
+
+def _inside_volume(lp: LatticeParams, tpl: JunctionTemplate, node_pos: np.ndarray,
+                   body: TopoDS_Shape, n: int = FUZZY_CHECK_SAMPLES):
+    """``(volume, standard error)`` of the junction within ``body``, sampled.
+
+    Asked of points with the body's exact classifier, not of a boolean, so it
+    shares nothing with the trim it judges."""
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.TopAbs import TopAbs_State
+    from OCP.gp import gp_Pnt
+
+    pts = _junction_points(lp, node_pos, n)
+    classifiers = [BRepClass3d_SolidClassifier(s) for s in occ.solids(body)]
+    hits = 0
+    for p in pts:
+        g = gp_Pnt(float(p[0]), float(p[1]), float(p[2]))
+        for c in classifiers:
+            c.Perform(g, 1e-7)
+            if c.State() == TopAbs_State.TopAbs_IN:
+                hits += 1
+                break
+    f = hits / n
+    se = tpl.volume * max(math.sqrt(f * (1.0 - f) / n), 1.0 / n)
+    return tpl.volume * f, se
+
+
+def _fuzzy_volume_ok(lp, tpl, node_pos, body, got: float) -> bool:
+    """Whether a fuzzy trim of ``got`` mm³ agrees with the sampled reading.
+
+    The probe sees only material *outside* the body; this is what stops a rung
+    that returned too little of the junction from replacing the reported drop
+    with a quiet note."""
+    want, se = _inside_volume(lp, tpl, node_pos, body)
+    return abs(got - want) <= FUZZY_CHECK_SIGMAS * se + FUZZY_CHECK_REL * tpl.volume
 
 
 def _retrim_per_half(
@@ -589,6 +713,7 @@ def trim_junction(
     # sharing no machinery with the kernel that produced the error — at a few
     # milliseconds per junction, so every junction can be asked.
     localized = False
+    fuzzy_used = 0.0
     outside_mm = 0.0
     if probe is not None and out:
         outside_mm = probe.worst_outside(_piece_vertices(out))
@@ -608,6 +733,34 @@ def trim_junction(
                     out, tolerances, n_pinholes = candidate, cand_tol, n_ph
                     outside_mm = still
                     localized = True
+        # **Then the same intersection, with a fuzzy value.** Where the input's
+        # own faces meet with a gap their edge tolerance covers, the kernel at
+        # fuzzy 0 can leave a strut face crossing that seam unsplit and keep it
+        # whole, and a block cut from the body there inherits the gap, so the
+        # rung above fails the same way (docs/algorithm.md §7.2). Each rung is
+        # judged by the probe exactly as the block is, and kept only if better.
+        # One that clears the probe is also held to a sampled reading of how
+        # much of the junction lies in the body, since the probe cannot see a
+        # trim that kept too little; a rung that fails it is skipped.
+        for fuzzy in JUNCTION_FUZZY_LADDER:
+            if outside_mm <= 0.0:
+                break
+            repaired = _trim_fuzzy(tpl, node_pos, body, fuzzy)
+            if repaired is None:
+                continue
+            candidate, cand_tol, n_ph = finish(occ.solids(repaired))
+            still = probe.worst_outside(_piece_vertices(candidate)) if candidate else None
+            if still is None or still >= outside_mm:
+                continue
+            if still == 0.0 and not _fuzzy_volume_ok(
+                    lp, tpl, node_pos, body, sum(v for _f, _t, v in candidate)):
+                continue
+            out, tolerances, n_pinholes = candidate, cand_tol, n_ph
+            outside_mm = still
+            fuzzy_used = fuzzy
+            # The block's result, if any, is what this replaced: the junction
+            # is reported once, by the rung whose trim it keeps.
+            localized = False
         if outside_mm > 0.0:
             # Nothing this stage can do trims it correctly, so it does not go
             # into the output at all. See `TrimResult.dropped`. The pinhole
@@ -618,7 +771,8 @@ def trim_junction(
             return TrimResult(
                 [], n_pinholes, [], retrimmed, localized, outside_mm, True
             )
-    return TrimResult(out, n_pinholes, tolerances, retrimmed, localized, outside_mm)
+    return TrimResult(out, n_pinholes, tolerances, retrimmed, localized, outside_mm,
+                      fuzzy=fuzzy_used)
 
 
 FUSE_PINHOLE_WIRE_TOL = 1e-3
@@ -1251,6 +1405,7 @@ def _worker_trim(job):
     n_pinhole_wires = 0
     n_retrimmed = 0
     n_localized = 0
+    fuzzy_nodes = []
     dropped_nodes = []
     worst_outside = 0.0
     worst_node = None
@@ -1261,6 +1416,8 @@ def _worker_trim(job):
             n_retrimmed += 1
         if trim.localized:
             n_localized += 1
+        if trim.fuzzy:
+            fuzzy_nodes.append((tuple(int(x) for x in node_batch[i]), trim.fuzzy))
         if trim.dropped:
             dropped_nodes.append(tuple(int(x) for x in node_batch[i]))
             if trim.outside_mm > worst_outside:
@@ -1281,7 +1438,7 @@ def _worker_trim(job):
 
     rss = peak_rss_bytes()
     pinholes = (n_pinhole_junctions, n_pinhole_wires, n_retrimmed,
-                n_localized, worst_outside, worst_node, dropped_nodes)
+                n_localized, worst_outside, worst_node, dropped_nodes, fuzzy_nodes)
     # `rss` stays last: WorkerPool.run reads it positionally at rss_index=-1, a
     # convention shared by every worker function in this codebase.
     if bundles:
@@ -1366,6 +1523,10 @@ def trim_boundary(
                 result.n_retrimmed_junctions += 1
             if trim.localized:
                 result.n_localized_junctions += 1
+            if trim.fuzzy:
+                result.n_fuzzy_junctions += 1
+                result.fuzzy_nodes.append(
+                    (tuple(int(x) for x in boundary_nodes[i]), trim.fuzzy))
             if trim.dropped:
                 result.n_dropped_junctions += 1
                 result.dropped_nodes.append(tuple(int(x) for x in boundary_nodes[i]))
@@ -1425,6 +1586,8 @@ def trim_boundary(
             result.n_localized_junctions += pinholes[3]
             result.n_dropped_junctions += len(pinholes[6])
             result.dropped_nodes += pinholes[6]
+            result.n_fuzzy_junctions += len(pinholes[7])
+            result.fuzzy_nodes += pinholes[7]
             if pinholes[4] > result.worst_outside_mm:
                 result.worst_outside_mm = pinholes[4]
                 result.worst_outside_node = pinholes[5]

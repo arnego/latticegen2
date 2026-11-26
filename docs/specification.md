@@ -614,7 +614,10 @@ scenario and the unit tests that read it.** It was the only committed part whose
 dominant component tiled and the only scenario exercising §7.2 — the
 intersection that returns its own operand, the local-block re-trim, and a
 junction dropped for containment — so **§7.2 now has no automated coverage**
-beyond the box-only unit test that a junction wholly inside is checked and kept.
+beyond the box-only unit test that a junction wholly inside is checked and kept,
+and 	est/fillet-seam-block.brep (	est/test_boundary_fillet_seam.py), a cut of a
+user's part on which the exact trim and the local block both leave material
+outside and the fuzzy rung trims it exactly.
 `TD_HX_rehearsal_test.step` at `cc=5, t=1` re-trims 35 junctions per
 half-strut, but it is far too slow to be a scenario. The measurements made on
 `SpiralTest` stay in docs/algorithm.md as the record they are.

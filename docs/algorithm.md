@@ -2327,8 +2327,21 @@ program builds itself.
   `--progress-stream` the same run additionally reports itself as one JSON object
   per line on stdout, for the graphical front-end (specification.md §3.1). It is
   defined once in [`src/latticegen2/progress.py`](../src/latticegen2/progress.py)
-  — seven event types, each declaring exactly the fields it carries, so the
+  — eight event types, each declaring exactly the fields it carries, so the
   consumer indexes rather than probes.
+
+  **The eighth, `mark`, says where a warning or a failure points, as numbers.**
+  A warning's places are `runlog.Place` objects -- a point, a box, a
+  segment of two points or an input face by centroid and box -- each carrying
+  the exact line the warning prints for it, so a warning built from places reads
+  byte for byte as one built from strings. `RunLog.warning` writes the warning
+  as `always` does and, when watched, follows its `log` event with a `mark`
+  event (severity `warning`, at most `MARK_PLACES` places); like `stage_begin`
+  it adds nothing to the `.log`. A failure's exception may carry `places` too,
+  and `__main__` emits them as a `mark` of severity `error` immediately before
+  `result`. A message that points nowhere sends no mark. The window's
+  bad-geometry viewer (specification.md §3.1) draws these; nothing else reads
+  them.
 
   **The guarantee is that watching a run does not change it.** The `.log` gets
   the same bytes either way and so does the `.step`;
@@ -2674,11 +2687,11 @@ Alternatives evaluated and rejected:
 | [`src/latticegen2/stepout.py`](../src/latticegen2/stepout.py) | §9 (header rewrite) |
 | [`src/latticegen2/runlog.py`](../src/latticegen2/runlog.py) | §10 (logging, stage timings, summary, the declared stage order, and the progress events every stage emits through it) |
 | [`src/latticegen2/progress.py`](../src/latticegen2/progress.py) | §10 (the NDJSON event schema, its emitter and its reader, plus the cancel-sentinel path both processes derive) |
-| [`src/latticegen2/gui/`](../src/latticegen2/gui/) | specification.md §3.1 (the window, the subprocess runner and the stage weights) — imports no geometry module and no OCP |
+| [`src/latticegen2/gui/`](../src/latticegen2/gui/) | specification.md §3.1 (the window, the subprocess runner, the stage weights, and the bad-geometry viewer: `marks.py` reads `mark` events, `badgeom.py` draws them through the orientation view's renderer) — imports no geometry module and no OCP |
 | [`src/latticegen2/pipeline.py`](../src/latticegen2/pipeline.py) | §4 (orchestration), §5.4 (dispatching the classification sweep), §9 (parallel unification, and the master-side validity gate) |
 | [`src/latticegen2/orient.py`](../src/latticegen2/orient.py) | §14.0 (the three angles, the rotation, the build direction) — pure NumPy, shared by the command line, the lattice maths and the window |
 | [`src/latticegen2/support/`](../src/latticegen2/support/) | §14.1–§14.4 (overhang detection, the support stage and its contract, the support algorithm: ceiling points, anchors, boxes on the lattice grid, the two manifold repairs, trims, pockets) — imported only under `--support` |
-| [`src/latticegen2/preview.py`](../src/latticegen2/preview.py) | specification.md §3.1 (the coarse mesh of the input the window draws on the print bed) |
+| [`src/latticegen2/preview.py`](../src/latticegen2/preview.py) | specification.md §3.1 (the coarse mesh of the input the window draws on the print bed and in the bad-geometry viewer, with the face each triangle came from and each face's box) |
 | [`src/latticegen2/__main__.py`](../src/latticegen2/__main__.py) | Entry point, failure reporting, exit codes |
 
 ---

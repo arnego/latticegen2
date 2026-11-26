@@ -106,7 +106,7 @@ def run_support(args, rl, lp, body, body_path, mesh, mesh_path, lattice,
         for line in result.lines:
             rl.line(line)
         for note in result.notes:
-            rl.always(note)
+            rl.warning(note)
         stats.update(result.stats)
         assembled = assemble.assemble(lattice, list(result.supports), lp,
                                       kept_nodes, report=rl.substage, lost=lost,

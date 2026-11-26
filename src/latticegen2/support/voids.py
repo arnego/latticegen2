@@ -46,7 +46,7 @@ from OCP.gp import gp_Pnt
 
 from .. import occ
 from ..errors import ProcessingError
-from ..runlog import box_text
+from ..runlog import Place
 
 
 class CutRefused(ProcessingError):
@@ -705,7 +705,7 @@ def find_pockets(body, body_mesh, cells: list, lattice_near, thickness: float, *
             if run and (k is None or k != run[-1] + 1):
                 rlo, rhi = box((spans[run[0]][0], spans[run[-1]][1]))
                 rlo, rhi = np.maximum(rlo, body_lo), np.minimum(rhi, body_hi)
-                unsearched.append(box_text(rlo, rhi))
+                unsearched.append(Place.box(rlo, rhi))
                 refusals.append(f"{unsearched[-1]}: {got[run[0]]}")
                 run = []
             if k is not None:

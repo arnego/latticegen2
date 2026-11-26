@@ -48,7 +48,7 @@ from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
 from .. import occ
 from ..errors import ProcessingError
 from ..cli import support_grid
-from ..runlog import point_text, warning_text
+from ..runlog import WARNING_PLACES, Place, point_text, warning_text
 from .params import REQUIRED_SLACK, SIN_START
 
 ANCHOR_DROP_PITCHES = 3
@@ -247,7 +247,10 @@ def _anchors(g: _Grid, v: np.ndarray, in_body, in_lattice):
             raise ProcessingError(
                 f"{int(missing.sum())} ceiling point(s) found no anchor on a rod or a wall "
                 f"within {ANCHOR_DROP_MAX_PITCHES} grid pitches, the first near {where} "
-                f"(docs/algorithm.md §14.3)."
+                f"(docs/algorithm.md §14.3).",
+                places=[Place.point(g.world(p * g.q), "ceiling point with no anchor at "
+                                    + point_text(g.world(p * g.q)))
+                        for p in v[missing][:WARNING_PLACES]],
             )
         reach *= 4
 
@@ -1049,8 +1052,8 @@ def build(body, mesh, rmesh, local, lp, thickness: float, gates, tmpdir: str,
             f"holds ceiling points (docs/algorithm.md §14.3 S6)",
             f"about {sum(d[2] for d in dropped):.1f} mm^3 of support is missing, and "
             f"{int(lost.sum())} ceiling point(s) may print unsupported",
-            [f"{tag} near {point_text(where)}: {est:.1f} mm^3, "
-             f"{int(held.sum())} ceiling point(s); {why}"
+            [Place.point(where, f"{tag} near {point_text(where)}: {est:.1f} mm^3, "
+                                f"{int(held.sum())} ceiling point(s); {why}")
              for tag, where, est, held, why in dropped],
         ))
     stats.update({"support_debris_solids": len(debris),

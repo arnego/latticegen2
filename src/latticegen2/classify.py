@@ -41,7 +41,7 @@ from . import occ
 from .errors import InputGeometryError
 from .lattice import LatticeParams, half_strut_offset, lattice_params, nodes
 from .parallel import WorkerPool
-from .runlog import box_text, point_text
+from .runlog import Place, box_text, point_text
 
 
 class Klass(IntEnum):
@@ -186,7 +186,8 @@ def check_surface_mesh_coverage(
             raise InputGeometryError(
                 f"Surface tessellation produced zero elements for face {idx} "
                 f"(exact CAD area {exact:.4f} mm^2){_face_place(face)}. The input "
-                f"geometry could not be faithfully meshed for boundary classification."
+                f"geometry could not be faithfully meshed for boundary classification.",
+                places=_face_places(face, idx),
             )
         verts, tris = tri
         a0, b0, c0 = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
@@ -202,7 +203,8 @@ def check_surface_mesh_coverage(
                 f"{min_deficit:.4f} mm^2). Classification against this mesh would "
                 f"misclassify struts near the missing region as OUTSIDE rather than "
                 f"fail. The input face likely needs repair in the originating CAD "
-                f"tool{_face_place(face)}."
+                f"tool{_face_place(face)}.",
+                places=_face_places(face, idx),
             )
 
         lo, hi = occ.bounding_box(face)
@@ -218,7 +220,10 @@ def check_surface_mesh_coverage(
                 f"outside that face's own CAD bounding box ({box_text(lo, hi)}, "
                 f"slack {bbox_slack:g} mm). The triangulation is mis-parametrized and "
                 f"classification against it would be unreliable. The input face "
-                f"likely needs repair in the originating CAD tool."
+                f"likely needs repair in the originating CAD tool.",
+                places=(*_face_places(face, idx),
+                        Place.point(verts[worst],
+                                    f"mesh node at {point_text(verts[worst])}")),
             )
 
 
@@ -230,6 +235,17 @@ def _face_place(face) -> str:
         return f", centred at {point_text(occ.centroid(face))} ({box_text(lo, hi)})"
     except Exception:                           # pragma: no cover - defensive
         return ""
+
+
+def _face_places(face, idx: int) -> tuple:
+    """The same face as a place, for the bad-geometry viewer."""
+    try:
+        lo, hi = occ.bounding_box(face)
+        c = occ.centroid(face)
+        return (Place.face(c, lo, hi, f"face {idx}, centred at {point_text(c)} "
+                                      f"({box_text(lo, hi)})"),)
+    except Exception:                           # pragma: no cover - defensive
+        return ()
 
 
 def surface_samples(face) -> np.ndarray | None:

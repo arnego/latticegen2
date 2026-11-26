@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from .. import progress
 from ..runlog import STAGES, WARNING_PREFIX, format_bytes
+from . import marks as _marks
 from .weights import overall_permille
 
 
@@ -97,6 +98,14 @@ class RunState:
     #: goes through two more than the plain pipeline, and both the stage
     #: counter and the bar are laid out over what was announced.
     stages: tuple = STAGES
+    #: What the run's warnings and failure point at, as :class:`marks.Mark`
+    #: objects, in the order they arrived (specification.md §3.1).
+    marks: list = field(default_factory=list)
+
+    @property
+    def has_bad_geometry(self) -> bool:
+        """Whether there is anything for "Show bad geometry" to show."""
+        return bool(self.marks)
 
     def add_line(self, text: str, source: str) -> None:
         """Record one line the child produced. ``source`` is :data:`LOG`,
@@ -220,6 +229,11 @@ class RunState:
         elif ev == progress.LOG:
             self.add_line(event["msg"],
                           WARN if event["msg"].startswith(WARNING_PREFIX) else LOG)
+
+        elif ev == progress.MARK:
+            mark = _marks.from_event(event)
+            if mark is not None:
+                self.marks.append(mark)
 
         elif ev == progress.SUMMARY:
             self.summary = dict(event["stats"])

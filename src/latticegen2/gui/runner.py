@@ -111,13 +111,14 @@ class Preview:
     seconds of work with no side effect beyond a file in a temp folder.
     """
 
-    def __init__(self, input_path: str, out_path: str):
+    def __init__(self, input_path: str, out_path: str, max_triangles: "int | None" = None):
         self.input_path = input_path
         self.out_path = out_path
         self.events: queue.Queue = queue.Queue()
         creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         self._proc = subprocess.Popen(
-            [child_python(), main_script(), "--preview-mesh", input_path, out_path],
+            [child_python(), main_script(), "--preview-mesh", input_path, out_path,
+             *(["--max-triangles", str(max_triangles)] if max_triangles else [])],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, creationflags=creation,
         )

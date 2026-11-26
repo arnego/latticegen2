@@ -3,8 +3,10 @@
 Everything that decides *what* the window shows lives outside
 :mod:`latticegen2.gui.app` precisely so it can be tested without a display: the
 stage weights, the reduction from an event stream to a state, and the command
-line handed to the child. Only one test here needs Tk at all, and it withdraws
-the window rather than showing it.
+line handed to the child. The tests that need Tk share one withdrawn root --
+except the bad-geometry viewer's, which map a real window: on Windows a window
+transient to a withdrawn master is never mapped, and resizing, focus and clicks
+cannot be tested on a window that is not.
 
 The stream these tests feed the model is deliberately hostile. Its producer is a
 separate process that can be killed at any moment, so a missing ``stage_end``, a
@@ -990,3 +992,425 @@ def test_the_orientation_panel_is_always_there_and_support_fields_grey_out(tmp_p
     finally:
         if app._preview is not None:
             app._preview.abandon()
+
+import numpy as np
+
+
+# -- the bad-geometry viewer (specification.md §3.1) ---------------------------
+
+
+def _mark_event(severity, title, message, places):
+    from latticegen2.runlog import mark_fields
+
+    return {"ev": progress.MARK, "t": 1.0, **mark_fields(severity, title, message, places)}
+
+
+def _cube_mesh(lo=(0.0, 0.0, 0.0), size=10.0):
+    """A cube as the preview helper writes one: six faces of two triangles,
+    each triangle wound outward and tagged with its face, and each face's box."""
+    lo = np.asarray(lo, dtype=float)
+    corners = np.array([[x, y, z] for z in (0, 1) for y in (0, 1) for x in (0, 1)],
+                       dtype=float) * size + lo
+    quads = [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)]
+    tris, face = [], []
+    for k, (a, b, c, d) in enumerate(quads):
+        tris += [(a, b, c), (a, c, d)]
+        face += [k, k]
+    tris = np.array(tris, dtype=np.int64)
+    face = np.array(face, dtype=np.int64)
+    face_lo = np.array([corners[list(q)].min(axis=0) for q in quads])
+    face_hi = np.array([corners[list(q)].max(axis=0) for q in quads])
+    return corners, tris, face, face_lo, face_hi
+
+
+def test_a_place_prints_exactly_the_line_it_replaces():
+    """A warning built from places reads byte for byte as one built from strings,
+    so the .log does not change for the viewer's sake."""
+    from latticegen2.runlog import Place, box_text, point_text, warning_text
+
+    p, lo, hi = (1, 2, 3), (0, 0, 0), (1, 2, 3)
+    as_text = warning_text("t", "w", "r", [point_text(p), box_text(lo, hi),
+                                           f"junction (1, 2, 3) at {point_text(p)}",
+                                           "curve ends at A, vertex at B"])
+    as_places = warning_text("t", "w", "r", [
+        Place.point(p), Place.box(lo, hi),
+        Place.point(p, f"junction (1, 2, 3) at {point_text(p)}"),
+        Place.segment(p, lo, "curve ends at A, vertex at B")])
+    assert str(as_places) == str(as_text)
+    assert [pl.kind for pl in as_places.places] == ["point", "box", "point", "segment"]
+    assert as_text.places == ()       # plain lines point nowhere
+
+
+def test_a_warning_and_a_failure_keep_their_places_across_a_process_boundary():
+    import pickle
+
+    from latticegen2.errors import InputGeometryError, ParamError
+    from latticegen2.runlog import Place, warning_text
+
+    w = warning_text("t", "w", "r", [Place.point((1, 2, 3))])
+    back = pickle.loads(pickle.dumps(w))
+    assert back == w and back.title == "t" and back.places == w.places
+    e = pickle.loads(pickle.dumps(InputGeometryError("bad", places=[Place.point((0, 0, 1))])))
+    assert str(e) == "bad" and e.places[0].coords == ((0.0, 0.0, 1.0),)
+    p = pickle.loads(pickle.dumps(ParamError("no", fix="raise {cc}")))
+    assert p.fix == "raise {cc}"
+
+
+def test_a_mark_is_read_from_its_event_and_hostile_places_are_dropped():
+    from latticegen2.gui import marks
+    from latticegen2.runlog import Place
+
+    ev = _mark_event("warning", "the input file is imprecise",
+                     "WARNING: the input file is imprecise: a vertex is loose. It may "
+                     "fail. Inspect, in the part's coordinates:\n  at [1.000, 2.000, 3.000] mm",
+                     [Place.point((1, 2, 3), "at [1.000, 2.000, 3.000] mm")])
+    ev["places"] += [{"kind": "point", "p": [1, 2]}, {"kind": "blob"}, "junk",
+                     {"kind": "box", "lo": [0, 0, "x"], "hi": [1, 1, 1]},
+                     {"kind": "point", "p": [float("nan"), 0, 0]}]
+    mark = marks.from_event(ev)
+    assert mark is not None and len(mark.places) == 1
+    assert mark.sentence() == "a vertex is loose. It may fail."
+    assert mark.colour == marks.WARNING_COLOUR and not mark.is_error
+    assert marks.from_event({"ev": "mark", "severity": "info", "places": ev["places"]}) is None
+    assert marks.from_event({**ev, "places": [{"kind": "blob"}]}) is None
+    text = marks.detail_text(mark, mark.places[0])
+    assert text.startswith("Warning: the input file is imprecise")
+    assert "at [1.000, 2.000, 3.000] mm" in text and "a vertex is loose" in text
+
+
+def test_marks_reach_the_run_state_and_say_there_is_bad_geometry():
+    from latticegen2.runlog import Place
+
+    s = model.RunState()
+    s.apply(json.loads(event(progress.HELLO, stages=list(STAGES))))
+    assert not s.has_bad_geometry
+    s.apply(_mark_event("error", "the run failed", "boom", [Place.point((0, 0, 0))]))
+    s.apply({"ev": progress.MARK, "t": 2.0, "severity": "warning", "title": "x",
+             "message": "y", "places": [{"kind": "nonsense"}]})
+    assert s.has_bad_geometry and len(s.marks) == 1 and s.marks[0].is_error
+
+
+def test_a_failures_face_is_found_among_the_preview_faces_by_box():
+    from latticegen2.gui import marks
+
+    _v, _t, _f, face_lo, face_hi = _cube_mesh()
+    # The top face, its box tightened a little as OCCT does once it is meshed.
+    assert marks.match_face((0.001, 0.0, 10.0), (9.999, 10.0, 10.0), face_lo, face_hi) == 1
+    assert marks.match_face((40, 40, 40), (50, 50, 50), face_lo, face_hi) is None
+    assert marks.match_face((0, 0, 0), (1, 1, 1), None, None) is None
+
+
+def test_thinning_a_preview_keeps_every_face():
+    from latticegen2.preview import thin_keeping_faces
+
+    owner = np.repeat(np.arange(50), [1] + [99] * 49)
+    keep = thin_keeping_faces(owner, 200)
+    assert len(keep) <= 200 and set(owner[keep]) == set(range(50))
+    assert np.all(np.diff(keep) > 0)
+    assert np.array_equal(thin_keeping_faces(owner[:10], 200), np.arange(10))
+
+
+def test_the_viewer_camera_zooms_about_the_cursor_and_fits_the_part():
+    from latticegen2.gui import view3d
+
+    centre, cursor = (400.0, 300.0), (520.0, 260.0)
+    scale, pan = 2.0, (15.0, -8.0)
+    # The point under the cursor, in the scene's own units.
+    xy = ((cursor[0] - centre[0] - pan[0]) / scale, (cursor[1] - centre[1] - pan[1]) / scale)
+    new, (px, py) = view3d.zoom_about(scale, pan, 1.6, cursor, centre)
+    assert new == pytest.approx(3.2)
+    assert centre[0] + px + new * xy[0] == pytest.approx(cursor[0])
+    assert centre[1] + py + new * xy[1] == pytest.approx(cursor[1])
+    assert view3d.fit_scale(10.0, 800, 600) == pytest.approx(600 * 0.5 / (10.0 * 1.15))
+    pts = np.array([[1.0, 2.0, 3.0], [0.0, 0.0, 0.0]])
+    assert np.array_equal(view3d.view_points(pts, np.eye(3), np.array([5.0, 5.0, 5.0])), pts)
+
+
+def test_the_overhang_tint_is_blue_in_both_views():
+    from latticegen2.gui import marks, orientview
+
+    r, g, b = orientview.OVERHANG_COLOUR
+    assert b > 0.8 and r < 0.3                       # blue
+    assert orientview.OVERHANG_COLOUR not in (marks.ERROR_COLOUR, marks.WARNING_COLOUR)
+
+
+def test_the_viewer_cap_is_the_helpers():
+    from latticegen2 import preview
+    from latticegen2.gui import app
+
+    assert app.VIEWER_TRIANGLES == preview.VIEWER_TRIANGLES
+
+
+def _viewer(tk_root, marks_=(), orient=(0, 0, 0)):
+    from latticegen2.gui.badgeom import BadGeometryViewer
+
+    v = BadGeometryViewer(tk_root, orient=orient, mesh=_cube_mesh(), marks=marks_)
+    v.geometry("800x600+40+40")
+    for _ in range(5):
+        tk_root.update()
+    v.fit()
+    tk_root.update()
+    return v
+
+
+def _sample_marks():
+    from latticegen2.gui import marks
+    from latticegen2.runlog import Place
+
+    warn = marks.from_event(_mark_event(
+        "warning", "corner", "WARNING: corner: it moved. It may fail. Inspect, in the "
+        "part's coordinates:\n  at [10.000, 10.000, 10.000] mm",
+        [Place.point((10, 10, 10), "at [10.000, 10.000, 10.000] mm"),
+         Place.box((0, 0, 0), (5, 5, 5))]))
+    err = marks.from_event(_mark_event(
+        "error", "the run failed", "Surface tessellation for face 1 failed",
+        [Place.face((5, 5, 10), (0, 0, 10), (10, 10, 10), "face 1")]))
+    return [warn, err]
+
+
+def test_the_viewer_fills_its_window_and_overlays_its_controls(tk_root):
+    v = _viewer(tk_root, _sample_marks())
+    try:
+        assert v.canvas.winfo_manager() == "pack"
+        assert v.overlay.winfo_manager() == "place"
+        assert v.overlay.place_info()["anchor"] == "ne"
+        # The controls are described in the top-left corner.
+        (item,) = v.canvas.find_withtag("controls")
+        x0, y0, _x1, _y1 = v.canvas.bbox(item)
+        assert x0 < 20 and y0 < 20
+        assert "Pan: middle drag" in v.canvas.itemcget(item, "text")
+        # No print bed: nothing but the mesh, the marks, the axes and the text.
+        tags = {t for i in v.canvas.find_all() for t in v.canvas.gettags(i)}
+        assert not any("bed" in t for t in tags)
+        # The issue list starts open, folds to its title, and the overhang box
+        # above it stays either way.
+        assert v.issues_expanded and v.issues_body.winfo_manager() == "pack"
+        v.toggle_issues()
+        tk_root.update()
+        assert not v.issues_expanded and not v.issues_body.winfo_manager()
+        assert v.overhangs_box.winfo_manager() == "pack"
+        v.toggle_issues()
+        assert v.issues_body.winfo_manager() == "pack"
+        # Errors are listed first.
+        first = v.tree.get_children()[0]
+        assert v.tree.item(first, "text").startswith("Error")
+        # Resizing re-fits the viewport to the window.
+        v.geometry("1000x700")
+        for _ in range(5):
+            tk_root.update()
+        assert abs(v.canvas.winfo_width() - 1000) <= 2
+        assert abs(v.canvas.winfo_height() - 700) <= 2
+    finally:
+        v.close()
+
+
+def test_the_viewer_marks_in_red_and_yellow_and_opens_details_on_a_click(tk_root):
+    from latticegen2.gui import marks
+    from latticegen2.gui.orientview import _hex
+
+    v = _viewer(tk_root, _sample_marks())
+    try:
+        red, yellow = _hex(marks.ERROR_COLOUR), _hex(marks.WARNING_COLOUR)
+        fills = {v.canvas.itemcget(i, "fill") for i in v.canvas.find_withtag("place:0:0")}
+        assert fills == {yellow}
+        # The failure's face is the cube's top face, tinted red, plus its pin.
+        assert v._face_match == {(1, 0): 1}
+        assert red in {v.canvas.itemcget(i, "fill") for i in v.canvas.find_withtag("place:1:0")}
+        # Click the warning's point: its detail box opens, bordered in yellow.
+        (sx, sy), = v.screen_of(v.to_bed((10, 10, 10)))[0]
+        v.click(sx, sy)
+        assert v.detail == (0, 0)
+        boxes = [i for i in v.canvas.find_withtag("detail")
+                 if v.canvas.type(i) == "rectangle"]
+        assert boxes and v.canvas.itemcget(boxes[0], "outline") == yellow
+        text = [v.canvas.itemcget(i, "text") for i in v.canvas.find_withtag("detail")
+                if v.canvas.type(i) == "text"][0]
+        assert "at [10.000, 10.000, 10.000] mm" in text and "it moved" in text
+        # A click on nothing closes it.
+        v.click(2, 590)
+        assert v.detail is None
+        # Picking from the list centres that place and opens its box.
+        v.tree.selection_set("m1_0")
+        tk_root.update()
+        assert v.detail == (1, 0)
+        (cx, cy), = v.screen_of(v.to_bed((5, 5, 10)))[0]
+        assert abs(cx - v.canvas.winfo_width() / 2) < 1.0
+        assert abs(cy - v.canvas.winfo_height() / 2) < 1.0
+    finally:
+        v.close()
+
+
+def test_the_viewer_turns_pans_zooms_and_fits_without_touching_the_orientation(tk_root):
+    from latticegen2.gui.badgeom import CLICK_SLOP
+
+    v = _viewer(tk_root, _sample_marks(), orient=(30, 0, 0))
+    try:
+        c = v.canvas
+        R = v._R.copy()
+        # A click that hardly moves is a click, not a rotation.
+        c.event_generate("<ButtonPress-1>", x=300, y=300)
+        c.event_generate("<B1-Motion>", x=300 + CLICK_SLOP, y=300)
+        c.event_generate("<ButtonRelease-1>", x=300 + CLICK_SLOP, y=300)
+        assert np.array_equal(v.view_rotation, np.eye(3))
+        # A left drag turns the view as a drag turns the part in the small view.
+        c.event_generate("<ButtonPress-1>", x=300, y=300)
+        c.event_generate("<B1-Motion>", x=340, y=310)
+        c.event_generate("<ButtonRelease-1>", x=340, y=310)
+        from latticegen2.gui import view3d
+
+        expect = view3d.drag_rotation(np.eye(3), 40, 10)
+        assert np.allclose(v.view_rotation, expect)
+        assert np.array_equal(v._R, R)               # the run's orientation is untouched
+        # A middle drag pans.
+        scale, pan = v.camera
+        c.event_generate("<ButtonPress-2>", x=100, y=100)
+        c.event_generate("<B2-Motion>", x=130, y=80)
+        c.event_generate("<ButtonRelease-2>", x=130, y=80)
+        assert v.camera[1] == (pan[0] + 30, pan[1] - 20)
+        # The wheel zooms, about the cursor.
+        c.event_generate("<MouseWheel>", x=200, y=200, delta=120)
+        assert v.camera[0] == pytest.approx(scale * 1.15)
+        # F fits again: scale back, pan gone, rotation kept.
+        c.focus_force()
+        tk_root.update()
+        c.event_generate("<KeyPress-f>")
+        tk_root.update()
+        assert v.camera == (pytest.approx(scale), (0.0, 0.0))
+        assert np.allclose(v.view_rotation, expect)
+    finally:
+        v.close()
+
+
+def test_the_overhang_toggle_starts_off_and_tints_blue(tk_root):
+    from latticegen2.gui.orientview import OVERHANG_COLOUR, _hex
+
+    v = _viewer(tk_root, orient=(0, 0, 0))
+    try:
+        def blues():
+            # The cube's top face overhangs (it is a ceiling); shaded blues only.
+            return [i for i in v.canvas.find_all()
+                    if v.canvas.type(i) == "polygon"
+                    and v.canvas.itemcget(i, "fill").startswith("#")
+                    and int(v.canvas.itemcget(i, "fill")[5:7], 16)
+                    > int(v.canvas.itemcget(i, "fill")[1:3], 16) + 80]
+        assert v.overhangs_var.get() is False and not blues()
+        v.overhangs_var.set(True)
+        v.redraw()
+        assert blues()
+        assert OVERHANG_COLOUR == (0.18, 0.44, 0.92) and _hex(OVERHANG_COLOUR)
+    finally:
+        v.close()
+
+
+def test_show_bad_geometry_appears_with_the_first_mark_and_opens_one_viewer(tk_root):
+    from latticegen2.gui.app import App
+    from latticegen2.runlog import Place
+
+    class FakeRun:
+        def __init__(self, lines):
+            import queue
+
+            self.events = queue.Queue()
+            for line in lines:
+                self.events.put(("event", json.loads(line) if isinstance(line, str) else line))
+            self.running = True
+            self.stderr_lines = []
+
+        def returncode(self):
+            return 0
+
+        def clear_cancel(self):
+            pass
+
+    app = App(tk_root)
+    try:
+        app.run = FakeRun([event(progress.HELLO, stages=list(STAGES), output="o", log="l")])
+        app._started = 0.0
+        app.panel.grid(row=9, column=0, columnspan=3, sticky="ew")
+        app._drain()
+        tk_root.update()
+        assert not app.bad_button.winfo_manager()
+        # Mid-run, the first mark brings the button.
+        app.run.events.put(("event", _mark_event("warning", "x", "WARNING: x: y. z.",
+                                                 [Place.point((1, 2, 3))])))
+        app._drain()
+        tk_root.update()
+        assert app.bad_button.winfo_manager() == "grid"
+        app._show_bad_geometry()
+        viewer = app._viewer
+        assert viewer is not None and len(viewer._marks) == 1
+        app._show_bad_geometry()
+        assert app._viewer is viewer                    # raised, not a second one
+        # A failure's red mark joins the open viewer live.
+        app.run.events.put(("event", _mark_event("error", "the run failed", "boom",
+                                                 [Place.point((0, 0, 0))])))
+        app._drain()
+        assert len(viewer._marks) == 2
+        # Closed with the window's x, it is forgotten.
+        viewer.protocol("WM_DELETE_WINDOW")
+        viewer.close()
+        assert app._viewer is None
+    finally:
+        app.run = None
+        app._close_viewer()
+        if app._preview is not None:
+            app._preview.abandon()
+
+
+def test_a_parameter_failure_shows_no_bad_geometry_button(tk_root):
+    from latticegen2.gui.app import App
+
+    app = App(tk_root)
+    try:
+        app.state.apply(json.loads(event(progress.RESULT, status="failed", exit=2,
+                                         reason="-t too large")))
+        app._refresh()
+        tk_root.update()
+        assert not app.bad_button.winfo_manager()
+    finally:
+        if app._preview is not None:
+            app._preview.abandon()
+
+
+def test_two_faces_sharing_a_box_are_told_apart_by_their_centres():
+    from latticegen2.gui import marks
+
+    # A counterbore's floor and the wall around it can share one box.
+    lo, hi = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]), np.array([[10.0, 10.0, 5.0]] * 2)
+    centres = np.array([[5.0, 5.0, 0.0], [5.0, 5.0, 2.5]])
+    assert marks.match_face(lo[0], hi[0], lo, hi, centroid=(5, 5, 2.5),
+                            face_centre=centres) == 1
+    assert marks.match_face(lo[0], hi[0], lo, hi, centroid=(5, 5, 0.0),
+                            face_centre=centres) == 0
+    # No centres known: the nearest box, as before.
+    assert marks.match_face(lo[0], hi[0], lo, hi) == 0
+
+
+def test_the_viewer_fits_the_part_once_its_first_mesh_arrives(tk_root):
+    """Opened before any mesh, the viewer fits its marks -- a single point, at a
+    thousandth of a millimetre -- and must fit again when the part arrives."""
+    from latticegen2.gui import view3d
+    from latticegen2.gui.badgeom import BadGeometryViewer
+
+    from latticegen2.gui import marks
+    from latticegen2.runlog import Place
+
+    point = marks.from_event(_mark_event("warning", "x", "WARNING: x: y. z.",
+                                         [Place.point((10, 10, 10))]))
+    v = BadGeometryViewer(tk_root, mesh=None, marks=[point])
+    v.geometry("800x600+40+40")
+    try:
+        for _ in range(5):
+            tk_root.update()
+        v.fit()
+        marks_only = v.camera[0]
+        v.set_mesh(_cube_mesh())
+        for _ in range(10):
+            tk_root.update()
+        v.after(60)
+        tk_root.update()
+        want = view3d.fit_scale(v._extent, v.canvas.winfo_width(), v.canvas.winfo_height())
+        assert v.camera[0] == pytest.approx(want)
+        assert v.camera[0] < marks_only
+    finally:
+        v.close()

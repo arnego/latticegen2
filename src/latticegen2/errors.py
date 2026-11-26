@@ -8,9 +8,23 @@ from __future__ import annotations
 
 
 class LatticeGenError(Exception):
-    """Base class for every failure this tool reports with a specific exit code."""
+    """Base class for every failure this tool reports with a specific exit code.
+
+    ``places`` are where in the part the failure happened, as
+    :class:`latticegen2.runlog.Place` objects, for the bad-geometry viewer
+    (specification.md §3.1). They add nothing to the message, which names the
+    same places in its own words.
+    """
 
     exit_code = 1
+
+    def __init__(self, message: str = "", places=()):
+        super().__init__(message)
+        self.places = tuple(places)
+
+    def __reduce__(self):
+        # A worker's failure crosses a process boundary; keep its places.
+        return (type(self), (str(self), self.places))
 
 
 class ParamError(LatticeGenError):
@@ -30,6 +44,9 @@ class ParamError(LatticeGenError):
     def __init__(self, message: str, fix: str | None = None):
         super().__init__(message)
         self.fix = fix
+
+    def __reduce__(self):
+        return (type(self), (str(self), self.fix))
 
     def fix_text(self, labels: dict[str, str]) -> str | None:
         """``fix`` with each parameter named by ``labels``; a parameter

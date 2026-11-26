@@ -29,12 +29,41 @@ polygons in tens of milliseconds, which is fine for a click and not for a drag;
 the full mesh comes back on release."""
 
 AXIS_COLOURS = ("#d33", "#2a2", "#36c")
-OVERHANG_COLOUR = (0.86, 0.33, 0.24)
+#: What will be supported, here and in the bad-geometry viewer alike: blue, so
+#: that it cannot be read as one of that viewer's red or yellow marks.
+OVERHANG_COLOUR = (0.18, 0.44, 0.92)
 BODY_COLOUR = (0.62, 0.68, 0.76)
 
 
 def _hex(rgb, k: float = 1.0) -> str:
     return "#%02x%02x%02x" % tuple(int(max(0.0, min(1.0, c * k)) * 255) for c in rgb)
+
+
+def draw_mesh(canvas: tk.Canvas, screen: np.ndarray, depth: np.ndarray,
+              tris: np.ndarray, normals_view: np.ndarray, colours: np.ndarray,
+              tags=None) -> None:
+    """Draw shaded triangles with a painter's sort, the far ones first.
+
+    The one mesh renderer both views use. ``screen`` and ``depth`` are the
+    projected vertices (:func:`view3d.project`), ``normals_view`` the
+    triangles' normals in the frame the camera looks through, ``colours`` one
+    RGB per triangle before shading, and ``tags`` -- if given -- one tuple of
+    canvas tags per triangle, so a triangle can be clicked.
+    """
+    light = view3d.shade(normals_view)
+    order = np.argsort(depth[tris].mean(axis=1))
+    # Back faces are hidden by the faces in front of them; drawing only
+    # the ones turned toward the eye halves the polygons for a closed body.
+    front = normals_view @ view3d.EYE > 0.0
+    for i in order:
+        if not front[i]:
+            continue
+        pts = screen[tris[i]].ravel()
+        colour = _hex(colours[i], light[i])
+        if tags is None:
+            canvas.create_polygon(*pts, fill=colour, outline=colour)
+        else:
+            canvas.create_polygon(*pts, fill=colour, outline=colour, tags=tags[i])
 
 
 class OrientationView(tk.Canvas):
@@ -154,24 +183,15 @@ class OrientationView(tk.Canvas):
                     else np.arange(len(self._tris)))
             tris = self._tris[keep]
             normals_bed = self._normals[keep] @ R.T
-            light = view3d.shade(normals_bed)
             if self._tint:
                 tint = view3d.overhang_mask(self._normals[keep],
                                             _orient.euler_from_matrix(R)
                                             if self._R_drag is not None else self._orient)
             else:
                 tint = np.zeros(len(tris), dtype=bool)
+            colours = np.where(tint[:, None], OVERHANG_COLOUR, BODY_COLOUR)
             screen, depth = to_screen(verts)
-            order = np.argsort(depth[tris].mean(axis=1))
-            # Back faces are hidden by the faces in front of them; drawing only
-            # the ones turned toward the eye halves the polygons for a closed body.
-            front = normals_bed @ view3d.EYE > 0.0
-            for i in order:
-                if not front[i]:
-                    continue
-                pts = screen[tris[i]].ravel()
-                colour = _hex(OVERHANG_COLOUR if tint[i] else BODY_COLOUR, light[i])
-                self.create_polygon(*pts, fill=colour, outline=colour)
+            draw_mesh(self, screen, depth, tris, normals_bed, colours)
 
         # The part's own axes, always on top. Drawn at a corner of the bed
         # rather than at the part's origin: what they show is which way the

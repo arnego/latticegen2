@@ -26,6 +26,7 @@ from OCP.gp import gp_Pnt
 from .. import lattice as _lattice
 from .. import occ
 from ..errors import ProcessingError
+from ..runlog import Place, point_text
 
 SUPPORT_OVERLAP_TOL = 1e-6
 """mm³. The most volume a support may share with the lattice or with another
@@ -505,17 +506,22 @@ def assemble(lattice: list, supports: list, lp, kept_nodes: np.ndarray,
                 s, [l for l, lb in zip(lattice, lattice_boxes) if _touch(boxes[i], lb)])
             real = float(sum(occ.volume(c) for c in common))
             if real > SUPPORT_OVERLAP_TOL:
+                at = _overlap_at(common)
                 raise ProcessingError(
                     f"A support body overlaps the lattice by {real:.3e} mm^3 near "
-                    f"{_overlap_at(common)}; supports must share faces with the "
-                    f"lattice, never volume (docs/algorithm.md §14.2)."
+                    f"{at}; supports must share faces with the "
+                    f"lattice, never volume (docs/algorithm.md §14.2).",
+                    places=[Place.point(at, f"support overlapping the lattice near "
+                                            f"{point_text(at)}")],
                 )
     for job, (vol, at) in zip(jobs, results):
         if job[0] == "pair" and vol > SUPPORT_OVERLAP_TOL:
             raise ProcessingError(
                 f"Two support bodies overlap by {vol:.3e} mm^3 near "
                 f"{at}; neighbouring supports must share faces, "
-                f"never volume (docs/algorithm.md §14.2)."
+                f"never volume (docs/algorithm.md §14.2).",
+                places=[Place.point(at, f"two supports overlapping near "
+                                        f"{point_text(at)}")] if at is not None else (),
             )
 
     lattice_volume = float(sum(occ.volume(s) for s in lattice))

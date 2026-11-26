@@ -195,7 +195,10 @@ def test_a_slab_refused_at_every_split_is_left_open(cup, monkeypatch):
     assert got.unsearched and got.stats["support_pocket_slabs_unsearched"] == len(got.unsearched)
     # Whole coordinates, so the region can be found in the part; the kernel's
     # reason is for the log.
-    for line in got.unsearched:
+    # They are box places, for the bad-geometry viewer, printing as box_text.
+    for place in got.unsearched:
+        line = str(place)
+        assert place.kind == "box"
         assert all(f"{axis} " in line for axis in "xyz") and "refused" not in line
     assert len(got.refusals) == len(got.unsearched) and "refused" in got.refusals[0]
 

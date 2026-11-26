@@ -62,23 +62,121 @@ WARNING_PREFIX = "WARNING: "
 WARNING_PLACES = 20
 
 
-def warning_text(title: str, what: str, risk: str, places=()) -> str:
+#: How many places one ``mark`` event carries. More than a warning prints, so
+#: the bad-geometry viewer shows what the text only counts, and bounded, so a
+#: warning naming every one of 100,000 ceiling points cannot flood the stream.
+MARK_PLACES = 500
+
+
+@dataclass(frozen=True)
+class Place:
+    """Where a warning or a failure points, in the part's coordinates.
+
+    ``text`` is the line the message prints for it -- exactly that line, so a
+    message built from places reads byte for byte as it did built from strings
+    -- and the rest is the same place as numbers, for the bad-geometry viewer
+    (specification.md §3.1), which must not have to parse text back into
+    coordinates. Build one with :meth:`point`, :meth:`box`, :meth:`segment` or
+    :meth:`face`.
+    """
+
+    kind: str
+    text: str
+    coords: tuple = ()
+
+    KINDS = ("point", "box", "segment", "face")
+
+    def __str__(self) -> str:
+        return self.text
+
+    @staticmethod
+    def _xyz(p) -> tuple:
+        return tuple(float(x) for x in p)
+
+    @classmethod
+    def point(cls, p, text: "str | None" = None) -> "Place":
+        """One point; ``text`` defaults to :func:`point_text`."""
+        return cls("point", point_text(p) if text is None else text, (cls._xyz(p),))
+
+    @classmethod
+    def box(cls, lo, hi, text: "str | None" = None) -> "Place":
+        """A region; ``text`` defaults to :func:`box_text`."""
+        return cls("box", box_text(lo, hi) if text is None else text,
+                   (cls._xyz(lo), cls._xyz(hi)))
+
+    @classmethod
+    def segment(cls, a, b, text: str) -> "Place":
+        """Two points that belong together, such as where a curve ends and
+        where the vertex it names lies."""
+        return cls("segment", text, (cls._xyz(a), cls._xyz(b)))
+
+    @classmethod
+    def face(cls, centroid, lo, hi, text: str) -> "Place":
+        """A face of the input, by its centroid and its bounding box -- what the
+        viewer matches it against, since a face index is not a contract."""
+        return cls("face", text, (cls._xyz(centroid), cls._xyz(lo), cls._xyz(hi)))
+
+    def event(self) -> dict:
+        """This place as one entry of a ``mark`` event's ``places``."""
+        keys = {"point": ("p",), "box": ("lo", "hi"), "segment": ("a", "b"),
+                "face": ("centroid", "lo", "hi")}[self.kind]
+        out = {"kind": self.kind, "text": self.text}
+        out.update({k: list(v) for k, v in zip(keys, self.coords)})
+        return out
+
+
+class WarningText(str):
+    """A warning's text, still knowing which of its lines were places.
+
+    A ``str`` so that everything that handles a warning as text -- the support
+    generator's lists of notes, a prefix filter, a test's ``startswith`` --
+    handles this one unchanged. :meth:`RunLog.warning` reads :attr:`places` to
+    emit the ``mark`` event; nothing else needs to know.
+    """
+
+    title: str
+    places: tuple
+
+    def __new__(cls, text: str, title: str, places=()):
+        obj = super().__new__(cls, text)
+        obj.title = title
+        obj.places = tuple(p for p in places if isinstance(p, Place))
+        return obj
+
+    def __reduce__(self):
+        # The support generator's warnings can come back from a worker process.
+        return (WarningText, (str(self), self.title, self.places))
+
+
+def warning_text(title: str, what: str, risk: str, places=()) -> WarningText:
     """One warning, in the one form every warning takes (docs/algorithm.md §10).
 
     ``title`` names it, ``what`` says what went wrong and ``risk`` what that may
     cause, each without a final full stop; ``places`` are where to look in the
-    part, one line each, from :func:`point_text` and :func:`box_text`. A warning
-    is for an output that may be wrong, incomplete or degraded: a repair that
-    left the output as intended is a ``note:``.
+    part, one line each -- :class:`Place` objects, or plain lines from
+    :func:`point_text` and :func:`box_text`. A warning is for an output that may
+    be wrong, incomplete or degraded: a repair that left the output as intended
+    is a ``note:``.
     """
     text = f"{WARNING_PREFIX}{title}: {what}. {risk}."
     places = list(places)
     if not places:
-        return text
+        return WarningText(text, title)
     rows = [f"  {place}" for place in places[:WARNING_PLACES]]
     if len(places) > WARNING_PLACES:
         rows.append(f"  ... and {len(places) - WARNING_PLACES} more")
-    return "\n".join([f"{text} Inspect, in the part's coordinates:", *rows])
+    return WarningText("\n".join([f"{text} Inspect, in the part's coordinates:", *rows]),
+                       title, places)
+
+
+def mark_fields(severity: str, title: str, message: str, places) -> "dict | None":
+    """The fields of a ``mark`` event, or ``None`` when ``places`` holds no
+    :class:`Place` -- a message that points nowhere has nothing to show."""
+    places = [p for p in places if isinstance(p, Place)]
+    if not places:
+        return None
+    return {"severity": severity, "title": title, "message": str(message),
+            "places": [p.event() for p in places[:MARK_PLACES]]}
 
 
 def point_text(p) -> str:
@@ -256,6 +354,32 @@ class RunLog:
 
     def always(self, msg: str) -> None:
         self.line(msg, console=True)
+
+    def warning(self, msg: str) -> None:
+        """Write a warning as :meth:`always` does, and point at its places.
+
+        With an emitter attached and ``msg`` a :class:`WarningText` carrying
+        places, a ``mark`` event follows the ``log`` event, for the
+        bad-geometry viewer. It writes nothing to the ``.log`` -- the rule
+        :meth:`stage_begin` follows -- so the file is the same bytes whether or
+        not anything is watching.
+        """
+        self.always(msg)
+        if self.emit is None:
+            return
+        fields = mark_fields(progress.WARNING_MARK, getattr(msg, "title", ""), msg,
+                             getattr(msg, "places", ()))
+        if fields is not None:
+            self._emit(progress.MARK, **fields)
+
+    def failure_mark(self, exc: BaseException) -> None:
+        """Point at where a failure happened, if its exception says. Emits only."""
+        if self.emit is None:
+            return
+        fields = mark_fields(progress.ERROR_MARK, "the run failed", exc,
+                             getattr(exc, "places", ()))
+        if fields is not None:
+            self._emit(progress.MARK, **fields)
 
     def stage_begin(self, name: str) -> None:
         """Announce a stage as it starts. Emits only; writes nothing to the log.

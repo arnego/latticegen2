@@ -42,7 +42,7 @@ import time
 
 import numpy as np
 
-from ..runlog import WARNING_PREFIX, point_text, points_text, warning_text
+from ..runlog import WARNING_PREFIX, Place, point_text, points_text, warning_text
 from .contract import SupportInput, SupportResult
 
 UNBACKED_WARNING = "ceiling left without support"
@@ -54,7 +54,7 @@ def _unbacked_warning(bare: np.ndarray, total: int) -> str:
         UNBACKED_WARNING,
         f"{len(bare)} of {total} ceiling point(s) are backed by nothing in the output",
         "Those overhangs may print unsupported",
-        [point_text(p) for p in bare],
+        [Place.point(p) for p in bare],
     )
 
 
@@ -245,7 +245,9 @@ def supports_for(body, mesh, lattice: list, kept_nodes, lp, thickness: float,
             where = np.round(np.asarray(occ.centroid(s), dtype=float), 3).tolist()
             raise ProcessingError(
                 f"A support body near {where} has {nm} edge(s) used by more than two "
-                f"faces: it is not a manifold solid (docs/algorithm.md §14.3)."
+                f"faces: it is not a manifold solid (docs/algorithm.md §14.3).",
+                places=[Place.box(*occ.bounding_box(s),
+                                  f"non-manifold support body near {point_text(where)}")],
             )
     stats["support_pockets_s"] = round(time.perf_counter() - t3, 2)
     stats["support_pockets"] = len(fills)

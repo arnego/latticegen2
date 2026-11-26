@@ -23,6 +23,7 @@ from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
 
 from .. import occ
 from ..errors import ProcessingError
+from ..runlog import Place
 from .assemble import SUPPORT_OVERLAP_TOL, _boxes, _common_volume, _touch, _where
 
 JOIN_VOLUME_REL_TOL = 1e-4
@@ -128,7 +129,8 @@ def join(solids: list, overlaps: bool = True) -> tuple[list, dict]:
                     f"Support bodies near {_where(boxes[g[0]])} share "
                     f"{shared.sum() / 2.0:.3e} mm^3 and could not be fused into "
                     f"valid bodies of the volume they cover "
-                    f"(docs/algorithm.md §14.3 S6)."
+                    f"(docs/algorithm.md §14.3 S6).",
+                    places=[Place.box(boxes[i][0], boxes[i][1]) for i in g],
                 )
             stats["support_joins_declined"] += 1
             out += members

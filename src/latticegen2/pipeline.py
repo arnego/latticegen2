@@ -172,7 +172,7 @@ def _run(args: Args, rl: RunLog, tmpdir: str) -> dict:
             )
         # Before anything reads the body: every later stage, the workers' staged
         # copy included, must see the repaired one (docs/algorithm.md §7.5).
-        input_repair = repair_input(body)
+        input_repair = repair_input(body, tmpdir)
         body = input_repair.shape
         lo, hi = occ.bounding_box(body)
         seam_gap = occ.surface_seam_gaps(body, bar=SEAM_GAP_WARN_FRACTION * args.t)

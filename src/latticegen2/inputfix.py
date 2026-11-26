@@ -903,26 +903,32 @@ def _apply_cusps(shape: TopoDS_Shape, plans,
     return reshape.Apply(shape), rebuilt
 
 
-def _survives_step(faces: list[TopoDS_Face]) -> bool:
+def _survives_step(faces: list[TopoDS_Face], folder: str | None, tag: str) -> bool:
     """Each face, written to STEP alone and read back, still valid: the file
     keeps no vertex tolerance a boolean widened to cover the crossing.
 
-    The files are a probe of a few faces, written and deleted inside this call,
-    not a cache, so they go to the system's temporary folder rather than the
-    run's ``temp/<stamp>/`` (specification.md §4.4): the repair runs before
-    anything else reads the body and needs no folder of the run's."""
-    with tempfile.TemporaryDirectory(prefix="latticegen2-inputfix-") as d:
-        for i, face in enumerate(faces):
-            path = os.path.join(d, f"face{i}.step")
-            occ.write_step(face, path, "inputfix-probe")
-            back = occ.faces(occ.read_step(path))
-            if len(back) != 1 or not BRepCheck_Analyzer(back[0]).IsValid():
-                return False
+    The files go to ``folder``, the run's own ``temp/<stamp>/``
+    (specification.md §4.4), named ``inputfix-<tag>-face<i>.step`` so that they
+    stay inside the length the run reserves there (``cli.TEMP_PATH_RESERVE``).
+    The run has already written that folder, so the check never depends on
+    another being writable, and the files stay for analysis if the run fails.
+    With no folder -- a caller outside a run -- they go to a temporary one,
+    deleted afterwards."""
+    if folder is None:
+        with tempfile.TemporaryDirectory(prefix="latticegen2-inputfix-") as d:
+            return _survives_step(faces, d, tag)
+    for i, face in enumerate(faces):
+        path = os.path.join(folder, f"inputfix-{tag}-face{i}.step")
+        occ.write_step(face, path, "inputfix-probe")
+        back = occ.faces(occ.read_step(path))
+        if len(back) != 1 or not BRepCheck_Analyzer(back[0]).IsValid():
+            return False
     return True
 
 
 def _check_cusps(before: TopoDS_Shape, after: TopoDS_Shape, rebuilt: list[TopoDS_Face],
-                 valid_before: list[bool], snap: _Snapshot) -> str | None:
+                 valid_before: list[bool], snap: _Snapshot, folder: str | None = None,
+                 tag: str = "cusp") -> str | None:
     """Why ``after`` is not a sound repair of the cusps, or ``None``. The face
     the cusps lie in must come out valid; each wall, valid if it was."""
     if len(occ.solids(after)) != len(occ.solids(before)):
@@ -946,7 +952,7 @@ def _check_cusps(before: TopoDS_Shape, after: TopoDS_Shape, rebuilt: list[TopoDS
         if abs(exact - meshed) > AREA_MESH_REL_TOL * exact + AREA_MESH_ABS_TOL:
             return (f"a rebuilt face's area {exact:.6f} mm^2 disagrees with its "
                     f"mesh's {meshed:.6f} mm^2")
-    if not _survives_step(rebuilt):
+    if not _survives_step(rebuilt, folder, tag):
         return "a rebuilt face is not valid once written to STEP"
     index = TopTools_IndexedMapOfShape()
     for fc in occ.faces(after):
@@ -965,7 +971,8 @@ def _crossing(c: _Cusp, repaired: bool, reason: str) -> WireCrossing:
                         repaired, reason)
 
 
-def _repair_cusps(work: TopoDS_Shape) -> tuple[TopoDS_Shape, list[WireCrossing], bool]:
+def _repair_cusps(work: TopoDS_Shape, folder: str | None = None,
+                  ) -> tuple[TopoDS_Shape, list[WireCrossing], bool]:
     """``work`` with the cusps of each face moved to where their arcs cross,
     one face at a time, where the repair holds. All of a face's cusps are
     repaired together: the face is valid only once every one is."""
@@ -1011,7 +1018,8 @@ def _repair_cusps(work: TopoDS_Shape) -> tuple[TopoDS_Shape, list[WireCrossing],
                     snap = _Snapshot(faces)
                     checked = True
                     after, rebuilt = _apply_cusps(work, plans, faces)
-                    why = _check_cusps(work, after, rebuilt, valid_before, snap)
+                    why = _check_cusps(work, after, rebuilt, valid_before, snap,
+                                       folder, f"cusp{len(tried)}")
                 except Exception as exc:  # kernel refusal: leave it as built
                     why = f"the kernel refused the repair ({exc})"
                 if why is None:
@@ -1038,9 +1046,10 @@ def _scan(work: TopoDS_Shape):
         return None
 
 
-def repair_input(shape: TopoDS_Shape) -> InputRepair:
+def repair_input(shape: TopoDS_Shape, tmpdir: str | None = None) -> InputRepair:
     """``shape`` with each misplaced vertex and each crossed cusp repaired
-    where the repair holds, and every one found reported."""
+    where the repair holds, and every one found reported. ``tmpdir`` is the
+    run's temporary folder, where the cusp repair's STEP check writes."""
     defects: list[InputDefect] = []
     work = shape
     tried: set[tuple] = set()
@@ -1078,7 +1087,7 @@ def repair_input(shape: TopoDS_Shape) -> InputRepair:
             break
         if not repaired:
             break
-    work, crossings, cusp_checked = _repair_cusps(work)
+    work, crossings, cusp_checked = _repair_cusps(work, tmpdir)
     if checked or cusp_checked:
         # The checks mesh faces of the body in place, down to 1e-4 mm, and
         # `tessellate` would keep a mesh finer than it asks for.

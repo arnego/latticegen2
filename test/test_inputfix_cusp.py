@@ -337,3 +337,21 @@ def test_only_the_cusp_that_cannot_be_planned_carries_its_reason(monkeypatch):
     assert reasons[CUSPS[1]] == "refused for the test"
     assert reasons[CUSPS[0]] == "another cusp of the same face could not be repaired"
     assert rep.shape.IsSame(block)
+
+
+def test_the_step_check_writes_into_the_run_folder_alone(tmp_path, monkeypatch):
+    """Given the run's folder, the check needs no other: with the system's
+    temporary folder unusable the repair still goes ahead, and its files stay
+    beside the run's, short enough for the length the run reserves there."""
+    from latticegen2 import cli
+
+    def unwritable(*_a, **_k):
+        raise PermissionError("the system's temporary folder is not writable")
+
+    monkeypatch.setattr(inputfix.tempfile, "TemporaryDirectory", unwritable)
+    rep = inputfix.repair_input(_block(), str(tmp_path))
+    assert [c.repaired for c in rep.crossings] == [True, True], rep.crossings
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert names and all(n.startswith("inputfix-cusp") and n.endswith(".step") for n in names)
+    reserve = cli.TEMP_PATH_RESERVE - len(os.path.join("temp", "20261107-153000-999", ""))
+    assert max(len(n) for n in names) <= reserve

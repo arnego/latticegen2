@@ -1294,9 +1294,11 @@ those two arcs and one straight line, between a floor and two walls. Checked
 as the misplaced-vertex repair is — the floor valid, each wall valid if it
 was, tolerances within the bar, every edge used twice, areas against meshes,
 the neighbourhood meshing closed — plus the property it exists for: **each
-rebuilt face, written to STEP alone and read back, is valid**. A repair any of
-this refuses is undone, and a crossing left is always a warning: however small,
-it is where a written body can fail.
+rebuilt face, written to STEP alone and read back, is valid**. Those files go
+to the run's own `temp/<stamp>/` (specification.md §4.4), which the run has
+already written, so the check depends on no other folder being writable. A
+repair any of this refuses is undone, and a crossing left is always a warning:
+however small, it is where a written body can fail.
 
 **It found a fault in the rebuild both repairs share.** Faces 166 and 168 are
 reversed and store their wire reversed. `_rebuild_face` took the edges from a

@@ -196,3 +196,76 @@ def test_a_sound_input_logs_its_worst_vertex_only(tmp_path):
     _report_input_repair(rl, inputfix.repair_input(occ.read_step(BALL)), 4.0, {})
     assert len(shown) == 1 and shown[0][1] is None
     assert shown[0][0].startswith("input vertex tolerances")
+
+
+def _vertex_at(shape, p):
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    ex = TopExp_Explorer(shape, TopAbs_ShapeEnum.TopAbs_VERTEX)
+    while ex.More():
+        v = TopoDS.Vertex_s(ex.Current())
+        if np.allclose(inputfix._vertex_xyz(v), p):
+            return v
+        ex.Next()
+    raise AssertionError(p)
+
+
+def test_a_loose_vertex_elsewhere_on_a_rebuilt_face_does_not_refuse_the_repair():
+    """The checks judge what the repair changes. The front face, rebuilt, also
+    holds the corner (40, 0, 0); given the 4.9e-3 mm the user's part carries on
+    ordinary vertices, the repair still goes ahead and the corner keeps it."""
+    from OCP.ShapeFix import ShapeFix_ShapeTolerance
+    from OCP.TopAbs import TopAbs_ShapeEnum
+
+    body = occ.read_step(DEFECT)
+    corner = _vertex_at(body, (40.0, 0.0, 0.0))
+    ShapeFix_ShapeTolerance().SetTolerance(corner, 4.9e-3, TopAbs_ShapeEnum.TopAbs_VERTEX)
+    rep = inputfix.repair_input(body)
+    assert [d.repaired for d in rep.defects] == [True], rep.defects
+    assert BRep_Tool.Tolerance_s(_vertex_at(rep.shape, (40.0, 0.0, 0.0))) == pytest.approx(4.9e-3)
+
+
+def test_faces_already_invalid_on_their_own_do_not_refuse_the_repair(monkeypatch):
+    """BRepCheck calls some sound faces invalid on their own (the user's faces
+    166, 168 and 266, where arcs meet tangentially). A repair beside such
+    faces is judged by the other checks."""
+    class AlwaysInvalid:
+        def __init__(self, *_a):
+            pass
+
+        def IsValid(self):
+            return False
+
+    monkeypatch.setattr(inputfix, "BRepCheck_Analyzer", AlwaysInvalid)
+    rep = inputfix.repair_input(occ.read_step(DEFECT))
+    assert [d.repaired for d in rep.defects] == [True], rep.defects
+
+
+def test_a_kernel_failure_while_examining_never_ends_the_run(monkeypatch):
+    """The repair runs on every input, so a throw in it must cost only the
+    repair: reported, and the body returned as built."""
+    from OCP.Standard import Standard_Failure
+
+    def boom(*_a, **_k):
+        raise Standard_Failure("test")
+
+    body = occ.read_step(DEFECT)
+    monkeypatch.setattr(inputfix, "_plan", boom)
+    rep = inputfix.repair_input(body)
+    assert rep.shape.IsSame(body)
+    assert [(d.repaired, "refused to examine" in d.reason) for d in rep.defects] == [(False, True)]
+    monkeypatch.setattr(inputfix, "misplaced_vertices", boom)
+    rep = inputfix.repair_input(body)
+    assert rep.shape.IsSame(body) and rep.defects == []
+
+
+def test_the_checks_leave_no_mesh_on_the_body():
+    """`tessellate` keeps a mesh finer than it asks for, so the checks' own
+    meshes, down to 1e-4 mm, must not stay behind on the body it is given."""
+    from OCP.TopLoc import TopLoc_Location
+
+    rep = inputfix.repair_input(occ.read_step(DEFECT))
+    assert all(BRep_Tool.Triangulation_s(f, TopLoc_Location()) is None
+               for f in occ.faces(rep.shape))

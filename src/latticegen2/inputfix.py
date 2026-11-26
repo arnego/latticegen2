@@ -51,7 +51,7 @@ from OCP.BRep import BRep_Builder, BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve
 from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy, BRepBuilderAPI_MakeEdge
 from OCP.BRepCheck import BRepCheck_Analyzer
-from OCP.BRepTools import BRepTools_ReShape, BRepTools_WireExplorer
+from OCP.BRepTools import BRepTools, BRepTools_ReShape, BRepTools_WireExplorer
 from OCP.GeomAPI import GeomAPI_ProjectPointOnCurve
 from OCP.Precision import Precision
 from OCP.ShapeBuild import ShapeBuild_Edge
@@ -466,19 +466,61 @@ def _mesh_area(face: TopoDS_Face) -> float:
         np.cross(v[t[:, 1]] - v[t[:, 0]], v[t[:, 2]] - v[t[:, 0]]), axis=1).sum())
 
 
-def _check(before: TopoDS_Shape, after: TopoDS_Shape, rebuilt: list[TopoDS_Face]) -> str | None:
+class _Snapshot:
+    """What the three faces a repair rebuilds were before it: each vertex's
+    and edge's tolerance, and whether each face was valid on its own.
+
+    The checks hold the repair to what it changes, not to the file: an input
+    whose faces already carry a 4.9e-3 mm vertex (the user's part has them) or
+    fail ``BRepCheck`` on their own (its faces 166, 168 and 266 do, where arcs
+    meet tangentially) must not have a sound repair refused for that. Taken
+    before :func:`_apply`, which changes tolerances in place, and used to put
+    them back if the repair is refused."""
+
+    def __init__(self, faces: list[TopoDS_Face]):
+        self.tolerance: list[tuple[TopoDS_Shape, float]] = []
+        self.index = TopTools_IndexedMapOfShape()
+        for kind in (TopAbs_ShapeEnum.TopAbs_VERTEX, TopAbs_ShapeEnum.TopAbs_EDGE):
+            for f in faces:
+                TopExp.MapShapes_s(f, kind, self.index)
+        for i in range(1, self.index.Extent() + 1):
+            sub = self.index.FindKey(i)
+            tol = (BRep_Tool.Tolerance_s(TopoDS.Vertex_s(sub))
+                   if sub.ShapeType() == TopAbs_ShapeEnum.TopAbs_VERTEX
+                   else BRep_Tool.Tolerance_s(TopoDS.Edge_s(sub)))
+            self.tolerance.append((sub, tol))
+        self.valid = all(BRepCheck_Analyzer(f).IsValid() for f in faces)
+
+    def allowed(self, sub: TopoDS_Shape, fresh: TopoDS_Vertex) -> float:
+        """The largest tolerance ``sub`` may keep: :data:`REPAIR_MAX_TOL`, or
+        what it already had if more -- except ``fresh``, the vertex whose
+        inflated tolerance is the defect."""
+        i = self.index.FindIndex(sub)
+        if i == 0 or sub.IsSame(fresh):
+            return REPAIR_MAX_TOL
+        return max(REPAIR_MAX_TOL, self.tolerance[i - 1][1])
+
+    def restore(self) -> None:
+        fix = ShapeFix_ShapeTolerance()
+        for sub, tol in self.tolerance:
+            kind = sub.ShapeType()
+            fix.SetTolerance(sub, tol, kind)
+
+
+def _check(before: TopoDS_Shape, after: TopoDS_Shape, rebuilt: list[TopoDS_Face],
+           snap: _Snapshot, x: TopoDS_Vertex) -> str | None:
     """Why ``after`` is not a sound repair of ``before``, or ``None``."""
     if len(occ.solids(after)) != len(occ.solids(before)):
         return "the number of solids changed"
+    if snap.valid and not all(BRepCheck_Analyzer(f).IsValid() for f in rebuilt):
+        return "a rebuilt face is not valid on its own"
     for face in rebuilt:
-        if not BRepCheck_Analyzer(face).IsValid():
-            return "a rebuilt face is not valid on its own"
         for _, edges in _wire_edges(face):
             for edge in edges:
-                if BRep_Tool.Tolerance_s(edge) > REPAIR_MAX_TOL:
+                if BRep_Tool.Tolerance_s(edge) > snap.allowed(edge, x):
                     return "a rebuilt face has an edge tolerance past the bar"
                 for w in (TopExp.FirstVertex_s(edge), TopExp.LastVertex_s(edge)):
-                    if BRep_Tool.Tolerance_s(w) > REPAIR_MAX_TOL:
+                    if BRep_Tool.Tolerance_s(w) > snap.allowed(w, x):
                         return f"a vertex at {_round(_vertex_xyz(w))} keeps a tolerance past the bar"
     fault = _edge_use_fault(after)
     if fault:
@@ -500,17 +542,14 @@ def _check(before: TopoDS_Shape, after: TopoDS_Shape, rebuilt: list[TopoDS_Face]
     return None
 
 
-def _vertex_tolerances(faces: list[TopoDS_Face]) -> list[tuple[TopoDS_Vertex, float]]:
-    """Every vertex of ``faces`` with its tolerance, to put back after a
-    refused repair: :func:`_apply` lowers one and may grow others in place."""
-    vm = TopTools_IndexedMapOfShape()
-    for f in faces:
-        TopExp.MapShapes_s(f, TopAbs_ShapeEnum.TopAbs_VERTEX, vm)
-    out = []
-    for i in range(1, vm.Extent() + 1):
-        v = TopoDS.Vertex_s(vm.FindKey(i))
-        out.append((v, BRep_Tool.Tolerance_s(v)))
-    return out
+def _scan(work: TopoDS_Shape):
+    """:func:`misplaced_vertices`, or ``None`` where the kernel will not answer:
+    this runs on every input, so a failure here must not end a run that would
+    have succeeded without it."""
+    try:
+        return misplaced_vertices(work)
+    except Exception:                     # pragma: no cover - kernel refusal
+        return None
 
 
 def repair_input(shape: TopoDS_Shape) -> InputRepair:
@@ -518,31 +557,34 @@ def repair_input(shape: TopoDS_Shape) -> InputRepair:
     and every one found reported."""
     defects: list[InputDefect] = []
     work = shape
-    tried: set[tuple[float, float, float]] = set()
+    tried: set[tuple] = set()
+    checked = False
     # A repair rebuilds faces, so the body is scanned again after each one; a
     # declined candidate changes nothing, so the scan it came from still holds.
     while True:
         repaired = False
-        for e, x, q, gap in misplaced_vertices(work):
+        for e, x, q, gap in _scan(work) or []:
             where = _round(q)
-            if where in tried:
-                continue
             at = _round(_vertex_xyz(x))
-            tried.add(where)
-            plan, why = _plan(_Body(work), e, x, q)
+            if (where, at) in tried:
+                continue
+            tried.add((where, at))
+            try:
+                plan, why = _plan(_Body(work), e, x, q)
+            except Exception as exc:      # kernel refusal: leave it as built
+                plan, why = None, f"the kernel refused to examine it ({exc})"
             if plan is None:
                 defects.append(InputDefect(where, gap, False, why, at))
                 continue
-            saved = _vertex_tolerances([plan["f"], plan["h"], plan["k"]])
+            snap = _Snapshot([plan["f"], plan["h"], plan["k"]])
+            checked = True
             try:
                 after, rebuilt = _apply(work, plan)
-                why = _check(work, after, rebuilt)
-            except Exception as exc:          # kernel refusal: leave it as built
+                why = _check(work, after, rebuilt, snap, x)
+            except Exception as exc:      # kernel refusal: leave it as built
                 why = f"the kernel refused the repair ({exc})"
             if why is not None:
-                tolerance = ShapeFix_ShapeTolerance()
-                for v, tol in saved:
-                    tolerance.SetTolerance(v, tol, TopAbs_ShapeEnum.TopAbs_VERTEX)
+                snap.restore()
                 defects.append(InputDefect(where, gap, False, why, at))
                 continue
             defects.append(InputDefect(where, gap, True, "split where the curve ends", at))
@@ -550,6 +592,10 @@ def repair_input(shape: TopoDS_Shape) -> InputRepair:
             break
         if not repaired:
             break
+    if checked:
+        # The checks mesh faces of the body in place, down to 1e-4 mm, and
+        # `tessellate` would keep a mesh finer than it asks for.
+        BRepTools.Clean_s(work)
     tol, at = max_vertex_tolerance(work)
     return InputRepair(work, defects, tol, at)
 

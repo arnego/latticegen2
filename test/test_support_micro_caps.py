@@ -105,15 +105,20 @@ def test_a_dimple_that_is_material_is_left_alone():
     assert out is s
 
 
-def test_a_cap_on_an_outer_wire_is_left_alone():
+def test_a_cap_on_an_outer_wire_is_collapsed_instead():
     """On the seam the hole is part of the wall face's outer wire: removing that
-    wire would remove the face, so the repair does not apply and the body is
-    returned as it came, for the STEP round-trip check to judge."""
+    wire would remove the face, so it is not removed as a cap. It is collapsed
+    as a corner facet instead (``test_lattice_micro_corners.py``): the cap's
+    faces and edges go, their vertices become one, and the outer wire stays."""
     s = _dimpled_cylinder(1e-4, seam_on_crest=True)
     assert len(occ.faces(s)) == 6
     (out,), removed, refused = generate.remove_micro_caps([s])
-    assert removed == [] and refused == []
-    assert out is s
+    assert refused == []
+    assert np.allclose(removed, [(20.3, 0.0, 20.0)], atol=1e-3)
+    assert len(occ.faces(out)) == 3
+    assert occ.is_valid(out)
+    assert frustum.edges_not_used_twice(out) == 0
+    assert abs(occ.volume(out) - occ.volume(s)) / occ.area(s) < 1e-4
 
 
 def test_the_real_body_fails_export_truth_and_passes_once_repaired(tmp_path):
@@ -133,3 +138,70 @@ def test_the_real_body_fails_export_truth_and_passes_once_repaired(tmp_path):
 
     after = occ.exported_mesh_defects(out, str(tmp_path / "after.step"))
     assert after.bad == 0
+
+
+LENS = os.path.join(HERE, "support-lens.brep")
+LENS_AT = (1865.836, -45.051, 919.752)
+
+
+def load_lens():
+    """A lens on a support body: two descriptions of one edge enclosing a sliver.
+
+    Support body 32 of `TDHX_error_report_test.stp` (a user's part) at ``cc=7,
+    t=1.4, --orient 180 0 0 --support``, 2026-11-25, cut to a 2 mm cube around
+    the lens: a cylinder face of area -5.2e-06 mm^2 bounded by the input's own
+    circle and the boolean's B-spline for the same intersection, 0.025 mm long
+    and 3.1e-04 mm apart. The whole body, 8.3 MB, read 4 edges used once at
+    every rung there and nowhere else; the cut reads the same 4.
+    """
+    from OCP.BRep import BRep_Builder
+    from OCP.BRepTools import BRepTools
+    from OCP.TopoDS import TopoDS_Shape
+
+    shape = TopoDS_Shape()
+    BRepTools.Read_s(shape, LENS, BRep_Builder())
+    (solid,) = occ.solids(shape)
+    return solid
+
+
+def test_the_lens_fails_the_round_trip_check_at_every_rung(tmp_path):
+    s = load_lens()
+    assert occ.is_valid(s)
+    assert frustum.edges_not_used_twice(s) == 0
+    md = occ.exported_mesh_defects(s, str(tmp_path / "rt.step"))
+    assert md.bad == 4
+    assert [n for _d, n in md.refinement.counts] == [4] * len(occ.MESH_REFINEMENT_LADDER)
+
+
+def test_the_lens_is_collapsed_onto_one_edge(tmp_path):
+    s = load_lens()
+    hosts: list = []
+    corners: list = []
+    fixed, where = occ.remove_micro_caps(s, hosts=hosts, corners=corners)
+    assert hosts == [] and len(corners) == 1
+    touched, n = corners[0]
+    assert n == 1 and len(touched) == 2
+    assert np.allclose(where, [LENS_AT], atol=1e-3)
+    assert occ.micro_cap_repair_fault(s, fixed, hosts, corners=corners) is None
+
+    (out,), removed, refused = generate.remove_micro_caps([s])
+    assert refused == [] and np.allclose(removed, [LENS_AT], atol=1e-3)
+    assert len(occ.faces(out)) == len(occ.faces(s)) - 1
+    assert occ.is_valid(out)
+    assert frustum.edges_not_used_twice(out) == 0
+    assert abs(occ.volume(out) - occ.volume(s)) / occ.area(s) < 1e-6
+    md = occ.exported_mesh_defects(out, str(tmp_path / "rt.step"))
+    assert md.bad == 0 or md.refinement.resolved
+
+
+def test_two_edged_faces_that_are_not_slivers_are_left_alone():
+    """A half-disc is two edges between two vertices too; its edges are far
+    apart, so it is a face and not a lens."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+    from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+
+    half = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 5.0, 2.0, np.pi).Shape()
+    (solid,) = occ.solids(half)
+    fixed, where = occ.remove_micro_caps(solid)
+    assert where == [] and fixed is solid

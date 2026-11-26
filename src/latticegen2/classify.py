@@ -41,6 +41,7 @@ from . import occ
 from .errors import InputGeometryError
 from .lattice import LatticeParams, half_strut_offset, lattice_params, nodes
 from .parallel import WorkerPool
+from .runlog import box_text, point_text
 
 
 class Klass(IntEnum):
@@ -184,8 +185,8 @@ def check_surface_mesh_coverage(
         if tri is None or len(tri[1]) == 0:
             raise InputGeometryError(
                 f"Surface tessellation produced zero elements for face {idx} "
-                f"(exact CAD area {exact:.4f} mm^2). The input geometry could not be "
-                f"faithfully meshed for boundary classification."
+                f"(exact CAD area {exact:.4f} mm^2){_face_place(face)}. The input "
+                f"geometry could not be faithfully meshed for boundary classification."
             )
         verts, tris = tri
         a0, b0, c0 = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
@@ -200,17 +201,35 @@ def check_surface_mesh_coverage(
                 f"{exact - meshed:.4f} mm^2; tolerances {100 * area_rel_tol:.1f}% and "
                 f"{min_deficit:.4f} mm^2). Classification against this mesh would "
                 f"misclassify struts near the missing region as OUTSIDE rather than "
-                f"fail. The input face likely needs repair in the originating CAD tool."
+                f"fail. The input face likely needs repair in the originating CAD "
+                f"tool{_face_place(face)}."
             )
 
         lo, hi = occ.bounding_box(face)
         if np.any(verts < lo - bbox_slack) or np.any(verts > hi + bbox_slack):
+            # Named by where it is, in the part's coordinates, and by how far
+            # the stray node lies outside: a face index means nothing in the
+            # user's CAD tool, and an unformatted NumPy repr is unreadable.
+            out = np.maximum(lo - verts, verts - hi).max(axis=1)
+            worst = int(np.argmax(out))
             raise InputGeometryError(
-                f"Surface tessellation for face {idx} placed a mesh node outside that "
-                f"face's own CAD bounding box lo={tuple(lo)} hi={tuple(hi)} (slack "
-                f"{bbox_slack} mm). The triangulation is mis-parametrized and "
-                f"classification against it would be unreliable."
+                f"Surface tessellation for face {idx}{_face_place(face)} placed a "
+                f"mesh node at {point_text(verts[worst])}, {out[worst]:.3f} mm "
+                f"outside that face's own CAD bounding box ({box_text(lo, hi)}, "
+                f"slack {bbox_slack:g} mm). The triangulation is mis-parametrized and "
+                f"classification against it would be unreliable. The input face "
+                f"likely needs repair in the originating CAD tool."
             )
+
+
+def _face_place(face) -> str:
+    """Where an input face is, for a failure naming it: its centre of area and
+    its extent, in the part's coordinates."""
+    try:
+        lo, hi = occ.bounding_box(face)
+        return f", centred at {point_text(occ.centroid(face))} ({box_text(lo, hi)})"
+    except Exception:                           # pragma: no cover - defensive
+        return ""
 
 
 def surface_samples(face) -> np.ndarray | None:

@@ -943,6 +943,53 @@ intersection:
 Probing every junction costs about **+24 %** on `boundary`, which is
 worker-parallel.
 
+**Then the whole-body trim again, with a fuzzy value**
+(`boundary.JUNCTION_FUZZY_LADDER`, 1e-5, 1e-4 and 1e-3 mm, in order), where
+the block too leaves material outside. Each rung is re-probed like the block
+and kept only if it is better. A rung that clears the probe is also held to a
+sampled reading of how much of the junction lies in the body: 2,000 points
+drawn inside the junction from its half-struts' own expressions, each asked of
+the body's exact classifier (`boundary._inside_volume`). It must agree within
+four standard errors plus 1 % of the junction. The probe cannot see a trim that
+kept too little, and without that check a rung returning part of the right
+answer would replace the drop and its warning with a quiet note. A junction no
+rung trims is dropped and reported as before. Each kept one is a `note:` naming
+the junction and its value.
+
+Found on a user's `TDHX_error_report_test.stp` at `cc=7, t=1.4,
+--orient 180 0 0`, where three junctions at [1883–1889, −17.5 to −28, 983.06]
+were dropped, each probed 1.7 to 2.4 mm outside. The probe was right: OCCT's
+exact classifier and `BRepExtrema` put the same vertices outside by the same
+distances. Three B-spline fillets round a bore meet one another **3.5e-05 mm
+apart**, a gap only their edges' tolerance covers, at the corner where they
+meet the plane z = 983.6. Their edges with that plane record 1e-07 mm against a
+measured curve-on-surface deviation of 2.7e-06 to 1.45e-05. Where a strut
+crosses that corner, the intersection curves are found and close, and the
+strut face is still not split: it comes back whole and is kept as inside. The
+two repairs above ask the same kernel at the same tolerance, and a block cut
+from the body there inherits the gap, so both fail too. The block's own
+intersection with the body comes back at 0 mm³ at three of four sizes tried.
+
+| junction | truth, 20,000 points | fuzzy 0 to 2e-05 | from 5e-05 |
+|---|---|---|---|
+| (196, −266, −274) | 9.33 ± 0.21 | 23.5455 | **9.6398** |
+| (197, −268, −273) | 14.63 ± 0.26 | 23.6165 | **15.0748** (from 1e-05) |
+| (197, −267, −274) | 9.75 ± 0.22 | 23.6165 | **10.1194** |
+
+The fuzzy trims are exact, not merely close. Classified point by point against
+the body, 20,000 points per junction, no point of a trim lies outside the body
+and no point of the junction inside it is missing. Raising every
+under-toleranced edge of the input to its own deviation (400 of its 1,414
+edges) was tried first and cures only (197, −268, −273). The face BRepCheck
+calls self-intersecting there, the 6,697 mm² plane, is not the cause: its
+tangent arcs meet 60 mm away.
+
+On the whole run, `--support --support-thickness 1`, 6 cores, 2026-11-26: no
+junction is left out. The three are trimmed at 1e-05 and 1e-04, and the lattice
+rises from 94,431.8 to 94,466.8 mm³, which is their 34.8 mm³. Support is 38
+bodies of 19,518 mm³ (was 19,522), and the harness finds all 88,220 overhang
+samples backed. The run took 33 m 01 s.
+
 **One consequence reaches §8, and it is why `unweldable` now checks
 boundary-to-boundary caps.** A rebuilt junction's caps are geometrically
 identical to what its neighbours expect — measured within 1e-15 mm, four orders
@@ -1179,10 +1226,10 @@ defect:
 The harness's own coverage check, asked of the written file
 (`verify_geometry.overhang_coverage`), finds all 88,220 samples over the
 7,243 mm² of inner overhang backed, one a sliver within 0.05 mm. Three lattice
-junctions left out by §7.2 at [1883–1889, −17.5 to −28, 983.06] are the same
-either way, 50 mm from the defect, beside a face BRepCheck calls
-self-intersecting where circular arcs meet tangentially; the repair does not
-touch them.
+junctions left out by §7.2 at [1883–1889, −17.5 to −28, 983.06] were the same
+either way, 50 mm from the defect. They are now trimmed by §7.2's fuzzy rung,
+and the cause was a seam between fillets rather than the self-intersecting face
+beside them.
 
 One more thing it found: with the defect gone, a support trim there reached the
 coplanar-face merge for the first time, and `ShapeUpgrade_UnifySameDomain`
@@ -2507,6 +2554,7 @@ Let `N` = candidate nodes (∝ volume), `S` = boundary nodes (∝ surface area,
 | Explicit face plane normals | Avoids a silently zero-volume shell (§6) |
 | One object operand per COMMON | Makes OCCT's operand-fragmentation failure mode unreachable |
 | A COMMON that returns its operand is re-derived per half-strut (§7.2) | Correctness, not speed. The kernel can return a junction untrimmed while reporting `IsDone`, leaving material up to 1.29 mm outside the body — 8 of 2,073 junctions on `SpiralTest`, and **not** detectable with another boolean, since `Cut` agrees with `Common`. The detector is self-validating: it fires on any result equal to the operand, and the re-trim keeps the original whenever every half-strut really is whole. 9.2 % reach the check, 0.4 % are changed, ~+11 % on a worker-parallel stage |
+| Whole-body trim retried with a fuzzy value where the probe still finds material outside (§7.2) | Correctness. Where the input's own faces meet with a gap only their tolerance covers, the exact trim can keep a strut face whole across it, and the local block inherits the gap. Measured on a user's part: three fillets 3.5e-05 mm apart, three junctions dropped at fuzzy 0 to 2e-05 and trimmed exactly from 5e-05. Each rung re-probed and kept only if better, so the worst case is the drop it replaces. Runs only after both other rungs have failed |
 | Interface correspondence checked on boundary-to-boundary caps too (§8) | Correctness. Sewing pairs edges, so two rings describing the same quad with six edges against four cannot close — and the area test §7.1 applies passes such a cap exactly. A cap whose two sides do not correspond is now *fused* with the same local boolean a mismatched cap gets, and declined only where that fuse cannot merge them — because declining a **coincident** pair keeps both sides' cap faces, which is duplicate material wherever the two pieces stay connected by their other interfaces (G23); both golden samples unchanged |
 | Pinhole wires removed in the worker, before tagging | Correctness, not speed: it rides the trim that produced them, so the piece is still identifiable and the repair parallelises for free (§7, G10). Guarded by an exact area bar and a structural one, never by volume — OCCT cannot integrate the volume of the unrepaired piece, because the pinhole is exactly the free boundary its precondition excludes (§7, G19) |
 | Vertex tolerances repaired on the sewn boundary, before the rings are read | Correctness, not speed: both rungs adjust recorded tolerances only, so no topology object is replaced and the interior adopts corrected vertices rather than a copy needing the same fix again. Cost is finding the faces to repair, on a sound layer (§8, G11, G12) |

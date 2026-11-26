@@ -45,6 +45,21 @@ POINT_RADIUS = 5
 REDRAW_DEBOUNCE_MS = 30
 
 
+def _face_centres(verts, tris, owner, n_faces) -> "np.ndarray | None":
+    """Each preview face's centre, as the mean of its triangles' centres; NaN
+    for a face with no triangle. What a failure's face is told apart by when
+    two faces share a bounding box."""
+    if owner is None or n_faces is None or len(owner) != len(tris):
+        return None
+    centres = verts[tris].mean(axis=1)
+    count = np.bincount(owner, minlength=n_faces)[:n_faces].astype(float)
+    out = np.full((n_faces, 3), np.nan)
+    for a in range(3):
+        total = np.bincount(owner, weights=centres[:, a], minlength=n_faces)[:n_faces]
+        out[:, a] = np.where(count > 0, total / np.maximum(count, 1.0), np.nan)
+    return out
+
+
 class BadGeometryViewer(tk.Toplevel):
     """The viewer window. ``mesh`` is ``(verts, tris, face, face_lo, face_hi)``
     with ``face`` and the boxes possibly ``None``, or ``None`` for no mesh."""
@@ -77,7 +92,7 @@ class BadGeometryViewer(tk.Toplevel):
         self._marks: list = []
         self._face_match: dict = {}    # (mark, place) -> preview face index
         self._verts = self._tris = self._normals = self._owner = None
-        self._face_lo = self._face_hi = None
+        self._face_lo = self._face_hi = self._face_centre = None
         self._bed = None
         self._shift = np.zeros(3)
         self._pivot = np.zeros(3)
@@ -193,6 +208,8 @@ class BadGeometryViewer(tk.Toplevel):
 
     def set_mesh(self, mesh) -> None:
         """Show this mesh of the input, or none (marks only)."""
+        had_mesh = self._verts is not None
+        self._face_centre = None
         if mesh is None or mesh[0] is None or len(mesh[1]) == 0:
             self._verts = self._tris = self._normals = self._owner = None
             self._face_lo = self._face_hi = None
@@ -204,6 +221,13 @@ class BadGeometryViewer(tk.Toplevel):
             self._owner = None if owner is None else np.asarray(owner, dtype=np.int64)
             self._face_lo = None if face_lo is None else np.asarray(face_lo, dtype=float)
             self._face_hi = None if face_hi is None else np.asarray(face_hi, dtype=float)
+            self._face_centre = _face_centres(self._verts, self._tris, self._owner,
+                                              None if self._face_lo is None
+                                              else len(self._face_lo))
+            # A view fitted to the marks alone -- a single point fits at a
+            # thousandth of a millimetre -- is no view of the part: fit again.
+            if not had_mesh:
+                self._fitted = False
         self._place()
         self._match_faces()
         self._schedule_redraw()
@@ -247,7 +271,9 @@ class BadGeometryViewer(tk.Toplevel):
                 if place.kind != "face":
                     continue
                 k = _marks.match_face(place.points[1], place.points[2],
-                                      self._face_lo, self._face_hi)
+                                      self._face_lo, self._face_hi,
+                                      centroid=place.points[0],
+                                      face_centre=self._face_centre)
                 if k is not None:
                     self._face_match[(i, j)] = k
 

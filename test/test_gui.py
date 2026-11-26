@@ -3,8 +3,10 @@
 Everything that decides *what* the window shows lives outside
 :mod:`latticegen2.gui.app` precisely so it can be tested without a display: the
 stage weights, the reduction from an event stream to a state, and the command
-line handed to the child. Only one test here needs Tk at all, and it withdraws
-the window rather than showing it.
+line handed to the child. The tests that need Tk share one withdrawn root --
+except the bad-geometry viewer's, which map a real window: on Windows a window
+transient to a withdrawn master is never mapped, and resizing, focus and clicks
+cannot be tested on a window that is not.
 
 The stream these tests feed the model is deliberately hostile. Its producer is a
 separate process that can be killed at any moment, so a missing ``stage_end``, a
@@ -1368,3 +1370,47 @@ def test_a_parameter_failure_shows_no_bad_geometry_button(tk_root):
     finally:
         if app._preview is not None:
             app._preview.abandon()
+
+
+def test_two_faces_sharing_a_box_are_told_apart_by_their_centres():
+    from latticegen2.gui import marks
+
+    # A counterbore's floor and the wall around it can share one box.
+    lo, hi = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]), np.array([[10.0, 10.0, 5.0]] * 2)
+    centres = np.array([[5.0, 5.0, 0.0], [5.0, 5.0, 2.5]])
+    assert marks.match_face(lo[0], hi[0], lo, hi, centroid=(5, 5, 2.5),
+                            face_centre=centres) == 1
+    assert marks.match_face(lo[0], hi[0], lo, hi, centroid=(5, 5, 0.0),
+                            face_centre=centres) == 0
+    # No centres known: the nearest box, as before.
+    assert marks.match_face(lo[0], hi[0], lo, hi) == 0
+
+
+def test_the_viewer_fits_the_part_once_its_first_mesh_arrives(tk_root):
+    """Opened before any mesh, the viewer fits its marks -- a single point, at a
+    thousandth of a millimetre -- and must fit again when the part arrives."""
+    from latticegen2.gui import view3d
+    from latticegen2.gui.badgeom import BadGeometryViewer
+
+    from latticegen2.gui import marks
+    from latticegen2.runlog import Place
+
+    point = marks.from_event(_mark_event("warning", "x", "WARNING: x: y. z.",
+                                         [Place.point((10, 10, 10))]))
+    v = BadGeometryViewer(tk_root, mesh=None, marks=[point])
+    v.geometry("800x600+40+40")
+    try:
+        for _ in range(5):
+            tk_root.update()
+        v.fit()
+        marks_only = v.camera[0]
+        v.set_mesh(_cube_mesh())
+        for _ in range(10):
+            tk_root.update()
+        v.after(60)
+        tk_root.update()
+        want = view3d.fit_scale(v._extent, v.canvas.winfo_width(), v.canvas.winfo_height())
+        assert v.camera[0] == pytest.approx(want)
+        assert v.camera[0] < marks_only
+    finally:
+        v.close()

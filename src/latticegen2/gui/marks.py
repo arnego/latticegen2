@@ -137,7 +137,8 @@ def detail_text(mark: Mark, place: MarkPlace, width: int = 52) -> str:
     return "\n".join(rows)
 
 
-def match_face(lo, hi, face_lo: np.ndarray, face_hi: np.ndarray) -> "int | None":
+def match_face(lo, hi, face_lo: np.ndarray, face_hi: np.ndarray,
+               centroid=None, face_centre: "np.ndarray | None" = None) -> "int | None":
     """The preview face a failure's face is, by bounding box.
 
     By box rather than by index: the pipeline repairs the input before it
@@ -146,12 +147,23 @@ def match_face(lo, hi, face_lo: np.ndarray, face_hi: np.ndarray) -> "int | None"
     still differ a little -- OCCT tightens a face's box to its triangulation
     once it has one -- so the nearest box is taken, if it is within a tenth of
     the named box's diagonal (and a tenth of a millimetre).
+
+    Two faces can share a box -- a counterbore's floor and the wall around it,
+    say. Where the faces' own centres are known (``face_centre``), every face
+    within the bar is scored by its box gap plus how far its centre lies from
+    the named ``centroid``, so the one the failure meant wins the tie.
     """
     if face_lo is None or face_hi is None or len(face_lo) == 0:
         return None
     lo, hi = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
     face_lo, face_hi = np.asarray(face_lo, dtype=float), np.asarray(face_hi, dtype=float)
     gap = np.maximum(np.abs(face_lo - lo).max(axis=1), np.abs(face_hi - hi).max(axis=1))
-    best = int(np.argmin(gap))
     bar = 0.1 * float(np.linalg.norm(hi - lo)) + 0.1
-    return best if gap[best] <= bar else None
+    score = gap.copy()
+    if centroid is not None and face_centre is not None and len(face_centre) == len(gap):
+        off = np.linalg.norm(np.asarray(face_centre, dtype=float)
+                             - np.asarray(centroid, dtype=float), axis=1)
+        score = gap + np.where(np.isfinite(off), off, np.inf)
+    score = np.where(gap <= bar, score, np.inf)
+    best = int(np.argmin(score))
+    return best if np.isfinite(score[best]) else None

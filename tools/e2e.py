@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -402,15 +403,25 @@ def _reduced(events: list[dict]):
 
 
 def _marks_say_what_the_text_says(rep: Report, marks: list[dict]) -> None:
-    """Every place a mark carries is a line of its message, and the numbers it
-    carries are the figures that line prints -- so the viewer marks exactly
-    where the text sends the reader."""
-    from latticegen2.runlog import point_text
+    """Every place a mark carries says the figures it carries, and a warning's
+    places are lines of its message -- so the viewer marks exactly where the
+    text sends the reader.
+
+    Only a warning's first ``WARNING_PLACES`` places are asked to be in its
+    message: the text counts the rest, the mark carries them. A failure's
+    places are labelled in the viewer's words, so only their figures are
+    asked of them."""
+    from latticegen2.runlog import WARNING_PLACES, point_text
 
     bad = []
     for m in marks:
+        printed = (m["places"][:WARNING_PLACES]
+                   if m["severity"] == progress.WARNING_MARK else [])
         for place in m["places"]:
-            if place["text"] not in m["message"]:
+            if not all(math.isfinite(x) for k, v in place.items()
+                       if k not in ("kind", "text") for x in v):
+                bad.append(f"{place['kind']} with a coordinate that is not finite")
+            if place in printed and place["text"] not in m["message"]:
                 bad.append(f"{place['text']!r} not in its message")
             keys = {"point": ("p",), "segment": ("a", "b"), "box": (),
                     "face": ("centroid",)}[place["kind"]]

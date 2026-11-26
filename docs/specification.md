@@ -667,6 +667,11 @@ For every scenario the harness must verify, without human intervention:
   checks fail, the body is left as built and the run warns with both points
   when the gap is wider than a tenth of `t`; a run also warns of any input
   vertex described less precisely than that. Neither refuses the run.
+  The same holds for a face whose boundary crosses itself where two arcs
+  leave a vertex in the same direction and overlap by a rounding of the file
+  (4.2e-9 mm on the same part): the vertex is moved to where they cross, a
+  `note:`, and a crossing left as built is a warning, since a body trimmed
+  there is valid in memory and can fail once read back from its STEP file.
 - The graphical front-end (§3.1) reports a failure with the same single reason
   line, in the window. A front-end that cannot *start* — no display, or an
   interpreter without `tkinter` — reports itself on stderr, or in a dialog box

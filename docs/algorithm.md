@@ -1238,6 +1238,78 @@ which the support path did not catch and so ended the run seven minutes into
 `support`. `frustum._unified` now keeps such a trim unmerged, as it already did
 for a merge that moved anything.
 
+#### A face that crosses its own boundary at a cusp, repaired at `import`
+
+**The defect.** Where two holes of a part touch tangentially — an R1 or R0.5
+hole against an R4.5 bore on the user's part — the planar face between them is
+bounded by two circular edges leaving their shared vertex `V` in the **same**
+direction: a zero-angle cusp, not an S-blend. The file writes the circles'
+centres to six decimals, so on its faces 166, 168 and 266 the circles overlap
+by 2.8e-10 to 4.2e-9 mm and cross again at `Q`, 1.6e-5 to 8.3e-5 mm from `V`
+(the square root of the overlap), inside both edges. The wire crosses itself,
+enclosing an inverted sliver of no material, and `BRepCheck` calls each face
+`SelfIntersectingWire` — rightly: the 2D intersector finds the crossing inside
+both edges' ranges, 8.2e-5 mm from a vertex of tolerance 1e-7. Five such
+cusps; `BRepCheck`'s first-pair report names only three.
+
+**Why the run passed it and the file did not.** A boolean against the body
+finds the same crossing and widens `V`'s tolerance to cover it: 8.508e-05 mm,
+exactly the crossing distance. So every trimmed body there is valid in this
+process, which is what §9's gate asks. STEP keeps no such tolerance (§9): read
+back, `V` is at 1e-7 and the face is invalid again. Measured on the user's run
+(2026-11-26): the 61,616-face lattice body failed `BRepCheck` after a round trip
+on one 0.083 mm² piece of face 266 at that vertex and nowhere else; and on a
+cut of junction (196, −283, −257), valid in memory, invalid read back. A
+synthetic cusp with the user's numbers reproduces both verdicts, and settles
+what can fix it:
+
+| vertex | overlap | in memory | after STEP |
+|---|---|---|---|
+| at the nominal tangent point, tol 1e-7 | 4.2e-9 mm | invalid | invalid |
+| same, tolerance widened to 1e-4 | 4.2e-9 mm | valid | **invalid** |
+| moved to where the circles cross, tol 1e-7 | 4.2e-9 mm | valid | **valid** |
+| circles exactly tangent, or 1e-9 apart | — | valid | valid |
+
+No tolerance repair can survive the file, so the geometry has to agree with
+itself.
+
+**The repair moves `V` to `Q`** (`inputfix._repair_cusps`). Both arcs are
+re-bounded at `Q` on their own circles and parameter curves; the third edge at
+`V`, the line where the two hole walls touch, is replaced by the segment from
+its other, unmoved end to `Q`, with parameter curves running straight from
+where the old one left that end to where each wall's arc now ends. `Q` lies
+along the tangent from `V`, so the segment departs from each wall only by the
+square of that offset over the radius: 3.5e-9 mm here, checked against both
+walls before anything is built. No surface moves; the material moved is the
+sliver's own. All the cusps of one face are repaired together, since the face
+is valid only once every one is, and an arc with a cusp at each end — face
+266's bore — is rebuilt once with both ends moved.
+
+It acts only where: the face is planar and both edges are circles in its
+plane; they leave `V` within `CUSP_ANGLE` of one direction and cross inside
+both, between the kernel's confusion and `CROSSING_MAX` (0.01 mm) from `V`; the
+sliver is no wider than `SLIVER_MAX` (1e-6 mm, 240 times the user's), wider
+being an overlap in the model rather than its rounding; and `V` holds exactly
+those two arcs and one straight line, between a floor and two walls. Checked
+as the misplaced-vertex repair is — the floor valid, each wall valid if it
+was, tolerances within the bar, every edge used twice, areas against meshes,
+the neighbourhood meshing closed — plus the property it exists for: **each
+rebuilt face, written to STEP alone and read back, is valid**. A repair any of
+this refuses is undone, and a crossing left is always a warning: however small,
+it is where a written body can fail.
+
+**It found a fault in the rebuild both repairs share.** Faces 166 and 168 are
+reversed and store their wire reversed. `_rebuild_face` took the edges from a
+wire explorer, which already gives them in the sense the face runs them, and
+then oriented the new wire as the old one: twice round, `BadOrientationOfSubshape`
+on every rebuild there. The misplaced-vertex repair had never met such a wire.
+
+**Measured.** On the user's part, all five cusps are repaired and the input body
+is `BRepCheck`-valid for the first time, in memory and after a STEP round trip;
+`repair_input` takes 5.2 s against 1.2 s, the checks being the difference. No
+committed part has a crossed cusp — the scan costs at most 0.07 s, on the
+rehearsal's 388 faces — so the golden samples cannot move.
+
 ---
 
 ## 8. Connectivity, the floating-body rule, and stitching
@@ -2367,6 +2439,7 @@ program builds itself.
   | faces of the input do not meet (§7.4) | the worst gap |
   | the input file contradicts itself (§7.5) | each curve end and the vertex it names |
   | the input file is imprecise (§7.5) | the vertex |
+  | a face of the input crosses itself (§7.5) | each crossing and its vertex |
   | lattice junctions left out (§7.2) | each junction |
   | trims resting on their own tolerance (§7.3) | each body's worst face |
   | struts closed off where they should join, not joined, not welded (§7.1, §8) | each junction |

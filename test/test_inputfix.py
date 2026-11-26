@@ -228,9 +228,9 @@ def test_a_loose_vertex_elsewhere_on_a_rebuilt_face_does_not_refuse_the_repair()
 
 
 def test_faces_already_invalid_on_their_own_do_not_refuse_the_repair(monkeypatch):
-    """BRepCheck calls some sound faces invalid on their own (the user's faces
-    166, 168 and 266, where arcs meet tangentially). A repair beside such
-    faces is judged by the other checks."""
+    """Some input faces are invalid on their own (the user's faces 166, 168
+    and 266, crossing their own boundary at a cusp until the second repair
+    runs). A repair beside such faces is judged by the other checks."""
     class AlwaysInvalid:
         def __init__(self, *_a):
             pass

@@ -518,8 +518,8 @@ class _Snapshot:
 
     The checks hold the repair to what it changes, not to the file: an input
     whose faces already carry a 4.9e-3 mm vertex (the user's part has them) or
-    fail ``BRepCheck`` on their own (its faces 166, 168 and 266 do, where arcs
-    meet tangentially) must not have a sound repair refused for that. Taken
+    fail ``BRepCheck`` on their own (its faces 166, 168 and 266 do, crossing
+    their own boundary at a cusp until :func:`_repair_cusps` runs) must not have a sound repair refused for that. Taken
     before :func:`_apply`, which changes tolerances in place, and used to put
     them back if the repair is refused."""
 

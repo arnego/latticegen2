@@ -1,4 +1,4 @@
-"""Repair of one defect class in the *input* body, found at ``import``.
+"""Repair of two defect classes in the *input* body, found at ``import``.
 
 The geometry kernel builds what a STEP file says. Where the file contradicts
 itself, the body it builds carries the contradiction into every boolean this
@@ -39,23 +39,54 @@ must mesh closed at some rung of the ladder the STEP round-trip check uses
 (:func:`latticegen2.occ.refine_until_manifold`). A defect that fails any of
 it is left as built and reported as a warning with its position, so a run on
 such a file says where its output may be missing.
+
+**The second defect: a face whose boundary crosses itself at a cusp.** Where
+two holes of a part touch tangentially, a planar face between them is bounded
+by two circular edges that leave their shared vertex ``V`` in the same
+direction. The user's file writes those circles to six decimals, so on its
+faces 166, 168 and 266 they overlap by 4.2e-9 mm and cross again at ``Q``,
+8.3e-5 mm from ``V``, inside both edges: the wire crosses itself, enclosing an
+inverted sliver of no material, and ``BRepCheck`` calls the face invalid. A
+boolean against the body widens ``V``'s tolerance to cover ``Q``, so a body
+trimmed there is valid in this process -- and not once written, since STEP
+cannot carry that tolerance: the lattice body of the user's run failed
+``BRepCheck`` after a round trip there and nowhere else.
+
+**The repair moves ``V`` to ``Q``**, where the two circles really meet. Both
+arcs are re-bounded there on their own circles, and the third edge at ``V`` --
+the line where the two hole walls touch -- is replaced by the segment from its
+other, unmoved end to ``Q``. ``Q`` lies along the tangent from ``V``, so that
+segment departs from each wall only by the square of that offset over twice
+the wall's radius: 3.5e-9 mm here. No surface moves, and the material moved is the sliver's own. It acts only
+on a planar face, two circles in its plane, a vertex of exactly those three
+edges and three faces, and a sliver narrower than :data:`SLIVER_MAX`; and it is
+checked as the other repair is, plus the one property it exists for: each
+rebuilt face, written to STEP and read back, is valid on its own
+(docs/algorithm.md §7.5).
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import NamedTuple
 
 import numpy as np
 
 from OCP.BRep import BRep_Builder, BRep_Tool
-from OCP.BRepAdaptor import BRepAdaptor_Curve
+from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy, BRepBuilderAPI_MakeEdge
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepTools import BRepTools, BRepTools_ReShape, BRepTools_WireExplorer
-from OCP.GeomAPI import GeomAPI_ProjectPointOnCurve
+from OCP.ElCLib import ElCLib
+from OCP.Geom2d import Geom2d_BSplineCurve
+from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
+from OCP.GeomAPI import GeomAPI_ProjectPointOnCurve, GeomAPI_ProjectPointOnSurf
 from OCP.Precision import Precision
 from OCP.ShapeBuild import ShapeBuild_Edge
 from OCP.ShapeFix import ShapeFix_Edge, ShapeFix_ShapeTolerance
+from OCP.TColStd import TColStd_Array1OfInteger, TColStd_Array1OfReal
+from OCP.TColgp import TColgp_Array1OfPnt2d
 from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
 from OCP.TopExp import TopExp
 from OCP.TopTools import (
@@ -71,7 +102,7 @@ from OCP.TopoDS import (
     TopoDS_Vertex,
     TopoDS_Wire,
 )
-from OCP.gp import gp_Pnt
+from OCP.gp import gp_Pnt, gp_Pnt2d
 
 from . import occ
 
@@ -123,11 +154,23 @@ class InputDefect(NamedTuple):
     vertex: tuple[float, float, float] = (0.0, 0.0, 0.0)  #: the vertex it names
 
 
+class WireCrossing(NamedTuple):
+    """One place where a face of the input file crosses its own boundary."""
+
+    where: tuple[float, float, float]   #: where the two arcs really cross
+    vertex: tuple[float, float, float]  #: the vertex the file gives them
+    span: float          #: mm between the two
+    width: float         #: mm, the widest the sliver they enclose gets
+    repaired: bool
+    reason: str          #: what was done, or why it was not
+
+
 class InputRepair(NamedTuple):
     shape: TopoDS_Shape
     defects: list[InputDefect]
     max_vertex_tol: float               #: after the repair
     max_vertex_tol_at: tuple[float, float, float]
+    crossings: tuple[WireCrossing, ...] = ()
 
 
 def _xyz(p: gp_Pnt) -> np.ndarray:
@@ -196,7 +239,10 @@ def _rebuild_face(face: TopoDS_Face, subs) -> TopoDS_Face:
             for r in (repl(e) if repl is not None else [e]):
                 builder.Add(nw, r)
         nw.Closed(True)
-        builder.Add(new, nw.Oriented(wire.Orientation()))
+        # The explorer already gave the edges in the sense the face runs them,
+        # its wire's orientation included, so the new wire is added forward:
+        # orienting it as the old one would turn a reversed wire round twice.
+        builder.Add(new, nw)
     return TopoDS.Face_s(new.Oriented(face.Orientation()))
 
 
@@ -472,8 +518,9 @@ class _Snapshot:
 
     The checks hold the repair to what it changes, not to the file: an input
     whose faces already carry a 4.9e-3 mm vertex (the user's part has them) or
-    fail ``BRepCheck`` on their own (its faces 166, 168 and 266 do, where arcs
-    meet tangentially) must not have a sound repair refused for that. Taken
+    fail ``BRepCheck`` on their own (its faces 166, 168 and 266 do, crossing
+    their own boundary at a cusp until :func:`_repair_cusps` runs) must not
+    have a sound repair refused for that. Taken
     before :func:`_apply`, which changes tolerances in place, and used to put
     them back if the repair is refused."""
 
@@ -542,6 +589,453 @@ def _check(before: TopoDS_Shape, after: TopoDS_Shape, rebuilt: list[TopoDS_Face]
     return None
 
 
+# -- The second defect: a face boundary crossing itself at a cusp ------------
+
+#: Two edges leaving their shared vertex closer than this to one direction
+#: form a cusp, rad. The user's part's leave theirs 2e-8 apart.
+CUSP_ANGLE = 1e-3
+
+#: The furthest from its vertex a cusp's crossing may lie for the repair to act,
+#: mm. The user's part's lie 8.3e-5 mm away, the square root of a 4.2e-9 mm
+#: overlap; it grows only as that root, so this is far past any rounding.
+CROSSING_MAX = GAP_TOL
+
+#: The widest sliver between the two arcs the repair takes for a rounding of
+#: the file, mm: ten times the kernel's confusion, and 240 times the 4.2e-9 mm
+#: of the user's part. Wider, the holes overlap in the model itself, which the
+#: CAD model must settle; the crossing is reported instead.
+SLIVER_MAX = 1e-6
+
+#: How close a computed crossing must lie to both circles, mm.
+ON_CIRCLE_TOL = 1e-9
+
+#: Samples along an arc from the vertex to the crossing, to measure the sliver
+#: the two arcs enclose, and along a replaced line, to measure it against its
+#: two faces.
+SLIVER_SAMPLES = 9
+
+
+class _Cusp(NamedTuple):
+    face: TopoDS_Face
+    v: TopoDS_Vertex
+    a: TopoDS_Edge       #: the edge before ``v`` in the face's wire
+    b: TopoDS_Edge       #: the edge after it
+    q: np.ndarray        #: where their circles really cross
+    ta: float            #: ``q``'s parameter on ``a``'s forward curve
+    tb: float
+    span: float          #: mm from ``v`` to ``q``
+    width: float         #: mm, the widest the sliver between them gets
+
+
+def _leaving(edge: TopoDS_Edge, v: TopoDS_Vertex) -> tuple[float, np.ndarray]:
+    """``v``'s parameter on ``edge``'s forward curve, and the unit direction
+    the edge leaves ``v`` in."""
+    ef = TopoDS.Edge_s(edge.Oriented(FORWARD))
+    c = BRepAdaptor_Curve(ef)
+    at_first = TopExp.FirstVertex_s(ef).IsSame(v)
+    t = c.FirstParameter() if at_first else c.LastParameter()
+    d = _xyz(gp_Pnt(*c.DN(t, 1).Coord()))
+    d = d / np.linalg.norm(d)
+    return t, (d if at_first else -d)
+
+
+def _circle_in(edge: TopoDS_Edge, pln):
+    """``edge``'s circle, if it lies in the plane ``pln``, else ``None``."""
+    c = BRepAdaptor_Curve(edge)
+    if c.GetType() != GeomAbs_CurveType.GeomAbs_Circle:
+        return None
+    circ = c.Circle()
+    if not circ.Axis().Direction().IsParallel(pln.Axis().Direction(), 1e-9):
+        return None
+    if pln.Distance(circ.Location()) > Precision.Confusion_s():
+        return None
+    return circ
+
+
+def _in_range(edge: TopoDS_Edge, circ, p: np.ndarray) -> float | None:
+    """``p``'s parameter on ``edge``'s forward circle, if strictly inside the
+    edge."""
+    f, l = BRep_Tool.Range_s(TopoDS.Edge_s(edge.Oriented(FORWARD)))
+    t = ElCLib.InPeriod_s(ElCLib.Parameter_s(circ, gp_Pnt(*p)), f, f + 2.0 * np.pi)
+    eps = Precision.PConfusion_s()
+    return t if f + eps < t < l - eps else None
+
+
+def _crossings(c1, c2, normal: np.ndarray) -> list[np.ndarray]:
+    """Where two coplanar circles cross. The half-chord is formed as a product
+    of differences so that it keeps its digits however nearly they touch."""
+    p1, p2 = _xyz(c1.Location()), _xyz(c2.Location())
+    r1, r2 = c1.Radius(), c2.Radius()
+    d = float(np.linalg.norm(p2 - p1))
+    if d == 0.0:
+        return []
+    h2 = (r1 + r2 - d) * (r1 + r2 + d) * (d - r1 + r2) * (d + r1 - r2) / (4.0 * d * d)
+    if h2 <= 0.0:
+        return []
+    e = (p2 - p1) / d
+    perp = np.cross(normal, e)
+    along = (d * d + r1 * r1 - r2 * r2) / (2.0 * d)
+    h = np.sqrt(h2)
+    return [p1 + along * e + h * perp, p1 + along * e - h * perp]
+
+
+def _cusp_at(face: TopoDS_Face, pln, v: TopoDS_Vertex,
+             a: TopoDS_Edge, b: TopoDS_Edge) -> _Cusp | None:
+    ca, cb = _circle_in(a, pln), _circle_in(b, pln)
+    if ca is None or cb is None:
+        return None
+    va, da = _leaving(a, v)
+    _vb, db = _leaving(b, v)
+    if float(np.dot(da, db)) < np.cos(CUSP_ANGLE):
+        return None
+    vp = _vertex_xyz(v)
+    best = None
+    for q in _crossings(ca, cb, _xyz(gp_Pnt(*pln.Axis().Direction().Coord()))):
+        if max(abs(np.linalg.norm(q - _xyz(c.Location())) - c.Radius())
+               for c in (ca, cb)) > ON_CIRCLE_TOL:
+            continue
+        span = float(np.linalg.norm(q - vp))
+        if not Precision.Confusion_s() < span <= CROSSING_MAX:
+            continue
+        ta, tb = _in_range(a, ca, q), _in_range(b, cb, q)
+        if ta is None or tb is None:
+            continue
+        if best is None or span < best[1]:
+            best = (q, span, ta, tb)
+    if best is None:
+        return None
+    q, span, ta, tb = best
+    # The sliver: how far a's arc from v to q strays from b's circle.
+    cpb, rb = _xyz(cb.Location()), cb.Radius()
+    width = 0.0
+    for k in range(SLIVER_SAMPLES):
+        p = _xyz(ElCLib.Value_s(va + (ta - va) * k / (SLIVER_SAMPLES - 1), ca))
+        width = max(width, abs(float(np.linalg.norm(p - cpb)) - rb))
+    return _Cusp(face, v, a, b, q, ta, tb, span, width)
+
+
+def crossed_cusps(shape: TopoDS_Shape) -> list[_Cusp]:
+    """Every vertex of a planar face where two circular edges leave in the same
+    direction and cross again inside both, further than the kernel's confusion
+    from it: a wire crossing itself."""
+    out: list[_Cusp] = []
+    for face in occ.faces(shape):
+        surf = BRepAdaptor_Surface(face)
+        if surf.GetType() != GeomAbs_SurfaceType.GeomAbs_Plane:
+            continue
+        pln = surf.Plane()
+        for _w, edges in _wire_edges(face):
+            n = len(edges)
+            for i in range(n):
+                a, b = edges[i], edges[(i + 1) % n]
+                if n < 2 or a.IsSame(b):
+                    continue
+                v = TopExp.LastVertex_s(a, True)
+                if not v.IsSame(TopExp.FirstVertex_s(b, True)):
+                    continue
+                if any(TopExp.FirstVertex_s(e).IsSame(TopExp.LastVertex_s(e)) for e in (a, b)):
+                    continue
+                cusp = _cusp_at(face, pln, v, a, b)
+                if cusp is not None:
+                    out.append(cusp)
+    return out
+
+
+def _plan_cusp(body: _Body, c: _Cusp):
+    """What the repair of one cusp rebuilds, or the reason there is none."""
+    if c.width > SLIVER_MAX:
+        return None, f"the two arcs enclose a sliver {c.width:.1e} mm wide, not a rounding"
+    edges = body.edges_at(c.v)
+    if len(edges) != 3:
+        return None, f"{len(edges)} edges meet at the vertex, not three"
+    rest = [e for e in edges if not e.IsSame(c.a) and not e.IsSame(c.b)]
+    if len(rest) != 1:
+        return None, "the vertex's third edge is one of its arcs"
+    line = TopoDS.Edge_s(rest[0].Oriented(FORWARD))
+    if (BRep_Tool.Degenerated_s(line)
+            or BRepAdaptor_Curve(line).GetType() != GeomAbs_CurveType.GeomAbs_Line):
+        return None, "the vertex's third edge is not a straight line"
+    w = TopExp.LastVertex_s(line) if TopExp.FirstVertex_s(line).IsSame(c.v) \
+        else TopExp.FirstVertex_s(line)
+    if w.IsSame(c.v):
+        return None, "the line is closed"
+    p = body.faces[body.face_index.FindIndex(c.face) - 1]
+    fa, fb, fl = body.faces_of(c.a), body.faces_of(c.b), body.faces_of(line)
+    if not (len(fa) == len(fb) == len(fl) == 2):
+        return None, "an edge at the vertex is not used by two faces"
+    c1 = next((f for f in fa if not f.IsSame(p)), None)
+    c2 = next((f for f in fb if not f.IsSame(p)), None)
+    if (c1 is None or c2 is None or c1.IsSame(c2)
+            or not any(f.IsSame(c1) for f in fl) or not any(f.IsSame(c2) for f in fl)):
+        return None, "the three faces at the vertex do not meet as two walls and a floor"
+    for face in (p, c1, c2):
+        for edge in (c.a, c.b, line):
+            if BRep_Tool.IsClosed_s(edge, face):
+                return None, "a seam edge is involved"
+    for edge in (c.a, c.b, line):
+        if not BRep_Tool.SameParameter_s(edge) or not BRep_Tool.SameRange_s(edge):
+            return None, "an edge at the vertex is not same-parameter"
+    # The new line, from its unmoved end to q, against both walls.
+    wp = _vertex_xyz(w)
+    bar = max(BRep_Tool.Tolerance_s(line), Precision.Confusion_s())
+    for face in (c1, c2):
+        surf = BRep_Tool.Surface_s(face)
+        for k in range(SLIVER_SAMPLES):
+            pt = wp + (c.q - wp) * k / (SLIVER_SAMPLES - 1)
+            proj = GeomAPI_ProjectPointOnSurf(gp_Pnt(*pt), surf)
+            if proj.NbPoints() < 1 or proj.LowerDistance() > bar:
+                return None, (f"the line moved to the crossing would leave a wall by "
+                              f"more than {bar:.1e} mm")
+    return dict(c=c, p=p, c1=c1, c2=c2, line=line, w=w), None
+
+
+def _rebound(edge: TopoDS_Edge, moves, faces: list[TopoDS_Face]) -> TopoDS_Edge:
+    """``edge`` on its own curve and parameter curves, in the forward edge's
+    sense, each end ``moves`` names -- ``(v, vq, t)`` -- moved from ``v`` to
+    ``vq`` at parameter ``t``. One arc can end in a cusp at both ends."""
+    ef = TopoDS.Edge_s(edge.Oriented(FORWARD))
+    f, l = BRep_Tool.Range_s(ef)
+    first, last = TopExp.FirstVertex_s(ef), TopExp.LastVertex_s(ef)
+    for v, vq, t in moves:
+        if first.IsSame(v):
+            first, f = vq, t
+        elif last.IsSame(v):
+            last, l = vq, t
+    return _sub_edge(ef, first, f, last, l, faces)
+
+
+def _uv(edge: TopoDS_Edge, face: TopoDS_Face, t: float) -> gp_Pnt2d:
+    c2d = BRep_Tool.CurveOnSurface_s(TopoDS.Edge_s(edge.Oriented(FORWARD)), face, 0.0, 0.0)
+    return c2d.Value(t)
+
+
+def _moved_line(plan, vq: TopoDS_Vertex) -> TopoDS_Edge:
+    """The line from its unmoved end to ``q``, in the old line's sense, with
+    parameter curves on both walls that run straight from where the old one
+    left ``w`` to where each wall's arc now ends: so they join the walls'
+    other edges exactly in each wall's own parameters."""
+    c, line, w = plan["c"], plan["line"], plan["w"]
+    from_v = TopExp.FirstVertex_s(line).IsSame(c.v)
+    v1, v2 = (vq, w) if from_v else (w, vq)
+    edge = BRepBuilderAPI_MakeEdge(v1, v2).Edge()
+    t0, t1 = BRep_Tool.Range_s(edge)
+    tw = BRep_Tool.Parameter_s(w, line)
+    builder = BRep_Builder()
+    for face, arc, t in ((plan["c1"], c.a, c.ta), (plan["c2"], c.b, c.tb)):
+        uw, uq = _uv(line, face, tw), _uv(arc, face, t)
+        poles = TColgp_Array1OfPnt2d(1, 2)
+        poles.SetValue(1, uq if from_v else uw)
+        poles.SetValue(2, uw if from_v else uq)
+        knots = TColStd_Array1OfReal(1, 2)
+        knots.SetValue(1, t0)
+        knots.SetValue(2, t1)
+        mults = TColStd_Array1OfInteger(1, 2)
+        mults.SetValue(1, 2)
+        mults.SetValue(2, 2)
+        builder.UpdateEdge(edge, Geom2d_BSplineCurve(poles, knots, mults, 1), face,
+                           Precision.Confusion_s())
+        builder.Range(edge, face, t0, t1)
+    builder.SameParameter(edge, True)
+    builder.SameRange(edge, True)
+    ShapeFix_Edge().FixSameParameter(edge)
+    return edge
+
+
+def _touched(plans) -> list[TopoDS_Face]:
+    """The faces a repair of ``plans`` rebuilds: the floor first, then each
+    wall once."""
+    out: list[TopoDS_Face] = []
+    for f in [plans[0]["p"]] + [f for pl in plans for f in (pl["c1"], pl["c2"])]:
+        if not any(f.IsSame(g) for g in out):
+            out.append(f)
+    return out
+
+
+def _apply_cusps(shape: TopoDS_Shape, plans,
+                 faces: list[TopoDS_Face]) -> tuple[TopoDS_Shape, list[TopoDS_Face]]:
+    """``shape`` with ``plans`` applied, and ``faces`` rebuilt, in their order."""
+    builder = BRep_Builder()
+    subs: list[list] = [[] for _ in faces]
+
+    def sub(face, old, new):
+        i = next(k for k, f in enumerate(faces) if f.IsSame(face))
+        subs[i].append((old, lambda o, n=new: [TopoDS.Edge_s(n.Oriented(o.Orientation()))]))
+
+    # Every move of one arc first, so an arc with a cusp at each end is
+    # rebuilt once with both ends moved.
+    arcs: list[tuple[TopoDS_Edge, list, list[TopoDS_Face]]] = []
+
+    def arc_move(edge, move, arc_faces):
+        hit = next((a for a in arcs if a[0].IsSame(edge)), None)
+        if hit is None:
+            arcs.append((edge, [move], arc_faces))
+        else:
+            hit[1].append(move)
+
+    lines = []
+    for plan in plans:
+        c = plan["c"]
+        vq = TopoDS_Vertex()
+        builder.MakeVertex(vq, gp_Pnt(*c.q), Precision.Confusion_s())
+        arc_move(c.a, (c.v, vq, c.ta), [plan["p"], plan["c1"]])
+        arc_move(c.b, (c.v, vq, c.tb), [plan["p"], plan["c2"]])
+        lines.append((plan, _moved_line(plan, vq)))
+    moved = []
+    for edge, moves, arc_faces in arcs:
+        new = _rebound(edge, moves, arc_faces)
+        for face in arc_faces:
+            sub(face, edge, new)
+        moved.append(new)
+    for plan, line2 in lines:
+        sub(plan["c1"], plan["line"], line2)
+        sub(plan["c2"], plan["line"], line2)
+        moved.append(line2)
+    rebuilt = [_rebuild_face(f, s) for f, s in zip(faces, subs)]
+    sfe = ShapeFix_Edge()
+    for face in rebuilt:
+        for _, edges in _wire_edges(face):
+            for edge in edges:
+                if any(edge.IsSame(m) for m in moved):
+                    sfe.FixVertexTolerance(edge, face)
+    reshape = BRepTools_ReShape()
+    for old, new in zip(faces, rebuilt):
+        reshape.Replace(old, new)
+    return reshape.Apply(shape), rebuilt
+
+
+def _survives_step(faces: list[TopoDS_Face], folder: str | None, tag: str) -> bool:
+    """Each face, written to STEP alone and read back, still valid: the file
+    keeps no vertex tolerance a boolean widened to cover the crossing.
+
+    The files go to ``folder``, the run's own ``temp/<stamp>/``
+    (specification.md §4.4), named ``inputfix-<tag>-face<i>.step`` so that they
+    stay inside the length the run reserves there (``cli.TEMP_PATH_RESERVE``).
+    The run has already written that folder, so the check never depends on
+    another being writable, and the files stay for analysis if the run fails.
+    With no folder -- a caller outside a run -- they go to a temporary one,
+    deleted afterwards."""
+    if folder is None:
+        with tempfile.TemporaryDirectory(prefix="latticegen2-inputfix-") as d:
+            return _survives_step(faces, d, tag)
+    for i, face in enumerate(faces):
+        path = os.path.join(folder, f"inputfix-{tag}-face{i}.step")
+        occ.write_step(face, path, "inputfix-probe")
+        back = occ.faces(occ.read_step(path))
+        if len(back) != 1 or not BRepCheck_Analyzer(back[0]).IsValid():
+            return False
+    return True
+
+
+def _check_cusps(before: TopoDS_Shape, after: TopoDS_Shape, rebuilt: list[TopoDS_Face],
+                 valid_before: list[bool], snap: _Snapshot, folder: str | None = None,
+                 tag: str = "cusp") -> str | None:
+    """Why ``after`` is not a sound repair of the cusps, or ``None``. The face
+    the cusps lie in must come out valid; each wall, valid if it was."""
+    if len(occ.solids(after)) != len(occ.solids(before)):
+        return "the number of solids changed"
+    for i, (face, was) in enumerate(zip(rebuilt, valid_before)):
+        if (was or i == 0) and not BRepCheck_Analyzer(face).IsValid():
+            return "a rebuilt face is not valid on its own"
+    for face in rebuilt:
+        for _, edges in _wire_edges(face):
+            for edge in edges:
+                if BRep_Tool.Tolerance_s(edge) > snap.allowed(edge, TopoDS_Vertex()):
+                    return "a rebuilt face has an edge tolerance past the bar"
+                for w in (TopExp.FirstVertex_s(edge), TopExp.LastVertex_s(edge)):
+                    if BRep_Tool.Tolerance_s(w) > snap.allowed(w, TopoDS_Vertex()):
+                        return f"a vertex at {_round(_vertex_xyz(w))} keeps a tolerance past the bar"
+    fault = _edge_use_fault(after)
+    if fault:
+        return fault
+    for face in rebuilt:
+        exact, meshed = occ.area(face), _mesh_area(face)
+        if abs(exact - meshed) > AREA_MESH_REL_TOL * exact + AREA_MESH_ABS_TOL:
+            return (f"a rebuilt face's area {exact:.6f} mm^2 disagrees with its "
+                    f"mesh's {meshed:.6f} mm^2")
+    if not _survives_step(rebuilt, folder, tag):
+        return "a rebuilt face is not valid once written to STEP"
+    index = TopTools_IndexedMapOfShape()
+    for fc in occ.faces(after):
+        index.Add(fc)
+    core = frozenset(index.FindIndex(fc) - 1 for fc in rebuilt)
+    if -1 in core:
+        return "a rebuilt face is not in the repaired body"
+    ref = occ.refine_until_manifold(after, core)
+    if not ref.resolved:
+        return f"the repaired faces do not mesh closed ({ref.reason})"
+    return None
+
+
+def _crossing(c: _Cusp, repaired: bool, reason: str) -> WireCrossing:
+    return WireCrossing(_round(c.q), _round(_vertex_xyz(c.v)), c.span, c.width,
+                        repaired, reason)
+
+
+def _repair_cusps(work: TopoDS_Shape, folder: str | None = None,
+                  ) -> tuple[TopoDS_Shape, list[WireCrossing], bool]:
+    """``work`` with the cusps of each face moved to where their arcs cross,
+    one face at a time, where the repair holds. All of a face's cusps are
+    repaired together: the face is valid only once every one is."""
+    found: list[WireCrossing] = []
+    tried: set[tuple] = set()
+    checked = False
+    while True:
+        try:
+            cusps = crossed_cusps(work)
+        except Exception:                 # pragma: no cover - kernel refusal
+            return work, found, checked
+        groups: list[list[_Cusp]] = []
+        for c in cusps:
+            g = next((g for g in groups if g[0].face.IsSame(c.face)), None)
+            if g is None:
+                groups.append([c])
+            else:
+                g.append(c)
+        repaired = False
+        for group in groups:
+            key = tuple(sorted(_round(c.q) for c in group))
+            if key in tried:
+                continue
+            tried.add(key)
+            # One cusp that cannot be planned declines the face: it is valid
+            # only once every cusp is repaired. That cusp keeps its own reason.
+            plans, why, culprit = [], None, None
+            try:
+                body = _Body(work)
+                for c in group:
+                    plan, why = _plan_cusp(body, c)
+                    if plan is None:
+                        culprit = c
+                        break
+                    plans.append(plan)
+            except Exception as exc:      # kernel refusal: leave it as built
+                why = f"the kernel refused to examine it ({exc})"
+            if why is None:
+                snap = None
+                try:
+                    faces = _touched(plans)
+                    valid_before = [BRepCheck_Analyzer(f).IsValid() for f in faces]
+                    snap = _Snapshot(faces)
+                    checked = True
+                    after, rebuilt = _apply_cusps(work, plans, faces)
+                    why = _check_cusps(work, after, rebuilt, valid_before, snap,
+                                       folder, f"cusp{len(tried)}")
+                except Exception as exc:  # kernel refusal: leave it as built
+                    why = f"the kernel refused the repair ({exc})"
+                if why is None:
+                    found += [_crossing(c, True, "vertex moved to where the arcs cross")
+                              for c in group]
+                    work, repaired = after, True
+                    break
+                if snap is not None:
+                    snap.restore()
+            found += [_crossing(c, False, why if culprit is None or c is culprit else
+                                "another cusp of the same face could not be repaired")
+                      for c in group]
+        if not repaired:
+            return work, found, checked
+
+
 def _scan(work: TopoDS_Shape):
     """:func:`misplaced_vertices`, or ``None`` where the kernel will not answer:
     this runs on every input, so a failure here must not end a run that would
@@ -552,9 +1046,10 @@ def _scan(work: TopoDS_Shape):
         return None
 
 
-def repair_input(shape: TopoDS_Shape) -> InputRepair:
-    """``shape`` with each misplaced vertex repaired where the repair holds,
-    and every one found reported."""
+def repair_input(shape: TopoDS_Shape, tmpdir: str | None = None) -> InputRepair:
+    """``shape`` with each misplaced vertex and each crossed cusp repaired
+    where the repair holds, and every one found reported. ``tmpdir`` is the
+    run's temporary folder, where the cusp repair's STEP check writes."""
     defects: list[InputDefect] = []
     work = shape
     tried: set[tuple] = set()
@@ -592,12 +1087,13 @@ def repair_input(shape: TopoDS_Shape) -> InputRepair:
             break
         if not repaired:
             break
-    if checked:
+    work, crossings, cusp_checked = _repair_cusps(work, tmpdir)
+    if checked or cusp_checked:
         # The checks mesh faces of the body in place, down to 1e-4 mm, and
         # `tessellate` would keep a mesh finer than it asks for.
         BRepTools.Clean_s(work)
     tol, at = max_vertex_tolerance(work)
-    return InputRepair(work, defects, tol, at)
+    return InputRepair(work, defects, tol, at, tuple(crossings))
 
 
 def max_vertex_tolerance(shape: TopoDS_Shape) -> tuple[float, tuple[float, float, float]]:
